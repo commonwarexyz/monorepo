@@ -64,6 +64,7 @@ pub trait Database: Sized + Send {
         _context: Self::Context,
         _config: &Self::Config,
         _target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
+        _journal: &Self::Journal,
     ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send
     {
         async { Ok(None) }

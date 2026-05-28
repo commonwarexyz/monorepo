@@ -7,7 +7,7 @@
 //! can read through to committed state.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, StateSyncMode, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -397,7 +397,6 @@ where
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
-        mode: StateSyncMode,
     ) -> Result<Self, Self::SyncError> {
         let config = sync::engine::Config {
             context,
@@ -412,10 +411,7 @@ where
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
         };
-        match mode {
-            StateSyncMode::New => sync::sync(config).await,
-            StateSyncMode::Resume => sync::resume(config).await,
-        }
+        sync::sync(config).await
     }
 }
 
@@ -439,7 +435,6 @@ where
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
-        mode: StateSyncMode,
     ) -> Result<Self, Self::SyncError> {
         let config = sync::engine::Config {
             context,
@@ -454,10 +449,7 @@ where
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
         };
-        match mode {
-            StateSyncMode::New => sync::sync(config).await,
-            StateSyncMode::Resume => sync::resume(config).await,
-        }
+        sync::sync(config).await
     }
 }
 

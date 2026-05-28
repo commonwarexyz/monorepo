@@ -134,10 +134,10 @@ where
     pub async fn run(mut self) {
         let resolved_floor =
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
-        let sync_mode = {
+        {
             let mut sync_metadata = self.sync_metadata.lock().await;
-            sync_metadata.begin_sync(resolved_floor.marker).await
-        };
+            sync_metadata.begin_sync(resolved_floor.marker).await;
+        }
 
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut state_sync_task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
@@ -148,7 +148,6 @@ where
             resolved_floor.targets,
             tip_updates_rx,
             self.sync_config,
-            sync_mode,
         ))));
 
         select_loop! {

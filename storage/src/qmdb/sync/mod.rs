@@ -52,21 +52,3 @@ where
 {
     Box::pin(Engine::new(config).await?.sync()).await
 }
-
-/// Sync using the existing sync journal without first probing completed local state.
-///
-/// Call this only after durable state above QMDB has determined that a previous
-/// sync was interrupted. Normal [`sync`] can reuse boundary nodes from a
-/// completed local database, but that probe is the wrong ownership path for an
-/// in-progress sync journal. Fetched operations and boundary nodes are still
-/// verified before they are applied.
-pub async fn resume<DB, R>(
-    config: Config<DB, R>,
-) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
-where
-    DB: Database,
-    DB::Op: Encode,
-    R: DbResolver<DB>,
-{
-    Box::pin(Engine::new_without_local_boundary(config).await?.sync()).await
-}

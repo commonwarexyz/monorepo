@@ -5,7 +5,7 @@
 //! adapters expose set and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, StateSyncMode, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -364,7 +364,6 @@ where
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
-        _mode: StateSyncMode,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         let mut tip_updates = Some(tip_updates);
@@ -457,7 +456,6 @@ where
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
-        _mode: StateSyncMode,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         let mut tip_updates = Some(tip_updates);
@@ -704,7 +702,6 @@ mod tests {
                 None,
                 None,
                 sync_config(),
-                StateSyncMode::New,
             )
             .await
             .unwrap();
@@ -766,7 +763,6 @@ mod tests {
                     None,
                     None,
                     sync_config(),
-                    StateSyncMode::New,
                 )
                 .await
             });

@@ -1,5 +1,5 @@
 use crate::stateful::{
-    db::{Anchor, DatabaseSet, StateSyncMode},
+    db::{Anchor, DatabaseSet},
     Application,
 };
 use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
@@ -266,31 +266,28 @@ where
         )
     }
 
-    /// Marks state sync as in progress for the resolved floor and returns the
-    /// mode the database sync engine should use.
+    /// Marks state sync as in progress for the resolved floor.
     ///
-    /// This must be persisted before any state sync database mutation begins so a
-    /// crash can reopen partial sync state and validate the next selected floor.
+    /// This must be persisted before any state sync database mutation begins so the database
+    /// sync engine can reopen partial sync state and validate the next selected floor after a crash.
     ///
     /// If an interrupted state sync already stored a floor, the newly selected
     /// floor must resume from that same floor or a later one.
-    pub(crate) async fn begin_sync(&mut self, floor: FloorMarker<C>) -> StateSyncMode {
-        let mode = match self.metadata.get(&SYNC_STATE_KEY) {
+    pub(crate) async fn begin_sync(&mut self, floor: FloorMarker<C>) {
+        match self.metadata.get(&SYNC_STATE_KEY) {
             Some(SyncState::InProgress(existing)) => {
                 existing.ensure_not_behind(&floor);
-                StateSyncMode::Resume
             }
             Some(SyncState::Complete(_)) => {
                 panic!("completed state sync cannot be marked in-progress");
             }
-            None => StateSyncMode::New,
-        };
+            None => {}
+        }
 
         self.metadata
             .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
             .await
             .expect("failed to set state sync state to in-progress");
-        mode
     }
 
     /// Records that one-time state sync completed at the given height.

@@ -5,12 +5,10 @@
 //! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
 
 use crate::{
-    index::{
-        ordered::Index as OrderedIndex, unordered::Index as UnorderedIndex, Factory as IndexFactory,
-    },
+    index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable},
+        contiguous::{fixed, variable, Mutable, Reader as _},
     },
     merkle::{self, full, Location},
     qmdb::{
@@ -103,7 +101,6 @@ where
 
 macro_rules! impl_sync_database {
     ($db:ident, $op:ident, $update:ident,
-     $index:ty,
      $journal:ty, $config:ty,
      $key_bound:path, $value_bound:ident
      $(; $($where_extra:tt)+)?) => {
@@ -152,25 +149,46 @@ macro_rules! impl_sync_database {
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
+                journal: &Self::Journal,
             ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
                 if target.range.start() == Location::new(0) {
                     return Ok(None);
                 }
 
-                let db = qmdb::any::init::<F, E, $update<K, V>, H, T, $index, $journal, S>(
-                    context,
-                    config.clone(),
-                )
-                .await?;
-                let bounds = db.bounds().await;
-                if bounds.start > target.range.start()
-                    || bounds.end != target.range.end()
-                    || crate::qmdb::any::db::Db::root(&db) != target.root
+                let reader = journal.reader().await;
+                let bounds = reader.bounds();
+                if Location::new(bounds.start) > target.range.start()
+                    || Location::new(bounds.end) != target.range.end()
                 {
                     return Ok(None);
                 }
+                drop(reader);
 
-                db.pinned_nodes_at(target.range.start()).await.map(Some)
+                let hasher = qmdb::hasher::<H>();
+                let merkle = full::Merkle::<F, _, _, S>::init(
+                    context.child("local_boundary_merkle"),
+                    &hasher,
+                    config.merkle_config.clone(),
+                )
+                .await?;
+                let bounds = merkle.bounds();
+                if bounds.start > target.range.start() || bounds.end != target.range.end() {
+                    return Ok(None);
+                }
+
+                let inactive_peaks = F::inactive_peaks(
+                    F::location_to_position(target.range.end()),
+                    target.range.start(),
+                );
+                if merkle.root(&hasher, inactive_peaks)? != target.root {
+                    return Ok(None);
+                }
+
+                merkle
+                    .pinned_nodes_at(target.range.start())
+                    .await
+                    .map(Some)
+                    .map_err(Into::into)
             }
 
             fn root(&self) -> Self::Digest {
@@ -182,14 +200,12 @@ macro_rules! impl_sync_database {
 
 impl_sync_database!(
     UnorderedFixedDb, UnorderedFixedOp, UnorderedFixedUpdate,
-    UnorderedIndex<T, Location<F>>,
     fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_sync_database!(
     UnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
-    UnorderedIndex<T, Location<F>>,
     variable::Journal<E, Self::Op>,
     VariableConfig<T, <UnorderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;
@@ -198,14 +214,12 @@ impl_sync_database!(
 
 impl_sync_database!(
     OrderedFixedDb, OrderedFixedOp, OrderedFixedUpdate,
-    OrderedIndex<T, Location<F>>,
     fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_sync_database!(
     OrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
-    OrderedIndex<T, Location<F>>,
     variable::Journal<E, Self::Op>,
     VariableConfig<T, <OrderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;

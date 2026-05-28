@@ -286,35 +286,12 @@ where
     DB::Op: Encode,
 {
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        Box::pin(Self::new_with_boundary_probe(config, true)).await
-    }
-
-    /// Create a new sync engine for a durable state-sync resume.
-    pub async fn new_without_local_boundary(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
-        Box::pin(Self::new_with_boundary_probe(config, false)).await
-    }
-
-    async fn new_with_boundary_probe(
-        config: Config<DB, R>,
-        probe_local_boundary: bool,
-    ) -> Result<Self, Error<DB, R>> {
         if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
                 lower_bound_pos: config.target.range.start(),
                 upper_bound_pos: config.target.range.end(),
             }));
         }
-
-        let pinned_nodes = if probe_local_boundary {
-            DB::local_boundary_nodes(
-                config.context.child("local_boundary"),
-                &config.db_config,
-                &config.target,
-            )
-            .await?
-        } else {
-            None
-        };
 
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal<DB::Family>>::new(
@@ -323,6 +300,23 @@ where
             config.target.range.clone(),
         )
         .await?;
+        let journal_size = journal.size().await;
+
+        // The sync journal is the source of truth for resume. If it already
+        // reaches the target, try to recover boundary pins from local Merkle
+        // state before asking peers for them. Partial journals resume without
+        // probing completed database state.
+        let pinned_nodes = if journal_size == *config.target.range.end() {
+            DB::local_boundary_nodes(
+                config.context.child("local_boundary"),
+                &config.db_config,
+                &config.target,
+                &journal,
+            )
+            .await?
+        } else {
+            None
+        };
 
         let sync_context = config.context.child("sync");
         let progress_metrics = ProgressMetrics::new(&sync_context);
@@ -867,8 +861,183 @@ mod tests {
         merkle::mmr::{Family as MmrFamily, Proof},
         qmdb::sync::requests::FetchFuture,
     };
-    use commonware_cryptography::sha256;
-    use commonware_utils::channel::oneshot;
+    use commonware_cryptography::{sha256, Sha256};
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::{channel::oneshot, non_empty_range, NZU64};
+    use std::{
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    #[derive(Clone)]
+    struct TestConfig {
+        journal_size: u64,
+        boundary_probes: Arc<AtomicUsize>,
+    }
+
+    impl crate::qmdb::sync::DatabaseConfig for TestConfig {
+        type JournalConfig = u64;
+
+        fn journal_config(&self) -> Self::JournalConfig {
+            self.journal_size
+        }
+    }
+
+    struct TestJournal {
+        size: u64,
+    }
+
+    impl Journal<MmrFamily> for TestJournal {
+        type Config = u64;
+        type Context = deterministic::Context;
+        type Error = crate::journal::Error;
+        type Op = i32;
+
+        async fn new(
+            _context: Self::Context,
+            size: Self::Config,
+            _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
+        ) -> Result<Self, Self::Error> {
+            Ok(Self { size })
+        }
+
+        async fn resize(&mut self, start: Location<MmrFamily>) -> Result<(), Self::Error> {
+            self.size = *start;
+            Ok(())
+        }
+
+        async fn sync(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn size(&self) -> u64 {
+            self.size
+        }
+
+        async fn append(&mut self, _op: Self::Op) -> Result<(), Self::Error> {
+            self.size += 1;
+            Ok(())
+        }
+    }
+
+    struct TestDb;
+
+    impl Database for TestDb {
+        type Config = TestConfig;
+        type Context = deterministic::Context;
+        type Digest = sha256::Digest;
+        type Family = MmrFamily;
+        type Hasher = Sha256;
+        type Journal = TestJournal;
+        type Op = i32;
+
+        async fn from_sync_result(
+            _context: Self::Context,
+            _config: Self::Config,
+            _journal: Self::Journal,
+            _pinned_nodes: Option<Vec<Self::Digest>>,
+            _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
+            _apply_batch_size: usize,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(Self)
+        }
+
+        async fn local_boundary_nodes(
+            _context: Self::Context,
+            config: &Self::Config,
+            _target: &Target<Self::Family, Self::Digest>,
+            _journal: &Self::Journal,
+        ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<Self::Family>> {
+            config.boundary_probes.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(vec![]))
+        }
+
+        fn root(&self) -> Self::Digest {
+            sha256::Digest::from([0u8; 32])
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestResolver;
+
+    impl Resolver for TestResolver {
+        type Digest = sha256::Digest;
+        type Error = Infallible;
+        type Family = MmrFamily;
+        type Op = i32;
+
+        async fn get_operations(
+            &self,
+            _op_count: Location<Self::Family>,
+            _start_loc: Location<Self::Family>,
+            _max_ops: NonZeroU64,
+            _include_pinned_nodes: bool,
+            _cancel_rx: oneshot::Receiver<()>,
+        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            Ok(FetchResult::new(
+                Proof {
+                    leaves: Location::new(0),
+                    inactive_peaks: 0,
+                    digests: vec![],
+                },
+                vec![],
+                None,
+            ))
+        }
+    }
+
+    fn test_engine_config(
+        context: deterministic::Context,
+        journal_size: u64,
+        boundary_probes: Arc<AtomicUsize>,
+    ) -> Config<TestDb, TestResolver> {
+        Config {
+            context,
+            resolver: TestResolver,
+            target: Target {
+                root: sha256::Digest::from([1u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(10)),
+            },
+            max_outstanding_requests: 1,
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: 1,
+            db_config: TestConfig {
+                journal_size,
+                boundary_probes,
+            },
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 0,
+        }
+    }
+
+    #[test]
+    fn new_probes_local_boundary_when_journal_reaches_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let boundary_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 10, boundary_probes.clone()))
+                .await
+                .unwrap();
+
+            assert_eq!(boundary_probes.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn new_skips_local_boundary_when_journal_is_partial() {
+        deterministic::Runner::default().start(|context| async move {
+            let boundary_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 7, boundary_probes.clone()))
+                .await
+                .unwrap();
+
+            assert_eq!(boundary_probes.load(Ordering::SeqCst), 0);
+        });
+    }
 
     /// Create a no-op fetch result future for testing request tracking.
     fn dummy_future(id: RequestId) -> FetchFuture<MmrFamily, i32, sha256::Digest, ()> {

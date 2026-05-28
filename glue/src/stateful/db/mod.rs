@@ -318,22 +318,6 @@ pub struct SyncEngineConfig {
     pub max_retained_roots: usize,
 }
 
-/// How a state-sync engine should treat durable local state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum StateSyncMode {
-    /// No interrupted state sync was recorded.
-    ///
-    /// Implementations may probe complete local database state before fetching
-    /// from peers.
-    New,
-
-    /// Durable metadata recorded an interrupted state sync.
-    ///
-    /// Implementations should reopen the partial sync state instead of probing
-    /// complete local database state.
-    Resume,
-}
-
 /// A [`ManagedDb`] with a startup state-sync entrypoint.
 pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// Error returned by the state-sync engine for this database.
@@ -350,7 +334,6 @@ pub trait StateSyncDb<E, R>: ManagedDb<E> {
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
-        mode: StateSyncMode,
     ) -> impl Future<Output = Result<Self, Self::SyncError>> + Send;
 }
 
@@ -444,7 +427,6 @@ where
         targets: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
-        mode: StateSyncMode,
     ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
 }
 
@@ -515,7 +497,6 @@ where
         target: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
-        mode: StateSyncMode,
     ) -> Result<(Self, Anchor<D>), Self::Error> {
         let (target_tx, target_rx) = mpsc::channel(sync_config.update_channel_size.get());
         let (finish_tx, finish_rx) = mpsc::channel(1);
@@ -530,7 +511,6 @@ where
             Some(finish_rx),
             Some(reached_tx),
             sync_config,
-            mode,
         );
 
         let coordinator = async {
@@ -814,7 +794,6 @@ macro_rules! impl_state_sync_set {
                 targets: Self::SyncTargets,
                 tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
                 sync_config: SyncEngineConfig,
-                mode: StateSyncMode,
             ) -> Result<(Self, Anchor<D>), Self::Error> {
                 let db_channels = ($(
                     DbSyncChannels::<<$T as ManagedDb<E>>::SyncTarget>::new(
@@ -967,7 +946,6 @@ macro_rules! impl_state_sync_set {
                                     Some(finish_rx),
                                     Some(reached_tx),
                                     sync_config,
-                                    mode,
                                 );
                                 let forward_reached = async move {
                                     loop {
@@ -1477,8 +1455,7 @@ mod tests {
     use super::{
         assert_rewind_window_safety, drain_single_tip_updates, Anchor, AttachableResolver,
         AttachableResolverSet, CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb,
-        StateSyncDb, StateSyncMode, StateSyncSet, SyncEngineConfig, TipUpdate,
-        MAX_CHANNEL_DRAIN_PER_TICK,
+        StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
     };
     use crate::stateful::tests::mocks::{anchor as mock_anchor, TestMerkleized, TestUnmerkleized};
     use commonware_cryptography::sha256;
@@ -1684,12 +1661,6 @@ mod tests {
     }
 
     struct ImmediateStateSyncDb;
-
-    struct RecordModeSyncDb {
-        final_target: u64,
-    }
-
-    type ModeRecorder = Arc<commonware_utils::sync::Mutex<Option<StateSyncMode>>>;
 
     struct FailingStateSyncDb;
 
@@ -2057,38 +2028,6 @@ mod tests {
         }
     }
 
-    impl<E: Send> ManagedDb<E> for RecordModeSyncDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-        type Config = ();
-        type SyncTarget = u64;
-
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            unreachable!("RecordModeSyncDb is only constructed through state sync in tests")
-        }
-
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn sync_target(&self) -> Self::SyncTarget {
-            self.final_target
-        }
-
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
-        }
-    }
-
     impl<E: Send> ManagedDb<E> for FinishClosedSyncDb {
         type Unmerkleized = TestUnmerkleized;
         type Merkleized = TestMerkleized;
@@ -2234,7 +2173,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             while !release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
@@ -2301,7 +2239,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             let mut final_target = target;
             while !release.load(Ordering::SeqCst) {
@@ -2377,7 +2314,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             let update = tip_updates.recv().await.expect("expected forwarded tip");
             if let Some(reached_target) = reached_target.as_ref() {
@@ -2419,7 +2355,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             done.store(true, Ordering::SeqCst);
             let mut final_target = target;
@@ -2485,7 +2420,6 @@ mod tests {
             _finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             Err(TestSyncError)
         }
@@ -2503,36 +2437,8 @@ mod tests {
             _finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
-        }
-    }
-
-    impl<E: Send> StateSyncDb<E, ModeRecorder> for RecordModeSyncDb {
-        type SyncError = Infallible;
-
-        async fn sync_db(
-            _context: E,
-            _config: Self::Config,
-            mode_seen: ModeRecorder,
-            target: Self::SyncTarget,
-            _tip_updates: mpsc::Receiver<Self::SyncTarget>,
-            mut finish: Option<mpsc::Receiver<()>>,
-            reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
-            _sync_config: SyncEngineConfig,
-            mode: StateSyncMode,
-        ) -> Result<Self, Self::SyncError> {
-            *mode_seen.lock() = Some(mode);
-            if let Some(reached_target) = reached_target.as_ref() {
-                let _ = reached_target.send(target).await;
-            }
-            if let Some(finish_rx) = finish.as_mut() {
-                let _ = finish_rx.recv().await;
-            }
-            Ok(Self {
-                final_target: target,
-            })
         }
     }
 
@@ -2548,7 +2454,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             if let Some(reached_target) = reached_target.as_ref() {
                 let _ = reached_target.send(target).await;
@@ -2574,7 +2479,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             let Some(finish_rx) = finish.as_mut() else {
                 panic!("finish receiver should be provided");
@@ -2603,7 +2507,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             while !controller.release.load(Ordering::SeqCst) {
                 context.sleep(Duration::from_millis(1)).await;
@@ -2696,7 +2599,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
@@ -2762,7 +2664,6 @@ mod tests {
             mut finish: Option<mpsc::Receiver<()>>,
             reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
-            _mode: StateSyncMode,
         ) -> Result<Self, Self::SyncError> {
             let mut final_target = target;
             let mut tip_updates = Some(tip_updates);
@@ -3021,7 +2922,6 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
                         },
-                        StateSyncMode::New,
                     )
                     .await
                     .expect("single state sync should succeed")
@@ -3034,41 +2934,6 @@ mod tests {
 
             let (_database, converged_anchor) = sync.await.expect("sync task should complete");
             assert_eq!(converged_anchor, anchor(0));
-        });
-    }
-
-    #[test]
-    fn single_state_sync_forwards_resume_mode() {
-        deterministic::Runner::default().start(|context| async move {
-            let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let mode_seen = Arc::new(commonware_utils::sync::Mutex::new(None));
-            let (database, converged_anchor) =
-                <Arc<AsyncRwLock<RecordModeSyncDb>> as StateSyncSet<
-                    deterministic::Context,
-                    ModeRecorder,
-                    sha256::Digest,
-                >>::sync(
-                    context,
-                    (),
-                    mode_seen.clone(),
-                    anchor(7),
-                    7,
-                    tip_rx,
-                    SyncEngineConfig {
-                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                        apply_batch_size: 1,
-                        max_outstanding_requests: 1,
-                        update_channel_size: NonZeroUsize::new(1).unwrap(),
-                        max_retained_roots: 0,
-                    },
-                    StateSyncMode::Resume,
-                )
-                .await
-                .expect("single state sync should succeed");
-
-            assert_eq!(*mode_seen.lock(), Some(StateSyncMode::Resume));
-            assert_eq!(database.read().await.final_target, 7);
-            assert_eq!(converged_anchor, anchor(7));
         });
     }
 
@@ -3096,7 +2961,6 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-                StateSyncMode::New,
             )
             .await;
 
@@ -3134,7 +2998,6 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
                         },
-                        StateSyncMode::New,
                     )
                     .await
                     .expect("single state sync should succeed")
@@ -3185,7 +3048,6 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
                         },
-                        StateSyncMode::New,
                     )
                     .await
                     .expect("single state sync should succeed")
@@ -3233,7 +3095,6 @@ mod tests {
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,
                             },
-                            StateSyncMode::New,
                         )
                         .await
                         .expect("single state sync should succeed")
@@ -3285,7 +3146,6 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
                         },
-                        StateSyncMode::New,
                     )
                     .await
                     .expect("tuple state sync should succeed")
@@ -3312,46 +3172,6 @@ mod tests {
                 slow_target,
                 "returned anchor height should match the converged generation"
             );
-        });
-    }
-
-    #[test]
-    fn tuple_state_sync_forwards_resume_mode_to_each_database() {
-        deterministic::Runner::default().start(|context| async move {
-            let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
-            let left_mode = Arc::new(commonware_utils::sync::Mutex::new(None));
-            let right_mode = Arc::new(commonware_utils::sync::Mutex::new(None));
-            let (databases, converged_anchor) = <(
-                Arc<AsyncRwLock<RecordModeSyncDb>>,
-                Arc<AsyncRwLock<RecordModeSyncDb>>,
-            ) as StateSyncSet<
-                deterministic::Context,
-                (ModeRecorder, ModeRecorder),
-                sha256::Digest,
-            >>::sync(
-                context,
-                ((), ()),
-                (left_mode.clone(), right_mode.clone()),
-                anchor(9),
-                (9, 9),
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
-                    max_outstanding_requests: 1,
-                    update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
-                },
-                StateSyncMode::Resume,
-            )
-            .await
-            .expect("tuple state sync should succeed");
-
-            assert_eq!(*left_mode.lock(), Some(StateSyncMode::Resume));
-            assert_eq!(*right_mode.lock(), Some(StateSyncMode::Resume));
-            assert_eq!(databases.0.read().await.final_target, 9);
-            assert_eq!(databases.1.read().await.final_target, 9);
-            assert_eq!(converged_anchor, anchor(9));
         });
     }
 
@@ -3385,7 +3205,6 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
                             max_retained_roots: 0,
                         },
-                        StateSyncMode::New,
                     )
                     .await
                     .expect("tuple state sync should succeed")
@@ -3447,7 +3266,6 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-                StateSyncMode::New,
             )
             .await;
 
@@ -3484,7 +3302,6 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-                StateSyncMode::New,
             )
             .await;
 
@@ -3530,7 +3347,6 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-                StateSyncMode::New,
             )
             .await;
 
@@ -3571,7 +3387,6 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-                StateSyncMode::New,
             )
             .await;
 
@@ -3705,7 +3520,6 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
                         },
-                    StateSyncMode::New,
                     )
                     .await
                     .expect("tuple state sync should succeed")
@@ -3778,7 +3592,6 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
                         },
-                        StateSyncMode::New,
                     )
                     .await
                     .expect("tuple state sync should succeed")
@@ -3845,7 +3658,6 @@ mod tests {
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,
                             },
-                            StateSyncMode::New,
                         )
                         .await
                         .expect("tuple state sync should succeed")
