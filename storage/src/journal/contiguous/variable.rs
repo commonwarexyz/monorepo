@@ -977,9 +977,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 break items_in_last_section;
             }
 
-            let previous_section = last_section.checked_sub(1).ok_or_else(|| {
-                Error::Corruption("multiple data sections with no previous section".into())
-            })?;
+            let previous_section = last_section
+                .checked_sub(1)
+                .expect("num_sections >= 2 implies newest_section >= 1");
             let previous_size = data.size(previous_section).await?;
             warn!(
                 section = last_section,
