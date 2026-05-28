@@ -3161,7 +3161,7 @@ mod tests {
                     write_buffer: cfg.write_buffer,
                 };
                 fixed::Journal::<_, u64>::test_stage_clear_to_size_in_partition(
-                    &context.child("intent").with_attribute("index", index),
+                    context.child("intent").with_attribute("index", index),
                     &offsets_cfg,
                     7,
                 )

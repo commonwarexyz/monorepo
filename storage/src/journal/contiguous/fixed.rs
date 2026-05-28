@@ -597,7 +597,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Stage a recovery-watermark entry no greater than `limit` in raw metadata.
     ///
     /// This is used by `init_at_size` before it clears existing blobs, before an `Inner` exists.
-    #[commonware_macros::stability(ALPHA)]
     fn update_metadata_watermark_before_clear(
         metadata: &mut Metadata<E, u64, Vec<u8>>,
         limit: u64,
@@ -669,12 +668,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     #[cfg(test)]
     pub(crate) async fn test_stage_clear_to_size_in_partition(
-        context: &E,
+        context: E,
         cfg: &Config,
         size: u64,
     ) -> Result<(), Error> {
-        Self::select_blob_partition(context, cfg).await?;
-        let mut metadata = Self::open_metadata(context, cfg).await?;
+        Self::select_blob_partition(&context, cfg).await?;
+        let mut metadata = Self::open_metadata(&context, cfg).await?;
         Self::stage_clear_to_size_metadata(&mut metadata, size).await
     }
 
