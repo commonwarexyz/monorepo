@@ -33,7 +33,6 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
     max_bit_vec: u64,
     max_peers: usize,
 
-    mailbox: Mailbox<C>,
     control: mailbox::UnreliableReceiver<Message<C>>,
     high: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
     low: mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
@@ -44,14 +43,13 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Metrics, C: PublicKey> {
 }
 
 impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> Actor<E, C> {
-    pub fn new(context: E, cfg: Config<C>) -> (Self, Relay<EncodedData>) {
+    pub fn new(context: E, cfg: Config<C>) -> (Self, Mailbox<C>, Relay<EncodedData>) {
         let (control_sender, control_receiver) =
             Mailbox::new(context.child("mailbox"), cfg.mailbox_size);
         let (relay, receivers) = Relay::new(context.child("relay"), cfg.mailbox_size);
         (
             Self {
                 context,
-                mailbox: control_sender,
                 gossip_bit_vec_frequency: cfg.gossip_bit_vec_frequency,
                 send_batch_size: cfg.send_batch_size.get(),
                 info_verifier: cfg.info_verifier,
@@ -64,6 +62,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 received_messages: cfg.received_messages,
                 rate_limited: cfg.rate_limited,
             },
+            control_sender,
             relay,
         )
     }
@@ -189,7 +188,6 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         let mut send_handler: Handle<Result<(), Error>> = self.context.child("sender").spawn({
             let peer = peer.clone();
             let tracker = tracker.clone();
-            let mailbox = self.mailbox.clone();
             let rate_limits = rate_limits.clone();
             move |context| async move {
                 // Set the initial deadline to now to start gossiping immediately
@@ -203,7 +201,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                     on_stopped => {},
                     _ = context.sleep_until(deadline) => {
                         // Get latest bitset from tracker (also used as ping)
-                        tracker.construct(peer.clone(), mailbox.clone());
+                        tracker.construct(peer.clone());
 
                         // Reset ticker
                         deadline = context.current() + self.gossip_bit_vec_frequency;
@@ -368,7 +366,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         types::Payload::Greeting(_) => unreachable!(),
                         types::Payload::BitVec(bit_vec) => {
                             // Gather useful peers
-                            tracker.bit_vec(bit_vec, self.mailbox.clone());
+                            tracker.bit_vec(peer.clone(), bit_vec);
                         }
                         types::Payload::Peers(peers) => {
                             // Verify all info is valid
@@ -522,10 +520,11 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.child("context"),
-                default_peer_config(context.child("config"), remote_pk),
-            );
+            let (peer_actor, _mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(
+                    context.child("peer"),
+                    default_peer_config(context.child("config"), remote_pk),
+                );
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
@@ -623,10 +622,11 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.child("context"),
-                default_peer_config(context.child("config"), remote_pk),
-            );
+            let (peer_actor, _mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(
+                    context.child("peer"),
+                    default_peer_config(context.child("config"), remote_pk),
+                );
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
@@ -730,10 +730,11 @@ mod tests {
                 .expect("listen result failed");
 
             // Create peer actor (from remote's perspective, local is the peer)
-            let (peer_actor, _messenger) = Actor::<deterministic::Context, PublicKey>::new(
-                context.child("context"),
-                default_peer_config(context.child("config"), remote_pk),
-            );
+            let (peer_actor, _mailbox, _messenger) =
+                Actor::<deterministic::Context, PublicKey>::new(
+                    context.child("peer"),
+                    default_peer_config(context.child("config"), remote_pk),
+                );
 
             // Create greeting info for the peer actor to send
             let greeting = types::Info::sign(
@@ -844,7 +845,7 @@ mod tests {
                 received_messages: received_messages.clone(),
                 ..default_peer_config(context.child("config"), remote_pk)
             };
-            let (peer_actor, _messenger) =
+            let (peer_actor, _mailbox, _messenger) =
                 Actor::<deterministic::Context, PublicKey>::new(context.child("actor"), cfg);
 
             // Greeting the actor will send upon connecting to the peer.

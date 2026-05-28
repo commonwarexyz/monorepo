@@ -5,7 +5,7 @@ use super::{
     ingress::{FetchKey, Mailbox, Message},
     metrics, wire, Producer,
 };
-use crate::{Consumer, Delivery};
+use crate::{subscribers, Consumer, Delivery};
 use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_cryptography::PublicKey;
@@ -19,13 +19,10 @@ use commonware_runtime::{
     telemetry::metrics::{histogram, status::Status, GaugeExt},
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner,
 };
-use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, vec::NonEmptyVec, Span};
+use commonware_utils::{channel::oneshot, futures::Pool as FuturesPool, Span};
 use futures::future::{self, Either};
 use rand::Rng;
-use std::{
-    collections::{BTreeSet, HashMap},
-    marker::PhantomData,
-};
+use std::marker::PhantomData;
 use tracing::{debug, error, trace, warn};
 
 /// Represents a pending serve operation.
@@ -72,10 +69,10 @@ where
     fetcher: Fetcher<E, P, Key, NetS>,
 
     /// Tracks all in-flight fetch state
-    inflight: Inflight<E, Con, P, Key>,
+    inflight: Inflight<Con, P>,
 
     /// Subscribers that keep each fetch alive.
-    subscribers: HashMap<Key, BTreeSet<Con::Subscriber>>,
+    subscribers: subscribers::Tracker<Key, Con::Subscriber>,
 
     /// Holds futures that resolve once the `Producer` has produced the data.
     /// Once the future is resolved, the data (or an error) is sent to the peer.
@@ -136,7 +133,7 @@ where
                 mailbox: receiver,
                 fetcher,
                 inflight: Inflight::new(cfg.consumer),
-                subscribers: HashMap::new(),
+                subscribers: subscribers::Tracker::new(),
                 serves: FuturesPool::default(),
                 priority_responses: cfg.priority_responses,
                 metrics,
@@ -164,7 +161,7 @@ where
             network.0,
             network.1,
         );
-        let peer_set_subscription = &mut self.peer_provider.subscribe().await;
+        let mut peer_set_subscription = self.peer_provider.subscribe().await;
 
         select_loop! {
             self.context,
@@ -231,18 +228,14 @@ where
                         for FetchKey {
                             key,
                             subscribers,
-                            targets,
+                            metadata: targets,
                         } in keys
                         {
                             trace!(?key, "mailbox: fetch");
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
-                            let subscribers_for_key = self
-                                .subscribers
-                                .entry(key.clone())
-                                .or_default();
-                            subscribers_for_key.extend(subscribers);
+                            self.subscribers.insert(key.clone(), subscribers);
 
                             // Update targets
                             match targets {
@@ -272,14 +265,12 @@ where
                     Message::Retain { predicate } => {
                         trace!("mailbox: retain");
 
-                        self.subscribers.retain(|key, subscribers| {
-                            subscribers.retain(|subscriber| predicate(key, subscriber));
-                            !subscribers.is_empty()
-                        });
+                        self.subscribers
+                            .retain(|key, subscriber| predicate(key, subscriber));
                         let subscribers = &self.subscribers;
-                        self.fetcher.retain(|key| subscribers.contains_key(key));
+                        self.fetcher.retain(|key| subscribers.contains(key));
                         let count =
-                            self.inflight.retain(|key| subscribers.contains_key(key)) as u64;
+                            self.inflight.retain(|key| subscribers.contains(key)) as u64;
                         self.record_cancellations(count);
                     }
                 }
@@ -412,14 +403,14 @@ where
             return;
         };
 
-        let Some(subscribers) = self.subscribers.get(&key) else {
+        let Some(subscribers) = self.subscribers.pending(&key) else {
             warn!(?key, "response for fetch with no subscribers");
             self.inflight.cancel(&key);
             return;
         };
         let delivery = Delivery {
             key: key.clone(),
-            subscribers: NonEmptyVec::from_unchecked(subscribers.iter().cloned().collect()),
+            subscribers,
         };
 
         // The peer had the data, so deliver it to the consumer without blocking the engine.
@@ -439,12 +430,7 @@ where
             // Remove only the subscribers that accepted this response. If other
             // subscribers still need the key, deliver the same accepted response
             // locally with the remaining annotations.
-            let remaining = self.subscribers.get_mut(&key).and_then(|subscribers| {
-                for subscriber in delivered.into_vec() {
-                    subscribers.remove(&subscriber);
-                }
-                NonEmptyVec::try_from(subscribers.iter().cloned().collect::<Vec<_>>()).ok()
-            });
+            let remaining = self.subscribers.remove_delivered(&key, delivered);
 
             if let Some(subscribers) = remaining {
                 if !already_accepted {
@@ -458,8 +444,7 @@ where
                 if !already_accepted {
                     self.metrics.fetch.inc(Status::Success);
                 }
-                self.inflight.complete(&key, self.context.as_ref());
-                self.subscribers.remove(&key);
+                self.inflight.complete(self.context.as_ref(), &key);
                 self.fetcher.clear_targets(&key);
             }
             return;
@@ -471,7 +456,7 @@ where
                 "previously accepted response was rejected during local redelivery"
             );
             self.metrics.fetch.inc(Status::Failure);
-            self.inflight.complete(&key, self.context.as_ref());
+            self.inflight.complete(self.context.as_ref(), &key);
             self.subscribers.remove(&key);
             self.fetcher.clear_targets(&key);
             return;

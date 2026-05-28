@@ -6,7 +6,7 @@
 
 use crate::{
     index::{
-        storage::{Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
+        storage::{insert_front, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
         Cursor as CursorTrait, Ordered, Unordered,
     },
     translator::Translator,
@@ -27,12 +27,7 @@ use std::{
 };
 
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
-impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
-    for BTreeOccupiedEntry<'_, K, Record<V>>
-{
-    fn get(&self) -> &V {
-        &self.get().value
-    }
+impl<K: Ord + Send + Sync, V: Send + Sync> IndexEntry<V> for BTreeOccupiedEntry<'_, K, Record<V>> {
     fn get_mut(&mut self) -> &mut Record<V> {
         self.get_mut()
     }
@@ -41,53 +36,12 @@ impl<K: Ord + Send + Sync, V: Eq + Send + Sync> IndexEntry<V>
     }
 }
 
-/// A cursor for the ordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, K: Ord + Send + Sync, V: Eq + Send + Sync> {
-    inner: CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>,
-}
-
-impl<'a, K: Ord + Send + Sync, V: Eq + Send + Sync> Cursor<'a, K, V> {
-    const fn new(
-        entry: BTreeOccupiedEntry<'a, K, Record<V>>,
-        keys: &'a Gauge,
-        items: &'a Gauge,
-        pruned: &'a Counter,
-    ) -> Self {
-        Self {
-            inner: CursorImpl::<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>::new(
-                entry, keys, items, pruned,
-            ),
-        }
-    }
-}
-
-impl<K: Ord + Send + Sync, V: Eq + Send + Sync> CursorTrait for Cursor<'_, K, V> {
-    type Value = V;
-
-    fn update(&mut self, v: V) {
-        self.inner.update(v)
-    }
-
-    fn next(&mut self) -> Option<&V> {
-        self.inner.next()
-    }
-
-    fn insert(&mut self, v: V) {
-        self.inner.insert(v)
-    }
-
-    fn delete(&mut self) {
-        self.inner.delete()
-    }
-
-    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        self.inner.prune(predicate)
-    }
-}
+/// A [crate::index::Cursor] over the values associated with a translated key.
+pub type Cursor<'a, K, V> = CursorImpl<'a, V, BTreeOccupiedEntry<'a, K, Record<V>>>;
 
 /// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
 /// values.
-pub struct Index<T: Translator, V: Eq + Send + Sync> {
+pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: BTreeMap<T::Key, Record<V>>,
 
@@ -96,7 +50,7 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
+impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -145,7 +99,7 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Ordered for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Ordered for Index<T, V> {
     type Iterator<'a>
         = ImmutableCursor<'a, V>
     where
@@ -194,13 +148,13 @@ impl<T: Translator, V: Eq + Send + Sync> Ordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> super::Factory<T> for Index<T, V> {
+impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
@@ -251,11 +205,9 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     fn insert(&mut self, key: &[u8], value: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => {
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-                cursor.next();
-                cursor.insert(value);
+            BTreeEntry::Occupied(mut entry) => {
+                insert_front(entry.get_mut(), value);
+                self.items.inc();
             }
             BTreeEntry::Vacant(entry) => {
                 Self::create(&self.keys, &self.items, entry, value);
@@ -263,47 +215,43 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_prune(&mut self, key: &[u8], value: V, predicate: impl Fn(&V) -> bool) {
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             BTreeEntry::Occupied(entry) => {
-                // Get entry
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                // Remove anything that is prunable.
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
 
-                // Add our new value (if not prunable).
-                if !predicate(&value) {
+                // Add the new value only if it should be retained.
+                if should_retain(&value) {
                     cursor.insert(value);
                 }
             }
             BTreeEntry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, value);
+                // Create the entry only if the value should be retained.
+                if should_retain(&value) {
+                    Self::create(&self.keys, &self.items, entry, value);
+                }
             }
-        }
-    }
-
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&V) -> bool) {
-        let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => {
-                // Get cursor
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-
-                // Remove anything that is prunable.
-                cursor.prune(&predicate);
-            }
-            BTreeEntry::Vacant(_) => {}
         }
     }
 
     fn remove(&mut self, key: &[u8]) {
-        // To ensure metrics are accurate, we iterate over all conflicting values and remove them
-        // one-by-one (rather than just removing the entire entry).
-        self.prune(key, |_| true);
+        let k = self.translator.transform(key);
+        if let Some(mut record) = self.map.remove(&k) {
+            // To ensure metrics are accurate, account for all conflicting values in the chain.
+            self.keys.dec();
+            self.items.dec();
+            self.pruned.inc();
+            while let Some(next) = record.next.take() {
+                self.items.dec();
+                self.pruned.inc();
+                record = *next;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -322,7 +270,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Drop for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {
@@ -387,15 +335,15 @@ mod tests {
             // Next translated key to 0x0b is 1c.
             let (mut next, wrapped) = index.next_translated_key(&hex!("0x0b0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
+            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x1b is 1c.
             let (mut next, wrapped) = index.next_translated_key(&hex!("0x1b010203")).unwrap();
             assert!(!wrapped);
-            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next().unwrap(), &22);
+            assert_eq!(next.next().unwrap(), &21);
             assert_eq!(next.next(), None);
 
             // Next translated key to 0x2a is 2d.
@@ -431,8 +379,8 @@ mod tests {
             // Previous translated key is 1c.
             let (mut prev, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next().unwrap(), &22);
+            assert_eq!(prev.next().unwrap(), &21);
             assert_eq!(prev.next(), None);
 
             // Previous translated key is 2d.

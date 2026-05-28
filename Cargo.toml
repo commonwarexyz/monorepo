@@ -11,6 +11,7 @@ members = [
     "cryptography",
     "deployer",
     "formatting",
+    "glue",
     "macros",
     "macros/impl",
     "math",
@@ -55,7 +56,7 @@ resolver = "2"
 libraries = [{ path = ".github/dylints/*" }]
 
 [workspace.package]
-version = "2026.4.0"
+version = "2026.5.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 homepage = "https://commonware.xyz"
@@ -103,29 +104,30 @@ chacha20poly1305 = { version = "0.10.1", default-features = false }
 chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
-commonware-actor = { version = "2026.4.0", path = "actor" }
-commonware-broadcast = { version = "2026.4.0", path = "broadcast" }
-commonware-codec = { version = "2026.4.0", path = "codec", default-features = false }
-commonware-coding = { version = "2026.4.0", path = "coding" }
-commonware-collector = { version = "2026.4.0", path = "collector" }
-commonware-conformance = { version = "2026.4.0", path = "conformance" }
-commonware-conformance-macros = { version = "2026.4.0", path = "conformance/macros" }
-commonware-consensus = { version = "2026.4.0", path = "consensus" }
-commonware-cryptography = { version = "2026.4.0", path = "cryptography", default-features = false }
-commonware-deployer = { version = "2026.4.0", path = "deployer", default-features = false }
-commonware-formatting = { version = "2026.4.0", path = "formatting", default-features = false }
-commonware-invariants = { version = "2026.4.0", path = "invariants" }
-commonware-macros = { version = "2026.4.0", path = "macros", default-features = false }
-commonware-macros-impl = { version = "2026.4.0", path = "macros/impl" }
-commonware-math = { version = "2026.4.0", path = "math", default-features = false }
-commonware-p2p = { version = "2026.4.0", path = "p2p" }
-commonware-parallel = { version = "2026.4.0", path = "parallel", default-features = false }
-commonware-resolver = { version = "2026.4.0", path = "resolver" }
-commonware-runtime = { version = "2026.4.0", path = "runtime" }
-commonware-runtime-macros = { version = "2026.4.0", path = "runtime/macros" }
-commonware-storage = { version = "2026.4.0", path = "storage", default-features = false }
-commonware-stream = { version = "2026.4.0", path = "stream" }
-commonware-utils = { version = "2026.4.0", path = "utils", default-features = false }
+commonware-actor = { version = "2026.5.0", path = "actor" }
+commonware-broadcast = { version = "2026.5.0", path = "broadcast" }
+commonware-codec = { version = "2026.5.0", path = "codec", default-features = false }
+commonware-coding = { version = "2026.5.0", path = "coding" }
+commonware-collector = { version = "2026.5.0", path = "collector" }
+commonware-conformance = { version = "2026.5.0", path = "conformance" }
+commonware-conformance-macros = { version = "2026.5.0", path = "conformance/macros" }
+commonware-consensus = { version = "2026.5.0", path = "consensus" }
+commonware-cryptography = { version = "2026.5.0", path = "cryptography", default-features = false }
+commonware-deployer = { version = "2026.5.0", path = "deployer", default-features = false }
+commonware-formatting = { version = "2026.5.0", path = "formatting", default-features = false }
+commonware-glue = { version = "2026.5.0", path = "glue" }
+commonware-invariants = { version = "2026.5.0", path = "invariants" }
+commonware-macros = { version = "2026.5.0", path = "macros", default-features = false }
+commonware-macros-impl = { version = "2026.5.0", path = "macros/impl" }
+commonware-math = { version = "2026.5.0", path = "math", default-features = false }
+commonware-p2p = { version = "2026.5.0", path = "p2p" }
+commonware-parallel = { version = "2026.5.0", path = "parallel", default-features = false }
+commonware-resolver = { version = "2026.5.0", path = "resolver" }
+commonware-runtime = { version = "2026.5.0", path = "runtime" }
+commonware-runtime-macros = { version = "2026.5.0", path = "runtime/macros" }
+commonware-storage = { version = "2026.5.0", path = "storage", default-features = false }
+commonware-stream = { version = "2026.5.0", path = "stream" }
+commonware-utils = { version = "2026.5.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 const-hex = { version = "1.18.1", default-features = false }
 crc = "3.4.0"
@@ -194,13 +196,16 @@ zeroize = "1.5.7"
 zstd = "0.13.2"
 
 [profile.bench]
-# Because we enable overflow checks in "release," we should benchmark with them.
+# Because we enable overflow checks in "release", we should benchmark with them.
 overflow-checks = true
 
 [profile.dev]
 # Although overflow checks are enabled by default in "dev", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+# Keep line tables for file:line in panics and backtraces, but skip variable-level
+# debuginfo to speed up codegen and linking. Use `debug = 2` for debugger sessions.
+debug = "line-tables-only"
 
 [profile.release]
 # To guard against unexpected behavior in production, we enable overflow checks in
@@ -217,6 +222,9 @@ debug = true
 # Although overflow checks are enabled by default in "test", we explicitly
 # enable them here for clarity.
 overflow-checks = true
+# Keep line tables for file:line in panics and backtraces, but skip variable-level
+# debuginfo to speed up codegen and linking. Use `debug = 2` for debugger sessions.
+debug = "line-tables-only"
 
 [profile.test.package.curve25519-dalek]
 opt-level = 3

@@ -232,7 +232,7 @@ mod tests {
         certificate::mocks::Fixture, ed25519::PublicKey, sha256::Digest as Sha256Digest,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::Fetch;
+    use commonware_resolver::{Fetch, TargetedResolver};
     use commonware_utils::{sync::Mutex, test_rng, vec::NonEmptyVec, NZUsize};
     use std::{collections::BTreeSet, sync::Arc};
 
@@ -259,7 +259,6 @@ mod tests {
     impl Resolver for MockResolver {
         type Key = U64;
         type Subscriber = ();
-        type PublicKey = PublicKey;
 
         fn fetch<R>(&mut self, request: R) -> Feedback
         where
@@ -280,33 +279,37 @@ mod tests {
             Feedback::Ok
         }
 
-        fn fetch_targeted(
-            &mut self,
-            request: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-            _targets: NonEmptyVec<PublicKey>,
-        ) -> Feedback {
-            // For testing, just treat targeted fetch the same as regular fetch
-            self.outstanding.lock().insert(request.into().key);
-            Feedback::Ok
-        }
-
-        fn fetch_all_targeted<R>(&mut self, requests: Vec<(R, NonEmptyVec<PublicKey>)>) -> Feedback
-        where
-            R: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            // For testing, just treat targeted fetch the same as regular fetch
-            for (request, _targets) in requests {
-                self.outstanding.lock().insert(request.into().key);
-            }
-            Feedback::Ok
-        }
-
         fn retain(
             &mut self,
             predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
         ) -> Feedback {
             self.outstanding.lock().retain(|key| predicate(key, &()));
             Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for MockResolver {
+        type PublicKey = PublicKey;
+
+        fn fetch_targeted(
+            &mut self,
+            fetch: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+            _targets: NonEmptyVec<Self::PublicKey>,
+        ) -> Feedback {
+            <Self as Resolver>::fetch(self, fetch)
+        }
+
+        fn fetch_all_targeted<F>(
+            &mut self,
+            fetches: Vec<(F, NonEmptyVec<Self::PublicKey>)>,
+        ) -> Feedback
+        where
+            F: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
+        {
+            <Self as Resolver>::fetch_all(
+                self,
+                fetches.into_iter().map(|(fetch, _)| fetch).collect(),
+            )
         }
     }
 

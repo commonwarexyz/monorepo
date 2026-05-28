@@ -83,7 +83,7 @@ mod tests {
         Manager as _, Recipients,
     };
     use commonware_parallel::Sequential;
-    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver};
+    use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
@@ -2685,7 +2685,6 @@ mod tests {
     impl Resolver for RecordingResolver {
         type Key = handler::Key<D>;
         type Subscriber = handler::Annotation;
-        type PublicKey = PublicKey;
 
         fn fetch<F>(&mut self, fetch: F) -> Feedback
         where
@@ -2704,6 +2703,21 @@ mod tests {
             }
             Feedback::Ok
         }
+
+        fn retain(
+            &mut self,
+            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
+        ) -> Feedback {
+            self.active_fetches
+                .lock()
+                .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
+            *self.retains.lock() += 1;
+            Feedback::Ok
+        }
+    }
+
+    impl TargetedResolver for RecordingResolver {
+        type PublicKey = PublicKey;
 
         fn fetch_targeted(
             &mut self,
@@ -2725,17 +2739,6 @@ mod tests {
             for (fetch, targets) in fetches {
                 targeted.push((fetch.into().key, targets));
             }
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
-            self.active_fetches
-                .lock()
-                .retain(|fetch| predicate(&fetch.key, &fetch.subscriber));
-            *self.retains.lock() += 1;
             Feedback::Ok
         }
     }
