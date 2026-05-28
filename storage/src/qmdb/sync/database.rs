@@ -58,19 +58,21 @@ pub trait Database: Sized + Send {
         apply_batch_size: usize,
     ) -> impl Future<Output = Result<Self, crate::qmdb::Error<Self::Family>>> + Send;
 
-    /// Returns whether persisted local state already matches the requested sync target.
+    /// Return locally available boundary nodes for the target, if persisted local state can
+    /// authenticate them.
     ///
-    /// Databases can override this to let the sync engine finish immediately when an
-    /// on-disk database already reflects the target. Simple append-only variants may
-    /// verify only the persisted tree size and root. Variants with additional
-    /// pruning-dependent state should also ensure their persisted lower bound still
-    /// covers `target.range.start()`.
-    fn has_local_target_state(
+    /// Databases can override this to let a completed sync journal reuse boundary nodes from an
+    /// on-disk database instead of fetching them from peers. Simple append-only variants may verify
+    /// only the persisted tree size and root. Variants with additional pruning-dependent state
+    /// should also ensure their persisted lower bound still covers `target.range.start()`.
+    fn local_boundary_nodes(
         _context: Self::Context,
         _config: &Self::Config,
         _target: &crate::qmdb::sync::Target<Self::Family, Self::Digest>,
-    ) -> impl Future<Output = bool> + Send {
-        async { false }
+        _journal: &Self::Journal,
+    ) -> impl Future<Output = Result<Option<Vec<Self::Digest>>, crate::qmdb::Error<Self::Family>>> + Send
+    {
+        async { Ok(None) }
     }
 
     /// Get the root digest of the database for verification

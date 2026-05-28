@@ -17,6 +17,10 @@ use commonware_runtime::{Clock, Metrics, Storage};
 ///    finalized floor and attaches it via [`SyncPlan::with_floor`]. Otherwise
 ///    the caller skips floor selection entirely.
 ///
+/// The plan owns the opened metadata store and is later consumed by
+/// [`Stateful`](crate::stateful::Stateful), so startup does not reopen the same
+/// metadata partition from multiple places.
+///
 /// Once state sync completes, this node never performs peer state sync
 /// again. Future startups must recover from the later of that synced height
 /// and marshal's processed height instead.
@@ -106,8 +110,13 @@ where
             .map_or_else(|| Start::Genesis(genesis), Start::Floor)
     }
 
-    /// Returns whether restart is blocked on selecting a new state sync floor.
-    pub(crate) fn requires_state_sync_floor(&self) -> bool {
+    /// Returns whether startup must attach a new state sync floor.
+    ///
+    /// This is `true` after a previous process crashed while state sync was
+    /// in progress. In that case [`Self::may_state_sync`] is also `true`, but
+    /// starting from marshal/genesis is not allowed because partially synced
+    /// database state must be reopened through the state-sync path.
+    pub fn requires_state_sync_floor(&self) -> bool {
         self.sync_metadata.in_progress()
     }
 
@@ -127,7 +136,6 @@ mod tests {
     use commonware_consensus::types::Height;
     use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
-    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn stored_sync_height_disables_state_sync() {
@@ -154,44 +162,81 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "completed state sync cannot be marked in-progress")]
+    fn completed_sync_cannot_be_marked_in_progress() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "completed_sync_cannot_be_marked_in_progress";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_complete(Height::new(7)).await;
+            metadata
+                .begin_sync(FloorMarker::new(Height::new(8), Sha256::fill(8)))
+                .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "completed state sync height cannot move backward")]
+    fn complete_height_cannot_move_backward() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "complete_height_cannot_move_backward";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_complete(Height::new(7)).await;
+            metadata.set_complete(Height::new(6)).await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "completed state sync height cannot be behind the in-progress floor")]
+    fn complete_height_cannot_be_behind_in_progress_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "complete_height_cannot_be_behind_in_progress_floor";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata
+                .begin_sync(FloorMarker::new(Height::new(7), Sha256::fill(7)))
+                .await;
+            metadata.set_complete(Height::new(6)).await;
+        });
+    }
+
+    #[test]
     fn in_progress_sync_requires_compatible_floor() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
             let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
             let mut metadata =
                 StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
-            metadata.set_in_progress(stored.clone()).await;
+            metadata.begin_sync(stored.clone()).await;
             drop(metadata);
 
             let mut plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(plan.may_state_sync());
             assert!(plan.requires_state_sync_floor());
-            plan.sync_metadata.set_in_progress(stored).await;
+            plan.sync_metadata.begin_sync(stored).await;
             plan.sync_metadata
-                .set_in_progress(FloorMarker::new(Height::new(9), Sha256::fill(9)))
+                .begin_sync(FloorMarker::new(Height::new(9), Sha256::fill(9)))
                 .await;
         });
     }
 
     #[test]
-    fn in_progress_sync_panics_for_backward_or_conflicting_floor() {
-        deterministic::Runner::default().start(|context| async move {
-            let partition_prefix = "in_progress_sync_panics_for_backward_or_conflicting_floor";
-            let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
-            metadata.set_in_progress(stored.clone()).await;
+    #[should_panic(
+        expected = "selected state sync floor cannot move behind the persisted in-progress floor"
+    )]
+    fn in_progress_sync_panics_for_backward_floor() {
+        let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
+        stored.ensure_not_behind(&FloorMarker::new(Height::new(6), Sha256::fill(6)));
+    }
 
-            let backward = catch_unwind(AssertUnwindSafe(|| {
-                stored.ensure_not_behind(&FloorMarker::new(Height::new(6), Sha256::fill(6)))
-            }));
-            assert!(backward.is_err());
-
-            let conflicting = catch_unwind(AssertUnwindSafe(|| {
-                stored.ensure_not_behind(&FloorMarker::new(Height::new(7), Sha256::fill(8)))
-            }));
-            assert!(conflicting.is_err());
-        });
+    #[test]
+    #[should_panic(
+        expected = "selected state sync floor conflicts with the persisted in-progress floor"
+    )]
+    fn in_progress_sync_panics_for_conflicting_floor() {
+        let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
+        stored.ensure_not_behind(&FloorMarker::new(Height::new(7), Sha256::fill(8)));
     }
 }

@@ -318,7 +318,7 @@ pub struct SyncEngineConfig {
     pub max_retained_roots: usize,
 }
 
-/// A [`ManagedDb`] with a startup state-sync entrypoint.
+/// A [`ManagedDb`] with a state-sync entrypoint.
 pub trait StateSyncDb<E, R>: ManagedDb<E> {
     /// Error returned by the state-sync engine for this database.
     type SyncError: Debug + Send;
@@ -413,11 +413,12 @@ pub trait StateSyncSet<E, R, D>: DatabaseSet<E>
 where
     D: Digest,
 {
-    /// Error returned if any database in the set fails startup state-sync.
+    /// Error returned if any database in the set fails state sync.
     type Error: Debug + Send;
 
-    /// Run one-time startup state-sync and return the initialized set
+    /// Run one-time state sync and return the initialized set
     /// together with the anchor all databases converged on.
+    #[allow(clippy::too_many_arguments)]
     fn sync(
         context: E,
         config: Self::Config,
@@ -487,6 +488,7 @@ where
 {
     type Error = T::SyncError;
 
+    #[allow(clippy::too_many_arguments)]
     async fn sync(
         context: E,
         config: Self::Config,
@@ -783,6 +785,7 @@ macro_rules! impl_state_sync_set {
         {
             type Error = String;
 
+            #[allow(clippy::too_many_arguments)]
             async fn sync(
                 context: E,
                 config: Self::Config,
@@ -1757,31 +1760,10 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "marshal max_pending_acks=2 exceeds database_set.max_rewind_depth=1")]
     fn rewind_window_assertion_panics_when_pending_acks_exceed_rewind_depth() {
-        let panic =
-            std::panic::catch_unwind(|| {
-                assert_rewind_window_safety::<
-                    deterministic::Context,
-                    Arc<AsyncRwLock<OneStepRewindDb>>,
-                >(NonZeroUsize::new(2).unwrap());
-            })
-            .expect_err(
-                "rewind-window assertion should panic when pending acks exceed rewind depth",
-            );
-
-        let panic = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&'static str>().copied())
-            .expect("panic should be a string");
-
-        assert!(
-            panic.contains("max_pending_acks=2"),
-            "panic should report max_pending_acks: {panic}"
-        );
-        assert!(
-            panic.contains("max_rewind_depth=1"),
-            "panic should report max_rewind_depth: {panic}"
+        assert_rewind_window_safety::<deterministic::Context, Arc<AsyncRwLock<OneStepRewindDb>>>(
+            NonZeroUsize::new(2).unwrap(),
         );
     }
 
@@ -2815,38 +2797,24 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "database finalize failed (index 1, type commonware_glue::stateful::db::tests::FailingFinalizeDb)"
+    )]
     fn tuple_finalize_panic_identifies_failing_database() {
-        let panic = std::panic::catch_unwind(|| {
-            deterministic::Runner::default().start(|_context| async move {
-                let databases = (
-                    Arc::new(AsyncRwLock::new(TestDb)),
-                    Arc::new(AsyncRwLock::new(FailingFinalizeDb)),
-                );
-                <(
-                    Arc<AsyncRwLock<TestDb>>,
-                    Arc<AsyncRwLock<FailingFinalizeDb>>,
-                ) as DatabaseSet<deterministic::Context>>::finalize(
-                    &databases,
-                    (TestMerkleized, TestMerkleized),
-                )
-                .await;
-            });
-        })
-        .expect_err("tuple finalize should panic when a database finalize fails");
-
-        let panic = panic
-            .downcast_ref::<String>()
-            .map(String::as_str)
-            .or_else(|| panic.downcast_ref::<&'static str>().copied())
-            .expect("panic should be a string");
-        assert!(
-            panic.contains("index 1"),
-            "panic should identify the failing database index: {panic}"
-        );
-        assert!(
-            panic.contains("FailingFinalizeDb"),
-            "panic should identify the failing database type: {panic}"
-        );
+        deterministic::Runner::default().start(|_context| async move {
+            let databases = (
+                Arc::new(AsyncRwLock::new(TestDb)),
+                Arc::new(AsyncRwLock::new(FailingFinalizeDb)),
+            );
+            <(
+                Arc<AsyncRwLock<TestDb>>,
+                Arc<AsyncRwLock<FailingFinalizeDb>>,
+            ) as DatabaseSet<deterministic::Context>>::finalize(
+                &databases,
+                (TestMerkleized, TestMerkleized),
+            )
+            .await;
+        });
     }
 
     type TestAnchor = Anchor<sha256::Digest>;

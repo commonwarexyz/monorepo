@@ -23,7 +23,7 @@ use commonware_utils::{
 use futures::SinkExt;
 use rand::Rng;
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::debug;
 
 /// Configuration for [`Syncer`].
 pub struct Config<E, A, R, S, V>
@@ -134,11 +134,10 @@ where
     pub async fn run(mut self) {
         let resolved_floor =
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
-        self.sync_metadata
-            .lock()
-            .await
-            .set_in_progress(resolved_floor.marker)
-            .await;
+        {
+            let mut sync_metadata = self.sync_metadata.lock().await;
+            sync_metadata.begin_sync(resolved_floor.marker).await;
+        }
 
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut state_sync_task = OptionFuture::from(Some(Box::pin(A::Databases::sync(
@@ -156,17 +155,21 @@ where
             on_stopped => {
                 debug!("syncer received stop signal, shutting down");
             },
-            Ok((databases, anchor)) = &mut state_sync_task else {
-                error!("critical: state sync task failed");
-                panic!("state sync task failed");
-            } => {
-                Self::publish_artifact(
-                    &mut self.artifact,
-                    &mut self.sync_complete,
-                    databases,
-                    anchor,
-                );
-                state_sync_task = None.into();
+            result = &mut state_sync_task => {
+                match result {
+                    Ok((databases, anchor)) => {
+                        Self::publish_artifact(
+                            &mut self.artifact,
+                            &mut self.sync_complete,
+                            databases,
+                            anchor,
+                        );
+                        state_sync_task = None.into();
+                    }
+                    Err(err) => {
+                        panic!("state sync task failed: {err:?}");
+                    }
+                }
             },
             Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down syncer");
@@ -195,9 +198,8 @@ where
                                 );
                                 state_sync_task = None.into();
                             }
-                            Err(_) => {
-                                error!("critical: state sync task failed");
-                                panic!("state sync task failed");
+                            Err(err) => {
+                                panic!("state sync task failed: {err:?}");
                             }
                         }
                         response.send_lossy(self.artifact.clone());

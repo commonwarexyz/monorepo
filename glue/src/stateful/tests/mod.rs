@@ -17,7 +17,7 @@ use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
 };
 use single_db_app::SingleDbEngine;
-use std::{any::Any, time::Duration};
+use std::time::Duration;
 
 mod common;
 pub(crate) mod mocks;
@@ -155,12 +155,19 @@ fn state_sync_crash_during_sync() {
 
 #[test_group("slow")]
 #[test_traced("DEBUG")]
-fn state_sync_partitioned_restart_stays_stuck_until_network_heals() {
+#[should_panic(expected = "runtime timeout")]
+fn state_sync_partitioned_restart_stays_stuck_until_network_heals_single_db() {
     run_state_sync_partitioned_restart_stays_stuck_until_network_heals(
         SingleDbEngine::new(NUM_VALIDATORS)
             .with_state_sync()
             .with_slow_state_sync(),
     );
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+#[should_panic(expected = "runtime timeout")]
+fn state_sync_partitioned_restart_stays_stuck_until_network_heals_multi_db() {
     run_state_sync_partitioned_restart_stays_stuck_until_network_heals(
         MultiDbEngine::new(NUM_VALIDATORS)
             .with_state_sync()
@@ -430,18 +437,6 @@ where
         .at(Duration::from_secs(7), Action::Restart(late_joiner))
 }
 
-fn panic_message(panic: Box<dyn Any + Send>) -> String {
-    if let Some(message) = panic.downcast_ref::<&str>() {
-        return (*message).to_string();
-    }
-
-    if let Some(message) = panic.downcast_ref::<String>() {
-        return message.clone();
-    }
-
-    "non-string panic payload".to_string()
-}
-
 fn run_lossy<D>(engine: D, link: Link)
 where
     D: EngineDefinition<PublicKey = ed25519::PublicKey>,
@@ -653,37 +648,22 @@ where
 {
     let participants = engine.participants();
     let late_joiner = participants[0].clone();
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        PlanBuilder::new(engine)
-            .seeds(0..5)
-            .crash(Crash::Delay {
-                count: 1,
-                after: 20,
-            })
-            .crash(Crash::Schedule(state_sync_partitioned_restart_schedule(
-                &participants,
-                late_joiner,
-            )))
-            .timeout(Duration::from_secs(20))
-            .exit_condition(ProcessedHeightAtLeast::new(100))
-            .property(LateJoinerStateSyncHandoff)
-            .property(BlockAgreementAtHeight::new(100))
-            .run()
-    }));
-
-    match result {
-        Err(panic) => {
-            let message = panic_message(panic);
-            assert!(
-                message.contains("runtime timeout"),
-                "expected the partitioned restart to time out, got panic: {message}"
-            );
-        }
-        Ok(Ok(_)) => panic!(
-            "expected the partitioned late joiner restart to remain stuck until the partition heals"
-        ),
-        Ok(Err(err)) => panic!("expected a runtime timeout panic, got simulation error: {err}"),
-    }
+    PlanBuilder::new(engine)
+        .seeds(0..5)
+        .crash(Crash::Delay {
+            count: 1,
+            after: 20,
+        })
+        .crash(Crash::Schedule(state_sync_partitioned_restart_schedule(
+            &participants,
+            late_joiner,
+        )))
+        .timeout(Duration::from_secs(20))
+        .exit_condition(ProcessedHeightAtLeast::new(100))
+        .property(LateJoinerStateSyncHandoff)
+        .property(BlockAgreementAtHeight::new(100))
+        .run()
+        .unwrap();
 }
 
 /// Rapid successive crashes with very short downtime, targeting the
