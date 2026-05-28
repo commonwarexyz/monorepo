@@ -127,7 +127,6 @@ mod tests {
     use commonware_consensus::types::Height;
     use commonware_cryptography::sha256::{Digest as Sha256Digest, Sha256};
     use commonware_runtime::{deterministic, Runner as _};
-    use std::panic::{catch_unwind, AssertUnwindSafe};
 
     #[test]
     fn stored_sync_height_disables_state_sync() {
@@ -154,6 +153,46 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "completed state sync cannot be marked in-progress")]
+    fn completed_sync_cannot_be_marked_in_progress() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "completed_sync_cannot_be_marked_in_progress";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_complete(Height::new(7)).await;
+            metadata
+                .set_in_progress(FloorMarker::new(Height::new(8), Sha256::fill(8)))
+                .await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "completed state sync height cannot move backward")]
+    fn complete_height_cannot_move_backward() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "complete_height_cannot_move_backward";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_complete(Height::new(7)).await;
+            metadata.set_complete(Height::new(6)).await;
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "completed state sync height cannot be behind the in-progress floor")]
+    fn complete_height_cannot_be_behind_in_progress_floor() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition_prefix = "complete_height_cannot_be_behind_in_progress_floor";
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata
+                .set_in_progress(FloorMarker::new(Height::new(7), Sha256::fill(7)))
+                .await;
+            metadata.set_complete(Height::new(6)).await;
+        });
+    }
+
+    #[test]
     fn in_progress_sync_requires_compatible_floor() {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
@@ -175,23 +214,18 @@ mod tests {
     }
 
     #[test]
-    fn in_progress_sync_panics_for_backward_or_conflicting_floor() {
-        deterministic::Runner::default().start(|context| async move {
-            let partition_prefix = "in_progress_sync_panics_for_backward_or_conflicting_floor";
-            let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
-            let mut metadata =
-                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
-            metadata.set_in_progress(stored.clone()).await;
+    #[should_panic(
+        expected = "selected state sync floor cannot move behind the persisted in-progress floor"
+    )]
+    fn in_progress_sync_panics_for_backward_floor() {
+        let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
+        stored.ensure_not_behind(&FloorMarker::new(Height::new(6), Sha256::fill(6)));
+    }
 
-            let backward = catch_unwind(AssertUnwindSafe(|| {
-                stored.ensure_not_behind(&FloorMarker::new(Height::new(6), Sha256::fill(6)))
-            }));
-            assert!(backward.is_err());
-
-            let conflicting = catch_unwind(AssertUnwindSafe(|| {
-                stored.ensure_not_behind(&FloorMarker::new(Height::new(7), Sha256::fill(8)))
-            }));
-            assert!(conflicting.is_err());
-        });
+    #[test]
+    #[should_panic(expected = "selected state sync floor conflicts with the persisted in-progress floor")]
+    fn in_progress_sync_panics_for_conflicting_floor() {
+        let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
+        stored.ensure_not_behind(&FloorMarker::new(Height::new(7), Sha256::fill(8)));
     }
 }

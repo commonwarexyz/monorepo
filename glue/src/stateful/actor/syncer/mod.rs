@@ -274,8 +274,12 @@ where
     /// If an interrupted state sync already stored a floor, the newly selected
     /// floor must resume from that same floor or a later one.
     pub(crate) async fn set_in_progress(&mut self, floor: FloorMarker<C>) {
-        if let Some(SyncState::InProgress(existing)) = self.metadata.get(&SYNC_STATE_KEY) {
-            existing.ensure_not_behind(&floor);
+        match self.metadata.get(&SYNC_STATE_KEY) {
+            Some(SyncState::InProgress(existing)) => existing.ensure_not_behind(&floor),
+            Some(SyncState::Complete(_)) => {
+                panic!("completed state sync cannot be marked in-progress");
+            }
+            None => {}
         }
 
         self.metadata
@@ -290,6 +294,22 @@ where
     /// from the later of this height and marshal's processed height instead. This
     /// action is irreversible.
     pub(crate) async fn set_complete(&mut self, height: Height) {
+        match self.metadata.get(&SYNC_STATE_KEY) {
+            Some(SyncState::InProgress(floor)) => {
+                assert!(
+                    height >= floor.height,
+                    "completed state sync height cannot be behind the in-progress floor",
+                );
+            }
+            Some(SyncState::Complete(existing)) => {
+                assert!(
+                    height >= *existing,
+                    "completed state sync height cannot move backward",
+                );
+            }
+            None => {}
+        }
+
         self.metadata
             .put_sync(SYNC_STATE_KEY, SyncState::<C>::Complete(height))
             .await

@@ -569,7 +569,7 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
 }
 
 #[test_traced]
-fn test_current_has_local_target_state_rejects_target_before_local_lower_bound() {
+fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
     type Db = crate::qmdb::current::unordered::variable::Db<
         crate::merkle::mmr::Family,
         Context,
@@ -614,12 +614,14 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
         assert!(
-            !<Db as SyncDatabase>::has_local_target_state(
+            <Db as SyncDatabase>::local_boundary_nodes(
                 context.child("probe_stale"),
                 &config,
                 &stale_target,
             )
             .await
+            .unwrap()
+            .is_none()
         );
 
         let matching_target = crate::qmdb::sync::Target {
@@ -627,12 +629,14 @@ fn test_current_has_local_target_state_rejects_target_before_local_lower_bound()
             range: non_empty_range!(local_start, local_end),
         };
         assert!(
-            <Db as SyncDatabase>::has_local_target_state(
+            <Db as SyncDatabase>::local_boundary_nodes(
                 context.child("probe_matching"),
                 &config,
                 &matching_target,
             )
             .await
+            .unwrap()
+            .is_some()
         );
 
         db.destroy().await.unwrap();

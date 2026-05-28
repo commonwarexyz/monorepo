@@ -279,6 +279,7 @@ mod tests {
             _finish: Option<mpsc::Receiver<()>>,
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
+            _resuming: bool,
         ) -> Result<Self, Self::SyncError> {
             Ok(Self)
         }

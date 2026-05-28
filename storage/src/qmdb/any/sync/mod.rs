@@ -5,10 +5,12 @@
 //! Callers verifying `any` sync proofs directly should use `qmdb::hasher`.
 
 use crate::{
-    index::Factory as IndexFactory,
+    index::{
+        ordered::Index as OrderedIndex, unordered::Index as UnorderedIndex, Factory as IndexFactory,
+    },
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable, Reader as _},
+        contiguous::{fixed, variable, Mutable},
     },
     merkle::{self, full, Location},
     qmdb::{
@@ -49,43 +51,6 @@ use commonware_utils::{range::NonEmptyRange, Array};
 
 #[cfg(test)]
 pub(crate) mod tests;
-
-/// Returns whether persisted local state already matches the requested sync target.
-///
-/// Shared helper for [crate::qmdb::any] sync implementations, which can reuse persisted
-/// state by checking only the operations-tree size and root.
-///
-/// [crate::qmdb::current] performs an additional lower-bound check because its grafted-state
-/// reconstruction depends on the persisted pruning point remaining at or below
-/// `target.range.start()`.
-pub async fn has_local_target_state<F, E, H, S>(
-    context: E,
-    merkle_config: full::Config<S>,
-    target: &qmdb::sync::Target<F, H::Digest>,
-    inactive_peaks: usize,
-) -> bool
-where
-    F: merkle::Family,
-    E: Context,
-    H: Hasher,
-    S: Strategy,
-{
-    let hasher = qmdb::hasher::<H>();
-    let peek = full::Merkle::<F, _, _, S>::peek_root(
-        context.child("local_target_probe"),
-        merkle_config,
-        &hasher,
-        inactive_peaks,
-    )
-    .await;
-    // Size + root identify a unique state, so if they match the target's we can reuse
-    // the persisted DB without fetching boundary pins.
-    matches!(
-        peek,
-        Ok(Some((_, journal_leaves, root)))
-            if journal_leaves == target.range.end() && root == target.root
-    )
-}
 
 /// Shared helper to build a [Db] from sync components.
 #[allow(clippy::too_many_arguments)]
@@ -138,6 +103,7 @@ where
 
 macro_rules! impl_sync_database {
     ($db:ident, $op:ident, $update:ident,
+     $index:ty,
      $journal:ty, $config:ty,
      $key_bound:path, $value_bound:ident
      $(; $($where_extra:tt)+)?) => {
@@ -182,34 +148,29 @@ macro_rules! impl_sync_database {
                 .await
             }
 
-            async fn has_local_target_state(
+            async fn local_boundary_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-            ) -> bool {
-                let Ok(journal) = <$journal>::init(
-                    context.child("local_target_journal_probe"),
-                    config.journal_config.clone(),
-                )
-                .await
-                else {
-                    return false;
-                };
-                if Location::new(journal.reader().await.bounds().start) > target.range.start() {
-                    return false;
+            ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+                if target.range.start() == Location::new(0) {
+                    return Ok(None);
                 }
 
-                let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
-                    target.range.start(),
-                );
-                qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context.child("local_target_merkle_probe"),
-                    config.merkle_config.clone(),
-                    target,
-                    inactive_peaks,
+                let db = qmdb::any::init::<F, E, $update<K, V>, H, T, $index, $journal, S>(
+                    context,
+                    config.clone(),
                 )
-                .await
+                .await?;
+                let bounds = db.bounds().await;
+                if bounds.start > target.range.start()
+                    || bounds.end != target.range.end()
+                    || crate::qmdb::any::db::Db::root(&db) != target.root
+                {
+                    return Ok(None);
+                }
+
+                db.pinned_nodes_at(target.range.start()).await.map(Some)
             }
 
             fn root(&self) -> Self::Digest {
@@ -221,12 +182,14 @@ macro_rules! impl_sync_database {
 
 impl_sync_database!(
     UnorderedFixedDb, UnorderedFixedOp, UnorderedFixedUpdate,
+    UnorderedIndex<T, Location<F>>,
     fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_sync_database!(
     UnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
+    UnorderedIndex<T, Location<F>>,
     variable::Journal<E, Self::Op>,
     VariableConfig<T, <UnorderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;
@@ -235,12 +198,14 @@ impl_sync_database!(
 
 impl_sync_database!(
     OrderedFixedDb, OrderedFixedOp, OrderedFixedUpdate,
+    OrderedIndex<T, Location<F>>,
     fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_sync_database!(
     OrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
+    OrderedIndex<T, Location<F>>,
     variable::Journal<E, Self::Op>,
     VariableConfig<T, <OrderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;

@@ -227,6 +227,12 @@ where
             metrics,
         );
 
+        self.sync_metadata
+            .lock()
+            .await
+            .set_complete(synced_height)
+            .await;
+
         if let Some((handoff_finalized, acknowledgement)) = handoff {
             if let FinalizeStatus::Persisted { height } = processor
                 .finalize(self.context.as_present(), handoff_finalized)
@@ -239,12 +245,6 @@ where
             }
             acknowledgement.acknowledge();
         }
-
-        self.sync_metadata
-            .lock()
-            .await
-            .set_complete(synced_height)
-            .await;
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs.
@@ -296,13 +296,14 @@ mod tests {
     use commonware_consensus::{
         marshal::{self, core::Actor as MarshalActor},
         simplex::mocks::scheme as scheme_mocks,
-        types::{FixedEpocher, ViewDelta},
+        types::{FixedEpocher, Height, ViewDelta},
         Heightable,
     };
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock as _, ContextCell, Runner as _,
+        Spawner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -312,7 +313,11 @@ mod tests {
         Acknowledgement, NZUsize, NZU16, NZU64,
     };
     use futures::FutureExt;
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
 
     #[derive(Clone)]
     struct NoopResolver;
@@ -503,5 +508,49 @@ mod tests {
             .or_else(|| panic.downcast_ref::<&'static str>().copied())
             .expect("panic should be a string");
         assert!(panic.contains("next finalized block"));
+    }
+
+    #[test]
+    fn transition_marks_sync_complete_before_handoff_acknowledgement() {
+        deterministic::Runner::default().start(|context| async move {
+            let harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let sync_metadata = harness.syncing.sync_metadata.clone();
+            let metadata_guard = sync_metadata.lock().await;
+            let (acknowledgement, waiter) = Exact::handle();
+            let acknowledged = Arc::new(AtomicBool::new(false));
+            let waiter_handle = context.child("waiter").spawn({
+                let acknowledged = acknowledged.clone();
+                move |_context| async move {
+                    waiter.await.expect("handoff acknowledgement should complete");
+                    acknowledged.store(true, Ordering::SeqCst);
+                }
+            });
+
+            let transition_handle = context.child("transition").spawn(move |_context| async move {
+                harness
+                    .syncing
+                    .transition(Some((TestBlock::new(8, 10), acknowledgement)))
+                    .await;
+            });
+
+            context.sleep(Duration::from_millis(1)).await;
+            assert!(
+                !acknowledged.load(Ordering::SeqCst),
+                "handoff must not be acknowledged while sync-complete metadata is blocked",
+            );
+
+            drop(metadata_guard);
+            transition_handle
+                .await
+                .expect("transition task should complete");
+            waiter_handle
+                .await
+                .expect("waiter task should complete");
+
+            assert_eq!(
+                sync_metadata.lock().await.sync_height(),
+                Some(Height::new(7)),
+            );
+        });
     }
 }

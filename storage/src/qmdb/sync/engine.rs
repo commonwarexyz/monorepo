@@ -200,10 +200,6 @@ where
     /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// Whether persisted local state already matches the current target and can be
-    /// rebuilt without fetching fresh boundary pins.
-    local_target_state_available: bool,
-
     /// Historical roots from previous sync targets, keyed by tree size
     /// (target.range.end()). Each tree size maps to a unique root because
     /// the merkle tree is append-only and validate_update rejects unchanged
@@ -289,8 +285,19 @@ where
     R: DbResolver<DB>,
     DB::Op: Encode,
 {
-    /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
+        Self::new_with_boundary_probe(config, true).await
+    }
+
+    /// Create a new sync engine for a durable state-sync resume.
+    pub async fn new_without_local_boundary(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
+        Self::new_with_boundary_probe(config, false).await
+    }
+
+    async fn new_with_boundary_probe(
+        config: Config<DB, R>,
+        probe_local_boundary: bool,
+    ) -> Result<Self, Error<DB, R>> {
         if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
                 lower_bound_pos: config.target.range.start(),
@@ -298,17 +305,15 @@ where
             }));
         }
 
-        // Probe for persisted local state matching the target before opening
-        // any engine-owned handles.
-        let local_target_state_available = if config.target.range.start() > Location::new(0) {
-            DB::has_local_target_state(
-                config.context.child("local_target_probe"),
+        let pinned_nodes = if probe_local_boundary {
+            DB::local_boundary_nodes(
+                config.context.child("local_boundary"),
                 &config.db_config,
                 &config.target,
             )
-            .await
+            .await?
         } else {
-            false
+            None
         };
 
         // Create journal and verifier using the database's factory methods
@@ -324,8 +329,7 @@ where
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
-            pinned_nodes: None,
-            local_target_state_available,
+            pinned_nodes,
             retained_roots: HashMap::new(),
             retained_roots_order: VecDeque::new(),
             max_retained_roots: config.max_retained_roots,
@@ -447,7 +451,6 @@ where
             .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
-        self.local_target_state_available = false;
 
         // Save the current root keyed by its tree size for verifying
         // retained requests that were issued against this target.
@@ -628,9 +631,7 @@ where
 
     /// Returns whether the current target has the boundary state needed for completion.
     fn has_boundary_state(&self) -> bool {
-        !self.needs_pinned_boundary()
-            || self.pinned_nodes.is_some()
-            || self.local_target_state_available
+        !self.needs_pinned_boundary() || self.pinned_nodes.is_some()
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
@@ -697,17 +698,10 @@ where
             root
         };
 
-        // Verify the proof. Pinned nodes are only extracted from proofs
-        // for the current root because the database needs them for the
-        // latest tree size. When local state already satisfies the boundary
-        // (pins are available in on-disk metadata), we must not demand
-        // pinned nodes from the proof: an empty pinned set would fail
-        // `verify_proof_and_pinned_nodes` against the expected
-        // `nodes_to_pin(range.start)` count, causing an infinite retry loop
-        // whenever a gap request happens to land at `range.start`.
+        // Pinned nodes are only extracted from proofs for the current root because
+        // the database needs them for the latest tree size.
         let need_pinned = is_current_target
             && self.pinned_nodes.is_none()
-            && !self.local_target_state_available
             && start_loc == self.target.range.start();
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {

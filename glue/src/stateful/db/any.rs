@@ -540,8 +540,9 @@ where
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
+        resuming: bool,
     ) -> Result<Self, Self::SyncError> {
-        sync::sync(sync::engine::Config {
+        let config = sync::engine::Config {
             context,
             resolver,
             target,
@@ -553,8 +554,12 @@ where
             finish_rx: finish,
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
-        })
-        .await
+        };
+        if resuming {
+            sync::resume(config).await
+        } else {
+            sync::sync(config).await
+        }
     }
 }
 
@@ -595,8 +600,9 @@ where
         finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         sync_config: SyncEngineConfig,
+        resuming: bool,
     ) -> Result<Self, Self::SyncError> {
-        sync::sync(sync::engine::Config {
+        let config = sync::engine::Config {
             context,
             resolver,
             target,
@@ -608,7 +614,11 @@ where
             finish_rx: finish,
             reached_target_tx: reached_target,
             max_retained_roots: sync_config.max_retained_roots,
-        })
-        .await
+        };
+        if resuming {
+            sync::resume(config).await
+        } else {
+            sync::sync(config).await
+        }
     }
 }

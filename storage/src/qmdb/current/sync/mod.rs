@@ -26,10 +26,12 @@
 //! height.
 
 use crate::{
-    index::Factory as IndexFactory,
+    index::{
+        ordered::Index as OrderedIndex, unordered::Index as UnorderedIndex, Factory as IndexFactory,
+    },
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Mutable, Reader as _},
+        contiguous::{fixed, variable, Mutable},
     },
     merkle::{
         full::{self, Merkle},
@@ -61,7 +63,7 @@ use crate::{
             },
             FixedConfig, VariableConfig,
         },
-        operation::{Committable, Key, Operation as _},
+        operation::{Committable, Key},
         sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
     },
     translator::Translator,
@@ -251,6 +253,7 @@ where
 
 macro_rules! impl_current_sync_database {
     ($db:ident, $op:ident, $update:ident,
+     $index:ty,
      $journal:ty, $config:ty,
      $key_bound:path, $value_bound:ident
      $(; $($where_extra:tt)+)?) => {
@@ -299,49 +302,29 @@ macro_rules! impl_current_sync_database {
                 .await
             }
 
-            async fn has_local_target_state(
+            async fn local_boundary_nodes(
                 context: Self::Context,
                 config: &Self::Config,
                 target: &qmdb::sync::Target<Self::Family, Self::Digest>,
-            ) -> bool {
-                let Ok(journal) = <$journal>::init(
-                    context.child("local_target_journal_probe"),
-                    config.journal_config(),
-                )
-                .await
-                else {
-                    return false;
-                };
-                let reader = journal.reader().await;
-                let bounds = reader.bounds();
-                if Location::new(bounds.start) > target.range.start() {
-                    return false;
+            ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<F>> {
+                if target.range.start() == Location::new(0) {
+                    return Ok(None);
                 }
-                let Ok(inactivity_floor) =
-                    qmdb::find_inactivity_floor_at::<F, _>(&reader, target.range.end(), |op| {
-                        op.has_floor()
-                    })
-                    .await
-                else {
-                    return false;
-                };
 
-                let inactive_peaks = F::inactive_peaks(
-                    F::location_to_position(target.range.end()),
-                    inactivity_floor,
-                );
-                if !qmdb::any::sync::has_local_target_state::<F, _, H, S>(
-                    context.child("local_target_merkle_probe"),
-                    config.merkle_config.clone(),
-                    target,
-                    inactive_peaks,
+                let db = qmdb::current::init::<F, E, $update<K, V>, H, T, $index, $journal, N, S>(
+                    context,
+                    config.clone(),
                 )
-                .await
+                .await?;
+                let bounds = db.bounds().await;
+                if bounds.start > target.range.start()
+                    || bounds.end != target.range.end()
+                    || crate::qmdb::any::db::Db::root(&db.any) != target.root
                 {
-                    return false;
+                    return Ok(None);
                 }
 
-                true
+                db.pinned_nodes_at(target.range.start()).await.map(Some)
             }
 
             /// Returns the ops root (not the canonical root), since the sync engine verifies
@@ -355,12 +338,14 @@ macro_rules! impl_current_sync_database {
 
 impl_current_sync_database!(
     CurrentUnorderedFixedDb, UnorderedFixedOp, UnorderedFixedUpdate,
+    UnorderedIndex<T, Location<F>>,
     fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_current_sync_database!(
     CurrentUnorderedVariableDb, UnorderedVariableOp, UnorderedVariableUpdate,
+    UnorderedIndex<T, Location<F>>,
     variable::Journal<E, Self::Op>,
     VariableConfig<T, <UnorderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;
@@ -369,12 +354,14 @@ impl_current_sync_database!(
 
 impl_current_sync_database!(
     CurrentOrderedFixedDb, OrderedFixedOp, OrderedFixedUpdate,
+    OrderedIndex<T, Location<F>>,
     fixed::Journal<E, Self::Op>, FixedConfig<T, S>,
     Array, FixedValue
 );
 
 impl_current_sync_database!(
     CurrentOrderedVariableDb, OrderedVariableOp, OrderedVariableUpdate,
+    OrderedIndex<T, Location<F>>,
     variable::Journal<E, Self::Op>,
     VariableConfig<T, <OrderedVariableOp<F, K, V> as CodecRead>::Cfg, S>,
     Key, VariableValue;

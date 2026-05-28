@@ -347,6 +347,7 @@ where
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
+        _resuming: bool,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         let mut tip_updates = Some(tip_updates);
@@ -438,6 +439,7 @@ where
         mut finish: Option<mpsc::Receiver<()>>,
         reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
         _sync_config: SyncEngineConfig,
+        _resuming: bool,
     ) -> Result<Self, Self::SyncError> {
         let mut attempt = 0u64;
         let mut tip_updates = Some(tip_updates);
@@ -714,6 +716,7 @@ mod tests {
                 None,
                 None,
                 sync_config(),
+                false,
             )
             .await
             .unwrap();
@@ -771,6 +774,7 @@ mod tests {
                 None,
                 Some(reached_tx),
                 sync_config(),
+                false,
             )
             .await
             .unwrap();
@@ -827,6 +831,7 @@ mod tests {
                     None,
                     None,
                     sync_config(),
+                false,
                 )
                 .await
             });
