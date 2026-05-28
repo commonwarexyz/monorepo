@@ -916,7 +916,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
         self.offsets
-            .clear_to_size_with_external_clear(new_size, || async { inner.data.clear().await })
+            .clear_to_size_with_dependent_clear(new_size, || async { inner.data.clear().await })
             .await?;
         inner.size = new_size;
         inner.pruning_boundary = new_size;

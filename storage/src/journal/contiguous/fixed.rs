@@ -1382,7 +1382,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
     pub(crate) async fn clear_to_size(&self, new_size: u64) -> Result<(), Error> {
-        self.clear_to_size_with_external_clear(new_size, || async { Ok(()) })
+        self.clear_to_size_with_dependent_clear(new_size, || async { Ok(()) })
             .await
     }
 
@@ -1401,7 +1401,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Clear this journal, allowing a caller to clear dependent state after the intent is durable.
-    pub(crate) async fn clear_to_size_with_external_clear<F, Fut>(
+    pub(crate) async fn clear_to_size_with_dependent_clear<F, Fut>(
         &self,
         new_size: u64,
         external_clear: F,
