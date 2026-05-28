@@ -261,6 +261,9 @@ where
                     self.send_random_message(&mut resolver_sender).await;
                 },
             }
+
+            // Keep non-finalizing configurations from spinning at one simulated timestamp.
+            self.context.sleep(TIMEOUT).await;
         }
     }
 
