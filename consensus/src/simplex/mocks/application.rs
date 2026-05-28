@@ -391,6 +391,7 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
         let (contents, recipients) = match plan {
             Plan::Propose { .. } => {
                 let contents = self.pending.remove(&payload).expect("missing payload");
+                self.seen.insert(payload, contents.clone());
                 (contents, Recipients::All)
             }
             Plan::Forward { recipients, .. } => {
@@ -401,13 +402,13 @@ impl<E: Clock + RngCore + Spawner, H: Hasher, P: PublicKey> Application<E, H, P>
                             debug!("payload not found for forwarding");
                             return;
                         };
+                        self.seen.insert(payload, contents.clone());
                         contents
                     }
                 };
                 (contents, recipients)
             }
         };
-        self.seen.insert(payload, contents.clone());
         self.relay
             .broadcast(&self.me, recipients, (payload, contents));
     }
