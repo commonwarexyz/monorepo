@@ -766,7 +766,7 @@ mod tests {
                     None,
                     None,
                     sync_config(),
-                StateSyncMode::New,
+                    StateSyncMode::New,
                 )
                 .await
             });

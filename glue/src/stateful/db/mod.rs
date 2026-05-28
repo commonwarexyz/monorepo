@@ -1786,9 +1786,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "marshal max_pending_acks=2 exceeds database_set.max_rewind_depth=1"
-    )]
+    #[should_panic(expected = "marshal max_pending_acks=2 exceeds database_set.max_rewind_depth=1")]
     fn rewind_window_assertion_panics_when_pending_acks_exceed_rewind_depth() {
         assert_rewind_window_safety::<deterministic::Context, Arc<AsyncRwLock<OneStepRewindDb>>>(
             NonZeroUsize::new(2).unwrap(),
@@ -3020,7 +3018,7 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
                         },
-                    StateSyncMode::New,
+                        StateSyncMode::New,
                     )
                     .await
                     .expect("single state sync should succeed")
@@ -3095,7 +3093,7 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-            StateSyncMode::New,
+                StateSyncMode::New,
             )
             .await;
 
@@ -3133,7 +3131,7 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
                         },
-                    StateSyncMode::New,
+                        StateSyncMode::New,
                     )
                     .await
                     .expect("single state sync should succeed")
@@ -3184,7 +3182,7 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
                         },
-                    StateSyncMode::New,
+                        StateSyncMode::New,
                     )
                     .await
                     .expect("single state sync should succeed")
@@ -3232,7 +3230,7 @@ mod tests {
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,
                             },
-                        StateSyncMode::New,
+                            StateSyncMode::New,
                         )
                         .await
                         .expect("single state sync should succeed")
@@ -3284,7 +3282,7 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(4).unwrap(),
                             max_retained_roots: 0,
                         },
-                    StateSyncMode::New,
+                        StateSyncMode::New,
                     )
                     .await
                     .expect("tuple state sync should succeed")
@@ -3384,7 +3382,7 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(8).unwrap(),
                             max_retained_roots: 0,
                         },
-                    StateSyncMode::New,
+                        StateSyncMode::New,
                     )
                     .await
                     .expect("tuple state sync should succeed")
@@ -3446,7 +3444,7 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-            StateSyncMode::New,
+                StateSyncMode::New,
             )
             .await;
 
@@ -3483,7 +3481,7 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-            StateSyncMode::New,
+                StateSyncMode::New,
             )
             .await;
 
@@ -3529,7 +3527,7 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-            StateSyncMode::New,
+                StateSyncMode::New,
             )
             .await;
 
@@ -3570,7 +3568,7 @@ mod tests {
                     update_channel_size: NonZeroUsize::new(1).unwrap(),
                     max_retained_roots: 0,
                 },
-            StateSyncMode::New,
+                StateSyncMode::New,
             )
             .await;
 
@@ -3777,7 +3775,7 @@ mod tests {
                             update_channel_size: NonZeroUsize::new(1).unwrap(),
                             max_retained_roots: 0,
                         },
-                    StateSyncMode::New,
+                        StateSyncMode::New,
                     )
                     .await
                     .expect("tuple state sync should succeed")
@@ -3844,7 +3842,7 @@ mod tests {
                                 update_channel_size: NonZeroUsize::new(4).unwrap(),
                                 max_retained_roots: 0,
                             },
-                        StateSyncMode::New,
+                            StateSyncMode::New,
                         )
                         .await
                         .expect("tuple state sync should succeed")

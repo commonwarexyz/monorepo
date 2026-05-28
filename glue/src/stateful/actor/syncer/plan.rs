@@ -232,7 +232,9 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "selected state sync floor conflicts with the persisted in-progress floor")]
+    #[should_panic(
+        expected = "selected state sync floor conflicts with the persisted in-progress floor"
+    )]
     fn in_progress_sync_panics_for_conflicting_floor() {
         let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
         stored.ensure_not_behind(&FloorMarker::new(Height::new(7), Sha256::fill(8)));

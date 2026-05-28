@@ -68,10 +68,5 @@ where
     DB::Op: Encode,
     R: DbResolver<DB>,
 {
-    Box::pin(
-        Engine::new_without_local_boundary(config)
-            .await?
-            .sync(),
-    )
-    .await
+    Box::pin(Engine::new_without_local_boundary(config).await?.sync()).await
 }

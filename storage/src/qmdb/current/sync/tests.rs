@@ -613,31 +613,27 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             root: sync_root,
             range: non_empty_range!(local_start.checked_sub(1).unwrap(), local_end),
         };
-        assert!(
-            <Db as SyncDatabase>::local_boundary_nodes(
-                context.child("probe_stale"),
-                &config,
-                &stale_target,
-            )
-            .await
-            .unwrap()
-            .is_none()
-        );
+        assert!(<Db as SyncDatabase>::local_boundary_nodes(
+            context.child("probe_stale"),
+            &config,
+            &stale_target,
+        )
+        .await
+        .unwrap()
+        .is_none());
 
         let matching_target = crate::qmdb::sync::Target {
             root: sync_root,
             range: non_empty_range!(local_start, local_end),
         };
-        assert!(
-            <Db as SyncDatabase>::local_boundary_nodes(
-                context.child("probe_matching"),
-                &config,
-                &matching_target,
-            )
-            .await
-            .unwrap()
-            .is_some()
-        );
+        assert!(<Db as SyncDatabase>::local_boundary_nodes(
+            context.child("probe_matching"),
+            &config,
+            &matching_target,
+        )
+        .await
+        .unwrap()
+        .is_some());
 
         db.destroy().await.unwrap();
     });

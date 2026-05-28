@@ -302,8 +302,8 @@ mod tests {
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock as _, ContextCell, Runner as _,
-        Spawner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, Clock as _, ContextCell, Runner as _, Spawner as _,
+        Supervisor as _,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -313,11 +313,13 @@ mod tests {
         Acknowledgement, NZUsize, NZU16, NZU64,
     };
     use futures::FutureExt;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
     };
-    use std::time::Duration;
 
     #[derive(Clone)]
     struct NoopResolver;
@@ -503,17 +505,21 @@ mod tests {
             let waiter_handle = context.child("waiter").spawn({
                 let acknowledged = acknowledged.clone();
                 move |_context| async move {
-                    waiter.await.expect("handoff acknowledgement should complete");
+                    waiter
+                        .await
+                        .expect("handoff acknowledgement should complete");
                     acknowledged.store(true, Ordering::SeqCst);
                 }
             });
 
-            let transition_handle = context.child("transition").spawn(move |_context| async move {
-                harness
-                    .syncing
-                    .transition(Some((TestBlock::new(8, 10), acknowledgement)))
-                    .await;
-            });
+            let transition_handle = context
+                .child("transition")
+                .spawn(move |_context| async move {
+                    harness
+                        .syncing
+                        .transition(Some((TestBlock::new(8, 10), acknowledgement)))
+                        .await;
+                });
 
             context.sleep(Duration::from_millis(1)).await;
             assert!(
@@ -525,9 +531,7 @@ mod tests {
             transition_handle
                 .await
                 .expect("transition task should complete");
-            waiter_handle
-                .await
-                .expect("waiter task should complete");
+            waiter_handle.await.expect("waiter task should complete");
 
             assert_eq!(
                 sync_metadata.lock().await.sync_height(),
