@@ -1,6 +1,6 @@
 use super::{
     mailbox::{Mailbox, Message},
-    resolve_state_sync_floor, set_sync_in_progress, BlockDigest, SyncResult,
+    resolve_state_sync_floor, BlockDigest, StateSyncMetadata, SyncResult,
 };
 use crate::stateful::{
     db::{Anchor, DatabaseSet, StateSyncSet, SyncEngineConfig},
@@ -17,10 +17,12 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot, ring},
     futures::OptionFuture,
+    sync::AsyncMutex,
     NZUsize,
 };
 use futures::SinkExt;
 use rand::Rng;
+use std::sync::Arc;
 use tracing::{debug, error};
 
 /// Configuration for [`Syncer`].
@@ -44,8 +46,8 @@ where
     /// Per-database resolvers used to fetch state from peers.
     pub resolvers: R,
 
-    /// Prefix for durable state-sync metadata.
-    pub partition_prefix: String,
+    /// Durable state-sync metadata.
+    pub sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
 
     /// Finalized floor marshal should resolve before sync starts.
     pub finalization: Finalization<S, V::Commitment>,
@@ -59,7 +61,7 @@ where
 
 pub struct Syncer<E, A, R, S, V>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
@@ -83,8 +85,8 @@ where
     /// Per-database resolvers used to fetch state from peers.
     resolvers: R,
 
-    /// Prefix for durable state-sync metadata.
-    partition_prefix: String,
+    /// Durable state-sync metadata.
+    sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
 
     /// Finalized floor marshal should resolve before sync starts.
     finalization: Finalization<S, V::Commitment>,
@@ -116,7 +118,7 @@ where
                 db_config: config.db_config,
                 sync_config: config.sync_config,
                 resolvers: config.resolvers,
-                partition_prefix: config.partition_prefix,
+                sync_metadata: config.sync_metadata,
                 finalization: config.finalization,
                 marshal: config.marshal,
                 sync_complete: Some(config.sync_complete),
@@ -132,12 +134,11 @@ where
     pub async fn run(mut self) {
         let resolved_floor =
             resolve_state_sync_floor::<E, A, S, V>(&self.marshal, &self.finalization).await;
-        set_sync_in_progress(
-            self.context.as_present(),
-            self.partition_prefix.as_str(),
-            resolved_floor.marker,
-        )
-        .await;
+        self.sync_metadata
+            .lock()
+            .await
+            .set_in_progress(resolved_floor.marker)
+            .await;
 
         let (mut tip_updates_tx, tip_updates_rx) = ring::channel(NZUsize!(1));
         let mut state_sync_task = OptionFuture::from(Some(Box::pin(A::Databases::sync(

@@ -1,4 +1,4 @@
-use super::SyncState;
+use super::StateSyncMetadata;
 use commonware_consensus::{
     marshal::{core::Variant, Start},
     simplex::types::Finalization,
@@ -20,37 +20,34 @@ use commonware_runtime::{Clock, Metrics, Storage};
 /// Once state sync completes, this node never performs peer state sync
 /// again. Future startups must recover from the later of that synced height
 /// and marshal's processed height instead.
-pub struct SyncPlan<S, V>
+pub struct SyncPlan<E, S, V>
 where
+    E: Clock + Metrics + Storage,
     S: Scheme,
     V: Variant,
 {
-    partition_prefix: String,
-    state_sync_state: Option<SyncState<V::Commitment>>,
+    sync_metadata: StateSyncMetadata<E, V::Commitment>,
     floor: Option<Finalization<S, V::Commitment>>,
 }
 
-impl<S, V> SyncPlan<S, V>
+impl<E, S, V> SyncPlan<E, S, V>
 where
+    E: Clock + Metrics + Storage,
     S: Scheme,
     V: Variant,
 {
-    /// Load the durable state sync state for this partition prefix.
+    /// Load the durable state sync metadata for this partition prefix.
     ///
     /// # Panics
     ///
     /// Panics if the metadata store cannot be opened. A node that cannot
     /// determine whether state sync already completed cannot safely choose a
     /// startup path.
-    pub async fn init<E>(context: &E, partition_prefix: impl AsRef<str>) -> Self
-    where
-        E: Clock + Metrics + Storage,
-    {
-        let state_sync_state =
-            super::sync_state::<E, V::Commitment>(context, partition_prefix.as_ref()).await;
+    pub async fn init(context: &E, partition_prefix: impl AsRef<str>) -> Self {
+        let sync_metadata =
+            StateSyncMetadata::<E, V::Commitment>::init(context, partition_prefix).await;
         Self {
-            partition_prefix: partition_prefix.as_ref().into(),
-            state_sync_state,
+            sync_metadata,
             floor: None,
         }
     }
@@ -66,21 +63,18 @@ where
     /// [`SyncPlan::with_floor`]. If a floor is not attached, the node will
     /// attempt to sync from genesis via marshal unless it is resuming an
     /// interrupted state sync.
-    pub const fn may_state_sync(&self) -> bool {
-        !matches!(self.state_sync_state, Some(SyncState::Complete(_)))
+    pub fn may_state_sync(&self) -> bool {
+        self.sync_metadata.sync_height().is_none()
     }
 
     /// Returns the durable completed state sync height, if one has been stored.
     pub fn sync_height(&self) -> Option<Height> {
-        self.state_sync_state
-            .as_ref()
-            .map(SyncState::sync_height)
-            .unwrap_or_default()
+        self.sync_metadata.sync_height()
     }
 
     /// Returns the partition prefix to use for state sync metadata storage.
     pub const fn partition_prefix(&self) -> &str {
-        self.partition_prefix.as_str()
+        self.sync_metadata.partition_prefix()
     }
 
     /// Returns a reference to the finalized floor attached to this plan, if any.
@@ -113,8 +107,13 @@ where
     }
 
     /// Returns whether restart is blocked on selecting a new state sync floor.
-    pub(crate) const fn requires_state_sync_floor(&self) -> bool {
-        matches!(self.state_sync_state, Some(SyncState::InProgress(_)))
+    pub(crate) fn requires_state_sync_floor(&self) -> bool {
+        self.sync_metadata.in_progress()
+    }
+
+    /// Consumes this plan and returns its durable state-sync metadata handle.
+    pub(crate) fn into_sync_metadata(self) -> StateSyncMetadata<E, V::Commitment> {
+        self.sync_metadata
     }
 }
 
@@ -122,7 +121,7 @@ where
 mod tests {
     use super::SyncPlan;
     use crate::stateful::{
-        actor::syncer::{set_sync_complete, set_sync_in_progress, FloorMarker},
+        actor::syncer::{FloorMarker, StateSyncMetadata},
         tests::mocks::{TestScheme, TestVariant},
     };
     use commonware_consensus::types::Height;
@@ -135,13 +134,19 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "stored_sync_height";
 
-            let plan = SyncPlan::<TestScheme, TestVariant>::init(&context, partition_prefix).await;
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(plan.may_state_sync());
             assert_eq!(plan.sync_height(), None);
+            drop(plan);
 
-            set_sync_complete::<_, Sha256Digest>(&context, partition_prefix, Height::new(7)).await;
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_complete(Height::new(7)).await;
+            drop(metadata);
 
-            let plan = SyncPlan::<TestScheme, TestVariant>::init(&context, partition_prefix).await;
+            let plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(!plan.may_state_sync());
             assert_eq!(plan.sync_height(), Some(Height::new(7)));
             assert!(plan.floor().is_none());
@@ -153,18 +158,19 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "in_progress_sync_requires_compatible_floor";
             let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
-            set_sync_in_progress(&context, partition_prefix, stored.clone()).await;
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_in_progress(stored.clone()).await;
+            drop(metadata);
 
-            let plan = SyncPlan::<TestScheme, TestVariant>::init(&context, partition_prefix).await;
+            let mut plan =
+                SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(plan.may_state_sync());
             assert!(plan.requires_state_sync_floor());
-            set_sync_in_progress(&context, partition_prefix, stored).await;
-            set_sync_in_progress(
-                &context,
-                partition_prefix,
-                FloorMarker::new(Height::new(9), Sha256::fill(9)),
-            )
-            .await;
+            plan.sync_metadata.set_in_progress(stored).await;
+            plan.sync_metadata
+                .set_in_progress(FloorMarker::new(Height::new(9), Sha256::fill(9)))
+                .await;
         });
     }
 
@@ -173,7 +179,9 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let partition_prefix = "in_progress_sync_panics_for_backward_or_conflicting_floor";
             let stored = FloorMarker::new(Height::new(7), Sha256::fill(7));
-            set_sync_in_progress(&context, partition_prefix, stored.clone()).await;
+            let mut metadata =
+                StateSyncMetadata::<_, Sha256Digest>::init(&context, partition_prefix).await;
+            metadata.set_in_progress(stored.clone()).await;
 
             let backward = catch_unwind(AssertUnwindSafe(|| {
                 stored.ensure_not_behind(&FloorMarker::new(Height::new(6), Sha256::fill(6)))

@@ -26,10 +26,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
-use commonware_utils::channel::oneshot;
+use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
 use rand::Rng;
-use std::num::NonZeroUsize;
+use std::{num::NonZeroUsize, sync::Arc};
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -42,7 +42,7 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Configuration for constructing a [`Stateful`] application.
 pub struct Config<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -69,8 +69,8 @@ where
 
     /// Startup plan loaded via [`SyncPlan::init`], optionally augmented with
     /// a finalized floor via [`SyncPlan::with_floor`]. Carries the durable
-    /// metadata partition prefix and the startup decision shared with marshal.
-    pub plan: SyncPlan<S, V>,
+    /// metadata handle and the startup decision shared with marshal.
+    pub plan: SyncPlan<E, S, V>,
 
     /// Resolver(s) for state sync fetches and post-bootstrap serving.
     pub resolvers: R,
@@ -84,7 +84,7 @@ where
 /// application and verifying traits.
 pub struct Stateful<E, A, S, V, R>
 where
-    E: Rng + Spawner + Metrics + Clock,
+    E: Rng + Spawner + Metrics + Clock + Storage,
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
@@ -107,8 +107,8 @@ where
     /// Configuration used to initialize the database set at startup.
     db_config: <A::Databases as DatabaseSet<E>>::Config,
 
-    /// Startup plan carrying the metadata partition prefix and floor decision.
-    plan: SyncPlan<S, V>,
+    /// Startup plan carrying the metadata handle and floor decision.
+    plan: SyncPlan<E, S, V>,
 
     /// Resolver(s) for state sync fetches and post-bootstrap serving.
     resolvers: R,
@@ -168,14 +168,14 @@ where
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
-        let partition_prefix = self.plan.partition_prefix().to_string();
+        let sync_metadata = Arc::new(AsyncMutex::new(self.plan.into_sync_metadata()));
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
             context: self.context.child("syncer"),
             db_config: self.db_config,
             sync_config: self.sync_config,
             resolvers: self.resolvers.clone(),
-            partition_prefix: partition_prefix.clone(),
+            sync_metadata: sync_metadata.clone(),
             finalization: floor,
             marshal: self.marshal.clone(),
             sync_complete,
@@ -186,7 +186,7 @@ where
             application: self.application,
             input_provider: self.input_provider,
             marshal: self.marshal,
-            partition_prefix,
+            sync_metadata,
             syncer: syncer_mailbox,
             held_verify_requests: Vec::new(),
             database_subscribers: Vec::new(),
@@ -206,8 +206,7 @@ where
             self.context.as_present(),
             &self.marshal,
             self.db_config,
-            self.plan.partition_prefix(),
-            self.plan.sync_height(),
+            self.plan.into_sync_metadata(),
         )
         .await;
 

@@ -5,7 +5,7 @@ use crate::stateful::{
             processing::Processing,
         },
         processor::{FinalizeStatus, Processor, ProcessorMetrics},
-        syncer::{self, SyncResult},
+        syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
     Application,
@@ -24,9 +24,11 @@ use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, Storage};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
+    sync::AsyncMutex,
     Acknowledgement,
 };
 use rand::Rng;
+use std::sync::Arc;
 use tracing::{debug, error};
 
 /// Verify request buffered while state sync is still in progress.
@@ -62,8 +64,8 @@ where
     /// Marshal actor mailbox.
     pub(super) marshal: MarshalMailbox<S, V>,
 
-    /// Prefix for durable state-sync metadata.
-    pub(super) partition_prefix: String,
+    /// Durable state-sync metadata.
+    pub(super) sync_metadata: Arc<AsyncMutex<StateSyncMetadata<E, V::Commitment>>>,
 
     /// Syncer actor mailbox.
     pub(super) syncer: syncer::Mailbox<E, A>,
@@ -238,12 +240,11 @@ where
             acknowledgement.acknowledge();
         }
 
-        syncer::set_sync_complete::<_, V::Commitment>(
-            self.context.as_present(),
-            self.partition_prefix.as_str(),
-            synced_height,
-        )
-        .await;
+        self.sync_metadata
+            .lock()
+            .await
+            .set_complete(synced_height)
+            .await;
 
         // Attach the resolvers to the initialized databases before starting the processor,
         // so that this instance can serve peers database operations and proofs.
@@ -287,7 +288,7 @@ where
 mod tests {
     use super::Syncing;
     use crate::stateful::{
-        actor::syncer::{self, SyncResult},
+        actor::syncer::{self, StateSyncMetadata, SyncResult},
         db::{Anchor, AttachableResolver},
         tests::mocks::{anchor, test_databases, TestApp, TestBlock, TestScheme, TestVariant},
     };
@@ -305,8 +306,10 @@ mod tests {
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
-        acknowledgement::Exact, channel::oneshot, sync::AsyncRwLock, Acknowledgement, NZUsize,
-        NZU16, NZU64,
+        acknowledgement::Exact,
+        channel::oneshot,
+        sync::{AsyncMutex, AsyncRwLock},
+        Acknowledgement, NZUsize, NZU16, NZU64,
     };
     use futures::FutureExt;
     use std::sync::Arc;
@@ -337,7 +340,9 @@ mod tests {
                     application: TestApp,
                     input_provider: (),
                     marshal: init_marshal_mailbox(context.child("marshal")).await,
-                    partition_prefix: "syncing-test".to_string(),
+                    sync_metadata: Arc::new(AsyncMutex::new(
+                        StateSyncMetadata::init(&context, "syncing-test").await,
+                    )),
                     syncer: syncer::Mailbox::new(syncer_sender),
                     held_verify_requests: Vec::new(),
                     database_subscribers: Vec::new(),

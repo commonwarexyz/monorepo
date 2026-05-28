@@ -212,78 +212,89 @@ where
     pub marker: FloorMarker<C>,
 }
 
-/// Loads the durable state sync metadata partition, creating it if needed.
-async fn load_state_sync_metadata<E, C>(
-    context: &E,
-    partition_prefix: &str,
-) -> Metadata<E, FixedBytes<1>, SyncState<C>>
+/// Durable state-sync metadata.
+pub(crate) struct StateSyncMetadata<E, C>
 where
     E: Storage + Clock + Metrics,
     C: Digest,
 {
-    Metadata::init(
-        context.child("metadata"),
-        metadata::Config {
-            partition: format!("{partition_prefix}{SYNC_METADATA_SUFFIX}"),
-            codec_config: (),
-        },
-    )
-    .await
-    .expect("failed to load sync metadata")
+    partition_prefix: String,
+    metadata: Metadata<E, FixedBytes<1>, SyncState<C>>,
 }
 
-/// Loads the durable state sync state for this partition, if any.
-pub(crate) async fn sync_state<E, C>(context: &E, partition_prefix: &str) -> Option<SyncState<C>>
+impl<E, C> StateSyncMetadata<E, C>
 where
     E: Storage + Clock + Metrics,
     C: Digest,
 {
-    let metadata = load_state_sync_metadata::<E, C>(context, partition_prefix).await;
-    metadata.get(&SYNC_STATE_KEY).cloned()
-}
-
-/// Marks state sync as in progress for the resolved floor.
-///
-/// This must be persisted before any state sync database mutation begins so a
-/// crash can reopen partial sync state and validate the next selected floor.
-///
-/// If an interrupted state sync already stored a floor, the newly selected
-/// floor must resume from that same floor or a later one.
-pub(crate) async fn set_sync_in_progress<E, C>(
-    context: &E,
-    partition_prefix: &str,
-    floor: FloorMarker<C>,
-) where
-    E: Storage + Clock + Metrics,
-    C: Digest,
-{
-    let mut metadata = load_state_sync_metadata::<E, C>(context, partition_prefix).await;
-
-    if let Some(SyncState::InProgress(existing)) = metadata.get(&SYNC_STATE_KEY) {
-        existing.ensure_not_behind(&floor);
+    /// Load the durable state-sync metadata partition, creating it if needed.
+    pub(crate) async fn init(context: &E, partition_prefix: impl AsRef<str>) -> Self {
+        let partition_prefix = partition_prefix.as_ref().to_string();
+        let metadata = Metadata::init(
+            context.child("metadata"),
+            metadata::Config {
+                partition: format!("{partition_prefix}{SYNC_METADATA_SUFFIX}"),
+                codec_config: (),
+            },
+        )
+        .await
+        .expect("failed to load sync metadata");
+        Self {
+            partition_prefix,
+            metadata,
+        }
     }
 
-    metadata
-        .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
-        .await
-        .expect("failed to set state sync state to in-progress");
-}
+    /// Returns the partition prefix for this state-sync metadata store.
+    pub(crate) const fn partition_prefix(&self) -> &str {
+        self.partition_prefix.as_str()
+    }
 
-/// Records that one-time state sync completed at the given height.
-///
-/// Once this height is set, future startups skip peer state sync and initialize
-/// from the later of this height and marshal's processed height instead. This
-/// action is irreversible.
-pub(crate) async fn set_sync_complete<E, C>(context: &E, partition_prefix: &str, height: Height)
-where
-    E: Storage + Clock + Metrics,
-    C: Digest,
-{
-    let mut metadata = load_state_sync_metadata::<E, C>(context, partition_prefix).await;
-    metadata
-        .put_sync(SYNC_STATE_KEY, SyncState::<C>::Complete(height))
-        .await
-        .expect("failed to set state sync state to complete");
+    /// Returns the completed state sync height, if state sync has finished.
+    pub(crate) fn sync_height(&self) -> Option<Height> {
+        self.metadata
+            .get(&SYNC_STATE_KEY)
+            .map(SyncState::sync_height)
+            .unwrap_or_default()
+    }
+
+    /// Returns whether state sync is in progress.
+    pub(crate) fn in_progress(&self) -> bool {
+        matches!(
+            self.metadata.get(&SYNC_STATE_KEY),
+            Some(SyncState::InProgress(_))
+        )
+    }
+
+    /// Marks state sync as in progress for the resolved floor.
+    ///
+    /// This must be persisted before any state sync database mutation begins so a
+    /// crash can reopen partial sync state and validate the next selected floor.
+    ///
+    /// If an interrupted state sync already stored a floor, the newly selected
+    /// floor must resume from that same floor or a later one.
+    pub(crate) async fn set_in_progress(&mut self, floor: FloorMarker<C>) {
+        if let Some(SyncState::InProgress(existing)) = self.metadata.get(&SYNC_STATE_KEY) {
+            existing.ensure_not_behind(&floor);
+        }
+
+        self.metadata
+            .put_sync(SYNC_STATE_KEY, SyncState::InProgress(floor))
+            .await
+            .expect("failed to set state sync state to in-progress");
+    }
+
+    /// Records that one-time state sync completed at the given height.
+    ///
+    /// Once this height is set, future startups skip peer state sync and initialize
+    /// from the later of this height and marshal's processed height instead. This
+    /// action is irreversible.
+    pub(crate) async fn set_complete(&mut self, height: Height) {
+        self.metadata
+            .put_sync(SYNC_STATE_KEY, SyncState::<C>::Complete(height))
+            .await
+            .expect("failed to set state sync state to complete");
+    }
 }
 
 /// Resolves the selected state sync floor into the anchor, targets, and
@@ -345,8 +356,7 @@ pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
-    partition_prefix: &str,
-    sync_height: Option<Height>,
+    mut sync_metadata: StateSyncMetadata<E, V::Commitment>,
 ) -> StartupResult<E, A>
 where
     E: Rng + Storage + Spawner + Clock + Metrics,
@@ -354,6 +364,7 @@ where
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
 {
+    let sync_height = sync_metadata.sync_height();
     let processed_height = marshal.get_processed_height().await;
     let skip_finalized_until = match (sync_height, processed_height) {
         (Some(sync_height), Some(processed_height)) if processed_height < sync_height => {
@@ -395,7 +406,7 @@ where
     // Once startup has aligned databases with marshal, future boots should skip peer
     // state sync and recover from the later of this anchor and marshal's durable
     // processed height.
-    set_sync_complete::<E, V::Commitment>(context, partition_prefix, floor_block.height()).await;
+    sync_metadata.set_complete(floor_block.height()).await;
 
     let anchor = Anchor {
         height: floor_block.height(),
