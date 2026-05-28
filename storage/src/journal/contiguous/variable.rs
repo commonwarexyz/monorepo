@@ -1266,8 +1266,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         section: u64,
         item: V,
     ) -> Result<(u64, u32), Error> {
+        let (buf, item_len) = seg_var::Journal::<E, V>::encode_item(self.compression, &item)?;
         let mut inner = self.inner.write().await;
-        inner.data.append(section, &item).await
+        let offset = inner.data.append_raw(section, &buf).await?;
+        Ok((offset, item_len))
     }
 
     /// Test helper: Sync the internal data journal.

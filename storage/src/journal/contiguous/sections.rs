@@ -619,7 +619,7 @@ impl<E: Storage + Metrics> Sections<E> {
         self.prune_guard(section)?;
         if let Some(s) = self.sealed.get(&section) {
             let size = s.size();
-            let r = s.replay(buffer).await.map_err(Error::Runtime)?;
+            let r = s.replay(buffer).map_err(Error::Runtime)?;
             return Ok((r, size));
         }
         if let Some(blob) = self.tail_blob(section) {

@@ -10,8 +10,6 @@
 //! byte-for-byte identical to `segmented::variable`; this module reuses that module's encode and
 //! decode helpers so storage formats remain interchangeable.
 
-#[cfg(test)]
-use crate::journal::segmented::variable as seg_var;
 use crate::journal::{
     contiguous::sections::{Config as SectionsConfig, Sections, SectionsInit},
     variable_format::{decode_item, decode_length_prefix, find_item, ItemInfo},
@@ -240,14 +238,6 @@ impl<E: crate::Context, V: CodecShared> VariableData<E, V> {
         let offset = self.sections.section_size(section).await?;
         self.sections.append_to_tail(buf).await?;
         Ok(offset)
-    }
-
-    /// Append a single encoded item. Test-only; production callers go through `append_raw`.
-    #[cfg(test)]
-    pub(super) async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
-        let (buf, item_len) = seg_var::Journal::<E, V>::encode_item(self.compression, item)?;
-        let offset = self.append_raw(section, &buf).await?;
-        Ok((offset, item_len))
     }
 
     /// Read a single item from `section` at `offset`.

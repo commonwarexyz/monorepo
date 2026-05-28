@@ -17,12 +17,8 @@
 //! # Blob Semantics
 //!
 //! [Append] owns the physical page layout, read cache, and durability bookkeeping for the wrapped
-//! [Blob]. Raw [Blob] handles cloned before wrapping operate on physical bytes, including checksum
-//! records, rather than [Append]'s logical view, and they do not observe buffered data until it is
-//! flushed.
-//!
-//! Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while an
-//! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
+//! [Blob]. Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while
+//! an [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
 //! recovery, and are not covered by [Append]'s [`Blob::write_at_sync`] fast paths.
 
 use super::{
@@ -542,10 +538,6 @@ impl<B: Blob> Append<B> {
         if offsets.is_empty() {
             return Ok(());
         }
-        assert!(
-            offsets.is_sorted(),
-            "read_many_into requires offsets to be sorted in ascending order"
-        );
 
         let last_end = offsets[offsets.len() - 1]
             .checked_add(item_size as u64)

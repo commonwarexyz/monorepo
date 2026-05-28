@@ -285,13 +285,6 @@ impl<B: Blob> Sealed<B> {
         if item_size == 0 {
             return Ok(());
         }
-        // Sorted-ness is the precondition that lets us bounds-check only the last offset —
-        // `split_at_partial` does unchecked `offset + item_size` arithmetic, and the sorted
-        // invariant guarantees the largest end is at the last slot.
-        assert!(
-            offsets.is_sorted(),
-            "read_many_into requires offsets to be sorted in ascending order"
-        );
         let last_end = offsets[offsets.len() - 1]
             .checked_add(item_size as u64)
             .ok_or(Error::OffsetOverflow)?;
@@ -339,10 +332,7 @@ impl<B: Blob> Sealed<B> {
 
     /// Returns a [`Replay`] that sequentially reads all logical bytes from the blob, validating
     /// CRCs along the way.
-    // Mirrors [`Append::replay`]'s async signature so callers can use either uniformly. `Sealed`
-    // never needs to flush so no await actually occurs here.
-    #[allow(clippy::unused_async)]
-    pub async fn replay(&self, buffer_size: std::num::NonZeroUsize) -> Result<Replay<B>, Error> {
+    pub fn replay(&self, buffer_size: std::num::NonZeroUsize) -> Result<Replay<B>, Error> {
         let logical_page_size = self.inner.cache_ref.page_size();
         let logical_page_size_nz =
             NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
@@ -619,7 +609,7 @@ mod tests {
 
             // Now seal and replay; expect identical bytes.
             let sealed = append.seal().await.unwrap();
-            let mut s_replay = sealed.replay(NZUsize!(BUFFER_PAGES)).await.unwrap();
+            let mut s_replay = sealed.replay(NZUsize!(BUFFER_PAGES)).unwrap();
             assert!(s_replay.ensure(data.len()).await.unwrap());
             let mut s_bytes = Vec::with_capacity(data.len());
             while s_replay.remaining() > 0 {
