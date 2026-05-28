@@ -57,7 +57,7 @@ where
     }
 }
 
-/// Post-run property: at least one node used startup state sync and then advanced further.
+/// Post-run property: at least one node used state sync and then advanced further.
 #[derive(Clone, Copy)]
 pub(crate) struct LateJoinerStateSyncHandoff;
 
@@ -78,7 +78,7 @@ where
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
         Box::pin(async move {
             for state in states {
-                let Some(sync_height) = state.startup_sync_height() else {
+                let Some(sync_height) = state.state_sync_height() else {
                     continue;
                 };
                 let processed_height = state.processed_height().await;
@@ -88,8 +88,60 @@ where
             }
 
             Err(
-                "no validator both used startup state sync and advanced beyond the synced height"
+                "no validator both used state sync and advanced beyond the synced height"
                     .to_string(),
+            )
+        })
+    }
+}
+
+/// Post-run property: a validator started state sync, crashed before it
+/// completed, restarted, re-entered state sync, then advanced beyond the
+/// synced height.
+#[derive(Clone, Copy)]
+pub(crate) struct CrashDuringStateSyncRecovery;
+
+impl<V> Property<ed25519::PublicKey, MockValidatorState<V>> for CrashDuringStateSyncRecovery
+where
+    V: Variant,
+    V::ApplicationBlock: Digestible<Digest = sha256::Digest>,
+    MockValidatorState<V>: Send + Sync,
+{
+    fn name(&self) -> &str {
+        "crash_during_state_sync_recovery"
+    }
+
+    fn check<'a>(
+        &'a self,
+        _tracker: &'a ProgressTracker<ed25519::PublicKey>,
+        states: &'a [&'a MockValidatorState<V>],
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            let mut observed = Vec::new();
+            for state in states {
+                let processed_height = state.processed_height().await;
+                observed.push(format!(
+                    "entries={} sync_height={:?} processed_height={processed_height}",
+                    state.state_sync_entries(),
+                    state.state_sync_height(),
+                ));
+
+                let Some(sync_height) = state.state_sync_height() else {
+                    continue;
+                };
+                if state.state_sync_entries() < 2 {
+                    continue;
+                }
+                if processed_height > sync_height {
+                    return Ok(());
+                }
+            }
+
+            Err(
+                format!(
+                    "no validator re-entered state sync after a crash and then advanced beyond the synced height; observed [{}]",
+                    observed.join(", "),
+                ),
             )
         })
     }

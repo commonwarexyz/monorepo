@@ -200,10 +200,6 @@ where
     /// Pinned merkle nodes extracted from proofs, used for database construction
     pinned_nodes: Option<Vec<DB::Digest>>,
 
-    /// Whether persisted local state already matches the current target and can be
-    /// rebuilt without fetching fresh boundary pins.
-    local_target_state_available: bool,
-
     /// Historical roots from previous sync targets, keyed by tree size
     /// (target.range.end()). Each tree size maps to a unique root because
     /// the merkle tree is append-only and validate_update rejects unchanged
@@ -289,7 +285,6 @@ where
     R: DbResolver<DB>,
     DB::Op: Encode,
 {
-    /// Create a new sync engine with the given configuration
     pub async fn new(config: Config<DB, R>) -> Result<Self, Error<DB, R>> {
         if !config.target.range.end().is_valid() {
             return Err(SyncError::Engine(EngineError::InvalidTarget {
@@ -298,19 +293,6 @@ where
             }));
         }
 
-        // Probe for persisted local state matching the target before opening
-        // any engine-owned handles.
-        let local_target_state_available = if config.target.range.start() > Location::new(0) {
-            DB::has_local_target_state(
-                config.context.child("local_target_probe"),
-                &config.db_config,
-                &config.target,
-            )
-            .await
-        } else {
-            false
-        };
-
         // Create journal and verifier using the database's factory methods
         let journal = <DB::Journal as Journal<DB::Family>>::new(
             config.context.child("journal"),
@@ -318,14 +300,30 @@ where
             config.target.range.clone(),
         )
         .await?;
+        let journal_size = journal.size().await;
+
+        // The sync journal is the source of truth for resume. If it already
+        // reaches the target, try to recover boundary pins from local Merkle
+        // state before asking peers for them. Partial journals resume without
+        // probing completed database state.
+        let pinned_nodes = if journal_size == *config.target.range.end() {
+            DB::local_boundary_nodes(
+                config.context.child("local_boundary"),
+                &config.db_config,
+                &config.target,
+                &journal,
+            )
+            .await?
+        } else {
+            None
+        };
 
         let sync_context = config.context.child("sync");
         let progress_metrics = ProgressMetrics::new(&sync_context);
         let mut engine = Self {
             outstanding_requests: Requests::new(),
             fetched_operations: BTreeMap::new(),
-            pinned_nodes: None,
-            local_target_state_available,
+            pinned_nodes,
             retained_roots: HashMap::new(),
             retained_roots_order: VecDeque::new(),
             max_retained_roots: config.max_retained_roots,
@@ -447,7 +445,6 @@ where
             .remove_before(new_target.range.start().checked_add(1).unwrap());
         self.fetched_operations.clear();
         self.pinned_nodes = None;
-        self.local_target_state_available = false;
 
         // Save the current root keyed by its tree size for verifying
         // retained requests that were issued against this target.
@@ -628,9 +625,7 @@ where
 
     /// Returns whether the current target has the boundary state needed for completion.
     fn has_boundary_state(&self) -> bool {
-        !self.needs_pinned_boundary()
-            || self.pinned_nodes.is_some()
-            || self.local_target_state_available
+        !self.needs_pinned_boundary() || self.pinned_nodes.is_some()
     }
 
     /// Returns whether the journal and boundary state are both ready for completion.
@@ -697,17 +692,10 @@ where
             root
         };
 
-        // Verify the proof. Pinned nodes are only extracted from proofs
-        // for the current root because the database needs them for the
-        // latest tree size. When local state already satisfies the boundary
-        // (pins are available in on-disk metadata), we must not demand
-        // pinned nodes from the proof: an empty pinned set would fail
-        // `verify_proof_and_pinned_nodes` against the expected
-        // `nodes_to_pin(range.start)` count, causing an infinite retry loop
-        // whenever a gap request happens to land at `range.start`.
+        // Pinned nodes are only extracted from proofs for the current root because
+        // the database needs them for the latest tree size.
         let need_pinned = is_current_target
             && self.pinned_nodes.is_none()
-            && !self.local_target_state_available
             && start_loc == self.target.range.start();
         let elements = operations.iter().map(|op| op.encode()).collect::<Vec<_>>();
         let valid = if need_pinned {
@@ -873,8 +861,183 @@ mod tests {
         merkle::mmr::{Family as MmrFamily, Proof},
         qmdb::sync::requests::FetchFuture,
     };
-    use commonware_cryptography::sha256;
-    use commonware_utils::channel::oneshot;
+    use commonware_cryptography::{sha256, Sha256};
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::{channel::oneshot, non_empty_range, NZU64};
+    use std::{
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    #[derive(Clone)]
+    struct TestConfig {
+        journal_size: u64,
+        boundary_probes: Arc<AtomicUsize>,
+    }
+
+    impl crate::qmdb::sync::DatabaseConfig for TestConfig {
+        type JournalConfig = u64;
+
+        fn journal_config(&self) -> Self::JournalConfig {
+            self.journal_size
+        }
+    }
+
+    struct TestJournal {
+        size: u64,
+    }
+
+    impl Journal<MmrFamily> for TestJournal {
+        type Config = u64;
+        type Context = deterministic::Context;
+        type Error = crate::journal::Error;
+        type Op = i32;
+
+        async fn new(
+            _context: Self::Context,
+            size: Self::Config,
+            _range: commonware_utils::range::NonEmptyRange<Location<MmrFamily>>,
+        ) -> Result<Self, Self::Error> {
+            Ok(Self { size })
+        }
+
+        async fn resize(&mut self, start: Location<MmrFamily>) -> Result<(), Self::Error> {
+            self.size = *start;
+            Ok(())
+        }
+
+        async fn sync(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn size(&self) -> u64 {
+            self.size
+        }
+
+        async fn append(&mut self, _op: Self::Op) -> Result<(), Self::Error> {
+            self.size += 1;
+            Ok(())
+        }
+    }
+
+    struct TestDb;
+
+    impl Database for TestDb {
+        type Config = TestConfig;
+        type Context = deterministic::Context;
+        type Digest = sha256::Digest;
+        type Family = MmrFamily;
+        type Hasher = Sha256;
+        type Journal = TestJournal;
+        type Op = i32;
+
+        async fn from_sync_result(
+            _context: Self::Context,
+            _config: Self::Config,
+            _journal: Self::Journal,
+            _pinned_nodes: Option<Vec<Self::Digest>>,
+            _range: commonware_utils::range::NonEmptyRange<Location<Self::Family>>,
+            _apply_batch_size: usize,
+        ) -> Result<Self, qmdb::Error<Self::Family>> {
+            Ok(Self)
+        }
+
+        async fn local_boundary_nodes(
+            _context: Self::Context,
+            config: &Self::Config,
+            _target: &Target<Self::Family, Self::Digest>,
+            _journal: &Self::Journal,
+        ) -> Result<Option<Vec<Self::Digest>>, qmdb::Error<Self::Family>> {
+            config.boundary_probes.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(vec![]))
+        }
+
+        fn root(&self) -> Self::Digest {
+            sha256::Digest::from([0u8; 32])
+        }
+    }
+
+    #[derive(Clone)]
+    struct TestResolver;
+
+    impl Resolver for TestResolver {
+        type Digest = sha256::Digest;
+        type Error = Infallible;
+        type Family = MmrFamily;
+        type Op = i32;
+
+        async fn get_operations(
+            &self,
+            _op_count: Location<Self::Family>,
+            _start_loc: Location<Self::Family>,
+            _max_ops: NonZeroU64,
+            _include_pinned_nodes: bool,
+            _cancel_rx: oneshot::Receiver<()>,
+        ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+            Ok(FetchResult::new(
+                Proof {
+                    leaves: Location::new(0),
+                    inactive_peaks: 0,
+                    digests: vec![],
+                },
+                vec![],
+                None,
+            ))
+        }
+    }
+
+    fn test_engine_config(
+        context: deterministic::Context,
+        journal_size: u64,
+        boundary_probes: Arc<AtomicUsize>,
+    ) -> Config<TestDb, TestResolver> {
+        Config {
+            context,
+            resolver: TestResolver,
+            target: Target {
+                root: sha256::Digest::from([1u8; 32]),
+                range: non_empty_range!(Location::new(5), Location::new(10)),
+            },
+            max_outstanding_requests: 1,
+            fetch_batch_size: NZU64!(1),
+            apply_batch_size: 1,
+            db_config: TestConfig {
+                journal_size,
+                boundary_probes,
+            },
+            update_rx: None,
+            finish_rx: None,
+            reached_target_tx: None,
+            max_retained_roots: 0,
+        }
+    }
+
+    #[test]
+    fn new_probes_local_boundary_when_journal_reaches_target() {
+        deterministic::Runner::default().start(|context| async move {
+            let boundary_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 10, boundary_probes.clone()))
+                .await
+                .unwrap();
+
+            assert_eq!(boundary_probes.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn new_skips_local_boundary_when_journal_is_partial() {
+        deterministic::Runner::default().start(|context| async move {
+            let boundary_probes = Arc::new(AtomicUsize::new(0));
+            Engine::new(test_engine_config(context, 7, boundary_probes.clone()))
+                .await
+                .unwrap();
+
+            assert_eq!(boundary_probes.load(Ordering::SeqCst), 0);
+        });
+    }
 
     /// Create a no-op fetch result future for testing request tracking.
     fn dummy_future(id: RequestId) -> FetchFuture<MmrFamily, i32, sha256::Digest, ()> {
