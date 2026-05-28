@@ -2,7 +2,7 @@
 
 ## v2026.5.0
 
-### Bounded Actor Ingress
+### Synchronous Messaging
 
 The new `commonware-actor` crate provides a bounded mailbox abstraction with
 caller-defined overflow handling and is now used by many actor-style
@@ -229,6 +229,7 @@ without downloading or storing the full operation history.
 - Runtime network sinks and streams are poisoned after send/receive errors or
   cancellation of a partially progressed operation. After that point, later
   calls return `Closed` instead of pretending the object is reusable.
+
 ### Cryptography Building Blocks
 
 The BLS12-381 DKG module now separates the original Feldman-Desmedt construction
