@@ -25,3 +25,10 @@ path = "fuzz_targets/p2p_resolver.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "opaque_resolver"
+path = "fuzz_targets/opaque_resolver.rs"
+test = false
+doc = false
+bench = false
