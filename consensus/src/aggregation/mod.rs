@@ -833,36 +833,43 @@ mod tests {
 
     test_for_all_fixtures!(slow slow_and_lossy_links);
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_determinism() {
+    fn determinism<S, F>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
+    {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            let mut states = Vec::new();
-            macro_rules! check {
-                ($vec:ident, $suffix:ident, $fixture:expr) => {{
-                    let first = slow_and_lossy_links_seeded($fixture, seed);
-                    let second = slow_and_lossy_links_seeded($fixture, seed);
-                    assert_eq!(
-                        first,
-                        second,
-                        "non-deterministic state for {}",
-                        stringify!($suffix)
-                    );
-                    $vec.push((stringify!($suffix), first));
-                }};
-            }
-            for_each_fixture!(check!(states));
+            assert_eq!(
+                slow_and_lossy_links_seeded(fixture, seed),
+                slow_and_lossy_links_seeded(fixture, seed),
+            );
+        }
+    }
 
-            // Sanity check that different types can't be identical
-            for pair in states.windows(2) {
-                assert_ne!(
-                    pair[0].1, pair[1].1,
-                    "state {} equals state {}",
-                    pair[0].0, pair[1].0
-                );
-            }
+    test_for_all_fixtures!(slow determinism);
+
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_distinct_states() {
+        // Sanity check that different schemes produce different audit states.
+        macro_rules! collect {
+            ($vec:ident, $suffix:ident, $fixture:expr) => {
+                $vec.push((
+                    stringify!($suffix),
+                    slow_and_lossy_links_seeded($fixture, 7),
+                ));
+            };
+        }
+        let mut states = Vec::new();
+        for_each_fixture!(collect!(states));
+        for pair in states.windows(2) {
+            assert_ne!(
+                pair[0].1, pair[1].1,
+                "state {} equals state {}",
+                pair[0].0, pair[1].0
+            );
         }
     }
 
