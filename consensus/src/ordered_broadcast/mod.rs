@@ -1112,37 +1112,11 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_bls12381_threshold_min_pk() {
-        run_1k(bls12381_threshold::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_threshold_min_sig() {
-        run_1k(bls12381_threshold::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_multisig_min_pk() {
-        run_1k(bls12381_multisig::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_multisig_min_sig() {
-        run_1k(bls12381_multisig::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_ed25519() {
-        run_1k(ed25519::fixture);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_secp256r1() {
-        run_1k(secp256r1::fixture);
+    fn test_1k() {
+        // Runs 1000 heights using the mock certificate scheme. The real signing
+        // schemes are exercised by the other end-to-end tests, using mock
+        // crypto here keeps this test cheap while still verifying the engine
+        // over many heights.
+        run_1k(mocks::scheme::fixture);
     }
 }
