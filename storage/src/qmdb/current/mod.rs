@@ -1452,29 +1452,6 @@ pub mod tests {
         };
     }
 
-    // Runner macros - receive common args followed by (label, type, config).
-    macro_rules! test_simple {
-        ($f:expr, $l:ident, $db:ty, $cfg:ident) => {
-            Box::pin(async {
-                $f(open_db_fn!($db, $cfg));
-            })
-            .await
-        };
-    }
-
-    // Macro to run a test on DB variants.
-    macro_rules! for_all_variants {
-        (simple: $f:expr) => {{
-            with_all_variants!(test_simple!($f));
-        }};
-        (ordered: $f:expr) => {{
-            with_ordered_variants!(test_simple!($f));
-        }};
-        (unordered: $f:expr) => {{
-            with_unordered_variants!(test_simple!($f));
-        }};
-    }
-
     // Emit one `#[test_group("slow")] #[test_traced]` test per variant.
     // The fn name is `<f>_<variant_label>`, the body opens the variant's DB and
     // runs the test function `f`.
@@ -1546,27 +1523,13 @@ pub mod tests {
     test_for_all_variants!(test_simulate_write_failures, "WARN");
     test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
     test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_commit_after_sync_recovery() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_commit_after_sync_recovery);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_all_variants_stale_batch_side_effect_free() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_stale_batch_side_effect_free);
-        });
-    }
+    test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
+    test_for_all_variants!(test_stale_batch_side_effect_free, "WARN");
 
     test_for_ordered_variants!(test_ordered_build_big, "WARN");
-    test_for_unordered_variants!(test_unordered_build_big, "WARN");
     test_for_ordered_variants!(test_ordered_build_small_close_reopen, "DEBUG");
+
+    test_for_unordered_variants!(test_unordered_build_big, "WARN");
     test_for_unordered_variants!(test_unordered_build_small_close_reopen, "DEBUG");
 
     // ---- Current-level batch API tests ----
