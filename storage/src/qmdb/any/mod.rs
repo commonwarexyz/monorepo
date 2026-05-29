@@ -1314,167 +1314,125 @@ pub(crate) mod test {
     // Defines MMR-only variants (for tests that require mmr::Family, e.g. proof verification).
     macro_rules! with_mmr_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, uf, UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, uv, UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, of, OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, ov, OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, uvp1, UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, ovp1, OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, ufp2, UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, uvp2, UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, ofp2, OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, ovp2, OrderedVariableP2, mmr::Family, variable_db_config);
         };
     }
 
     // Defines all variants (MMR + MMB). Calls $cb!($($args)*, $label, $type, $family, $config) for each.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixed, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "uv", UnorderedVariable, mmr::Family, variable_db_config);
-            $cb!($($args)*, "of", OrderedFixed, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "ov", OrderedVariable, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2, mmr::Family, variable_db_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2, mmr::Family, fixed_db_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2, mmr::Family, variable_db_config);
-            $cb!($($args)*, "uf_mmb", MmbUnorderedFixed, mmb::Family, fixed_db_config);
-            $cb!($($args)*, "uv_mmb", MmbUnorderedVariable, mmb::Family, variable_db_config);
-            $cb!($($args)*, "of_mmb", MmbOrderedFixed, mmb::Family, fixed_db_config);
-            $cb!($($args)*, "ov_mmb", MmbOrderedVariable, mmb::Family, variable_db_config);
+            $cb!($($args)*, uf, UnorderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, uv, UnorderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, of, OrderedFixed, mmr::Family, fixed_db_config);
+            $cb!($($args)*, ov, OrderedVariable, mmr::Family, variable_db_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, uvp1, UnorderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1, mmr::Family, fixed_db_config);
+            $cb!($($args)*, ovp1, OrderedVariableP1, mmr::Family, variable_db_config);
+            $cb!($($args)*, ufp2, UnorderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, uvp2, UnorderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, ofp2, OrderedFixedP2, mmr::Family, fixed_db_config);
+            $cb!($($args)*, ovp2, OrderedVariableP2, mmr::Family, variable_db_config);
+            $cb!($($args)*, uf_mmb, MmbUnorderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, uv_mmb, MmbUnorderedVariable, mmb::Family, variable_db_config);
+            $cb!($($args)*, of_mmb, MmbOrderedFixed, mmb::Family, fixed_db_config);
+            $cb!($($args)*, ov_mmb, MmbOrderedVariable, mmb::Family, variable_db_config);
         };
     }
 
-    // Runner macros - each receives common args followed by (label, type, family, config)
-    // from with_all_variants. Each variant constructs a fresh `deterministic::Runner` so
-    // the outer state machine of one variant never has to fit alongside the outer state
-    // machines of the others on the test thread stack.
-    macro_rules! test_with_reopen {
-        ($sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
-            let p = concat!($l, "_", $sfx);
-            let executor = deterministic::Runner::default();
-            executor.start(|context| async move {
-                let ctx = context.child($l);
-                let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
-                    .await
-                    .unwrap();
-                $f(
-                    ctx,
-                    db,
-                    |ctx| {
-                        Box::pin(async move {
-                            <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
-                                .await
-                                .unwrap()
-                        })
-                    },
-                    to_digest,
-                )
-                .await;
-            });
-        }};
+    // Emit one `#[test_group("slow")] #[test_traced]` test per variant, named
+    // `<f>_<variant_label>`. `with_reopen` hands the test a db plus a reopen
+    // closure, `with_make_value` hands it just the db.
+    macro_rules! test_for_variant {
+        (with_reopen: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$f _ $l>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        let ctx = context.child(stringify!($l));
+                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                            .await
+                            .unwrap();
+                        $f(
+                            ctx,
+                            db,
+                            |ctx| {
+                                Box::pin(async move {
+                                    <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                                        .await
+                                        .unwrap()
+                                })
+                            },
+                            to_digest,
+                        )
+                        .await;
+                    });
+                }
+            }
+        };
+        (with_make_value: $f:ident, $traced:literal, $l:ident, $db:ty, $family:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$f _ $l>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        let ctx = context.child(stringify!($l));
+                        let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>("db", &ctx))
+                            .await
+                            .unwrap();
+                        $f(ctx, db, to_digest).await;
+                    });
+                }
+            }
+        };
     }
 
-    macro_rules! test_with_make_value {
-        ($sfx:expr, $f:expr, $l:literal, $db:ty, $family:ty, $cfg:ident) => {{
-            let p = concat!($l, "_", $sfx);
-            let executor = deterministic::Runner::default();
-            executor.start(|context| async move {
-                let ctx = context.child($l);
-                let db = <$db>::init(ctx.child("storage"), $cfg::<OneCap>(p, &ctx))
-                    .await
-                    .unwrap();
-                $f(ctx, db, to_digest).await;
-            });
-        }};
+    // Generate one slow test per variant across all variants (MMR + MMB).
+    macro_rules! test_for_all_variants {
+        (with_reopen: $f:ident, $traced:literal) => {
+            with_all_variants!(test_for_variant!(with_reopen: $f, $traced));
+        };
+        (with_make_value: $f:ident, $traced:literal) => {
+            with_all_variants!(test_for_variant!(with_make_value: $f, $traced));
+        };
     }
 
-    // Macro to run a test on all DB variants (MMR + MMB).
-    macro_rules! for_all_variants {
-        ($sfx:expr, with_reopen: $f:expr) => {{
-            with_all_variants!(test_with_reopen!($sfx, $f));
-        }};
-        ($sfx:expr, with_make_value: $f:expr) => {{
-            with_all_variants!(test_with_make_value!($sfx, $f));
-        }};
+    // Generate one slow test per variant across the MMR-only variants (for
+    // tests that use mmr::Family-specific features like Location::new or
+    // verify_proof).
+    macro_rules! test_for_mmr_variants {
+        (with_reopen: $f:ident, $traced:literal) => {
+            with_mmr_variants!(test_for_variant!(with_reopen: $f, $traced));
+        };
+        (with_make_value: $f:ident, $traced:literal) => {
+            with_mmr_variants!(test_for_variant!(with_make_value: $f, $traced));
+        };
     }
 
-    // Macro to run a test on MMR-only DB variants (for tests that use mmr::Family-specific
-    // features like Location::new or verify_proof).
-    macro_rules! for_mmr_variants {
-        ($sfx:expr, with_reopen: $f:expr) => {{
-            with_mmr_variants!(test_with_reopen!($sfx, $f));
-        }};
-        ($sfx:expr, with_make_value: $f:expr) => {{
-            with_mmr_variants!(test_with_make_value!($sfx, $f));
-        }};
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_log_replay() {
-        for_all_variants!("lr", with_reopen: test_any_db_log_replay);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_build_and_authenticate() {
-        for_mmr_variants!("baa", with_reopen: test_any_db_build_and_authenticate);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_historical_proof_basic() {
-        for_mmr_variants!("hpb", with_make_value: test_any_db_historical_proof_basic);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_historical_proof_invalid() {
-        for_mmr_variants!("hpi", with_make_value: test_any_db_historical_proof_invalid);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_historical_proof_edge_cases() {
-        for_mmr_variants!("hpec", with_make_value: test_any_db_historical_proof_edge_cases);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_multiple_commits_delete_replayed() {
-        for_all_variants!("mcdr", with_reopen: test_any_db_multiple_commits_delete_replayed);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_non_empty_recovery() {
-        for_all_variants!("ner", with_reopen: test_any_db_non_empty_recovery);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_empty_recovery() {
-        for_all_variants!("er", with_reopen: test_any_db_empty_recovery);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_commit_after_sync_recovery() {
-        for_all_variants!("casr", with_reopen: test_any_db_commit_after_sync_recovery);
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_rewind_recovery() {
-        for_mmr_variants!("rr", with_reopen: test_any_db_rewind_recovery);
-    }
+    test_for_all_variants!(with_reopen: test_any_db_log_replay, "WARN");
+    test_for_mmr_variants!(with_reopen: test_any_db_build_and_authenticate, "WARN");
+    test_for_mmr_variants!(with_make_value: test_any_db_historical_proof_basic, "WARN");
+    test_for_mmr_variants!(with_make_value: test_any_db_historical_proof_invalid, "WARN");
+    test_for_mmr_variants!(with_make_value: test_any_db_historical_proof_edge_cases, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_multiple_commits_delete_replayed, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_non_empty_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_empty_recovery, "WARN");
+    test_for_all_variants!(with_reopen: test_any_db_commit_after_sync_recovery, "WARN");
+    test_for_mmr_variants!(with_reopen: test_any_db_rewind_recovery, "WARN");
 
     fn key(i: u64) -> Digest {
         Sha256::hash(&i.to_be_bytes())
