@@ -1476,7 +1476,7 @@ pub mod tests {
     // Emit one `#[test_group("slow")] #[test_traced]` test per variant.
     // The fn name is `<prefix>_<variant_label>`, the body opens the variant's DB
     // and runs the user-supplied test function.
-    macro_rules! per_variant_slow_test_emit {
+    macro_rules! test_for_variant {
         ($prefix:ident, $f:path, $traced:literal, $label:ident, $db:ty, $cfg:ident) => {
             paste::paste! {
                 #[test_group("slow")]
@@ -1494,24 +1494,24 @@ pub mod tests {
         };
     }
 
-    // Bulk-generate per-variant slow tests across all 24 variants.
-    macro_rules! per_all_variants_slow_tests {
+    // Generate one slow test per variant across all 24 variants.
+    macro_rules! test_for_all_variants {
         ($prefix:ident, $f:path, $traced:literal) => {
-            with_all_variants!(per_variant_slow_test_emit!($prefix, $f, $traced));
+            with_all_variants!(test_for_variant!($prefix, $f, $traced));
         };
     }
 
-    // Bulk-generate per-variant slow tests across the 12 ordered variants.
-    macro_rules! per_ordered_variants_slow_tests {
+    // Generate one slow test per variant across the 12 ordered variants.
+    macro_rules! test_for_ordered_variants {
         ($prefix:ident, $f:path, $traced:literal) => {
-            with_ordered_variants!(per_variant_slow_test_emit!($prefix, $f, $traced));
+            with_ordered_variants!(test_for_variant!($prefix, $f, $traced));
         };
     }
 
-    // Bulk-generate per-variant slow tests across the 12 unordered variants.
-    macro_rules! per_unordered_variants_slow_tests {
+    // Generate one slow test per variant across the 12 unordered variants.
+    macro_rules! test_for_unordered_variants {
         ($prefix:ident, $f:path, $traced:literal) => {
-            with_unordered_variants!(per_variant_slow_test_emit!($prefix, $f, $traced));
+            with_unordered_variants!(test_for_variant!($prefix, $f, $traced));
         };
     }
 
@@ -1540,22 +1540,22 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(open_db);
     }
 
-    per_all_variants_slow_tests!(
+    test_for_all_variants!(
         test_all_variants_build_random_close_reopen,
         test_build_random_close_reopen,
         "WARN"
     );
-    per_all_variants_slow_tests!(
+    test_for_all_variants!(
         test_all_variants_simulate_write_failures,
         test_simulate_write_failures,
         "WARN"
     );
-    per_all_variants_slow_tests!(
+    test_for_all_variants!(
         test_all_variants_different_pruning_delays_same_root,
         test_different_pruning_delays_same_root,
         "WARN"
     );
-    per_all_variants_slow_tests!(
+    test_for_all_variants!(
         test_all_variants_sync_persists_bitmap_pruning_boundary,
         test_sync_persists_bitmap_pruning_boundary,
         "WARN"
@@ -1578,22 +1578,22 @@ pub mod tests {
         });
     }
 
-    per_ordered_variants_slow_tests!(
+    test_for_ordered_variants!(
         test_ordered_variants_build_big,
         test_ordered_build_big,
         "WARN"
     );
-    per_unordered_variants_slow_tests!(
+    test_for_unordered_variants!(
         test_unordered_variants_build_big,
         test_unordered_build_big,
         "WARN"
     );
-    per_ordered_variants_slow_tests!(
+    test_for_ordered_variants!(
         test_ordered_variants_build_small_close_reopen,
         ordered::tests::test_build_small_close_reopen,
         "DEBUG"
     );
-    per_unordered_variants_slow_tests!(
+    test_for_unordered_variants!(
         test_unordered_variants_build_small_close_reopen,
         unordered::tests::test_build_small_close_reopen,
         "DEBUG"
@@ -2774,7 +2774,7 @@ pub mod tests {
         });
     }
 
-    per_all_variants_slow_tests!(
+    test_for_all_variants!(
         test_all_variants_speculative_root_matches_committed,
         test_speculative_root_matches_committed,
         "INFO"
