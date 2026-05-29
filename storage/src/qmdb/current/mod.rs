@@ -525,12 +525,14 @@ pub mod tests {
     };
     use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
     use core::future::Future;
+    use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::{
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,
     };
     use tracing::warn;
+    use unordered::tests::test_build_small_close_reopen as test_unordered_build_small_close_reopen;
 
     type Error<F> = crate::qmdb::Error<F>;
     type Location<F> = merkle::Location<F>;
@@ -1474,14 +1476,14 @@ pub mod tests {
     }
 
     // Emit one `#[test_group("slow")] #[test_traced]` test per variant.
-    // The fn name is `<prefix>_<variant_label>`, the body opens the variant's DB
-    // and runs the user-supplied test function.
+    // The fn name is `<f>_<variant_label>`, the body opens the variant's DB and
+    // runs the test function `f`.
     macro_rules! test_for_variant {
-        ($prefix:ident, $f:path, $traced:literal, $label:ident, $db:ty, $cfg:ident) => {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident) => {
             paste::paste! {
                 #[test_group("slow")]
                 #[test_traced($traced)]
-                fn [<$prefix _ $label>]() {
+                fn [<$f _ $label>]() {
                     let executor = deterministic::Runner::default();
                     executor.start(|_context| async move {
                         Box::pin(async {
@@ -1496,22 +1498,22 @@ pub mod tests {
 
     // Generate one slow test per variant across all 24 variants.
     macro_rules! test_for_all_variants {
-        ($prefix:ident, $f:path, $traced:literal) => {
-            with_all_variants!(test_for_variant!($prefix, $f, $traced));
+        ($f:ident, $traced:literal) => {
+            with_all_variants!(test_for_variant!($f, $traced));
         };
     }
 
     // Generate one slow test per variant across the 12 ordered variants.
     macro_rules! test_for_ordered_variants {
-        ($prefix:ident, $f:path, $traced:literal) => {
-            with_ordered_variants!(test_for_variant!($prefix, $f, $traced));
+        ($f:ident, $traced:literal) => {
+            with_ordered_variants!(test_for_variant!($f, $traced));
         };
     }
 
     // Generate one slow test per variant across the 12 unordered variants.
     macro_rules! test_for_unordered_variants {
-        ($prefix:ident, $f:path, $traced:literal) => {
-            with_unordered_variants!(test_for_variant!($prefix, $f, $traced));
+        ($f:ident, $traced:literal) => {
+            with_unordered_variants!(test_for_variant!($f, $traced));
         };
     }
 
@@ -1540,26 +1542,10 @@ pub mod tests {
         test_current_db_build_big::<M, C, F, Fut>(open_db);
     }
 
-    test_for_all_variants!(
-        test_all_variants_build_random_close_reopen,
-        test_build_random_close_reopen,
-        "WARN"
-    );
-    test_for_all_variants!(
-        test_all_variants_simulate_write_failures,
-        test_simulate_write_failures,
-        "WARN"
-    );
-    test_for_all_variants!(
-        test_all_variants_different_pruning_delays_same_root,
-        test_different_pruning_delays_same_root,
-        "WARN"
-    );
-    test_for_all_variants!(
-        test_all_variants_sync_persists_bitmap_pruning_boundary,
-        test_sync_persists_bitmap_pruning_boundary,
-        "WARN"
-    );
+    test_for_all_variants!(test_build_random_close_reopen, "WARN");
+    test_for_all_variants!(test_simulate_write_failures, "WARN");
+    test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
+    test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
 
     #[test_group("slow")]
     #[test_traced("WARN")]
@@ -1578,26 +1564,10 @@ pub mod tests {
         });
     }
 
-    test_for_ordered_variants!(
-        test_ordered_variants_build_big,
-        test_ordered_build_big,
-        "WARN"
-    );
-    test_for_unordered_variants!(
-        test_unordered_variants_build_big,
-        test_unordered_build_big,
-        "WARN"
-    );
-    test_for_ordered_variants!(
-        test_ordered_variants_build_small_close_reopen,
-        ordered::tests::test_build_small_close_reopen,
-        "DEBUG"
-    );
-    test_for_unordered_variants!(
-        test_unordered_variants_build_small_close_reopen,
-        unordered::tests::test_build_small_close_reopen,
-        "DEBUG"
-    );
+    test_for_ordered_variants!(test_ordered_build_big, "WARN");
+    test_for_unordered_variants!(test_unordered_build_big, "WARN");
+    test_for_ordered_variants!(test_ordered_build_small_close_reopen, "DEBUG");
+    test_for_unordered_variants!(test_unordered_build_small_close_reopen, "DEBUG");
 
     // ---- Current-level batch API tests ----
     //
@@ -2774,11 +2744,7 @@ pub mod tests {
         });
     }
 
-    test_for_all_variants!(
-        test_all_variants_speculative_root_matches_committed,
-        test_speculative_root_matches_committed,
-        "INFO"
-    );
+    test_for_all_variants!(test_speculative_root_matches_committed, "INFO");
 
     /// MerkleizedBatch::get() at the current level reads overlay then base DB.
     #[test_traced("INFO")]
