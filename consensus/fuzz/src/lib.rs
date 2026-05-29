@@ -1860,7 +1860,7 @@ pub fn fuzz<P: simplex::Simplex, M: FuzzMode>(mut input: FuzzInput) {
     }
 }
 
-pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(mut input: NodeFuzzInput) {
+pub fn fuzz_node<P: simplex::Simplex, M: simplex_node::NodeFuzzMode>(input: NodeFuzzInput) {
     print_node_fuzz_input(M::MODE, &input);
 
     let raw_bytes_for_panic = input.raw_bytes.clone();
