@@ -1131,4 +1131,56 @@ mod tests {
         insufficient_validators(ed25519::fixture);
         insufficient_validators(secp256r1::fixture);
     }
+
+    fn run_1k<S, F>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let cfg = deterministic::Config::new();
+        let runner = deterministic::Runner::new(cfg);
+
+        runner.start(|mut context| async move {
+            let num_validators = 10;
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
+            let epoch = Epoch::new(111);
+
+            let delayed_link = Link {
+                latency: Duration::from_millis(80),
+                jitter: Duration::from_millis(10),
+                success_rate: 0.98,
+            };
+
+            let (mut oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, delayed_link).await;
+
+            let reporters = spawn_validator_engines(
+                context.child("validator"),
+                &fixture,
+                &mut registrations,
+                &mut oracle,
+                epoch,
+                Duration::from_secs(5),
+                vec![],
+            );
+
+            await_reporters(
+                context.child("reporter"),
+                &reporters,
+                Height::new(1_000),
+                epoch,
+            )
+            .await;
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k() {
+        // Runs 1000 heights using the mock certificate scheme. The real signing
+        // schemes are exercised by the other end-to-end tests, using mock
+        // crypto here keeps this test cheap while still verifying the engine
+        // over many heights.
+        run_1k(mocks::scheme::fixture);
+    }
 }
