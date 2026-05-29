@@ -974,7 +974,7 @@ mod tests {
         });
     }
 
-    test_for_all_fixtures!(slow network_partition);
+    test_for_all_fixtures!(network_partition);
 
     /// Test insufficient validator participation (below quorum).
     fn insufficient_validators<S, F>(fixture: F)
@@ -1082,5 +1082,5 @@ mod tests {
         });
     }
 
-    test_for_all_fixtures!(slow insufficient_validators);
+    test_for_all_fixtures!(insufficient_validators);
 }
