@@ -643,7 +643,7 @@ mod tests {
             ($vec:ident, $suffix:ident, $fixture:expr) => {
                 $vec.push((
                     stringify!($suffix),
-                    slow_and_lossy_links_seeded($fixture, 0),
+                    slow_and_lossy_links_seeded($fixture, 7),
                 ));
             };
         }
