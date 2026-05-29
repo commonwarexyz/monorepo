@@ -416,7 +416,6 @@ mod tests {
         simplex::{
             elector::{Config as Elector, Elector as ElectorTrait, Random, RoundRobin},
             mocks::{
-                scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
                 wrapped,
             },
@@ -3611,7 +3610,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = scheme_mocks::fixture(&mut context, &namespace, n);
+            } = mocks::scheme::fixture(&mut context, &namespace, n);
             let me = participants[0].clone();
             let mut oracle =
                 start_test_network_with_peers(context.child("network"), participants.clone(), true)
@@ -4852,50 +4851,12 @@ mod tests {
 
     #[test_group("slow")]
     #[test_traced]
-    fn test_1k_bls12381_threshold_vrf_min_pk() {
-        run_1k::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_threshold_vrf_min_sig() {
-        run_1k::<_, _, Random>(bls12381_threshold_vrf::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_threshold_std_min_pk() {
-        run_1k::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_threshold_std_min_sig() {
-        run_1k::<_, _, RoundRobin>(bls12381_threshold_std::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_multisig_min_pk() {
-        run_1k::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinPk, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_bls12381_multisig_min_sig() {
-        run_1k::<_, _, RoundRobin>(bls12381_multisig::fixture::<MinSig, _>);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_ed25519() {
-        run_1k::<_, _, RoundRobin>(ed25519::fixture);
-    }
-
-    #[test_group("slow")]
-    #[test_traced]
-    fn test_1k_secp256r1() {
-        run_1k::<_, _, RoundRobin>(secp256r1::fixture);
+    fn test_1k() {
+        // Runs 1000 views using the mock certificate scheme. The real signing
+        // schemes are exercised by the other end-to-end tests, using mock
+        // crypto here keeps this test cheap while still verifying the engine
+        // over many views.
+        run_1k::<_, _, RoundRobin>(mocks::scheme::fixture);
     }
 
     fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
@@ -6764,7 +6725,7 @@ mod tests {
                 &mut test_rng(),
                 TWINS_CAMPAIGN,
                 link,
-                scheme_mocks::fixture,
+                mocks::scheme::fixture,
             );
         }
     }
@@ -6788,7 +6749,7 @@ mod tests {
                 &mut test_rng(),
                 campaign,
                 link,
-                scheme_mocks::fixture,
+                mocks::scheme::fixture,
             );
         }
     }
@@ -6805,7 +6766,7 @@ mod tests {
             &mut test_rng(),
             campaign,
             TWINS_LINK,
-            scheme_mocks::fixture,
+            mocks::scheme::fixture,
         );
     }
 
@@ -6822,7 +6783,7 @@ mod tests {
             &mut test_rng(),
             campaign,
             TWINS_LINK,
-            scheme_mocks::fixture,
+            mocks::scheme::fixture,
         );
     }
 
