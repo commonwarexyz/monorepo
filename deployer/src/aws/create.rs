@@ -1274,12 +1274,19 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     Ok(())
 }
 
+/// Region-scoped availability zone group identifier.
+///
+/// Group names are intentionally scoped by region because subnets and AZ support are region-local.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct AvailabilityZoneGroupKey {
     region: String,
     group: String,
 }
 
+/// Selects one mutually-supported AZ for each region/group pair.
+///
+/// The returned AZ supports every instance type used by the group in that region. Reusing the
+/// same group name in another region produces a separate selection.
 fn select_availability_zone_groups(
     instances: &[InstanceConfig],
     resources: &HashMap<String, RegionResources>,
@@ -1324,6 +1331,7 @@ fn select_availability_zone_groups(
     Ok(selected)
 }
 
+/// Returns the first subnet AZ that supports every requested instance type.
 fn select_group_availability_zone(
     resources: &RegionResources,
     instance_types: &BTreeSet<String>,
@@ -1341,6 +1349,10 @@ fn select_group_availability_zone(
         .cloned()
 }
 
+/// Returns the subnets an instance may launch into.
+///
+/// Ungrouped instances can use any region subnet. Grouped instances are restricted to their
+/// selected AZ so all members of the local region/group stay colocated.
 fn grouped_subnets(
     instance: &InstanceConfig,
     resources: &RegionResources,
