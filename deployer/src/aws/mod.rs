@@ -90,8 +90,8 @@
 //! (e.g., `10.<region-index>.<az-index>.0/24`), linked to a shared route table with an internet gateway.
 //! Each instance is placed in an AZ that supports its instance type, distributed round-robin across
 //! eligible AZs, with automatic fallback to other AZs on capacity errors.
-//! Instances that set the same `availability_zone_group` are launched in one mutually-supported AZ.
-//! A group must reside in a single region; spanning regions is rejected.
+//! Instances that set the same `availability_zone_group` and region are launched in one
+//! mutually-supported AZ.
 //!
 //! ### VPC Peering
 //!
@@ -525,8 +525,6 @@ cfg_if::cfg_if! {
                 group: String,
                 instance_types: Vec<String>,
             },
-            #[error("availability zone group '{group}' spans multiple regions {regions:?}; a group must reside in a single region")]
-            AvailabilityZoneGroupMultiRegion { group: String, regions: Vec<String> },
             #[error("metadata not found for deployment: {0}")]
             MetadataNotFound(String),
             #[error("must specify either --config or --tag")]
@@ -595,7 +593,10 @@ pub struct InstanceConfig {
     /// AWS region where the instance is deployed
     pub region: String,
 
-    /// Optional group whose instances must launch in the same availability zone.
+    /// Optional group whose instances in the same region must launch in the same availability zone.
+    ///
+    /// The same group name may be reused in different regions, but each region is resolved
+    /// independently and the group will not span regions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub availability_zone_group: Option<String>,
 
