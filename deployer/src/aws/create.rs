@@ -438,6 +438,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .unzip();
     info!(?regions, "initialized resources");
 
+    // Select AZs for grouped instances after subnets and AZ support are known.
+    let availability_zone_groups =
+        select_availability_zone_groups(&config.instances, &region_resources)?;
+
     // Create binary security groups (without monitoring IP - added later for parallel launch)
     info!("creating binary security groups");
     let binary_sg_futures: Vec<_> = region_resources
@@ -632,10 +636,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     };
 
     // Launch binary instances, distributing ungrouped instances across AZs by using instance index
-    // as start_idx. Grouped instances resolve AZs by region/group up front, then receive a
-    // single-AZ subnet list from grouped_subnets so all local group members stay colocated.
-    let availability_zone_groups =
-        select_availability_zone_groups(&config.instances, &region_resources)?;
+    // as start_idx. Grouped instances receive a single-AZ subnet list from grouped_subnets so all
+    // local group members stay colocated.
     let binary_launch_futures = binary_launch_configs.iter().enumerate().map(
         |(idx, (instance, ec2_client, resources, ami_id, _arch))| {
             let key_name = key_name.clone();
