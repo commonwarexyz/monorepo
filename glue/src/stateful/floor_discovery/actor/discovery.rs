@@ -22,14 +22,14 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRngCore;
-use std::{collections::HashMap, ops::ControlFlow, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 use tracing::debug;
 
 /// The discovery phase of [`FloorDiscovery`](super::FloorDiscovery).
 ///
-/// Solicits peers' latest finalizations and selects a floor agreed upon by a threshold of
-/// distinct peers. By construction it has no marshal and never serves finalizations. Once a
-/// marshal is attached (after the floor has been consumed), it hands off to [`Serving`].
+/// Solicits peers' latest finalizations and selects the highest floor from a peer sample. By
+/// construction it has no marshal and never serves finalizations. Once a marshal is attached
+/// (after the floor has been consumed), it hands off to [`Serving`].
 pub(super) struct Discovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
@@ -68,7 +68,7 @@ where
         receiver: &mut impl Receiver<PublicKey = P>,
     ) {
         let mut deadline = self.context.current() + self.retry_timeout.get();
-        let mut finalizations = HashMap::new();
+        let mut finalizations = BTreeMap::new();
         let mut marshal = None;
 
         select_loop! {
@@ -126,7 +126,12 @@ where
                 let message = match wire::Message::<S, V>::decode_cfg(message, &cfg) {
                     Ok(message) => message,
                     Err(err) => {
-                        commonware_p2p::block!(self.blocker, peer, ?err, "finalization decode failed");
+                        commonware_p2p::block!(
+                            self.blocker,
+                            peer,
+                            ?err,
+                            "finalization decode failed"
+                        );
                         continue;
                     }
                 };
@@ -138,7 +143,8 @@ where
                 if self.floor.is_some() {
                     continue;
                 }
-                let Some((peer, finalization)) = self.verify_finalization(peer, finalization) else {
+                let Some((peer, finalization)) = self.verify_finalization(peer, finalization)
+                else {
                     continue;
                 };
                 if self.floor_subscribers.is_empty() {
@@ -146,14 +152,7 @@ where
                     continue;
                 }
                 finalizations.entry(peer).or_insert(finalization);
-
-                // If the threshold is no longer reachable with the responses gathered so far,
-                // retry immediately rather than waiting.
-                if self.try_select_floor(&mut finalizations) {
-                    debug!(reason = "threshold unreachable", "re-requesting finalizations");
-                    Self::request_latest(sender, &mut finalizations);
-                    deadline = self.context.current() + self.retry_timeout.get();
-                }
+                self.try_select_floor(&mut finalizations);
             },
             _ = retry => {
                 debug!(reason = "deadline elapsed", "re-requesting finalizations");
@@ -198,75 +197,50 @@ where
         Some((peer, finalization))
     }
 
-    /// Attempts to select a floor agreed upon by a threshold of distinct peers. Each candidate
-    /// finalization is judged against the threshold for its own epoch. If one is found, sets the
-    /// floor, notifies all subscribers, and clears the pending responses.
-    ///
-    /// Returns `true` if no candidate can still reach its epoch's threshold given the responses
-    /// gathered so far (the caller should retry); `false` if a floor was selected or remains
-    /// reachable.
+    /// Attempts to select the highest finalization from a sample of distinct peers.
     fn try_select_floor(
         &mut self,
-        finalizations: &mut HashMap<P, Finalization<S, V::Commitment>>,
-    ) -> bool {
+        finalizations: &mut BTreeMap<P, Finalization<S, V::Commitment>>,
+    ) {
         if self.floor.is_some() {
-            return false;
+            return;
         }
 
-        let responded = finalizations.len();
-
-        // Select the first finalized proposal backed by a threshold of peers for its epoch,
-        // breaking as soon as one is found. Otherwise, fold across candidates to learn whether
-        // any could still reach its epoch's threshold if every outstanding peer agreed. Different
-        // peers may carry different valid certificates for the same finalized proposal.
-        let selected = {
-            let counts = finalizations.values().fold(
-                HashMap::<_, (usize, _)>::new(),
-                |mut counts, finalization| {
-                    counts
-                        .entry(finalization.proposal.clone())
-                        .and_modify(|(count, _)| *count += 1)
-                        .or_insert((1, finalization));
-                    counts
-                },
-            );
-            counts.iter().try_fold(
-                counts.is_empty(),
-                |reachable, (_, &(count, finalization))| {
-                    let Some(threshold) = self.threshold(finalization.epoch()) else {
-                        // Unknown epoch: cannot judge, so do not give up on it.
-                        return ControlFlow::Continue(true);
-                    };
-                    if count >= threshold {
-                        return ControlFlow::Break(finalization.clone());
+        let (floor, replies) =
+            finalizations
+                .values()
+                .fold((None, 0), |(floor, replies), finalization| {
+                    if self.sample_size(finalization.epoch()).is_none() {
+                        return (floor, replies);
                     }
-                    let outstanding = self
-                        .participants(finalization.epoch())
-                        .unwrap_or(0)
-                        .saturating_sub(responded);
-                    ControlFlow::Continue(reachable || count + outstanding >= threshold)
-                },
-            )
-        };
-
-        match selected {
-            ControlFlow::Break(floor) => {
-                self.floor_subscribers.drain(..).for_each(|subscriber| {
-                    subscriber.send_lossy(floor.clone());
+                    let floor = floor
+                        .is_none_or(|candidate: &Finalization<_, _>| {
+                            finalization.round() > candidate.round()
+                        })
+                        .then_some(finalization)
+                        .or(floor);
+                    (floor, replies + 1)
                 });
-                self.floor = Some(floor);
-                finalizations.clear();
-                finalizations.shrink_to_fit();
-                false
-            }
-            ControlFlow::Continue(reachable) => !reachable,
+        let Some(floor) = floor else {
+            return;
+        };
+        let Some(sample_size) = self.sample_size(floor.epoch()) else {
+            return;
+        };
+        if replies < sample_size {
+            return;
         }
+
+        self.floor_subscribers.drain(..).for_each(|subscriber| {
+            subscriber.send_lossy(floor.clone());
+        });
+        self.floor = Some(floor.clone());
     }
 
     /// Clears any pending responses and re-requests peers' latest [`Finalization`].
     fn request_latest(
         sender: &mut impl Sender<PublicKey = P>,
-        finalizations: &mut HashMap<P, Finalization<S, V::Commitment>>,
+        finalizations: &mut BTreeMap<P, Finalization<S, V::Commitment>>,
     ) {
         finalizations.clear();
         sender.send(
@@ -282,14 +256,9 @@ where
         self.provider.all().or_else(|| self.provider.scoped(epoch))
     }
 
-    /// Returns the number of participants for `epoch`, if a scheme is available.
-    fn participants(&self, epoch: Epoch) -> Option<usize> {
-        self.scheme(epoch).map(|scheme| scheme.participants().len())
-    }
-
-    /// Returns the number of distinct peers (`f + 1`) that must agree for `epoch`.
-    fn threshold(&self, epoch: Epoch) -> Option<usize> {
-        self.participants(epoch)
-            .map(|n| N3f1::max_faults(n) as usize + 1)
+    /// Returns the number of distinct peer replies (`f + 1`) required for `epoch`.
+    fn sample_size(&self, epoch: Epoch) -> Option<usize> {
+        self.scheme(epoch)
+            .map(|scheme| N3f1::max_faults(scheme.participants().len()) as usize + 1)
     }
 }

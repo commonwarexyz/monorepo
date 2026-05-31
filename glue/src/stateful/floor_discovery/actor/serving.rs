@@ -85,7 +85,12 @@ where
                 let message = match wire::Message::<S, V>::decode_cfg(message, &cfg) {
                     Ok(message) => message,
                     Err(err) => {
-                        commonware_p2p::block!(self.blocker, peer, ?err, "finalization decode failed");
+                        commonware_p2p::block!(
+                            self.blocker,
+                            peer,
+                            ?err,
+                            "finalization decode failed"
+                        );
                         continue;
                     }
                 };

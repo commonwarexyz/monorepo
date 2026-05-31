@@ -32,16 +32,15 @@ where
     pub capacity: NonZeroUsize,
     /// Blocker used to block peers that send invalid finalizations.
     pub blocker: B,
-    /// How long to wait for a threshold of matching finalizations before clearing
-    /// the pending responses and re-requesting.
+    /// How long to wait for enough finalization replies before clearing the pending
+    /// responses and re-requesting.
     pub retry_timeout: NonZeroDuration,
 }
 
-/// Discovers a sync floor by soliciting peers' latest finalizations and adopting the first one
-/// reported by a threshold (`f + 1`) of distinct peers.
+/// Discovers a sync floor by adopting the highest finalization from a peer sample.
 ///
 /// The actor is a two-phase state machine. It starts in discovery, waits until a subscriber needs
-/// a floor, then solicits and tallies peers' finalizations without serving any of its own. Once a
+/// a floor, then solicits and samples peers' finalizations without serving any of its own. Once a
 /// marshal is attached, it hands off to serving, answering peers' requests from that marshal and
 /// never issuing outbound requests. A source node that never needed a floor attaches a marshal
 /// without consuming one and transitions straight to serving without soliciting peers.

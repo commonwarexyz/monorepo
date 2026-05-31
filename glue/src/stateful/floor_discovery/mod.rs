@@ -2,8 +2,8 @@
 //!
 //! A node that is starting fresh (or recovering from far behind) needs a recent, trustworthy
 //! finalization, the "floor", as the point to begin state sync from. It cannot trust any
-//! single peer to name that point, so the [`FloorDiscovery`] asks many peers and adopts only a
-//! finalization that a threshold (`f + 1`) of distinct peers independently report.
+//! single peer to name that point, so the [`FloorDiscovery`] asks many peers and adopts the
+//! highest valid finalization from `f + 1` distinct peer replies.
 //!
 //! # Protocol
 //!
@@ -27,22 +27,19 @@
 //! source: it transitions to serving without a cached floor. Callers that need a floor must keep a
 //! subscription alive until it resolves and attach marshal only after consuming that floor.
 //!
-//! ## Collect and tally
+//! ## Collect and select
 //!
 //! Each peer answers with its own latest finalization (or nothing, if it has none). Every
-//! response is verified against the certificate scheme for its epoch, then bucketed by the
-//! finalized proposal it carries. At most one finalization is counted per peer, so no single peer
-//! can inflate a bucket on its own:
+//! response is verified against the certificate scheme for its epoch. At most one finalization is
+//! counted per peer, so no single peer can inflate the sample on its own. Once `f + 1`
+//! distinct peers have replied, the highest finalized round becomes the floor:
 //!
 //! ```text
-//!   peer 1 --Finalization(A)-->\
-//!   peer 2 --Finalization(A)--> \      tally            buckets
-//!   peer 3 --Finalization(B)-->  +-> FloorDiscovery   A: {1, 2, 4}  (3)
-//!   peer 4 --Finalization(A)--> /                     B: {3}        (1)
-//!                                                       |
-//!                                                       v
-//!                        first bucket to reach the threshold (f + 1)
-//!                        distinct peers becomes the floor: A
+//!   peer 1 --Finalization(view 10)-->\                 replies
+//!   peer 2 --Finalization(view 12)--> +-> FloorDiscovery {10, 12, 13}
+//!   peer 3 --Finalization(view 13)-->/                        |
+//!                                                             v
+//!                                      sample reached, highest view becomes the floor: 13
 //! ```
 //!
 //! A peer that sends an undecodable or unverifiable finalization is blocked. A peer that sends a
@@ -50,54 +47,55 @@
 //!
 //! ## Retry
 //!
-//! If no bucket reaches the threshold, the collected responses are cleared and the request is
-//! re-issued. A retry fires either eagerly, when the responses are split so finely that no
-//! bucket can reach the threshold even if every peer yet to respond agreed, or after a
-//! configurable `retry_timeout`, when peers are slow, offline, or have not yet converged.
+//! If too few peers reply, the collected responses are cleared and the request is re-issued after
+//! a configurable `retry_timeout`. Retry is not required for safety. It is a liveness mechanism
+//! for request rounds that fail to collect enough usable replies because messages were dropped,
+//! peers were slow or offline, or a finalization's epoch could not yet be judged.
 //!
 //! ```text
-//!   request --> collect --> threshold met? --yes--> floor
-//!      ^                          |
-//!      |                          no
-//!      +------ clear + re-request -+
-//!          (threshold unreachable, or retry_timeout elapsed)
+//!   request --> collect --> sample reached? --yes--> highest floor
+//!      ^                         |
+//!      |                         no
+//!      +----- clear + re-request +
+//!            (retry_timeout elapsed)
 //! ```
 //!
-//! # Why the threshold is `f + 1`
+//! # Why the sample is `f + 1`
 //!
-//! Assume at most `f` of the `n` participants are Byzantine (here `f` is the consensus fault
-//! bound, so the threshold is `f + 1`). A finalization is self-certifying: it carries a quorum
-//! certificate, so any one that verifies proves the network truly finalized that block.
-//! Accepting a single peer's finalization is therefore always *safe* (it names a real block),
-//! but it is not necessarily *recent*.
+//! Assume at most `f` of the `n` participants are faulty. In this protocol, `f` makes no
+//! distinction between Byzantine and crashed nodes: a peer that does not answer and a peer that
+//! answers adversarially both count against the same fault budget.
+//!
+//! A finalization is self-certifying: it carries a quorum certificate, so any one that verifies
+//! proves the network truly finalized that block. Accepting a single peer's finalization is
+//! therefore always *safe* (it names a real block), but it is not necessarily *recent*.
 //!
 //! That recency gap is the attack. A Byzantine peer can replay an old (but still valid)
 //! finalization to drag a joining node's floor far behind the real tip of the chain, forcing it
-//! to re-sync a huge range or to settle on a stale view. With up to `f` such peers, accepting
-//! any single response (or any agreement reachable by `f` peers alone) would let the adversary
-//! unilaterally choose how far back the floor sits.
+//! to re-sync a huge range or to settle on a stale view.
 //!
-//! Requiring `f + 1` distinct peers to report the *same* finalization closes the gap. Any set of
-//! `f + 1` peers contains at least one honest peer, since at most `f` are Byzantine. An honest
-//! peer only reports the finalization it actually holds as its latest, so the chosen floor is
-//! vouched for by at least one honest node and is therefore no older than that honest peer's
-//! tip. The Byzantine `f` cannot reach the threshold by themselves, and so cannot pull the floor
-//! back to a height no honest peer occupies.
+//! Under simplex's synchrony assumptions, `2f + 1` honest nodes are expected to be in the same view.
+//! Waiting for `f + 1` replies guarantees at least one honest response in the sample: at most `f`
+//! responders can be Byzantine, and crashed nodes do not respond. The selected finalization is
+//! therefore at least as recent as that honest response. Byzantine peers can still replay old
+//! certificates, but old certificates lose to newer honest replies. If they report something higher,
+//! it must still be a valid finalization, so it is a real finalized block rather than a rollback.
 //!
 //! ```text
-//!   any agreeing set of (f + 1) peers:
+//!   any f + 1 sample:
 //!
-//!     [ B   B  ...  B ]  [ H ]       at most f Byzantine => at least 1 honest
-//!      \____ <= f ____/     |
-//!                           +-- reports its real latest finalization
-//!                               => floor is no older than an honest peer's tip
+//!     [ B   B  ...  B ]  [ H ]       at most f Byzantine
+//!      \____ <= f ____/    \_ at least one honest response
+//!
+//!     choose max(valid finalizations)
+//!       => floor is no older than the freshest honest reply in the sample
 //! ```
 //!
 //! # Resource Bounds
 //!
 //! The actor retains at most one finalization candidate per peer per request round. Additional
 //! valid finalizations from the same peer are verified and then ignored, preserving correctness
-//! when network delivery lags across request rounds without allowing one peer to inflate a tally.
+//! when network delivery lags across request rounds without allowing one peer to inflate a sample.
 //! The p2p channel supplies rate limiting and maximum encoded message size enforcement.
 
 mod actor;
@@ -606,17 +604,17 @@ mod test {
         }
     }
 
-    /// A threshold of peers serving the same finalization lets a subscribing node resolve it
-    /// as the floor.
+    /// A sample of peers serving the same finalization lets a subscribing node resolve it as
+    /// the floor.
     #[test]
-    fn test_resolves_floor_from_threshold_peers() {
+    fn test_resolves_floor_from_sample_peers() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
             assert_eq!(harness.participants.len(), 4);
 
-            // Seed a threshold (f+1 = 2) of peers with the same finalization, then start the
+            // Seed a sample (f + 1 = 2) of peers with the same finalization, then start the
             // bootstrappers so node 0's first request already observes agreement.
             let (block, finalization) = harness.finalization(1, 1);
             for index in [1, 2] {
@@ -636,47 +634,72 @@ mod test {
         });
     }
 
-    /// When peers disagree but enough responses are available, the threshold remains reachable,
-    /// so the node waits out its retry deadline before re-requesting (timeout-driven retry).
+    /// A sample of distinct valid replies resolves to the highest finalization, even without
+    /// exact agreement.
+    #[test]
+    fn test_resolves_highest_floor_from_sample_replies() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut harness =
+                Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
+            harness.start_bootstrappers();
+            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+
+            let mut expected = None;
+            for index in 1..=3u8 {
+                let (_, finalization) = harness.finalization(index.into(), index);
+                if index == 3 {
+                    expected = Some(finalization.clone());
+                }
+                harness.send_raw(index as usize, 0, finalization_bytes(finalization));
+            }
+            let expected = expected.expect("highest finalization present");
+
+            context.sleep(Duration::from_millis(100)).await;
+            let floor = subscription
+                .try_recv()
+                .expect("floor should resolve once enough replies arrive");
+            assert_eq!(floor, expected);
+        });
+    }
+
+    /// When too few peers reply, the node waits out its retry deadline before re-requesting.
     #[test_collect_traces]
-    fn test_retries_until_peers_agree(traces: TraceStorage) {
+    fn test_retries_until_enough_replies(traces: TraceStorage) {
         let retry_timeout = NZDuration!(Duration::from_millis(500));
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(move |context| async move {
             let mut harness = Harness::setup(&context, 4, retry_timeout).await;
-
-            // The peers disagree: node 1 serves finalization F, node 3 serves a different
-            // finalization G. Node 0's first request gathers F and G (one each), which cannot
-            // reach the threshold (f+1 = 2) but remains reachable (one peer is outstanding).
-            let (block_f, finalization_f) = harness.finalization(1, 0xF);
-            let (block_g, finalization_g) = harness.finalization(1, 0x6);
-            harness
-                .inject(1, block_f.clone(), finalization_f.clone())
-                .await;
-            harness.inject(3, block_g, finalization_g).await;
-
-            let start = context.current();
             harness.start_bootstrappers();
+            let start = context.current();
             let mut subscription = harness.nodes[0].bootstrap.subscribe();
 
-            // Let node 0 finish its first request round. With only disagreeing finalizations
-            // available, the threshold is unmet and the subscription must remain pending.
+            // Node 0's first request gathers one reply, which is below the sample size (f + 1 = 2).
+            let (_, finalization_f) = harness.finalization(1, 0xF);
+            let (_, finalization_g) = harness.finalization(2, 0x6);
+            harness.send_raw(1, 0, finalization_bytes(finalization_f.clone()));
+
+            // Let node 0 finish its first request round. With too few finalizations available,
+            // the subscription must remain pending.
             context.sleep(Duration::from_millis(100)).await;
             assert!(
                 matches!(
                     subscription.try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
                 ),
-                "floor resolved before peers agreed"
+                "floor resolved before enough replies arrived"
             );
 
-            // Make a second peer agree on F. Node 0 only learns of it on its next,
-            // retry-driven request.
-            harness.inject(2, block_f, finalization_f.clone()).await;
+            // After the retry deadline, send a full sample. The actor should select the
+            // highest valid reply.
+            context.sleep(retry_timeout.get()).await;
+            harness.send_raw(1, 0, finalization_bytes(finalization_f));
+            harness.send_raw(2, 0, finalization_bytes(finalization_g.clone()));
 
-            // The floor resolves to F, and only after the retry deadline has elapsed.
-            let floor = subscription.await.expect("floor resolved");
-            assert_eq!(floor, finalization_f);
+            // The floor resolves to G, and only after the retry deadline has elapsed.
+            context.sleep(Duration::from_millis(100)).await;
+            let floor = subscription.try_recv().expect("floor resolved");
+            assert_eq!(floor, finalization_g);
             let elapsed = context.current().duration_since(start).unwrap();
             assert!(
                 elapsed >= retry_timeout.get(),
@@ -684,7 +707,7 @@ mod test {
             );
         });
 
-        // The retry was driven by the deadline, not by an unreachability result.
+        // The retry was driven by the deadline.
         let events = traces.get_all();
         events
             .expect_event(|event| {
@@ -695,60 +718,33 @@ mod test {
                         .is_ok()
             })
             .expect("a deadline-driven retry should have occurred");
-        assert!(
-            events
-                .expect_event(|event| event
-                    .metadata
-                    .expect_field_exact("reason", "threshold unreachable")
-                    .is_ok())
-                .is_err(),
-            "the threshold was reachable, so no impossibility retry should occur"
-        );
     }
 
-    /// When responses are split so finely that no finalization can reach the threshold even if
-    /// every outstanding peer agreed, the node retries immediately instead of waiting. A very
-    /// high retry timeout ensures the only retry that can fire is this impossibility result.
-    #[test_collect_traces]
-    fn test_retries_on_impossible_threshold(traces: TraceStorage) {
+    /// Agreement below the sample size is not enough to resolve a floor.
+    #[test]
+    fn test_waits_for_sample_size_even_with_matching_replies() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
-
-            // Seven participants => threshold f+1 = 3. Give each of the six reachable peers a
-            // distinct finalization, so node 0 gathers six disagreeing responses with only
-            // itself outstanding: no finalization can reach three.
-            for index in 1..=6u8 {
-                let (block, finalization) = harness.finalization(1, index);
-                harness.inject(index as usize, block, finalization).await;
-            }
             harness.start_bootstrappers();
-            let _subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap.subscribe();
 
-            context.sleep(Duration::from_secs(1)).await;
+            // Seven participants => f + 1 = 3. Two matching replies are still not enough.
+            let (_, finalization) = harness.finalization(1, 1);
+            for index in 1..=2 {
+                harness.send_raw(index, 0, finalization_bytes(finalization.clone()));
+            }
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "matching replies below the sample size must not resolve the floor"
+            );
         });
-
-        // The retry was driven by the impossibility result, not by the (very high) deadline.
-        let events = traces.get_all();
-        events
-            .expect_event(|event| {
-                event.metadata.content == "re-requesting finalizations"
-                    && event
-                        .metadata
-                        .expect_field_exact("reason", "threshold unreachable")
-                        .is_ok()
-            })
-            .expect("an impossibility-driven retry should have occurred");
-        assert!(
-            events
-                .expect_event(|event| event
-                    .metadata
-                    .expect_field_exact("reason", "deadline elapsed")
-                    .is_ok())
-                .is_err(),
-            "no deadline-driven retry should occur with a high retry timeout"
-        );
     }
 
     /// Starting without a floor subscriber does not solicit peers. This lets a source node start
@@ -861,7 +857,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
             let (block, finalization) = harness.finalization(1, 1);
-            for index in [1, 2] {
+            for index in [1, 2, 3] {
                 harness
                     .inject(index, block.clone(), finalization.clone())
                     .await;
@@ -895,7 +891,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
             let (block, finalization) = harness.finalization(1, 1);
-            for index in [1, 2] {
+            for index in [1, 2, 3] {
                 harness
                     .inject(index, block.clone(), finalization.clone())
                     .await;
@@ -932,18 +928,19 @@ mod test {
     }
 
     /// A second valid finalization from a peer already counted this round is ignored (not
-    /// blocked, since it verifies) and does not let a single peer inflate another tally.
+    /// blocked, since it verifies) and does not let a single peer inflate the sample.
     #[test]
     fn test_duplicate_finalization_from_peer_is_ignored() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let mut harness =
-                Harness::setup(&context, 4, NZDuration!(Duration::from_secs(3600))).await;
+                Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_bootstrappers();
+            let mut subscription = harness.nodes[0].bootstrap.subscribe();
 
             // Deliver two different valid finalizations from node 1, then the second from node 2.
             // If node 1's second answer were counted, the second finalization would incorrectly
-            // reach the threshold.
+            // reach the sample size.
             let (_, first) = harness.finalization(1, 1);
             let (_, second) = harness.finalization(2, 2);
             harness.send_raw(1, 0, finalization_bytes(first));
@@ -952,7 +949,7 @@ mod test {
 
             context.sleep(Duration::from_millis(100)).await;
 
-            // The duplicate is ignored (not blocked), and one peer cannot inflate the tally.
+            // The duplicate is ignored (not blocked), and one peer cannot inflate the sample.
             let blocked = harness.oracle.blocked().await.unwrap();
             assert!(
                 !blocked.contains(&(
@@ -961,14 +958,12 @@ mod test {
                 )),
                 "a duplicate finalization must be ignored, not treated as a fault"
             );
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
-            context.sleep(Duration::from_millis(50)).await;
             assert!(
                 matches!(
                     subscription.try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
                 ),
-                "a single peer must not satisfy the threshold"
+                "a duplicate finalization must not satisfy the sample size"
             );
         });
     }
@@ -1007,40 +1002,34 @@ mod test {
         });
     }
 
-    /// More than a threshold of peers agreeing still resolves the floor (exercises selection
-    /// completing before the tally has visited every response).
+    /// A peer sample resolves to its highest finalization, not to the most common stale one.
     #[test]
-    fn test_super_threshold_agreement() {
+    fn test_sample_selects_highest_over_stale_agreement() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
-            // Seven participants => threshold f+1 = 3.
+            // Seven participants => f + 1 = 3.
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_bootstrappers();
+            let mut subscription = harness.nodes[0].bootstrap.subscribe();
 
-            // Two distinct non-matching finalizations (each below the threshold) plus three
-            // peers agreeing on F, all delivered to node 0 in one round.
-            let (_, g1) = harness.finalization(2, 0xA1);
-            let (_, g2) = harness.finalization(2, 0xA2);
-            let (_, f) = harness.finalization(1, 0x0F);
-            harness.send_raw(1, 0, finalization_bytes(g1));
-            harness.send_raw(2, 0, finalization_bytes(g2));
-            harness.send_raw(3, 0, finalization_bytes(f.clone()));
-            harness.send_raw(4, 0, finalization_bytes(f.clone()));
-            harness.send_raw(5, 0, finalization_bytes(f.clone()));
+            // Two peers agree on a stale finalization, but the sample also includes a newer
+            // valid finalization. The highest reply should win.
+            let (_, stale) = harness.finalization(1, 0x0F);
+            let (_, newest) = harness.finalization(2, 0xA2);
+            harness.send_raw(1, 0, finalization_bytes(stale.clone()));
+            harness.send_raw(2, 0, finalization_bytes(stale.clone()));
+            harness.send_raw(3, 0, finalization_bytes(newest.clone()));
 
-            let floor = harness.nodes[0]
-                .bootstrap
-                .subscribe()
-                .await
-                .expect("floor resolved");
-            assert_eq!(floor, f);
+            context.sleep(Duration::from_millis(100)).await;
+            let floor = subscription.try_recv().expect("floor resolved");
+            assert_eq!(floor, newest);
         });
     }
 
     /// Finalizations are verified against the scheme for their own epoch: a non-zero-epoch
-    /// finalization, signed by that epoch's committee and reported by a threshold of peers,
-    /// resolves the floor (exercises the epoch-scoped scheme lookup and per-epoch threshold).
+    /// finalization, signed by that epoch's committee and reported by enough peers, resolves
+    /// the floor (exercises the epoch-scoped scheme lookup and per-epoch sample size).
     #[test]
     fn test_resolves_floor_at_non_zero_epoch() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1059,17 +1048,15 @@ mod test {
                 })
                 .await;
             harness.start_bootstrappers();
+            let mut subscription = harness.nodes[0].bootstrap.subscribe();
 
             // Two peers report the same epoch-1 finalization, signed by the epoch-1 committee.
             let (_, finalization) = build_finalization_at(&epoch_one, Epoch::new(1), 1, 7);
             harness.send_raw(1, 0, finalization_bytes(finalization.clone()));
             harness.send_raw(2, 0, finalization_bytes(finalization.clone()));
 
-            let floor = harness.nodes[0]
-                .bootstrap
-                .subscribe()
-                .await
-                .expect("floor resolved");
+            context.sleep(Duration::from_millis(100)).await;
+            let floor = subscription.try_recv().expect("floor resolved");
             assert_eq!(floor, finalization);
         });
     }
@@ -1140,9 +1127,10 @@ mod test {
             provider.insert(Epoch::new(1), harness.schemes[0].clone());
             provider.insert(Epoch::new(2), harness.schemes[0].clone());
             harness.start_bootstrappers();
+            let mut subscription = harness.nodes[0].bootstrap.subscribe();
 
-            // Peer 1 reports an epoch-1 finalization; it verifies and is buffered (below the
-            // threshold of 2).
+            // Peer 1 reports an epoch-1 finalization; it verifies and is buffered below the
+            // sample size.
             let (_, epoch_one_finalization) =
                 build_finalization_at(&harness.schemes, Epoch::new(1), 1, 1);
             harness.send_raw(1, 0, finalization_bytes(epoch_one_finalization));
@@ -1151,22 +1139,21 @@ mod test {
             // Forget epoch 1, so the buffered finalization's scheme is now unavailable.
             provider.forget(Epoch::new(1));
 
-            // Peer 2 reports an epoch-2 finalization; ingesting it re-runs selection over the
-            // buffer, where the stale epoch-1 entry can no longer be judged.
+            // One peer reports an epoch-2 finalization; ingesting it re-runs selection over
+            // the buffer, where the stale epoch-1 entry can no longer be judged or counted.
             let (_, epoch_two_finalization) =
                 build_finalization_at(&harness.schemes, Epoch::new(2), 1, 2);
             harness.send_raw(2, 0, finalization_bytes(epoch_two_finalization));
             context.sleep(Duration::from_millis(50)).await;
 
-            // No floor (one vote per epoch, threshold 2) and nothing is blocked.
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
-            context.sleep(Duration::from_millis(50)).await;
+            // No floor (one currently judgeable vote, below the sample size) and nothing is
+            // blocked.
             assert!(
                 matches!(
                     subscription.try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
                 ),
-                "a single vote per epoch must not resolve the floor"
+                "a single judgeable vote must not resolve the floor"
             );
             let blocked = harness.oracle.blocked().await.unwrap();
             assert!(blocked.is_empty(), "no peer should be blocked");
