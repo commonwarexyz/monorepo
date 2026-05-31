@@ -169,6 +169,7 @@ fn main() {
         let instance = aws::InstanceConfig {
             name: name.clone(),
             region,
+            availability_zone_group: None,
             instance_type: instance_type.clone(),
             storage_size,
             storage_class: storage_class.clone(),
