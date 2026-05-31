@@ -109,22 +109,6 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
-impl Signature {
-    fn from_raw(raw: [u8; SIGNATURE_LENGTH]) -> Result<Self, CodecError> {
-        let result = p256::ecdsa::Signature::from_slice(&raw);
-        #[cfg(feature = "std")]
-        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let signature = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        // Reject any signatures with a `s` value in the upper half of the curve order.
-        if signature.s().is_high().into() {
-            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
-        }
-        Ok(Self { raw, signature })
-    }
-}
-
 impl crate::Signature for Signature {}
 
 impl Write for Signature {
@@ -137,7 +121,18 @@ impl Read for Signature {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        Self::from_raw(<[u8; Self::SIZE]>::read(buf)?)
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let result = p256::ecdsa::Signature::from_slice(&raw);
+        #[cfg(feature = "std")]
+        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        #[cfg(not(feature = "std"))]
+        let signature = result
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        // Reject any signatures with a `s` value in the upper half of the curve order.
+        if signature.s().is_high().into() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
+        }
+        Ok(Self { raw, signature })
     }
 }
 
