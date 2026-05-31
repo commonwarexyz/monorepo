@@ -9,7 +9,10 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use proc_macro_crate::{crate_name, FoundCrate};
 use quote::quote;
-use syn::{parenthesized, parse_macro_input, DeriveInput, Error, Ident, Type};
+use syn::{
+    parenthesized, parse_macro_input, parse_quote, DeriveInput, Error, Generics, Ident, Type,
+    WhereClause, WherePredicate,
+};
 
 /// Resolves the path to the `commonware-codec` crate, accounting for renames and use within
 /// `commonware-codec` itself.
@@ -22,6 +25,15 @@ fn codec_path() -> proc_macro2::TokenStream {
         }
         Err(_) => quote!(::commonware_codec),
     }
+}
+
+/// Returns a where clause that preserves user predicates and adds one generated bound.
+fn where_clause_with(generics: &Generics, predicate: WherePredicate) -> WhereClause {
+    let mut generics = generics.clone();
+    generics.make_where_clause().predicates.push(predicate);
+    generics
+        .where_clause
+        .expect("make_where_clause should create a where clause")
 }
 
 /// Derives byte-array conversion impls for a fixed-size type.
@@ -47,7 +59,7 @@ fn codec_path() -> proc_macro2::TokenStream {
 pub fn fixed_array(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+    let (impl_generics, ty_generics, _) = input.generics.split_for_impl();
 
     let mut infallible = false;
     let mut bytes_ty: Option<Type> = None;
@@ -89,17 +101,25 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
         || quote!([u8; <#name as #codec::FixedSize>::SIZE]),
         |ty| quote!(#ty),
     );
+    let decode_fixed_where = where_clause_with(
+        &input.generics,
+        parse_quote!(#name #ty_generics: #codec::DecodeFixed),
+    );
+    let encode_fixed_where = where_clause_with(
+        &input.generics,
+        parse_quote!(#name #ty_generics: #codec::EncodeFixed),
+    );
 
     let from_arrays = if infallible {
         quote! {
-            impl #impl_generics core::convert::From<#bytes> for #name #ty_generics #where_clause {
+            impl #impl_generics core::convert::From<#bytes> for #name #ty_generics #decode_fixed_where {
                 fn from(bytes: #bytes) -> Self {
                     <Self as #codec::DecodeFixed>::decode_fixed(bytes)
                         .expect("infallible decode of fixed-size array")
                 }
             }
 
-            impl #impl_generics core::convert::From<&#bytes> for #name #ty_generics #where_clause {
+            impl #impl_generics core::convert::From<&#bytes> for #name #ty_generics #decode_fixed_where {
                 fn from(bytes: &#bytes) -> Self {
                     <Self as core::convert::From<#bytes>>::from(*bytes)
                 }
@@ -107,7 +127,7 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            impl #impl_generics core::convert::TryFrom<#bytes> for #name #ty_generics #where_clause {
+            impl #impl_generics core::convert::TryFrom<#bytes> for #name #ty_generics #decode_fixed_where {
                 type Error = #codec::Error;
 
                 fn try_from(bytes: #bytes) -> core::result::Result<Self, Self::Error> {
@@ -115,7 +135,7 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl #impl_generics core::convert::TryFrom<&#bytes> for #name #ty_generics #where_clause {
+            impl #impl_generics core::convert::TryFrom<&#bytes> for #name #ty_generics #decode_fixed_where {
                 type Error = #codec::Error;
 
                 fn try_from(bytes: &#bytes) -> core::result::Result<Self, Self::Error> {
@@ -128,7 +148,7 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         #from_arrays
 
-        impl #impl_generics core::convert::TryFrom<&[u8]> for #name #ty_generics #where_clause {
+        impl #impl_generics core::convert::TryFrom<&[u8]> for #name #ty_generics #decode_fixed_where {
             type Error = #codec::Error;
 
             fn try_from(bytes: &[u8]) -> core::result::Result<Self, Self::Error> {
@@ -136,13 +156,13 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl #impl_generics core::convert::From<#name #ty_generics> for #bytes #where_clause {
+        impl #impl_generics core::convert::From<#name #ty_generics> for #bytes #encode_fixed_where {
             fn from(value: #name #ty_generics) -> Self {
                 #codec::EncodeFixed::encode_fixed(&value)
             }
         }
 
-        impl #impl_generics core::convert::From<&#name #ty_generics> for #bytes #where_clause {
+        impl #impl_generics core::convert::From<&#name #ty_generics> for #bytes #encode_fixed_where {
             fn from(value: &#name #ty_generics) -> Self {
                 #codec::EncodeFixed::encode_fixed(value)
             }

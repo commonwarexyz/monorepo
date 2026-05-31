@@ -615,6 +615,66 @@ mod tests {
         );
     }
 
+    trait FixedArrayBound {}
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Bounded;
+
+    impl FixedArrayBound for Bounded {}
+
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(bytes([u8; 2]))]
+    struct BoundedGeneric<T> {
+        marker: PhantomData<T>,
+        raw: [u8; 2],
+    }
+
+    impl<T: FixedArrayBound> Write for BoundedGeneric<T> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.raw.write(buf);
+        }
+    }
+
+    impl<T: FixedArrayBound> Read for BoundedGeneric<T> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self {
+                marker: PhantomData,
+                raw: <[u8; 2]>::read(buf)?,
+            })
+        }
+    }
+
+    impl<T: FixedArrayBound> FixedSize for BoundedGeneric<T> {
+        const SIZE: usize = 2;
+    }
+
+    #[test]
+    fn test_fixed_array_bounded_generic() {
+        let value = BoundedGeneric::<Bounded> {
+            marker: PhantomData,
+            raw: [1, 2],
+        };
+        let encoded: [u8; 2] = (&value).into();
+        assert_eq!(encoded, [1, 2]);
+        assert_eq!(<[u8; 2]>::from(value).as_ref(), &[1, 2]);
+        assert_eq!(
+            BoundedGeneric::<Bounded>::try_from(encoded).unwrap().raw,
+            [1, 2]
+        );
+        assert_eq!(
+            BoundedGeneric::<Bounded>::try_from(&encoded).unwrap().raw,
+            [1, 2]
+        );
+        assert_eq!(
+            BoundedGeneric::<Bounded>::try_from([1u8, 2].as_slice())
+                .unwrap()
+                .raw,
+            [1, 2]
+        );
+    }
+
     #[derive(Debug, Eq, PartialEq, FixedArray)]
     #[fixed_array(bytes([u8; 2]))]
     struct LifetimeFixed<'a> {
