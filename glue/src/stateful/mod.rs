@@ -33,9 +33,8 @@
 //! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
 //! The plan reads the durable state sync state and keeps that metadata handle
 //! until [`Stateful`] consumes it, avoiding multiple opens of the same metadata
-//! partition during startup. Callers gate floor selection on
-//! [`SyncPlan::may_state_sync`] and, if state sync is desired or
-//! [`SyncPlan::requires_state_sync_floor`] is true, attach a finalized floor via
+//! partition during startup. Callers use [`SyncPlan::should_state_sync`] to
+//! decide whether to discover and attach a finalized floor via
 //! [`SyncPlan::with_floor`]. The same plan then drives marshal (via
 //! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
 //! actors are guaranteed to agree on the startup decision. Once the durable
@@ -102,6 +101,7 @@ mod actor;
 pub use actor::{Config, Mailbox, Stateful, SyncPlan};
 
 pub mod db;
+pub mod floor_discovery;
 
 #[cfg(test)]
 mod tests;

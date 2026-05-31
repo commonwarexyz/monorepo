@@ -19,6 +19,8 @@ pub struct InitContext<'a, P: PublicKey> {
     pub context: deterministic::Context,
     /// Index of this validator in the participant list.
     pub index: usize,
+    /// Whether this validator was configured as a delayed participant.
+    pub delayed: bool,
     /// This validator's public key.
     pub public_key: &'a P,
     /// Network oracle for peer management.

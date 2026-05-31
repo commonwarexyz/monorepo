@@ -308,6 +308,11 @@ pub struct UnreliableReceiver<T: UnreliablePolicy> {
 }
 
 impl<T: Policy> Receiver<T> {
+    /// Returns whether senders can still enqueue messages.
+    pub fn is_open(&self) -> bool {
+        !self.state.is_disconnected()
+    }
+
     /// Receive the next message.
     ///
     /// Returns `None` after all senders are dropped and all buffered messages
@@ -326,6 +331,11 @@ impl<T: Policy> Receiver<T> {
 }
 
 impl<T: UnreliablePolicy> UnreliableReceiver<T> {
+    /// Returns whether senders can still enqueue messages.
+    pub fn is_open(&self) -> bool {
+        !self.state.is_disconnected()
+    }
+
     /// Receive the next message.
     ///
     /// Returns `None` after all senders are dropped and all buffered messages
@@ -1115,6 +1125,22 @@ mod tests {
     }
 
     #[test]
+    fn unreliable_receiver_is_open_while_sender_is_connected() {
+        let (sender, mut receiver) = new_unreliable(NZUsize!(1));
+        assert!(receiver.is_open());
+        assert_eq!(
+            sender.enqueue(Message::Vote(1)),
+            Unreliable::new(Feedback::Ok)
+        );
+
+        drop(sender);
+
+        assert!(!receiver.is_open());
+        assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
+    }
+
+    #[test]
     fn poll_recv_drains_buffered_messages_after_senders_drop() {
         let (sender, receiver) = new_unreliable(NZUsize!(1));
         let wakes = Arc::new(WakeCounter::default());
@@ -1468,6 +1494,19 @@ mod tests {
         assert_eq!(wakes.count(), 1);
         assert_eq!(receiver.try_recv(), Ok(SpillMessage::FillReady));
         assert_eq!(receiver.try_recv(), Ok(SpillMessage::Spill));
+    }
+
+    #[test]
+    fn reliable_receiver_is_open_while_sender_is_connected() {
+        let (sender, mut receiver) = new(NZUsize!(1));
+        assert!(receiver.is_open());
+        assert_eq!(sender.enqueue(SpillMessage::FillReady), Feedback::Ok);
+
+        drop(sender);
+
+        assert!(!receiver.is_open());
+        assert_eq!(receiver.try_recv(), Ok(SpillMessage::FillReady));
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
     }
 }
 
