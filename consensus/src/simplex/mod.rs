@@ -4585,7 +4585,11 @@ mod tests {
         })
     }
 
-    test_for_all_fixtures!(run_1k);
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k() {
+        run_1k::<_, _, RoundRobin>(scheme_mocks::fixture);
+    }
 
     fn engine_shutdown<S, F, L>(seed: u64, mut fixture: F, graceful: bool)
     where

@@ -1083,4 +1083,57 @@ mod tests {
     }
 
     test_for_all_fixtures!(insufficient_validators);
+
+    fn run_1k<S, F>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let cfg = deterministic::Config::new();
+        let runner = deterministic::Runner::new(cfg);
+
+        runner.start(|mut context| async move {
+            // Create validators
+            let num_validators = 10;
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
+            let epoch = Epoch::new(111);
+
+            // Configure a delayed, lossy link
+            let delayed_link = Link {
+                latency: Duration::from_millis(80),
+                jitter: Duration::from_millis(10),
+                success_rate: 0.98,
+            };
+
+            // Initialize the simulated network
+            let (mut oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, delayed_link).await;
+
+            // Start all validators
+            let reporters = spawn_validator_engines(
+                context.child("validator"),
+                &fixture,
+                &mut registrations,
+                &mut oracle,
+                epoch,
+                Duration::from_secs(5),
+                vec![],
+            );
+
+            // Wait for every validator to recover 1,000 certificates
+            await_reporters(
+                context.child("reporter"),
+                &reporters,
+                Height::new(1_000),
+                epoch,
+            )
+            .await;
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k() {
+        run_1k(mocks::scheme::fixture);
+    }
 }

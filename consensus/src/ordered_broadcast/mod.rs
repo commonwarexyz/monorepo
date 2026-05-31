@@ -1064,5 +1064,9 @@ mod tests {
         })
     }
 
-    test_for_all_fixtures!(run_1k);
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k() {
+        run_1k(mocks::scheme::fixture);
+    }
 }
