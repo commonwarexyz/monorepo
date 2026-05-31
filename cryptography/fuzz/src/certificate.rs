@@ -263,7 +263,7 @@ fn bounded_bytes(u: &mut Unstructured, max: usize) -> arbitrary::Result<Vec<u8>>
 }
 
 fn gen_ops(u: &mut Unstructured) -> arbitrary::Result<Vec<Op>> {
-    let count = u.int_in_range(0..=MAX_OPERATIONS)?;
+    let count = u.int_in_range(1..=MAX_OPERATIONS)?;
     let mut ops = Vec::with_capacity(count);
     for _ in 0..count {
         let op = match u.int_in_range(0u8..=7)? {
