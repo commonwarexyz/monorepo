@@ -337,6 +337,29 @@ pub trait EncodeFixed: Write + FixedSize {
 // Automatically implement `EncodeFixed` for types that implement `Write` and `FixedSize`.
 impl<T: Write + FixedSize> EncodeFixed for T {}
 
+/// Convenience trait for [FixedSize] types that can be decoded directly from a fixed-size array.
+pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
+    /// Decodes a value from a fixed-size byte array `[u8; N]`, ensuring all bytes are consumed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is not equal to `<Self as FixedSize>::SIZE`.
+    fn decode_fixed<const N: usize>(bytes: [u8; N]) -> Result<Self, Error> {
+        assert_eq!(
+            N,
+            Self::SIZE,
+            "Can't decode {} bytes into {} bytes",
+            N,
+            Self::SIZE
+        );
+
+        Self::decode_cfg(bytes.as_ref(), &())
+    }
+}
+
+// Automatically implement `DecodeFixed` for types that implement `Read<Cfg = ()>` and `FixedSize`.
+impl<T: Read<Cfg = ()> + FixedSize> DecodeFixed for T {}
+
 /// Convenience trait combining `FixedSize` and `Codec`.
 ///
 /// Represents types that can be both fully encoded and decoded from a fixed-size byte sequence.
@@ -374,9 +397,10 @@ mod tests {
     use super::*;
     use crate::{
         extensions::{DecodeExt, ReadExt},
-        Error,
+        Error, FixedArray,
     };
     use bytes::Bytes;
+    use core::marker::PhantomData;
 
     #[test]
     fn test_insufficient_buffer() {
@@ -402,5 +426,297 @@ mod tests {
     #[should_panic(expected = "Can't encode 4 bytes into 5 bytes")]
     fn test_encode_fixed_panic() {
         let _: [u8; 5] = 42u32.encode_fixed();
+    }
+
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    struct FixedBytes([u8; 2]);
+
+    impl Write for FixedBytes {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for FixedBytes {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self(<[u8; Self::SIZE]>::read(buf)?))
+        }
+    }
+
+    impl FixedSize for FixedBytes {
+        const SIZE: usize = 2;
+    }
+
+    #[test]
+    fn test_fixed_array() {
+        let value = FixedBytes([1, 2]);
+        let encoded: [u8; FixedBytes::SIZE] = (&value).into();
+        assert_eq!(encoded, [1, 2]);
+        assert_eq!(<[u8; FixedBytes::SIZE]>::from(value), encoded);
+        assert_eq!(FixedBytes::try_from(encoded).unwrap(), FixedBytes([1, 2]));
+        assert_eq!(FixedBytes::try_from(&encoded).unwrap(), FixedBytes([1, 2]));
+        assert_eq!(
+            FixedBytes::try_from([1u8, 2].as_slice()).unwrap(),
+            FixedBytes([1, 2])
+        );
+        assert!(matches!(
+            FixedBytes::try_from([1u8].as_slice()),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            FixedBytes::try_from([1u8, 2, 3].as_slice()),
+            Err(Error::ExtraData(1))
+        ));
+    }
+
+    #[test]
+    fn test_decode_fixed() {
+        assert_eq!(
+            FixedBytes::decode_fixed([1, 2]).unwrap(),
+            FixedBytes([1, 2])
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Can't decode 3 bytes into 2 bytes")]
+    fn test_decode_fixed_panic() {
+        let _ = FixedBytes::decode_fixed([1, 2, 3]);
+    }
+
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(infallible)]
+    struct InfallibleFixedBytes([u8; 2]);
+
+    impl Write for InfallibleFixedBytes {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl Read for InfallibleFixedBytes {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self(<[u8; Self::SIZE]>::read(buf)?))
+        }
+    }
+
+    impl FixedSize for InfallibleFixedBytes {
+        const SIZE: usize = 2;
+    }
+
+    #[test]
+    fn test_fixed_array_infallible() {
+        let value = InfallibleFixedBytes([1, 2]);
+        let encoded: [u8; InfallibleFixedBytes::SIZE] = (&value).into();
+        assert_eq!(encoded, [1, 2]);
+        assert_eq!(<[u8; InfallibleFixedBytes::SIZE]>::from(value), encoded);
+        assert_eq!(
+            InfallibleFixedBytes::from(encoded),
+            InfallibleFixedBytes([1, 2])
+        );
+        assert_eq!(
+            InfallibleFixedBytes::from(&encoded),
+            InfallibleFixedBytes([1, 2])
+        );
+        assert_eq!(
+            InfallibleFixedBytes::try_from([1u8, 2].as_slice()).unwrap(),
+            InfallibleFixedBytes([1, 2])
+        );
+        assert!(matches!(
+            InfallibleFixedBytes::try_from([1u8, 2, 3].as_slice()),
+            Err(Error::ExtraData(1))
+        ));
+    }
+
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(bytes([u8; N]))]
+    struct GenericFixed<const N: usize>([u8; N]);
+
+    impl<const N: usize> Write for GenericFixed<N> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl<const N: usize> Read for GenericFixed<N> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self(<[u8; N]>::read(buf)?))
+        }
+    }
+
+    impl<const N: usize> FixedSize for GenericFixed<N> {
+        const SIZE: usize = N;
+    }
+
+    #[test]
+    fn test_fixed_array_generic() {
+        let value = GenericFixed::<3>([1, 2, 3]);
+        let encoded: [u8; 3] = (&value).into();
+        assert_eq!(encoded, [1, 2, 3]);
+        assert_eq!(<[u8; 3]>::from(value), encoded);
+        assert_eq!(
+            GenericFixed::<3>::try_from(encoded).unwrap(),
+            GenericFixed([1, 2, 3])
+        );
+        assert_eq!(
+            GenericFixed::<3>::try_from(&encoded).unwrap(),
+            GenericFixed([1, 2, 3])
+        );
+        assert_eq!(
+            GenericFixed::<3>::try_from([1u8, 2, 3].as_slice()).unwrap(),
+            GenericFixed([1, 2, 3])
+        );
+    }
+
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(infallible, bytes([u8; N]))]
+    struct GenericInfallible<const N: usize>([u8; N]);
+
+    impl<const N: usize> Write for GenericInfallible<N> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl<const N: usize> Read for GenericInfallible<N> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self(<[u8; N]>::read(buf)?))
+        }
+    }
+
+    impl<const N: usize> FixedSize for GenericInfallible<N> {
+        const SIZE: usize = N;
+    }
+
+    #[test]
+    fn test_fixed_array_generic_infallible() {
+        let value = GenericInfallible::<3>([1, 2, 3]);
+        let encoded: [u8; 3] = (&value).into();
+        assert_eq!(encoded, [1, 2, 3]);
+        assert_eq!(<[u8; 3]>::from(value), encoded);
+        assert_eq!(
+            GenericInfallible::<3>::from(encoded),
+            GenericInfallible([1, 2, 3])
+        );
+        assert_eq!(
+            GenericInfallible::<3>::from(&encoded),
+            GenericInfallible([1, 2, 3])
+        );
+        assert_eq!(
+            GenericInfallible::<3>::try_from([1u8, 2, 3].as_slice()).unwrap(),
+            GenericInfallible([1, 2, 3])
+        );
+    }
+
+    trait FixedArrayBound {}
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct Bounded;
+
+    impl FixedArrayBound for Bounded {}
+
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(bytes([u8; 2]))]
+    struct BoundedGeneric<T> {
+        marker: PhantomData<T>,
+        raw: [u8; 2],
+    }
+
+    impl<T: FixedArrayBound> Write for BoundedGeneric<T> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.raw.write(buf);
+        }
+    }
+
+    impl<T: FixedArrayBound> Read for BoundedGeneric<T> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self {
+                marker: PhantomData,
+                raw: <[u8; 2]>::read(buf)?,
+            })
+        }
+    }
+
+    impl<T: FixedArrayBound> FixedSize for BoundedGeneric<T> {
+        const SIZE: usize = 2;
+    }
+
+    #[test]
+    fn test_fixed_array_bounded_generic() {
+        let value = BoundedGeneric::<Bounded> {
+            marker: PhantomData,
+            raw: [1, 2],
+        };
+        let encoded: [u8; 2] = (&value).into();
+        assert_eq!(encoded, [1, 2]);
+        assert_eq!(<[u8; 2]>::from(value).as_ref(), &[1, 2]);
+        assert_eq!(
+            BoundedGeneric::<Bounded>::try_from(encoded).unwrap().raw,
+            [1, 2]
+        );
+        assert_eq!(
+            BoundedGeneric::<Bounded>::try_from(&encoded).unwrap().raw,
+            [1, 2]
+        );
+        assert_eq!(
+            BoundedGeneric::<Bounded>::try_from([1u8, 2].as_slice())
+                .unwrap()
+                .raw,
+            [1, 2]
+        );
+    }
+
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(bytes([u8; 2]))]
+    struct LifetimeFixed<'a> {
+        marker: PhantomData<&'a ()>,
+        raw: [u8; 2],
+    }
+
+    impl Write for LifetimeFixed<'_> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.raw.write(buf);
+        }
+    }
+
+    impl Read for LifetimeFixed<'_> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self {
+                marker: PhantomData,
+                raw: <[u8; 2]>::read(buf)?,
+            })
+        }
+    }
+
+    impl FixedSize for LifetimeFixed<'_> {
+        const SIZE: usize = 2;
+    }
+
+    #[test]
+    fn test_fixed_array_lifetime() {
+        let value = LifetimeFixed {
+            marker: PhantomData,
+            raw: [1, 2],
+        };
+        let encoded: [u8; LifetimeFixed::SIZE] = (&value).into();
+        assert_eq!(encoded, [1, 2]);
+        assert_eq!(<[u8; LifetimeFixed::SIZE]>::from(value).as_ref(), &[1, 2]);
+        assert_eq!(LifetimeFixed::try_from(encoded).unwrap().raw, [1, 2]);
+        assert_eq!(LifetimeFixed::try_from(&encoded).unwrap().raw, [1, 2]);
+        assert_eq!(
+            LifetimeFixed::try_from([1u8, 2].as_slice()).unwrap().raw,
+            [1, 2]
+        );
     }
 }

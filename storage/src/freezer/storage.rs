@@ -5,7 +5,9 @@ use crate::{
     },
     Context,
 };
-use commonware_codec::{CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    CodecShared, Encode, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
+};
 use commonware_cryptography::{crc32, Crc32, Hasher};
 use commonware_runtime::{
     buffer,
@@ -25,7 +27,7 @@ const RESIZE_THRESHOLD: u64 = 50;
 ///
 /// This can be used to directly access the data for a given
 /// key-value pair (rather than walking the journal chain).
-#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
+#[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, FixedArray)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct Cursor([u8; u64::SIZE + u64::SIZE + u32::SIZE]);

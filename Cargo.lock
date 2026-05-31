@@ -1270,6 +1270,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-codec-macros",
  "commonware-conformance",
  "commonware-macros",
  "paste",
@@ -1289,6 +1290,16 @@ dependencies = [
  "libfuzzer-sys",
  "paste",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "commonware-codec-macros"
+version = "2026.5.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

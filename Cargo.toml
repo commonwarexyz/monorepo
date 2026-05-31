@@ -3,6 +3,7 @@ members = [
     "actor",
     "broadcast",
     "codec",
+    "codec/macros",
     "coding",
     "collector",
     "conformance",
@@ -107,6 +108,7 @@ colored = "3.0.0"
 commonware-actor = { version = "2026.5.0", path = "actor" }
 commonware-broadcast = { version = "2026.5.0", path = "broadcast" }
 commonware-codec = { version = "2026.5.0", path = "codec", default-features = false }
+commonware-codec-macros = { version = "2026.5.0", path = "codec/macros" }
 commonware-coding = { version = "2026.5.0", path = "coding" }
 commonware-collector = { version = "2026.5.0", path = "collector" }
 commonware-conformance = { version = "2026.5.0", path = "conformance" }
