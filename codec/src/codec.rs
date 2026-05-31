@@ -400,6 +400,7 @@ mod tests {
         Error, FixedConversions,
     };
     use bytes::Bytes;
+    use core::marker::PhantomData;
 
     #[test]
     fn test_insufficient_buffer() {
@@ -623,6 +624,51 @@ mod tests {
         assert_eq!(
             GenericInfallible::<3>::try_from([1u8, 2, 3].as_slice()).unwrap(),
             GenericInfallible([1, 2, 3])
+        );
+    }
+
+    #[derive(Debug, Eq, PartialEq, FixedConversions)]
+    #[fixed_conversions(bytes([u8; 2]))]
+    struct LifetimeFixed<'a> {
+        marker: PhantomData<&'a ()>,
+        raw: [u8; 2],
+    }
+
+    impl Write for LifetimeFixed<'_> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.raw.write(buf);
+        }
+    }
+
+    impl Read for LifetimeFixed<'_> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self {
+                marker: PhantomData,
+                raw: <[u8; 2]>::read(buf)?,
+            })
+        }
+    }
+
+    impl FixedSize for LifetimeFixed<'_> {
+        const SIZE: usize = 2;
+    }
+
+    #[test]
+    fn test_fixed_conversions_lifetime() {
+        let value = LifetimeFixed {
+            marker: PhantomData,
+            raw: [1, 2],
+        };
+        let encoded: [u8; LifetimeFixed::SIZE] = (&value).into();
+        assert_eq!(encoded, [1, 2]);
+        assert_eq!(<[u8; LifetimeFixed::SIZE]>::from(value).as_ref(), &[1, 2]);
+        assert_eq!(LifetimeFixed::try_from(encoded).unwrap().raw, [1, 2]);
+        assert_eq!(LifetimeFixed::try_from(&encoded).unwrap().raw, [1, 2]);
+        assert_eq!(
+            LifetimeFixed::try_from([1u8, 2].as_slice()).unwrap().raw,
+            [1, 2]
         );
     }
 }

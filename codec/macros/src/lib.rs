@@ -39,8 +39,9 @@ fn codec_path() -> proc_macro2::TokenStream {
 /// # Attributes
 ///
 /// - `#[fixed_conversions(infallible)]`: skip the `TryFrom<[u8; SIZE]>` impl.
-/// - `#[fixed_conversions(bytes([u8; N]))]`: required for generic types. Stable Rust forbids
-///   `[u8; <T as FixedSize>::SIZE]` when `T` is generic, so the byte array type must be named.
+/// - `#[fixed_conversions(bytes([u8; N]))]`: required for any generic type (lifetime, type, or
+///   const). Stable Rust forbids a generic parameter inside the const expression
+///   `[u8; <T as FixedSize>::SIZE]`, so the byte array type must be named.
 #[proc_macro_derive(FixedConversions, attributes(fixed_conversions))]
 pub fn fixed_conversions(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -71,6 +72,8 @@ pub fn fixed_conversions(input: TokenStream) -> TokenStream {
         }
     }
 
+    // Stable Rust forbids any generic parameter (lifetime, type, or const) inside the const
+    // expression `<T as FixedSize>::SIZE`, so generic types must name the byte array type.
     if !input.generics.params.is_empty() && bytes_ty.is_none() {
         return Error::new_spanned(
             &input.generics,
