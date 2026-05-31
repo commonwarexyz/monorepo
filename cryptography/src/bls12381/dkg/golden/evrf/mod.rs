@@ -12,7 +12,7 @@ use crate::{
 use bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    impl_fixed_conversions, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read,
+    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedConversions, FixedSize, Read,
     ReadExt, Write,
 };
 use commonware_formatting::hex;
@@ -325,7 +325,7 @@ impl FixedSize for PrivateKey {
 /// A Schnorr signature over the Bandersnatch curve.
 ///
 /// Consists of a commitment point K and a scalar response s.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedConversions)]
 pub struct Signature {
     raw: [u8; G::SIZE + F::SIZE],
 }
@@ -348,8 +348,6 @@ impl Read for Signature {
 impl FixedSize for Signature {
     const SIZE: usize = G::SIZE + F::SIZE;
 }
-
-impl_fixed_conversions!(Signature);
 
 impl crate::Signature for Signature {}
 
@@ -385,7 +383,7 @@ impl Display for Signature {
 /// A public key on the Bandersnatch curve, used for signatures and VRF outputs.
 ///
 /// This can be created using [`PrivateKey::public`].
-#[derive(Clone)]
+#[derive(Clone, FixedConversions)]
 pub struct PublicKey {
     raw: [u8; G::SIZE],
     point: G,
@@ -447,8 +445,6 @@ impl Read for PublicKey {
 impl FixedSize for PublicKey {
     const SIZE: usize = G::SIZE;
 }
-
-impl_fixed_conversions!(PublicKey);
 
 impl Span for PublicKey {}
 

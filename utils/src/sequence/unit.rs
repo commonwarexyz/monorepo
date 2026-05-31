@@ -1,13 +1,13 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{impl_fixed_conversions, FixedSize, Read, Write};
+use commonware_codec::{FixedConversions, FixedSize, Read, Write};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
 
 /// An `Array` implementation for the unit type `()`.
-#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, FixedConversions)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Unit;
 
@@ -52,8 +52,6 @@ impl AsRef<[u8]> for Unit {
         &[]
     }
 }
-
-impl_fixed_conversions!(Unit);
 
 impl Span for Unit {}
 impl Array for Unit {}

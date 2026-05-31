@@ -28,9 +28,7 @@
 
 use crate::Hasher;
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -98,7 +96,8 @@ impl Hasher for Crc32 {
 }
 
 /// Digest of a CRC32 hashing operation (4 bytes).
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedConversions)]
+#[fixed_conversions(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; SIZE]);
 
@@ -148,8 +147,6 @@ impl From<[u8; SIZE]> for Digest {
         Self(value)
     }
 }
-
-impl_fixed_conversions!(Digest, infallible);
 
 impl From<u32> for Digest {
     fn from(value: u32) -> Self {

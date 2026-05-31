@@ -1,8 +1,6 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display, Formatter},
@@ -19,7 +17,8 @@ pub enum Error {
 }
 
 /// An `Array` implementation for `u64`.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default, FixedConversions)]
+#[fixed_conversions(infallible)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct U64([u8; u64::SIZE]);
@@ -57,8 +56,6 @@ impl From<[u8; Self::SIZE]> for U64 {
         Self(value)
     }
 }
-
-impl_fixed_conversions!(U64, infallible);
 
 impl From<u64> for U64 {
     fn from(value: u64) -> Self {

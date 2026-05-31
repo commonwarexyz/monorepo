@@ -1,8 +1,6 @@
 use crate::Secret;
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -104,7 +102,7 @@ impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
 }
 
 /// Internal Secp256r1 Public Key storage.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedConversions)]
 pub struct PublicKeyInner {
     raw: [u8; PUBLIC_KEY_LENGTH],
     pub key: VerifyingKey,
@@ -150,8 +148,6 @@ impl Read for PublicKeyInner {
 impl FixedSize for PublicKeyInner {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
-
-impl_fixed_conversions!(PublicKeyInner);
 
 impl Span for PublicKeyInner {}
 
@@ -283,8 +279,6 @@ macro_rules! impl_public_key_wrapper {
         impl commonware_codec::FixedSize for $name {
             const SIZE: usize = PUBLIC_KEY_LENGTH;
         }
-
-        impl_fixed_conversions!($name);
 
         impl commonware_utils::Span for $name {}
 

@@ -35,8 +35,7 @@ use crate::{BatchVerifier, Secret, Signer as _};
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_conversions, DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt,
-    Write,
+    DecodeExt, EncodeFixed, Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -150,7 +149,7 @@ impl crate::Verifier for PublicKey {
 }
 
 /// BLS12-381 public key.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, FixedConversions)]
 pub struct PublicKey {
     raw: [u8; <MinPk as Variant>::Public::SIZE],
     key: <MinPk as Variant>::Public,
@@ -188,8 +187,6 @@ impl Read for PublicKey {
 impl FixedSize for PublicKey {
     const SIZE: usize = <MinPk as Variant>::Public::SIZE;
 }
-
-impl_fixed_conversions!(PublicKey);
 
 impl Span for PublicKey {}
 
@@ -258,7 +255,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 }
 
 /// BLS12-381 signature.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, FixedConversions)]
 pub struct Signature {
     raw: [u8; <MinPk as Variant>::Signature::SIZE],
     signature: <MinPk as Variant>::Signature,
@@ -292,8 +289,6 @@ impl Read for Signature {
 impl FixedSize for Signature {
     const SIZE: usize = <MinPk as Variant>::Signature::SIZE;
 }
-
-impl_fixed_conversions!(Signature);
 
 impl Span for Signature {}
 

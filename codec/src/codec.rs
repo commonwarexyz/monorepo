@@ -360,170 +360,6 @@ pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
 // Automatically implement `DecodeFixed` for types that implement `Read<Cfg = ()>` and `FixedSize`.
 impl<T: Read<Cfg = ()> + FixedSize> DecodeFixed for T {}
 
-/// Implements conversion traits for a type's fixed-size byte array encoding.
-///
-/// This macro adds:
-/// - `TryFrom<[u8; T::SIZE]> for T`
-/// - `TryFrom<&[u8; T::SIZE]> for T`
-/// - `TryFrom<&[u8]> for T`
-/// - `From<T> for [u8; T::SIZE]`
-/// - `From<&T> for [u8; T::SIZE]`
-///
-/// `impl_fixed_conversions!(T)` requires `T` to implement [Read] with `Cfg = ()` and [EncodeFixed].
-/// For types that already implement infallible `From<[u8; T::SIZE]>`, use
-/// `impl_fixed_conversions!(T, infallible)` to skip the `TryFrom<[u8; T::SIZE]>` impl (which would
-/// conflict with the standard library's blanket impl).
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // BETA
-#[macro_export]
-macro_rules! impl_fixed_conversions {
-    ([$($generics:tt)*] $type:ty, $bytes:ty) => {
-        impl<$($generics)*> core::convert::TryFrom<$bytes> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(bytes: $bytes) -> Result<Self, Self::Error> {
-                <$type as $crate::DecodeFixed>::decode_fixed(bytes)
-            }
-        }
-
-        impl<$($generics)*> core::convert::TryFrom<&$bytes> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(bytes: &$bytes) -> Result<Self, Self::Error> {
-                <$type as $crate::DecodeFixed>::decode_fixed(*bytes)
-            }
-        }
-
-        impl<$($generics)*> core::convert::TryFrom<&[u8]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-                <$type as $crate::Decode>::decode_cfg(bytes, &())
-            }
-        }
-
-        impl<$($generics)*> core::convert::From<$type> for $bytes {
-            fn from(value: $type) -> Self {
-                $crate::EncodeFixed::encode_fixed(&value)
-            }
-        }
-
-        impl<$($generics)*> core::convert::From<&$type> for $bytes {
-            fn from(value: &$type) -> Self {
-                $crate::EncodeFixed::encode_fixed(value)
-            }
-        }
-    };
-
-    ([$($generics:tt)*] $type:ty, $bytes:ty, infallible) => {
-        impl<$($generics)*> core::convert::TryFrom<&$bytes> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(bytes: &$bytes) -> Result<Self, Self::Error> {
-                <$type as $crate::DecodeFixed>::decode_fixed(*bytes)
-            }
-        }
-
-        impl<$($generics)*> core::convert::TryFrom<&[u8]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-                <$type as $crate::Decode>::decode_cfg(bytes, &())
-            }
-        }
-
-        impl<$($generics)*> core::convert::From<$type> for $bytes {
-            fn from(value: $type) -> Self {
-                $crate::EncodeFixed::encode_fixed(&value)
-            }
-        }
-
-        impl<$($generics)*> core::convert::From<&$type> for $bytes {
-            fn from(value: &$type) -> Self {
-                $crate::EncodeFixed::encode_fixed(value)
-            }
-        }
-    };
-
-    ($type:ty) => {
-        impl core::convert::TryFrom<[u8; <$type as $crate::FixedSize>::SIZE]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(
-                bytes: [u8; <$type as $crate::FixedSize>::SIZE],
-            ) -> Result<Self, Self::Error> {
-                <$type as $crate::DecodeFixed>::decode_fixed(bytes)
-            }
-        }
-
-        impl core::convert::TryFrom<&[u8; <$type as $crate::FixedSize>::SIZE]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(
-                bytes: &[u8; <$type as $crate::FixedSize>::SIZE],
-            ) -> Result<Self, Self::Error> {
-                <$type as $crate::DecodeFixed>::decode_fixed(*bytes)
-            }
-        }
-
-        impl core::convert::TryFrom<&[u8]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-                <$type as $crate::Decode>::decode_cfg(bytes, &())
-            }
-        }
-
-        impl core::convert::From<$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: $type) -> Self {
-                $crate::EncodeFixed::encode_fixed(&value)
-            }
-        }
-
-        impl core::convert::From<&$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: &$type) -> Self {
-                $crate::EncodeFixed::encode_fixed(value)
-            }
-        }
-    };
-
-    ($type:ty, infallible) => {
-        impl core::convert::TryFrom<&[u8; <$type as $crate::FixedSize>::SIZE]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(
-                bytes: &[u8; <$type as $crate::FixedSize>::SIZE],
-            ) -> Result<Self, Self::Error> {
-                <$type as $crate::DecodeFixed>::decode_fixed(*bytes)
-            }
-        }
-
-        impl core::convert::TryFrom<&[u8]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
-                <$type as $crate::Decode>::decode_cfg(bytes, &())
-            }
-        }
-
-        impl core::convert::From<$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: $type) -> Self {
-                $crate::EncodeFixed::encode_fixed(&value)
-            }
-        }
-
-        impl core::convert::From<&$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: &$type) -> Self {
-                $crate::EncodeFixed::encode_fixed(value)
-            }
-        }
-    };
-}
-
 /// Convenience trait combining `FixedSize` and `Codec`.
 ///
 /// Represents types that can be both fully encoded and decoded from a fixed-size byte sequence.
@@ -561,7 +397,7 @@ mod tests {
     use super::*;
     use crate::{
         extensions::{DecodeExt, ReadExt},
-        Error,
+        Error, FixedConversions,
     };
     use bytes::Bytes;
 
@@ -591,7 +427,7 @@ mod tests {
         let _: [u8; 5] = 42u32.encode_fixed();
     }
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Debug, Eq, PartialEq, FixedConversions)]
     struct FixedBytes([u8; 2]);
 
     impl Write for FixedBytes {
@@ -612,10 +448,8 @@ mod tests {
         const SIZE: usize = 2;
     }
 
-    impl_fixed_conversions!(FixedBytes);
-
     #[test]
-    fn test_impl_fixed_conversions() {
+    fn test_fixed_conversions() {
         let value = FixedBytes([1, 2]);
         let encoded: [u8; FixedBytes::SIZE] = (&value).into();
         assert_eq!(encoded, [1, 2]);
@@ -650,7 +484,8 @@ mod tests {
         let _ = FixedBytes::decode_fixed([1, 2, 3]);
     }
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Debug, Eq, PartialEq, FixedConversions)]
+    #[fixed_conversions(infallible)]
     struct InfallibleFixedBytes([u8; 2]);
 
     impl Write for InfallibleFixedBytes {
@@ -677,10 +512,8 @@ mod tests {
         }
     }
 
-    impl_fixed_conversions!(InfallibleFixedBytes, infallible);
-
     #[test]
-    fn test_impl_fixed_conversions_infallible() {
+    fn test_fixed_conversions_infallible() {
         let value = InfallibleFixedBytes([1, 2]);
         let encoded: [u8; InfallibleFixedBytes::SIZE] = (&value).into();
         assert_eq!(encoded, [1, 2]);
@@ -703,7 +536,8 @@ mod tests {
         ));
     }
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Debug, Eq, PartialEq, FixedConversions)]
+    #[fixed_conversions(bytes([u8; N]))]
     struct GenericFixed<const N: usize>([u8; N]);
 
     impl<const N: usize> Write for GenericFixed<N> {
@@ -724,10 +558,8 @@ mod tests {
         const SIZE: usize = N;
     }
 
-    impl_fixed_conversions!([const N: usize] GenericFixed<N>, [u8; N]);
-
     #[test]
-    fn test_impl_fixed_conversions_generic() {
+    fn test_fixed_conversions_generic() {
         let value = GenericFixed::<3>([1, 2, 3]);
         let encoded: [u8; 3] = (&value).into();
         assert_eq!(encoded, [1, 2, 3]);
@@ -746,7 +578,8 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Eq, PartialEq)]
+    #[derive(Debug, Eq, PartialEq, FixedConversions)]
+    #[fixed_conversions(infallible, bytes([u8; N]))]
     struct GenericInfallible<const N: usize>([u8; N]);
 
     impl<const N: usize> Write for GenericInfallible<N> {
@@ -773,10 +606,8 @@ mod tests {
         }
     }
 
-    impl_fixed_conversions!([const N: usize] GenericInfallible<N>, [u8; N], infallible);
-
     #[test]
-    fn test_impl_fixed_conversions_generic_infallible() {
+    fn test_fixed_conversions_generic_infallible() {
         let value = GenericInfallible::<3>([1, 2, 3]);
         let encoded: [u8; 3] = (&value).into();
         assert_eq!(encoded, [1, 2, 3]);

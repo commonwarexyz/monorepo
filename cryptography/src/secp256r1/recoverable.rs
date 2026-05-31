@@ -10,9 +10,7 @@ use super::common::{
     PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_utils::{union_unique, Array, Span};
 use core::{
@@ -76,7 +74,7 @@ impl From<PrivateKey> for PublicKey {
 }
 
 /// Secp256r1 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedConversions)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
@@ -101,7 +99,7 @@ impl PublicKey {
 }
 
 /// Secp256r1 Signature with recovery ID.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, FixedConversions)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     recovery_id: RecoveryId,
@@ -179,8 +177,6 @@ impl Read for Signature {
 impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
-
-impl_fixed_conversions!(Signature);
 
 impl Span for Signature {}
 

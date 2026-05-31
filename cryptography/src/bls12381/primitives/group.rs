@@ -30,9 +30,9 @@ use blst::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_conversions, EncodeSize,
+    EncodeSize,
     Error::{self, Invalid},
-    FixedSize, Read, ReadExt, Write,
+    FixedConversions, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
@@ -376,7 +376,7 @@ const COSET_SHIFT_INV: Scalar = Scalar(blst_fr {
 });
 
 /// A point on the BLS12-381 G1 curve.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, FixedConversions)]
 #[repr(transparent)]
 pub struct G1(blst_p1);
 
@@ -402,7 +402,7 @@ impl arbitrary::Arbitrary<'_> for G1 {
 }
 
 /// A point on the BLS12-381 G2 curve.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq, FixedConversions)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
 
@@ -1166,8 +1166,6 @@ impl FixedSize for G1 {
     const SIZE: usize = G1_ELEMENT_BYTE_LENGTH;
 }
 
-impl_fixed_conversions!(G1);
-
 impl Hash for G1 {
     fn hash<H: Hasher>(&self, state: &mut H) {
         let slice = self.as_slice();
@@ -1587,8 +1585,6 @@ impl Read for G2 {
 impl FixedSize for G2 {
     const SIZE: usize = G2_ELEMENT_BYTE_LENGTH;
 }
-
-impl_fixed_conversions!(G2);
 
 impl Hash for G2 {
     fn hash<H: Hasher>(&self, state: &mut H) {

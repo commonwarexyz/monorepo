@@ -5,9 +5,7 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -124,7 +122,7 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedConversions)]
 pub struct PublicKey {
     key: ed_core::VerificationKey,
 }
@@ -185,8 +183,6 @@ impl FixedSize for PublicKey {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
 
-impl_fixed_conversions!(PublicKey);
-
 impl Span for PublicKey {}
 
 impl Array for PublicKey {}
@@ -246,7 +242,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// one message also verify against another. This property does not hold for maliciously
 /// generated public keys. In particular, it's possible to craft public keys (which would
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
-#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedConversions)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
 }
@@ -271,8 +267,6 @@ impl Read for Signature {
 impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
-
-impl_fixed_conversions!(Signature);
 
 impl Span for Signature {}
 
