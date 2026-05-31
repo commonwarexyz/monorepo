@@ -697,7 +697,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
         //! Types and utilities for working with [`Commitment`]s.
 
-        use commonware_codec::{impl_fixed_byte_conversions, Encode, FixedSize, Read, ReadExt, Write};
+        use commonware_codec::{impl_fixed_conversions, Encode, FixedSize, Read, ReadExt, Write};
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
@@ -896,7 +896,7 @@ commonware_macros::stability_scope!(ALPHA {
 
         impl Span for Commitment {}
 
-        impl_fixed_byte_conversions!(Commitment);
+        impl_fixed_conversions!(Commitment);
 
         impl Array for Commitment {}
 

@@ -30,7 +30,7 @@ use blst::{
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_byte_conversions, EncodeSize,
+    impl_fixed_conversions, EncodeSize,
     Error::{self, Invalid},
     FixedSize, Read, ReadExt, Write,
 };
@@ -1166,7 +1166,7 @@ impl FixedSize for G1 {
     const SIZE: usize = G1_ELEMENT_BYTE_LENGTH;
 }
 
-impl_fixed_byte_conversions!(G1);
+impl_fixed_conversions!(G1);
 
 impl Hash for G1 {
     fn hash<H: Hasher>(&self, state: &mut H) {
@@ -1588,7 +1588,7 @@ impl FixedSize for G2 {
     const SIZE: usize = G2_ELEMENT_BYTE_LENGTH;
 }
 
-impl_fixed_byte_conversions!(G2);
+impl_fixed_conversions!(G2);
 
 impl Hash for G2 {
     fn hash<H: Hasher>(&self, state: &mut H) {

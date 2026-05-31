@@ -13,7 +13,7 @@ use super::common::{
 use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_utils::{union_unique, Array, Span};
@@ -145,7 +145,7 @@ impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
 
-impl_fixed_byte_conversions!(Signature);
+impl_fixed_conversions!(Signature);
 
 impl Span for Signature {}
 

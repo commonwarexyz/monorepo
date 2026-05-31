@@ -1,6 +1,6 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{impl_fixed_byte_conversions, FixedSize, Read, Write};
+use commonware_codec::{impl_fixed_conversions, FixedSize, Read, Write};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
@@ -53,7 +53,7 @@ impl AsRef<[u8]> for Unit {
     }
 }
 
-impl_fixed_byte_conversions!(Unit);
+impl_fixed_conversions!(Unit);
 
 impl Span for Unit {}
 impl Array for Unit {}

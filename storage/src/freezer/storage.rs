@@ -6,7 +6,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{
-    impl_fixed_byte_conversions, CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
+    impl_fixed_conversions, CodecShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
 };
 use commonware_cryptography::{crc32, Crc32, Hasher};
 use commonware_runtime::{
@@ -76,7 +76,7 @@ impl FixedSize for Cursor {
     const SIZE: usize = u64::SIZE + u64::SIZE + u32::SIZE;
 }
 
-impl_fixed_byte_conversions!(Cursor);
+impl_fixed_conversions!(Cursor);
 
 impl Span for Cursor {}
 

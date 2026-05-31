@@ -344,9 +344,9 @@ impl<T: Write + FixedSize> EncodeFixed for T {}
 /// - `From<T> for [u8; T::SIZE]`
 /// - `From<&T> for [u8; T::SIZE]`
 ///
-/// `impl_fixed_byte_conversions!(T)` requires `T` to implement [Read] with `Cfg = ()` and [EncodeFixed].
+/// `impl_fixed_conversions!(T)` requires `T` to implement [Read] with `Cfg = ()` and [EncodeFixed].
 /// For types that already implement infallible `From<[u8; T::SIZE]>`, use
-/// `impl_fixed_byte_conversions!(T, infallible)` to generate only the `T`-to-bytes conversions.
+/// `impl_fixed_conversions!(T, infallible)` to generate only the `T`-to-bytes conversions.
 #[cfg(not(any(
     commonware_stability_GAMMA,
     commonware_stability_DELTA,
@@ -354,7 +354,7 @@ impl<T: Write + FixedSize> EncodeFixed for T {}
     commonware_stability_RESERVED
 )))] // BETA
 #[macro_export]
-macro_rules! impl_fixed_byte_conversions {
+macro_rules! impl_fixed_conversions {
     ([$($generics:tt)*] $type:ty) => {
         impl<$($generics)*> core::convert::TryFrom<[u8; <$type as $crate::FixedSize>::SIZE]> for $type {
             type Error = $crate::Error;
@@ -559,10 +559,10 @@ mod tests {
         const SIZE: usize = 2;
     }
 
-    impl_fixed_byte_conversions!(FixedBytes);
+    impl_fixed_conversions!(FixedBytes);
 
     #[test]
-    fn test_impl_fixed_byte_conversions() {
+    fn test_impl_fixed_conversions() {
         let value = FixedBytes([1, 2]);
         let encoded: [u8; FixedBytes::SIZE] = (&value).into();
         assert_eq!(encoded, [1, 2]);
@@ -597,10 +597,10 @@ mod tests {
         }
     }
 
-    impl_fixed_byte_conversions!(InfallibleFixedBytes, infallible);
+    impl_fixed_conversions!(InfallibleFixedBytes, infallible);
 
     #[test]
-    fn test_impl_fixed_byte_conversions_infallible() {
+    fn test_impl_fixed_conversions_infallible() {
         let value = InfallibleFixedBytes([1, 2]);
         let encoded: [u8; InfallibleFixedBytes::SIZE] = (&value).into();
         assert_eq!(encoded, [1, 2]);

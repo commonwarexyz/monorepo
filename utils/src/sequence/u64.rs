@@ -1,7 +1,7 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use core::{
     cmp::{Ord, PartialOrd},
@@ -58,7 +58,7 @@ impl From<[u8; Self::SIZE]> for U64 {
     }
 }
 
-impl_fixed_byte_conversions!(U64, infallible);
+impl_fixed_conversions!(U64, infallible);
 
 impl From<u64> for U64 {
     fn from(value: u64) -> Self {

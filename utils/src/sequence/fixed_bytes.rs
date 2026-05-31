@@ -1,7 +1,7 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    impl_fixed_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use core::{
@@ -80,7 +80,7 @@ impl<const N: usize> From<[u8; N]> for FixedBytes<N> {
     }
 }
 
-impl_fixed_byte_conversions!([const N: usize] FixedBytes<N>, [u8; N], infallible);
+impl_fixed_conversions!([const N: usize] FixedBytes<N>, [u8; N], infallible);
 
 impl<const N: usize> Zeroize for FixedBytes<N> {
     fn zeroize(&mut self) {

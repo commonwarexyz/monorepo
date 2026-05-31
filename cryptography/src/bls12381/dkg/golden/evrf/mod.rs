@@ -12,8 +12,8 @@ use crate::{
 use bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    impl_fixed_byte_conversions, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize,
-    Read, ReadExt, Write,
+    impl_fixed_conversions, Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read,
+    ReadExt, Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
@@ -349,7 +349,7 @@ impl FixedSize for Signature {
     const SIZE: usize = G::SIZE + F::SIZE;
 }
 
-impl_fixed_byte_conversions!(Signature);
+impl_fixed_conversions!(Signature);
 
 impl crate::Signature for Signature {}
 
@@ -466,7 +466,7 @@ impl FixedSize for PublicKey {
     const SIZE: usize = G::SIZE;
 }
 
-impl_fixed_byte_conversions!(PublicKey);
+impl_fixed_conversions!(PublicKey);
 
 impl Span for PublicKey {}
 

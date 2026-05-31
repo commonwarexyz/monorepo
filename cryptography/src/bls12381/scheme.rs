@@ -35,8 +35,8 @@ use crate::{BatchVerifier, Secret, Signer as _};
 use alloc::vec::Vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_byte_conversions, DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read,
-    ReadExt, Write,
+    impl_fixed_conversions, DecodeExt, EncodeFixed, Error as CodecError, FixedSize, Read, ReadExt,
+    Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -189,7 +189,7 @@ impl FixedSize for PublicKey {
     const SIZE: usize = <MinPk as Variant>::Public::SIZE;
 }
 
-impl_fixed_byte_conversions!(PublicKey);
+impl_fixed_conversions!(PublicKey);
 
 impl Span for PublicKey {}
 
@@ -293,7 +293,7 @@ impl FixedSize for Signature {
     const SIZE: usize = <MinPk as Variant>::Signature::SIZE;
 }
 
-impl_fixed_byte_conversions!(Signature);
+impl_fixed_conversions!(Signature);
 
 impl Span for Signature {}
 

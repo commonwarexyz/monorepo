@@ -25,7 +25,7 @@ use crate::Hasher;
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    impl_fixed_byte_conversions, DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    impl_fixed_conversions, DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -128,7 +128,7 @@ impl From<[u8; DIGEST_LENGTH]> for Digest {
     }
 }
 
-impl_fixed_byte_conversions!(Digest, infallible);
+impl_fixed_conversions!(Digest, infallible);
 
 impl AsRef<[u8]> for Digest {
     fn as_ref(&self) -> &[u8] {
