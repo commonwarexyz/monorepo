@@ -348,9 +348,9 @@ pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
         assert_eq!(
             N,
             Self::SIZE,
-            "Can't decode {} bytes from {} bytes",
-            Self::SIZE,
-            N
+            "Can't decode {} bytes into {} bytes",
+            N,
+            Self::SIZE
         );
 
         Self::decode_cfg(bytes.as_ref(), &())
@@ -480,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Can't decode 2 bytes from 3 bytes")]
+    #[should_panic(expected = "Can't decode 3 bytes into 2 bytes")]
     fn test_decode_fixed_panic() {
         let _ = FixedBytes::decode_fixed([1, 2, 3]);
     }
