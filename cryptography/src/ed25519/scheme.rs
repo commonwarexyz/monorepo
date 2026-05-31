@@ -200,12 +200,6 @@ impl Deref for PublicKey {
     }
 }
 
-impl From<VerificationKey> for PublicKey {
-    fn from(key: VerificationKey) -> Self {
-        Self { key }
-    }
-}
-
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", Hex(self))
