@@ -325,7 +325,7 @@ impl FixedSize for PrivateKey {
 /// A Schnorr signature over the Bandersnatch curve.
 ///
 /// Consists of a commitment point K and a scalar response s.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Signature {
     raw: [u8; G::SIZE + F::SIZE],
 }
@@ -356,24 +356,6 @@ impl crate::Signature for Signature {}
 impl Span for Signature {}
 
 impl Array for Signature {}
-
-impl Hash for Signature {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
-    }
-}
-
-impl Ord for Signature {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for Signature {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {

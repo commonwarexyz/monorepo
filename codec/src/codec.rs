@@ -600,7 +600,10 @@ mod tests {
 
     #[test]
     fn test_decode_fixed() {
-        assert_eq!(FixedBytes::decode_fixed([1, 2]).unwrap(), FixedBytes([1, 2]));
+        assert_eq!(
+            FixedBytes::decode_fixed([1, 2]).unwrap(),
+            FixedBytes([1, 2])
+        );
     }
 
     #[test]
