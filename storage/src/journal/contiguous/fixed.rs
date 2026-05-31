@@ -3432,6 +3432,182 @@ mod tests {
         });
     }
 
+    /// Test recovery when the oldest section is empty but a newer section still holds durable items.
+    ///
+    /// This is the fixed-journal analog of the variable-journal empty-oldest-section gap bug. A
+    /// contiguous journal can only populate a later section after filling the earlier one, so an
+    /// empty oldest section with a populated newer section is an orphaned gap. Length-based recovery
+    /// walks from the oldest section, finds it short (empty), and truncates everything from there,
+    /// aligning the journal to empty without panicking.
+    #[test_traced]
+    fn test_fixed_recovery_empty_oldest_section_orphaned_newer_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+
+            // Durably persist sections 0 and 1 (positions 0..20).
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Empty the oldest data section in place, leaving section 1's items orphaned past the
+            // gap.
+            let (section0, size0) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert!(size0 > 0, "section 0 should start durable");
+            section0.resize(0).await.unwrap();
+            section0.sync().await.unwrap();
+
+            // Recovery aligns to an empty journal instead of panicking.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..0);
+            assert!(matches!(
+                journal.read(0).await,
+                Err(Error::ItemOutOfRange(0))
+            ));
+            let names = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert_eq!(
+                names.len(),
+                1,
+                "orphaned newer section should be truncated away"
+            );
+
+            // The orphaned newer section is truncated away and appends resume from position 0.
+            assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 0);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(42));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test recovery when the oldest section keeps a complete item but ends with a partial item.
+    ///
+    /// The segmented fixed journal first trims trailing partial-item bytes to the last complete
+    /// item. Contiguous recovery then treats the oldest section as a short non-tail section and
+    /// truncates the newer orphaned section.
+    #[test_traced]
+    fn test_fixed_recovery_partial_oldest_section_orphaned_newer_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+
+            // Durably persist sections 0 and 1 (positions 0..20).
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Leave one complete physical page plus one trailing partial byte in the oldest
+            // section. The append layer recovers the complete page, then the fixed journal trims
+            // the remaining logical bytes down to one complete item.
+            let (section0, size0) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            let physical_page_size = PAGE_SIZE.get() as u64 + 12;
+            assert!(size0 > physical_page_size);
+            section0.resize(physical_page_size + 1).await.unwrap();
+            section0.sync().await.unwrap();
+
+            // Recovery trims the partial item, keeps the complete prefix, and drops section 1.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..1);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(0));
+            assert!(matches!(
+                journal.read(1).await,
+                Err(Error::ItemOutOfRange(1))
+            ));
+            let names = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert_eq!(
+                names.len(),
+                1,
+                "orphaned newer section should be truncated away"
+            );
+
+            assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 1);
+            assert_eq!(journal.read(1).await.unwrap(), test_digest(42));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// Test recovery when the oldest section ends at a clean page boundary but is still short.
+    ///
+    /// No trailing bytes are repaired in this case: the first section simply contains fewer
+    /// complete items than its capacity. Since a later section exists, recovery must treat the
+    /// short non-tail section as the end of the contiguous prefix and drop the later section.
+    #[test_traced]
+    fn test_fixed_recovery_clean_short_oldest_section_orphaned_newer_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(20));
+
+            // Build two durable sections. Section 1 is only reachable if section 0 remains a full
+            // non-tail section after recovery.
+            let journal = Journal::<_, u32>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..40u32 {
+                journal.append(&i).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let physical_page_size = PAGE_SIZE.get() as u64 + 12;
+            let items_in_page = PAGE_SIZE.get() as u64 / u32::SIZE as u64;
+            assert_eq!(PAGE_SIZE.get() as u64 % u32::SIZE as u64, 0);
+            assert!(items_in_page < cfg.items_per_blob.get());
+
+            // Truncate at a valid physical page boundary. This leaves no invalid trailing page; the
+            // oldest section is simply short while section 1 still exists.
+            let (section0, size0) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert!(size0 > physical_page_size);
+            section0.resize(physical_page_size).await.unwrap();
+            section0.sync().await.unwrap();
+
+            // Recovery must stop at the short non-tail section rather than skipping to section 1.
+            let journal = Journal::<_, u32>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..items_in_page);
+            assert_eq!(journal.read(items_in_page - 1).await.unwrap(), 10);
+            assert!(matches!(
+                journal.read(items_in_page).await,
+                Err(Error::ItemOutOfRange(pos)) if pos == items_in_page
+            ));
+            let names = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert_eq!(
+                names.len(),
+                1,
+                "orphaned newer section should be truncated away"
+            );
+
+            // Appends resume directly after the recovered prefix.
+            assert_eq!(journal.append(&42).await.unwrap(), items_in_page);
+            assert_eq!(journal.read(items_in_page).await.unwrap(), 42);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test the contiguous fixed journal with items_per_blob: 1.
     ///
     /// This is an edge case where each item creates its own blob, and the
