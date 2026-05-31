@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_cryptography::bls12381::dkg::golden::{FuzzPlan, Setup};
 use commonware_parallel::Sequential;
 use libfuzzer_sys::fuzz_target;
@@ -17,7 +17,10 @@ struct FuzzInput {
     seed: u64,
 }
 
-fuzz_target!(|input: FuzzInput| {
+fuzz_target!(|data: &[u8]| {
+    let Ok(input) = FuzzInput::arbitrary_take_rest(Unstructured::new(data)) else {
+        return;
+    };
     input
         .plan
         .run(&SETUP, input.seed, &Sequential)
