@@ -10,7 +10,9 @@ use super::common::{
     PRIVATE_KEY_LENGTH, PUBLIC_KEY_LENGTH,
 };
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_formatting::Hex;
 use commonware_utils::{union_unique, Array, Span};
 use core::{
@@ -177,6 +179,8 @@ impl Read for Signature {
 impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
+
+impl_fixed_byte_conversions!(Signature);
 
 impl Span for Signature {}
 

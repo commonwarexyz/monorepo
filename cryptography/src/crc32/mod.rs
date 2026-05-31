@@ -28,7 +28,9 @@
 
 use crate::Hasher;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -146,6 +148,8 @@ impl From<[u8; SIZE]> for Digest {
         Self(value)
     }
 }
+
+impl_fixed_byte_conversions!(Digest, infallible);
 
 impl From<u32> for Digest {
     fn from(value: u32) -> Self {

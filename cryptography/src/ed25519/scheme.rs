@@ -5,7 +5,9 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
@@ -122,7 +124,7 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct PublicKey {
     key: ed_core::VerificationKey,
 }
@@ -146,21 +148,6 @@ impl crate::Verifier for PublicKey {
 }
 
 impl PublicKey {
-    /// Attempts to construct a public key from its byte encoding.
-    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CodecError> {
-        bytes.try_into()
-    }
-
-    /// Returns the byte encoding of this public key.
-    pub fn to_bytes(&self) -> [u8; 32] {
-        *self.key.as_bytes()
-    }
-
-    /// Returns a reference to the byte encoding of this public key.
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        self.key.as_bytes()
-    }
-
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
         let payload = namespace
@@ -194,29 +181,11 @@ impl Read for PublicKey {
     }
 }
 
-impl TryFrom<[u8; 32]> for PublicKey {
-    type Error = CodecError;
-
-    fn try_from(bytes: [u8; 32]) -> Result<Self, Self::Error> {
-        Self::read(&mut bytes.as_ref())
-    }
-}
-
-impl From<PublicKey> for [u8; 32] {
-    fn from(value: PublicKey) -> Self {
-        value.to_bytes()
-    }
-}
-
-impl From<&PublicKey> for [u8; 32] {
-    fn from(value: &PublicKey) -> Self {
-        value.to_bytes()
-    }
-}
-
 impl FixedSize for PublicKey {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
+
+impl_fixed_byte_conversions!(PublicKey);
 
 impl Span for PublicKey {}
 
@@ -277,29 +246,12 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// one message also verify against another. This property does not hold for maliciously
 /// generated public keys. In particular, it's possible to craft public keys (which would
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
 }
 
 impl crate::Signature for Signature {}
-
-impl Signature {
-    /// Attempts to construct a signature from its byte encoding.
-    pub fn from_bytes(bytes: [u8; 64]) -> Result<Self, CodecError> {
-        bytes.try_into()
-    }
-
-    /// Returns the byte encoding of this signature.
-    pub const fn to_bytes(&self) -> [u8; 64] {
-        self.raw
-    }
-
-    /// Returns a reference to the byte encoding of this signature.
-    pub const fn as_bytes(&self) -> &[u8; 64] {
-        &self.raw
-    }
-}
 
 impl Write for Signature {
     fn write(&self, buf: &mut impl BufMut) {
@@ -316,29 +268,11 @@ impl Read for Signature {
     }
 }
 
-impl TryFrom<[u8; 64]> for Signature {
-    type Error = CodecError;
-
-    fn try_from(raw: [u8; 64]) -> Result<Self, Self::Error> {
-        Self::read(&mut raw.as_ref())
-    }
-}
-
-impl From<Signature> for [u8; 64] {
-    fn from(value: Signature) -> Self {
-        value.to_bytes()
-    }
-}
-
-impl From<&Signature> for [u8; 64] {
-    fn from(value: &Signature) -> Self {
-        value.to_bytes()
-    }
-}
-
 impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
+
+impl_fixed_byte_conversions!(Signature);
 
 impl Span for Signature {}
 
@@ -468,7 +402,7 @@ impl Batch {
 mod tests {
     use super::*;
     use crate::{ed25519, Signer as _};
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, Encode, EncodeFixed};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
@@ -602,13 +536,11 @@ mod tests {
             0ee172f3daa62325af021a68f707511a
             ",
         );
-        let bytes = public_key.to_bytes();
+        let bytes: [u8; 32] = public_key.encode_fixed();
 
-        assert_eq!(public_key.as_bytes(), &bytes);
-        assert_eq!(<[u8; 32]>::from(public_key), bytes);
         assert_eq!(<[u8; 32]>::from(&public_key), bytes);
-        assert_eq!(PublicKey::from_bytes(bytes).unwrap(), public_key);
         assert_eq!(PublicKey::try_from(bytes).unwrap(), public_key);
+        assert_eq!(<[u8; 32]>::from(public_key), bytes);
     }
 
     #[test]
@@ -637,13 +569,11 @@ mod tests {
             d25bf5f0595bbe24655141438e7a100b
             ",
         );
-        let bytes = signature.to_bytes();
+        let bytes: [u8; 64] = signature.encode_fixed();
 
-        assert_eq!(signature.as_bytes(), &bytes);
-        assert_eq!(<[u8; 64]>::from(signature), bytes);
         assert_eq!(<[u8; 64]>::from(&signature), bytes);
-        assert_eq!(Signature::from_bytes(bytes).unwrap(), signature);
         assert_eq!(Signature::try_from(bytes).unwrap(), signature);
+        assert_eq!(<[u8; 64]>::from(signature), bytes);
     }
 
     #[test]

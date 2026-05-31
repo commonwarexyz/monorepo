@@ -1,6 +1,8 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display, Formatter},
@@ -55,6 +57,8 @@ impl From<[u8; Self::SIZE]> for U32 {
         Self(value)
     }
 }
+
+impl_fixed_byte_conversions!(U32, infallible);
 
 impl From<u32> for U32 {
     fn from(value: u32) -> Self {

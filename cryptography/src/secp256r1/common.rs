@@ -1,6 +1,8 @@
 use crate::Secret;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -149,6 +151,8 @@ impl FixedSize for PublicKeyInner {
     const SIZE: usize = PUBLIC_KEY_LENGTH;
 }
 
+impl_fixed_byte_conversions!(PublicKeyInner);
+
 impl Span for PublicKeyInner {}
 
 impl Array for PublicKeyInner {}
@@ -279,6 +283,8 @@ macro_rules! impl_public_key_wrapper {
         impl commonware_codec::FixedSize for $name {
             const SIZE: usize = PUBLIC_KEY_LENGTH;
         }
+
+        impl_fixed_byte_conversions!($name);
 
         impl commonware_utils::Span for $name {}
 

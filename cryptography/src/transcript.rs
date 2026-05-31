@@ -6,7 +6,9 @@
 use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    impl_fixed_byte_conversions, varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write,
+};
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
@@ -383,6 +385,9 @@ impl Display for Summary {
 }
 
 impl Span for Summary {}
+
+impl_fixed_byte_conversions!(Summary);
+
 impl Array for Summary {}
 
 impl crate::Digest for Summary {

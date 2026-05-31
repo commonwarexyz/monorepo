@@ -12,7 +12,9 @@ use super::common::{
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    impl_fixed_byte_conversions, Error as CodecError, FixedSize, Read, ReadExt, Write,
+};
 use commonware_formatting::Hex;
 use commonware_utils::{union_unique, Array, Span};
 use core::{
@@ -107,10 +109,8 @@ pub struct Signature {
     signature: p256::ecdsa::Signature,
 }
 
-impl TryFrom<[u8; SIGNATURE_LENGTH]> for Signature {
-    type Error = CodecError;
-
-    fn try_from(raw: [u8; SIGNATURE_LENGTH]) -> Result<Self, Self::Error> {
+impl Signature {
+    fn from_raw(raw: [u8; SIGNATURE_LENGTH]) -> Result<Self, CodecError> {
         let result = p256::ecdsa::Signature::from_slice(&raw);
         #[cfg(feature = "std")]
         let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
@@ -137,13 +137,15 @@ impl Read for Signature {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        <[u8; Self::SIZE]>::read(buf)?.try_into()
+        Self::from_raw(<[u8; Self::SIZE]>::read(buf)?)
     }
 }
 
 impl FixedSize for Signature {
     const SIZE: usize = SIGNATURE_LENGTH;
 }
+
+impl_fixed_byte_conversions!(Signature);
 
 impl Span for Signature {}
 
