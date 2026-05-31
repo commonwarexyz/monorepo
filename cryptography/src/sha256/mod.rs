@@ -123,12 +123,6 @@ impl Span for Digest {}
 
 impl Array for Digest {}
 
-impl From<[u8; DIGEST_LENGTH]> for Digest {
-    fn from(value: [u8; DIGEST_LENGTH]) -> Self {
-        Self(value)
-    }
-}
-
 impl AsRef<[u8]> for Digest {
     fn as_ref(&self) -> &[u8] {
         &self.0

@@ -142,12 +142,6 @@ impl Span for Digest {}
 
 impl Array for Digest {}
 
-impl From<[u8; SIZE]> for Digest {
-    fn from(value: [u8; SIZE]) -> Self {
-        Self(value)
-    }
-}
-
 impl From<u32> for Digest {
     fn from(value: u32) -> Self {
         Self(value.to_be_bytes())

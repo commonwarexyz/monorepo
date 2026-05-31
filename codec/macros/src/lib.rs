@@ -27,8 +27,8 @@ fn codec_path() -> proc_macro2::TokenStream {
 /// Derives byte-array conversion impls for a fixed-size type.
 ///
 /// Generates:
-/// - `TryFrom<[u8; SIZE]>` (skipped when `infallible`, since the standard library's blanket
-///   `TryFrom` impl already covers types with an infallible `From<[u8; SIZE]>`)
+/// - `TryFrom<[u8; SIZE]>`, or `From<[u8; SIZE]>` when `infallible` (decoding via
+///   `DecodeFixed`).
 /// - `TryFrom<&[u8; SIZE]>`
 /// - `TryFrom<&[u8]>`
 /// - `From<T> for [u8; SIZE]`
@@ -38,7 +38,9 @@ fn codec_path() -> proc_macro2::TokenStream {
 ///
 /// # Attributes
 ///
-/// - `#[fixed_array(infallible)]`: skip the `TryFrom<[u8; SIZE]>` impl.
+/// - `#[fixed_array(infallible)]`: emit `From<[u8; SIZE]>` instead of `TryFrom<[u8; SIZE]>`.
+///   The type's decode must never fail (any `[u8; SIZE]` is a valid value), since the generated
+///   `From` unwraps the `DecodeFixed` result.
 /// - `#[fixed_array(bytes([u8; N]))]`: required for any generic type (lifetime, type, or
 ///   const). Stable Rust forbids a generic parameter inside the const expression
 ///   `[u8; <T as FixedSize>::SIZE]`, so the byte array type must be named.
@@ -89,8 +91,15 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
         |ty| quote!(#ty),
     );
 
-    let try_from_array = if infallible {
-        quote!()
+    let from_array = if infallible {
+        quote! {
+            impl #impl_generics core::convert::From<#bytes> for #name #ty_generics #where_clause {
+                fn from(bytes: #bytes) -> Self {
+                    <Self as #codec::DecodeFixed>::decode_fixed(bytes)
+                        .expect("infallible decode of fixed-size array")
+                }
+            }
+        }
     } else {
         quote! {
             impl #impl_generics core::convert::TryFrom<#bytes> for #name #ty_generics #where_clause {
@@ -104,7 +113,7 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        #try_from_array
+        #from_array
 
         impl #impl_generics core::convert::TryFrom<&#bytes> for #name #ty_generics #where_clause {
             type Error = #codec::Error;

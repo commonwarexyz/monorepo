@@ -507,12 +507,6 @@ mod tests {
         const SIZE: usize = 2;
     }
 
-    impl From<[u8; Self::SIZE]> for InfallibleFixedBytes {
-        fn from(value: [u8; Self::SIZE]) -> Self {
-            Self(value)
-        }
-    }
-
     #[test]
     fn test_fixed_array_infallible() {
         let value = InfallibleFixedBytes([1, 2]);
@@ -599,12 +593,6 @@ mod tests {
 
     impl<const N: usize> FixedSize for GenericInfallible<N> {
         const SIZE: usize = N;
-    }
-
-    impl<const N: usize> From<[u8; N]> for GenericInfallible<N> {
-        fn from(value: [u8; N]) -> Self {
-            Self(value)
-        }
     }
 
     #[test]

@@ -51,12 +51,6 @@ impl Span for U32 {}
 
 impl Array for U32 {}
 
-impl From<[u8; Self::SIZE]> for U32 {
-    fn from(value: [u8; Self::SIZE]) -> Self {
-        Self(value)
-    }
-}
-
 impl From<u32> for U32 {
     fn from(value: u32) -> Self {
         Self(value.to_be_bytes())

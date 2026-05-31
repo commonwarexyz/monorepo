@@ -64,12 +64,6 @@ impl Span for U64 {}
 
 impl Array for U64 {}
 
-impl From<[u8; Self::SIZE]> for U64 {
-    fn from(value: [u8; Self::SIZE]) -> Self {
-        Self(value)
-    }
-}
-
 impl AsRef<[u8]> for U64 {
     fn as_ref(&self) -> &[u8] {
         &self.0

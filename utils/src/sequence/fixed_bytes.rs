@@ -73,12 +73,6 @@ impl<const N: usize> Display for FixedBytes<N> {
     }
 }
 
-impl<const N: usize> From<[u8; N]> for FixedBytes<N> {
-    fn from(value: [u8; N]) -> Self {
-        Self::new(value)
-    }
-}
-
 impl<const N: usize> Zeroize for FixedBytes<N> {
     fn zeroize(&mut self) {
         self.0.zeroize();
