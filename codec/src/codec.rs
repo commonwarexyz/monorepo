@@ -355,45 +355,6 @@ impl<T: Write + FixedSize> EncodeFixed for T {}
 )))] // BETA
 #[macro_export]
 macro_rules! impl_fixed_conversions {
-    ([$($generics:tt)*] $type:ty) => {
-        impl<$($generics)*> core::convert::TryFrom<[u8; <$type as $crate::FixedSize>::SIZE]> for $type {
-            type Error = $crate::Error;
-
-            fn try_from(
-                bytes: [u8; <$type as $crate::FixedSize>::SIZE],
-            ) -> Result<Self, Self::Error> {
-                let mut buf = bytes.as_ref();
-                <$type as $crate::Read>::read_cfg(&mut buf, &())
-            }
-        }
-
-        impl<$($generics)*> core::convert::From<$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: $type) -> Self {
-                $crate::EncodeFixed::encode_fixed(&value)
-            }
-        }
-
-        impl<$($generics)*> core::convert::From<&$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: &$type) -> Self {
-                $crate::EncodeFixed::encode_fixed(value)
-            }
-        }
-    };
-
-    ([$($generics:tt)*] $type:ty, infallible) => {
-        impl<$($generics)*> core::convert::From<$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: $type) -> Self {
-                $crate::EncodeFixed::encode_fixed(&value)
-            }
-        }
-
-        impl<$($generics)*> core::convert::From<&$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
-            fn from(value: &$type) -> Self {
-                $crate::EncodeFixed::encode_fixed(value)
-            }
-        }
-    };
-
     ([$($generics:tt)*] $type:ty, $bytes:ty) => {
         impl<$($generics)*> core::convert::TryFrom<$bytes> for $type {
             type Error = $crate::Error;
@@ -608,6 +569,82 @@ mod tests {
         assert_eq!(
             InfallibleFixedBytes::from(encoded),
             InfallibleFixedBytes([1, 2])
+        );
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct GenericFixed<const N: usize>([u8; N]);
+
+    impl<const N: usize> Write for GenericFixed<N> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl<const N: usize> Read for GenericFixed<N> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self(<[u8; N]>::read(buf)?))
+        }
+    }
+
+    impl<const N: usize> FixedSize for GenericFixed<N> {
+        const SIZE: usize = N;
+    }
+
+    impl_fixed_conversions!([const N: usize] GenericFixed<N>, [u8; N]);
+
+    #[test]
+    fn test_impl_fixed_conversions_generic() {
+        let value = GenericFixed::<3>([1, 2, 3]);
+        let encoded: [u8; 3] = (&value).into();
+        assert_eq!(encoded, [1, 2, 3]);
+        assert_eq!(<[u8; 3]>::from(value), encoded);
+        assert_eq!(
+            GenericFixed::<3>::try_from(encoded).unwrap(),
+            GenericFixed([1, 2, 3])
+        );
+    }
+
+    #[derive(Debug, Eq, PartialEq)]
+    struct GenericInfallible<const N: usize>([u8; N]);
+
+    impl<const N: usize> Write for GenericInfallible<N> {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.0.write(buf);
+        }
+    }
+
+    impl<const N: usize> Read for GenericInfallible<N> {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+            Ok(Self(<[u8; N]>::read(buf)?))
+        }
+    }
+
+    impl<const N: usize> FixedSize for GenericInfallible<N> {
+        const SIZE: usize = N;
+    }
+
+    impl<const N: usize> From<[u8; N]> for GenericInfallible<N> {
+        fn from(value: [u8; N]) -> Self {
+            Self(value)
+        }
+    }
+
+    impl_fixed_conversions!([const N: usize] GenericInfallible<N>, [u8; N], infallible);
+
+    #[test]
+    fn test_impl_fixed_conversions_generic_infallible() {
+        let value = GenericInfallible::<3>([1, 2, 3]);
+        let encoded: [u8; 3] = (&value).into();
+        assert_eq!(encoded, [1, 2, 3]);
+        assert_eq!(<[u8; 3]>::from(value), encoded);
+        assert_eq!(
+            GenericInfallible::<3>::from(encoded),
+            GenericInfallible([1, 2, 3])
         );
     }
 }
