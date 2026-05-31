@@ -337,6 +337,29 @@ pub trait EncodeFixed: Write + FixedSize {
 // Automatically implement `EncodeFixed` for types that implement `Write` and `FixedSize`.
 impl<T: Write + FixedSize> EncodeFixed for T {}
 
+/// Convenience trait for [FixedSize] types that can be decoded directly from a fixed-size array.
+pub trait DecodeFixed: Read<Cfg = ()> + FixedSize {
+    /// Decodes a value from a fixed-size byte array `[u8; N]`, ensuring all bytes are consumed.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `N` is not equal to `<Self as FixedSize>::SIZE`.
+    fn decode_fixed<const N: usize>(bytes: [u8; N]) -> Result<Self, Error> {
+        assert_eq!(
+            N,
+            Self::SIZE,
+            "Can't decode {} bytes from {} bytes",
+            Self::SIZE,
+            N
+        );
+
+        Self::decode_cfg(bytes.as_ref(), &())
+    }
+}
+
+// Automatically implement `DecodeFixed` for types that implement `Read<Cfg = ()>` and `FixedSize`.
+impl<T: Read<Cfg = ()> + FixedSize> DecodeFixed for T {}
+
 /// Implements conversion traits for a type's fixed-size byte array encoding.
 ///
 /// This macro adds:
@@ -360,8 +383,7 @@ macro_rules! impl_fixed_conversions {
             type Error = $crate::Error;
 
             fn try_from(bytes: $bytes) -> Result<Self, Self::Error> {
-                let mut buf = bytes.as_ref();
-                <$type as $crate::Read>::read_cfg(&mut buf, &())
+                <$type as $crate::DecodeFixed>::decode_fixed(bytes)
             }
         }
 
@@ -399,8 +421,7 @@ macro_rules! impl_fixed_conversions {
             fn try_from(
                 bytes: [u8; <$type as $crate::FixedSize>::SIZE],
             ) -> Result<Self, Self::Error> {
-                let mut buf = bytes.as_ref();
-                <$type as $crate::Read>::read_cfg(&mut buf, &())
+                <$type as $crate::DecodeFixed>::decode_fixed(bytes)
             }
         }
 
@@ -529,6 +550,17 @@ mod tests {
         assert_eq!(encoded, [1, 2]);
         assert_eq!(<[u8; FixedBytes::SIZE]>::from(value), encoded);
         assert_eq!(FixedBytes::try_from(encoded).unwrap(), FixedBytes([1, 2]));
+    }
+
+    #[test]
+    fn test_decode_fixed() {
+        assert_eq!(FixedBytes::decode_fixed([1, 2]).unwrap(), FixedBytes([1, 2]));
+    }
+
+    #[test]
+    #[should_panic(expected = "Can't decode 2 bytes from 3 bytes")]
+    fn test_decode_fixed_panic() {
+        let _ = FixedBytes::decode_fixed([1, 2, 3]);
     }
 
     #[derive(Debug, Eq, PartialEq)]
