@@ -1093,19 +1093,23 @@ mod tests {
         let runner = deterministic::Runner::new(cfg);
 
         runner.start(|mut context| async move {
+            // Create validators
             let num_validators = 10;
             let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
             let epoch = Epoch::new(111);
 
+            // Configure a delayed, lossy link
             let delayed_link = Link {
                 latency: Duration::from_millis(80),
                 jitter: Duration::from_millis(10),
                 success_rate: 0.98,
             };
 
+            // Initialize the simulated network
             let (mut oracle, mut registrations) =
                 initialize_simulation(context.child("simulation"), &fixture, delayed_link).await;
 
+            // Start all validators
             let reporters = spawn_validator_engines(
                 context.child("validator"),
                 &fixture,
@@ -1116,6 +1120,7 @@ mod tests {
                 vec![],
             );
 
+            // Wait for every validator to recover 1,000 certificates
             await_reporters(
                 context.child("reporter"),
                 &reporters,
