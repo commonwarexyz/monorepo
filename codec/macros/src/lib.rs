@@ -38,12 +38,12 @@ fn codec_path() -> proc_macro2::TokenStream {
 ///
 /// # Attributes
 ///
-/// - `#[fixed_conversions(infallible)]`: skip the `TryFrom<[u8; SIZE]>` impl.
-/// - `#[fixed_conversions(bytes([u8; N]))]`: required for any generic type (lifetime, type, or
+/// - `#[fixed_array(infallible)]`: skip the `TryFrom<[u8; SIZE]>` impl.
+/// - `#[fixed_array(bytes([u8; N]))]`: required for any generic type (lifetime, type, or
 ///   const). Stable Rust forbids a generic parameter inside the const expression
 ///   `[u8; <T as FixedSize>::SIZE]`, so the byte array type must be named.
-#[proc_macro_derive(FixedConversions, attributes(fixed_conversions))]
-pub fn fixed_conversions(input: TokenStream) -> TokenStream {
+#[proc_macro_derive(FixedArray, attributes(fixed_array))]
+pub fn fixed_array(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
@@ -51,7 +51,7 @@ pub fn fixed_conversions(input: TokenStream) -> TokenStream {
     let mut infallible = false;
     let mut bytes_ty: Option<Type> = None;
     for attr in &input.attrs {
-        if !attr.path().is_ident("fixed_conversions") {
+        if !attr.path().is_ident("fixed_array") {
             continue;
         }
         let result = attr.parse_nested_meta(|meta| {
@@ -77,7 +77,7 @@ pub fn fixed_conversions(input: TokenStream) -> TokenStream {
     if !input.generics.params.is_empty() && bytes_ty.is_none() {
         return Error::new_spanned(
             &input.generics,
-            "generic types must name the byte array type: #[fixed_conversions(bytes([u8; N]))]",
+            "generic types must name the byte array type: #[fixed_array(bytes([u8; N]))]",
         )
         .to_compile_error()
         .into();

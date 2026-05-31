@@ -12,7 +12,7 @@ use super::common::{
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_utils::{union_unique, Array, Span};
 use core::{
@@ -64,7 +64,7 @@ impl From<PrivateKey> for PublicKey {
 }
 
 /// Secp256r1 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedConversions)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
@@ -101,7 +101,7 @@ impl PublicKey {
 }
 
 /// Secp256r1 Signature.
-#[derive(Clone, Eq, PartialEq, FixedConversions)]
+#[derive(Clone, Eq, PartialEq, FixedArray)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: p256::ecdsa::Signature,

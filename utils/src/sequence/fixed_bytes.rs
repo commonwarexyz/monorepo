@@ -1,6 +1,6 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use core::{
     cmp::{Ord, PartialOrd},
@@ -19,8 +19,8 @@ pub enum Error {
 }
 
 /// An `Array` implementation for fixed-length byte arrays.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, FixedConversions)]
-#[fixed_conversions(infallible, bytes([u8; N]))]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, FixedArray)]
+#[fixed_array(infallible, bytes([u8; N]))]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct FixedBytes<const N: usize>([u8; N]);

@@ -397,7 +397,7 @@ mod tests {
     use super::*;
     use crate::{
         extensions::{DecodeExt, ReadExt},
-        Error, FixedConversions,
+        Error, FixedArray,
     };
     use bytes::Bytes;
     use core::marker::PhantomData;
@@ -428,7 +428,7 @@ mod tests {
         let _: [u8; 5] = 42u32.encode_fixed();
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedConversions)]
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
     struct FixedBytes([u8; 2]);
 
     impl Write for FixedBytes {
@@ -450,7 +450,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_conversions() {
+    fn test_fixed_array() {
         let value = FixedBytes([1, 2]);
         let encoded: [u8; FixedBytes::SIZE] = (&value).into();
         assert_eq!(encoded, [1, 2]);
@@ -485,8 +485,8 @@ mod tests {
         let _ = FixedBytes::decode_fixed([1, 2, 3]);
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedConversions)]
-    #[fixed_conversions(infallible)]
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(infallible)]
     struct InfallibleFixedBytes([u8; 2]);
 
     impl Write for InfallibleFixedBytes {
@@ -514,7 +514,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_conversions_infallible() {
+    fn test_fixed_array_infallible() {
         let value = InfallibleFixedBytes([1, 2]);
         let encoded: [u8; InfallibleFixedBytes::SIZE] = (&value).into();
         assert_eq!(encoded, [1, 2]);
@@ -537,8 +537,8 @@ mod tests {
         ));
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedConversions)]
-    #[fixed_conversions(bytes([u8; N]))]
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(bytes([u8; N]))]
     struct GenericFixed<const N: usize>([u8; N]);
 
     impl<const N: usize> Write for GenericFixed<N> {
@@ -560,7 +560,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_conversions_generic() {
+    fn test_fixed_array_generic() {
         let value = GenericFixed::<3>([1, 2, 3]);
         let encoded: [u8; 3] = (&value).into();
         assert_eq!(encoded, [1, 2, 3]);
@@ -579,8 +579,8 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedConversions)]
-    #[fixed_conversions(infallible, bytes([u8; N]))]
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(infallible, bytes([u8; N]))]
     struct GenericInfallible<const N: usize>([u8; N]);
 
     impl<const N: usize> Write for GenericInfallible<N> {
@@ -608,7 +608,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_conversions_generic_infallible() {
+    fn test_fixed_array_generic_infallible() {
         let value = GenericInfallible::<3>([1, 2, 3]);
         let encoded: [u8; 3] = (&value).into();
         assert_eq!(encoded, [1, 2, 3]);
@@ -627,8 +627,8 @@ mod tests {
         );
     }
 
-    #[derive(Debug, Eq, PartialEq, FixedConversions)]
-    #[fixed_conversions(bytes([u8; 2]))]
+    #[derive(Debug, Eq, PartialEq, FixedArray)]
+    #[fixed_array(bytes([u8; 2]))]
     struct LifetimeFixed<'a> {
         marker: PhantomData<&'a ()>,
         raw: [u8; 2],
@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_conversions_lifetime() {
+    fn test_fixed_array_lifetime() {
         let value = LifetimeFixed {
             marker: PhantomData,
             raw: [1, 2],

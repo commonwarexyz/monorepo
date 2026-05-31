@@ -697,7 +697,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
         //! Types and utilities for working with [`Commitment`]s.
 
-        use commonware_codec::{Encode, FixedConversions, FixedSize, Read, ReadExt, Write};
+        use commonware_codec::{Encode, FixedArray, FixedSize, Read, ReadExt, Write};
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
@@ -715,7 +715,7 @@ commonware_macros::stability_scope!(ALPHA {
         /// - coding root:    32..64
         /// - context digest: 64..96
         /// - coding config:  96..100
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FixedConversions)]
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FixedArray)]
         pub struct Commitment([u8; Self::SIZE]);
 
         impl Commitment {

@@ -1,13 +1,13 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{FixedConversions, FixedSize, Read, Write};
+use commonware_codec::{FixedArray, FixedSize, Read, Write};
 use core::{
     fmt::{Debug, Display},
     ops::Deref,
 };
 
 /// An `Array` implementation for the unit type `()`.
-#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, FixedConversions)]
+#[derive(Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct Unit;
 

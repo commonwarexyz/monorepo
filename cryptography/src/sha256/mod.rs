@@ -25,7 +25,7 @@ use crate::Hasher;
 use alloc::vec;
 use bytes::{Buf, BufMut};
 use commonware_codec::{
-    DecodeExt, Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write,
+    DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
@@ -85,8 +85,8 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedConversions)]
-#[fixed_conversions(infallible)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 

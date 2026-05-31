@@ -32,7 +32,7 @@ use bytes::{Buf, BufMut};
 use commonware_codec::{
     EncodeSize,
     Error::{self, Invalid},
-    FixedConversions, FixedSize, Read, ReadExt, Write,
+    FixedArray, FixedSize, Read, ReadExt, Write,
 };
 use commonware_formatting::Hex;
 use commonware_math::algebra::{
@@ -376,7 +376,7 @@ const COSET_SHIFT_INV: Scalar = Scalar(blst_fr {
 });
 
 /// A point on the BLS12-381 G1 curve.
-#[derive(Clone, Copy, Eq, PartialEq, FixedConversions)]
+#[derive(Clone, Copy, Eq, PartialEq, FixedArray)]
 #[repr(transparent)]
 pub struct G1(blst_p1);
 
@@ -402,7 +402,7 @@ impl arbitrary::Arbitrary<'_> for G1 {
 }
 
 /// A point on the BLS12-381 G2 curve.
-#[derive(Clone, Copy, Eq, PartialEq, FixedConversions)]
+#[derive(Clone, Copy, Eq, PartialEq, FixedArray)]
 #[repr(transparent)]
 pub struct G2(blst_p2);
 

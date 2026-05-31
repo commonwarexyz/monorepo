@@ -2,7 +2,7 @@
 
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display, Formatter},
@@ -19,8 +19,8 @@ pub enum Error {
 }
 
 /// An `Array` implementation for prefixed `U64`
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default, FixedConversions)]
-#[fixed_conversions(infallible)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default, FixedArray)]
+#[fixed_array(infallible)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct U64([u8; u64::SIZE + 1]);

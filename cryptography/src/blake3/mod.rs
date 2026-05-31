@@ -23,7 +23,7 @@
 use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedConversions, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -93,8 +93,8 @@ impl Hasher for Blake3 {
 }
 
 /// Digest of a BLAKE3 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedConversions)]
-#[fixed_conversions(infallible)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
