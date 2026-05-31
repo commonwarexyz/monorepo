@@ -23,7 +23,7 @@
 use crate::Hasher;
 use blake3::Hash;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -93,7 +93,8 @@ impl Hasher for Blake3 {
 }
 
 /// Digest of a BLAKE3 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
@@ -133,12 +134,6 @@ impl Array for Digest {}
 impl From<Hash> for Digest {
     fn from(value: Hash) -> Self {
         Self(value.into())
-    }
-}
-
-impl From<[u8; DIGEST_LENGTH]> for Digest {
-    fn from(value: [u8; DIGEST_LENGTH]) -> Self {
-        Self(value)
     }
 }
 

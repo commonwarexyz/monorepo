@@ -12,7 +12,7 @@ use super::common::{
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 use aws_lc_rs::signature::{UnparsedPublicKey, ECDSA_P256_SHA256_FIXED};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_utils::{union_unique, Array, Span};
 use core::{
@@ -64,7 +64,7 @@ impl From<PrivateKey> for PublicKey {
 }
 
 /// Secp256r1 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub struct PublicKey(PublicKeyInner);
 
@@ -101,28 +101,10 @@ impl PublicKey {
 }
 
 /// Secp256r1 Signature.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq, FixedArray)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
     signature: p256::ecdsa::Signature,
-}
-
-impl TryFrom<[u8; SIGNATURE_LENGTH]> for Signature {
-    type Error = CodecError;
-
-    fn try_from(raw: [u8; SIGNATURE_LENGTH]) -> Result<Self, Self::Error> {
-        let result = p256::ecdsa::Signature::from_slice(&raw);
-        #[cfg(feature = "std")]
-        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
-        #[cfg(not(feature = "std"))]
-        let signature = result
-            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
-        // Reject any signatures with a `s` value in the upper half of the curve order.
-        if signature.s().is_high().into() {
-            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
-        }
-        Ok(Self { raw, signature })
-    }
 }
 
 impl crate::Signature for Signature {}
@@ -137,7 +119,18 @@ impl Read for Signature {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
-        <[u8; Self::SIZE]>::read(buf)?.try_into()
+        let raw = <[u8; Self::SIZE]>::read(buf)?;
+        let result = p256::ecdsa::Signature::from_slice(&raw);
+        #[cfg(feature = "std")]
+        let signature = result.map_err(|e| CodecError::Wrapped(CURVE_NAME, e.into()))?;
+        #[cfg(not(feature = "std"))]
+        let signature = result
+            .map_err(|e| CodecError::Wrapped(CURVE_NAME, alloc::format!("{:?}", e).into()))?;
+        // Reject any signatures with a `s` value in the upper half of the curve order.
+        if signature.s().is_high().into() {
+            return Err(CodecError::Invalid(CURVE_NAME, "Signature S is high"));
+        }
+        Ok(Self { raw, signature })
     }
 }
 

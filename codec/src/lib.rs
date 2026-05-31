@@ -228,6 +228,7 @@ commonware_macros::stability_scope!(BETA {
 
     // Re-export main types and traits
     pub use codec::*;
+    pub use commonware_codec_macros::FixedArray;
     pub use config::RangeCfg;
     pub use error::Error;
     pub use extensions::*;

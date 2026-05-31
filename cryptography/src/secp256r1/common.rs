@@ -1,6 +1,6 @@
 use crate::Secret;
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -102,7 +102,7 @@ impl arbitrary::Arbitrary<'_> for PrivateKeyInner {
 }
 
 /// Internal Secp256r1 Public Key storage.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, FixedArray)]
 pub struct PublicKeyInner {
     raw: [u8; PUBLIC_KEY_LENGTH],
     pub key: VerifyingKey,

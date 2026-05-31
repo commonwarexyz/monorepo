@@ -8,3 +8,4 @@ mod reporter;
 pub use reporter::{Mailbox as ReporterMailbox, Reporter};
 mod provider;
 pub use provider::Provider;
+pub mod scheme;

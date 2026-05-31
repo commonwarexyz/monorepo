@@ -24,7 +24,9 @@ use crate::Hasher;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use bytes::{Buf, BufMut};
-use commonware_codec::{DecodeExt, Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{
+    DecodeExt, Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write,
+};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
@@ -83,7 +85,8 @@ impl Hasher for Sha256 {
 }
 
 /// Digest of a SHA-256 hashing operation.
-#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
+#[fixed_array(infallible)]
 #[repr(transparent)]
 pub struct Digest(pub [u8; DIGEST_LENGTH]);
 
@@ -119,12 +122,6 @@ impl FixedSize for Digest {
 impl Span for Digest {}
 
 impl Array for Digest {}
-
-impl From<[u8; DIGEST_LENGTH]> for Digest {
-    fn from(value: [u8; DIGEST_LENGTH]) -> Self {
-        Self(value)
-    }
-}
 
 impl AsRef<[u8]> for Digest {
     fn as_ref(&self) -> &[u8] {

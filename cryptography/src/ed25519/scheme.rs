@@ -5,14 +5,14 @@ use crate::{
 #[cfg(not(feature = "std"))]
 use alloc::borrow::{Cow, ToOwned};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_formatting::Hex;
 use commonware_math::algebra::Random;
 use commonware_parallel::Strategy;
 use commonware_utils::{union_unique, Array, Span};
 use core::{
     fmt::{Debug, Display},
-    hash::{Hash, Hasher},
+    hash::Hash,
     ops::Deref,
 };
 use rand_core::CryptoRngCore;
@@ -122,7 +122,7 @@ impl PartialEq for PrivateKey {
 }
 
 /// Ed25519 Public Key.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, FixedArray)]
 pub struct PublicKey {
     key: ed_core::VerificationKey,
 }
@@ -200,12 +200,6 @@ impl Deref for PublicKey {
     }
 }
 
-impl From<VerificationKey> for PublicKey {
-    fn from(key: VerificationKey) -> Self {
-        Self { key }
-    }
-}
-
 impl Debug for PublicKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{}", Hex(self))
@@ -242,7 +236,7 @@ impl arbitrary::Arbitrary<'_> for PublicKey {
 /// one message also verify against another. This property does not hold for maliciously
 /// generated public keys. In particular, it's possible to craft public keys (which would
 /// otherwise not be honestly generatable) for which a signature will verify against any message.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
 pub struct Signature {
     raw: [u8; SIGNATURE_LENGTH],
 }
@@ -271,24 +265,6 @@ impl FixedSize for Signature {
 impl Span for Signature {}
 
 impl Array for Signature {}
-
-impl Hash for Signature {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
-    }
-}
-
-impl Ord for Signature {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for Signature {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
 
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {

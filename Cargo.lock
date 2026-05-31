@@ -1282,6 +1282,7 @@ dependencies = [
  "arbitrary",
  "bytes",
  "cfg-if",
+ "commonware-codec-macros",
  "commonware-conformance",
  "commonware-macros",
  "paste",
@@ -1302,6 +1303,16 @@ dependencies = [
  "libfuzzer-sys",
  "paste",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "commonware-codec-macros"
+version = "2026.5.0"
+dependencies = [
+ "proc-macro-crate",
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1425,6 +1436,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
+ "paste",
  "pin-project",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -1938,6 +1950,7 @@ dependencies = [
  "criterion",
  "futures",
  "futures-util",
+ "paste",
  "rand 0.8.5",
  "rstest",
  "thiserror 2.0.17",

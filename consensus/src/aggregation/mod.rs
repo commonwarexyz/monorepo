@@ -117,6 +117,39 @@ mod tests {
     };
     use tracing::debug;
 
+    // Invoke `$cb!($($args)*, $suffix, $fixture)` once per canonical scheme fixture.
+    macro_rules! for_each_fixture {
+        ($cb:ident!($($args:tt)*)) => {
+            $cb!($($args)*, bls12381_threshold_min_pk, bls12381_threshold::fixture::<MinPk, _>);
+            $cb!($($args)*, bls12381_threshold_min_sig, bls12381_threshold::fixture::<MinSig, _>);
+            $cb!($($args)*, bls12381_multisig_min_pk, bls12381_multisig::fixture::<MinPk, _>);
+            $cb!($($args)*, bls12381_multisig_min_sig, bls12381_multisig::fixture::<MinSig, _>);
+            $cb!($($args)*, ed25519, ed25519::fixture);
+            $cb!($($args)*, secp256r1, secp256r1::fixture);
+        };
+    }
+
+    // Generate one `#[test_traced("INFO")]` test per scheme fixture, named
+    // `test_<callee>_<suffix>`, calling `callee(fixture)`. Prefix the callee with
+    // `slow` to additionally tag each generated test with `#[test_group("slow")]`.
+    macro_rules! test_for_all_fixtures {
+        ($callee:ident) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [] $callee));
+        };
+        (slow $callee:ident) => {
+            for_each_fixture!(test_for_all_fixtures!(@emit [#[test_group("slow")]] $callee));
+        };
+        (@emit [$(#[$attr:meta])*] $callee:ident, $suffix:ident, $fixture:expr) => {
+            paste::paste! {
+                $(#[$attr])*
+                #[test_traced("INFO")]
+                fn [<test_ $callee _ $suffix>]() {
+                    $callee($fixture);
+                }
+            }
+        };
+    }
+
     type Registrations<P> = BTreeMap<P, (Sender<P, deterministic::Context>, Receiver<P>)>;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
@@ -359,16 +392,7 @@ mod tests {
         });
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_all_online() {
-        all_online(bls12381_threshold::fixture::<MinPk, _>);
-        all_online(bls12381_threshold::fixture::<MinSig, _>);
-        all_online(bls12381_multisig::fixture::<MinPk, _>);
-        all_online(bls12381_multisig::fixture::<MinSig, _>);
-        all_online(ed25519::fixture);
-        all_online(secp256r1::fixture);
-    }
+    test_for_all_fixtures!(slow all_online);
 
     /// Test consensus resilience to Byzantine behavior.
     fn byzantine_proposer<S, F>(fixture: F)
@@ -406,15 +430,7 @@ mod tests {
         });
     }
 
-    #[test_traced("INFO")]
-    fn test_byzantine_proposer() {
-        byzantine_proposer(bls12381_threshold::fixture::<MinPk, _>);
-        byzantine_proposer(bls12381_threshold::fixture::<MinSig, _>);
-        byzantine_proposer(bls12381_multisig::fixture::<MinPk, _>);
-        byzantine_proposer(bls12381_multisig::fixture::<MinSig, _>);
-        byzantine_proposer(ed25519::fixture);
-        byzantine_proposer(secp256r1::fixture);
-    }
+    test_for_all_fixtures!(byzantine_proposer);
 
     fn unclean_byzantine_shutdown<S, F>(fixture: F)
     where
@@ -566,16 +582,7 @@ mod tests {
         }
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_unclean_byzantine_shutdown() {
-        unclean_byzantine_shutdown(bls12381_threshold::fixture::<MinPk, _>);
-        unclean_byzantine_shutdown(bls12381_threshold::fixture::<MinSig, _>);
-        unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinPk, _>);
-        unclean_byzantine_shutdown(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_byzantine_shutdown(ed25519::fixture);
-        unclean_byzantine_shutdown(secp256r1::fixture);
-    }
+    test_for_all_fixtures!(slow unclean_byzantine_shutdown);
 
     fn unclean_shutdown_with_unsigned_height<S, F>(fixture: F)
     where
@@ -767,18 +774,9 @@ mod tests {
         deterministic::Runner::from(checkpoint).start(f2);
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_unclean_shutdown_with_unsigned_height() {
-        unclean_shutdown_with_unsigned_height(bls12381_threshold::fixture::<MinPk, _>);
-        unclean_shutdown_with_unsigned_height(bls12381_threshold::fixture::<MinSig, _>);
-        unclean_shutdown_with_unsigned_height(bls12381_multisig::fixture::<MinPk, _>);
-        unclean_shutdown_with_unsigned_height(bls12381_multisig::fixture::<MinSig, _>);
-        unclean_shutdown_with_unsigned_height(ed25519::fixture);
-        unclean_shutdown_with_unsigned_height(secp256r1::fixture);
-    }
+    test_for_all_fixtures!(slow unclean_shutdown_with_unsigned_height);
 
-    fn slow_and_lossy_links<S, F>(fixture: F, seed: u64) -> String
+    fn slow_and_lossy_links_seeded<S, F>(fixture: F, seed: u64) -> String
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -825,74 +823,53 @@ mod tests {
         })
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_slow_and_lossy_links() {
-        slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, 0);
-        slow_and_lossy_links(bls12381_threshold::fixture::<MinSig, _>, 0);
-        slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, 0);
-        slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, 0);
-        slow_and_lossy_links(ed25519::fixture, 0);
-        slow_and_lossy_links(secp256r1::fixture, 0);
+    fn slow_and_lossy_links<S, F>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        slow_and_lossy_links_seeded(fixture, 0);
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_determinism() {
+    test_for_all_fixtures!(slow slow_and_lossy_links);
+
+    fn determinism<S, F>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
+    {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
         for seed in 1..6 {
-            // Test BLS threshold MinPk
-            let ts_pk_state_1 = slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, seed);
-            let ts_pk_state_2 = slow_and_lossy_links(bls12381_threshold::fixture::<MinPk, _>, seed);
-            assert_eq!(ts_pk_state_1, ts_pk_state_2);
+            assert_eq!(
+                slow_and_lossy_links_seeded(fixture, seed),
+                slow_and_lossy_links_seeded(fixture, seed),
+            );
+        }
+    }
 
-            // Test BLS threshold MinSig
-            let ts_sig_state_1 =
-                slow_and_lossy_links(bls12381_threshold::fixture::<MinSig, _>, seed);
-            let ts_sig_state_2 =
-                slow_and_lossy_links(bls12381_threshold::fixture::<MinSig, _>, seed);
-            assert_eq!(ts_sig_state_1, ts_sig_state_2);
+    test_for_all_fixtures!(slow determinism);
 
-            // Test BLS multisig MinPk
-            let ms_pk_state_1 = slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, seed);
-            let ms_pk_state_2 = slow_and_lossy_links(bls12381_multisig::fixture::<MinPk, _>, seed);
-            assert_eq!(ms_pk_state_1, ms_pk_state_2);
-
-            // Test BLS multisig MinSig
-            let ms_sig_state_1 =
-                slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, seed);
-            let ms_sig_state_2 =
-                slow_and_lossy_links(bls12381_multisig::fixture::<MinSig, _>, seed);
-            assert_eq!(ms_sig_state_1, ms_sig_state_2);
-
-            // Test ed25519
-            let ed_state_1 = slow_and_lossy_links(ed25519::fixture, seed);
-            let ed_state_2 = slow_and_lossy_links(ed25519::fixture, seed);
-            assert_eq!(ed_state_1, ed_state_2);
-
-            // Test secp256r1
-            let secp_state_1 = slow_and_lossy_links(secp256r1::fixture, seed);
-            let secp_state_2 = slow_and_lossy_links(secp256r1::fixture, seed);
-            assert_eq!(secp_state_1, secp_state_2);
-
-            let states = [
-                ("threshold-minpk", ts_pk_state_1),
-                ("threshold-minsig", ts_sig_state_1),
-                ("multisig-minpk", ms_pk_state_1),
-                ("multisig-minsig", ms_sig_state_1),
-                ("ed25519", ed_state_1),
-                ("secp256r1", secp_state_1),
-            ];
-
-            // Sanity check that different types can't be identical
-            for pair in states.windows(2) {
-                assert_ne!(
-                    pair[0].1, pair[1].1,
-                    "state {} equals state {}",
-                    pair[0].0, pair[1].0
-                );
-            }
+    #[test_group("slow")]
+    #[test_traced("INFO")]
+    fn test_distinct_states() {
+        // Sanity check that different schemes produce different audit states.
+        macro_rules! collect {
+            ($vec:ident, $suffix:ident, $fixture:expr) => {
+                $vec.push((
+                    stringify!($suffix),
+                    slow_and_lossy_links_seeded($fixture, 7),
+                ));
+            };
+        }
+        let mut states = Vec::new();
+        for_each_fixture!(collect!(states));
+        for pair in states.windows(2) {
+            assert_ne!(
+                pair[0].1, pair[1].1,
+                "state {} equals state {}",
+                pair[0].0, pair[1].0
+            );
         }
     }
 
@@ -935,16 +912,7 @@ mod tests {
         });
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_one_offline() {
-        one_offline(bls12381_threshold::fixture::<MinPk, _>);
-        one_offline(bls12381_threshold::fixture::<MinSig, _>);
-        one_offline(bls12381_multisig::fixture::<MinPk, _>);
-        one_offline(bls12381_multisig::fixture::<MinSig, _>);
-        one_offline(ed25519::fixture);
-        one_offline(secp256r1::fixture);
-    }
+    test_for_all_fixtures!(slow one_offline);
 
     /// Test consensus recovery after a network partition.
     fn network_partition<S, F>(fixture: F)
@@ -1006,15 +974,7 @@ mod tests {
         });
     }
 
-    #[test_traced("INFO")]
-    fn test_network_partition() {
-        network_partition(bls12381_threshold::fixture::<MinPk, _>);
-        network_partition(bls12381_threshold::fixture::<MinSig, _>);
-        network_partition(bls12381_multisig::fixture::<MinPk, _>);
-        network_partition(bls12381_multisig::fixture::<MinSig, _>);
-        network_partition(ed25519::fixture);
-        network_partition(secp256r1::fixture);
-    }
+    test_for_all_fixtures!(network_partition);
 
     /// Test insufficient validator participation (below quorum).
     fn insufficient_validators<S, F>(fixture: F)
@@ -1122,13 +1082,58 @@ mod tests {
         });
     }
 
-    #[test_traced("INFO")]
-    fn test_insufficient_validators() {
-        insufficient_validators(bls12381_threshold::fixture::<MinPk, _>);
-        insufficient_validators(bls12381_threshold::fixture::<MinSig, _>);
-        insufficient_validators(bls12381_multisig::fixture::<MinPk, _>);
-        insufficient_validators(bls12381_multisig::fixture::<MinSig, _>);
-        insufficient_validators(ed25519::fixture);
-        insufficient_validators(secp256r1::fixture);
+    test_for_all_fixtures!(insufficient_validators);
+
+    fn run_1k<S, F>(fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let cfg = deterministic::Config::new();
+        let runner = deterministic::Runner::new(cfg);
+
+        runner.start(|mut context| async move {
+            // Create validators
+            let num_validators = 10;
+            let fixture = fixture(&mut context, TEST_NAMESPACE, num_validators);
+            let epoch = Epoch::new(111);
+
+            // Configure a delayed, lossy link
+            let delayed_link = Link {
+                latency: Duration::from_millis(80),
+                jitter: Duration::from_millis(10),
+                success_rate: 0.98,
+            };
+
+            // Initialize the simulated network
+            let (mut oracle, mut registrations) =
+                initialize_simulation(context.child("simulation"), &fixture, delayed_link).await;
+
+            // Start all validators
+            let reporters = spawn_validator_engines(
+                context.child("validator"),
+                &fixture,
+                &mut registrations,
+                &mut oracle,
+                epoch,
+                Duration::from_secs(5),
+                vec![],
+            );
+
+            // Wait for every validator to recover 1,000 certificates
+            await_reporters(
+                context.child("reporter"),
+                &reporters,
+                Height::new(1_000),
+                epoch,
+            )
+            .await;
+        });
+    }
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_1k() {
+        run_1k(mocks::scheme::fixture);
     }
 }

@@ -438,6 +438,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         .unzip();
     info!(?regions, "initialized resources");
 
+    // Select AZs for grouped instances after subnets and AZ support are known.
+    let availability_zone_groups =
+        select_availability_zone_groups(&config.instances, &region_resources)?;
+
     // Create binary security groups (without monitoring IP - added later for parallel launch)
     info!("creating binary security groups");
     let binary_sg_futures: Vec<_> = region_resources
@@ -631,7 +635,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     };
 
-    // Launch binary instances, distributing across AZs by using instance index as start_idx
+    // Launch binary instances, distributing ungrouped instances across AZs by using instance index
+    // as start_idx. Grouped instances receive a single-AZ subnet list from grouped_subnets so all
+    // local group members stay colocated.
     let binary_launch_futures = binary_launch_configs.iter().enumerate().map(
         |(idx, (instance, ec2_client, resources, ami_id, _arch))| {
             let key_name = key_name.clone();
@@ -643,7 +649,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let tag = tag.clone();
             let instance_name = instance.name.clone();
             let region = instance.region.clone();
-            let subnets = resources.subnets.clone();
+            let subnets = grouped_subnets(instance, resources, &availability_zone_groups);
             let az_support = resources.az_support.clone();
             async move {
                 let (mut ids, az) = launch_instances(
@@ -1268,4 +1274,279 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         "deployment complete"
     );
     Ok(())
+}
+
+/// Region-scoped availability zone group identifier.
+///
+/// Group names are intentionally scoped by region because subnets and AZ support are region-local.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct AvailabilityZoneGroupKey {
+    region: String,
+    group: String,
+}
+
+/// Selects one mutually-supported AZ for each region/group pair.
+///
+/// The returned AZ supports every instance type used by the group in that region. Reusing the
+/// same group name in another region produces a separate selection.
+fn select_availability_zone_groups(
+    instances: &[InstanceConfig],
+    resources: &HashMap<String, RegionResources>,
+) -> Result<HashMap<AvailabilityZoneGroupKey, String>, Error> {
+    // Collect the instance types per region/group pair so the same group name can be reused
+    // independently in different regions.
+    let mut groups: HashMap<AvailabilityZoneGroupKey, BTreeSet<String>> = HashMap::new();
+    for instance in instances {
+        let Some(group) = &instance.availability_zone_group else {
+            continue;
+        };
+        groups
+            .entry(AvailabilityZoneGroupKey {
+                region: instance.region.clone(),
+                group: group.clone(),
+            })
+            .or_default()
+            .insert(instance.instance_type.clone());
+    }
+
+    let mut selected = HashMap::new();
+    for (key, instance_types) in groups {
+        let resources = resources
+            .get(&key.region)
+            .expect("region resources initialized for instance region");
+        let az = select_group_availability_zone(resources, &instance_types).ok_or_else(|| {
+            Error::AvailabilityZoneGroupUnsupported {
+                region: key.region.clone(),
+                group: key.group.clone(),
+                instance_types: instance_types.iter().cloned().collect(),
+            }
+        })?;
+        info!(
+            region = key.region.as_str(),
+            group = key.group.as_str(),
+            az = az.as_str(),
+            ?instance_types,
+            "selected availability zone group"
+        );
+        selected.insert(key, az);
+    }
+    Ok(selected)
+}
+
+/// Returns the first subnet AZ that supports every requested instance type.
+fn select_group_availability_zone(
+    resources: &RegionResources,
+    instance_types: &BTreeSet<String>,
+) -> Option<String> {
+    resources
+        .subnets
+        .iter()
+        .map(|(az, _)| az)
+        .find(|az| {
+            resources
+                .az_support
+                .get(*az)
+                .is_some_and(|supported| instance_types.is_subset(supported))
+        })
+        .cloned()
+}
+
+/// Returns the subnets an instance may launch into.
+///
+/// Ungrouped instances can use any region subnet. Grouped instances are restricted to their
+/// selected AZ so all members of the local region/group stay colocated.
+fn grouped_subnets(
+    instance: &InstanceConfig,
+    resources: &RegionResources,
+    groups: &HashMap<AvailabilityZoneGroupKey, String>,
+) -> Vec<(String, String)> {
+    let Some(group) = &instance.availability_zone_group else {
+        return resources.subnets.clone();
+    };
+    let az = groups
+        .get(&AvailabilityZoneGroupKey {
+            region: instance.region.clone(),
+            group: group.clone(),
+        })
+        .expect("availability zone group selected before launch");
+    resources
+        .subnets
+        .iter()
+        .filter(|(subnet_az, _)| subnet_az == az)
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        grouped_subnets, select_availability_zone_groups, select_group_availability_zone,
+        RegionResources,
+    };
+    use crate::aws::{Error, InstanceConfig};
+    use std::collections::{BTreeSet, HashMap};
+
+    fn instance(
+        name: &str,
+        region: &str,
+        instance_type: &str,
+        group: Option<&str>,
+    ) -> InstanceConfig {
+        InstanceConfig {
+            name: name.to_string(),
+            region: region.to_string(),
+            availability_zone_group: group.map(str::to_string),
+            instance_type: instance_type.to_string(),
+            storage_size: 10,
+            storage_class: "gp3".to_string(),
+            binary: "binary".to_string(),
+            config: "config.yaml".to_string(),
+            profiling: false,
+        }
+    }
+
+    fn resources_in(region: &str) -> RegionResources {
+        RegionResources {
+            vpc_id: "vpc".to_string(),
+            vpc_cidr: "10.0.0.0/16".to_string(),
+            route_table_id: "rt".to_string(),
+            subnets: vec![
+                (format!("{region}a"), "subnet-a".to_string()),
+                (format!("{region}b"), "subnet-b".to_string()),
+            ],
+            az_support: HashMap::from([
+                (
+                    format!("{region}a"),
+                    BTreeSet::from(["c8g.4xlarge".to_string()]),
+                ),
+                (
+                    format!("{region}b"),
+                    BTreeSet::from(["c8g.4xlarge".to_string(), "c8g.2xlarge".to_string()]),
+                ),
+            ])
+            .into_iter()
+            .collect(),
+            binary_sg_id: None,
+            monitoring_sg_id: None,
+        }
+    }
+
+    #[test]
+    fn az_group_selects_mutually_supported_zone() {
+        let resources = resources_in("us-east-1");
+        let requested = BTreeSet::from(["c8g.4xlarge".to_string(), "c8g.2xlarge".to_string()]);
+
+        let az = select_group_availability_zone(&resources, &requested)
+            .expect("one AZ supports every requested type");
+
+        assert_eq!(az, "us-east-1b");
+    }
+
+    #[test]
+    fn grouped_instances_are_restricted_to_selected_subnet() {
+        let instances = vec![
+            instance(
+                "chain-indexer",
+                "us-east-1",
+                "c8g.4xlarge",
+                Some("indexers"),
+            ),
+            instance(
+                "metadata-indexer",
+                "us-east-1",
+                "c8g.2xlarge",
+                Some("indexers"),
+            ),
+        ];
+        let resources = HashMap::from([("us-east-1".to_string(), resources_in("us-east-1"))]);
+        let groups = select_availability_zone_groups(&instances, &resources)
+            .expect("group should have a mutually-supported AZ");
+
+        let subnets = grouped_subnets(&instances[0], &resources["us-east-1"], &groups);
+
+        assert_eq!(
+            subnets,
+            vec![("us-east-1b".to_string(), "subnet-b".to_string())]
+        );
+    }
+
+    #[test]
+    fn ungrouped_instances_keep_all_subnets() {
+        let resources = resources_in("us-east-1");
+        let instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+
+        let subnets = grouped_subnets(&instance, &resources, &HashMap::new());
+
+        assert_eq!(subnets, resources.subnets);
+    }
+
+    #[test]
+    fn group_without_mutually_supported_zone_is_rejected() {
+        let instances = vec![
+            instance(
+                "chain-indexer",
+                "us-east-1",
+                "c8g.4xlarge",
+                Some("indexers"),
+            ),
+            instance(
+                "metadata-indexer",
+                "us-east-1",
+                "m8g.large",
+                Some("indexers"),
+            ),
+        ];
+        let resources = HashMap::from([("us-east-1".to_string(), resources_in("us-east-1"))]);
+
+        let err = select_availability_zone_groups(&instances, &resources)
+            .expect_err("group should require one AZ supporting every instance type");
+
+        assert!(matches!(
+            err,
+            Error::AvailabilityZoneGroupUnsupported {
+                region,
+                group,
+                instance_types,
+            } if region == "us-east-1"
+                && group == "indexers"
+                && instance_types == vec!["c8g.4xlarge".to_string(), "m8g.large".to_string()]
+        ));
+    }
+
+    #[test]
+    fn group_name_can_be_reused_across_regions() {
+        let instances = vec![
+            instance(
+                "chain-indexer",
+                "us-east-1",
+                "c8g.4xlarge",
+                Some("indexers"),
+            ),
+            instance(
+                "metadata-indexer",
+                "us-west-2",
+                "c8g.4xlarge",
+                Some("indexers"),
+            ),
+        ];
+        let resources = HashMap::from([
+            ("us-east-1".to_string(), resources_in("us-east-1")),
+            ("us-west-2".to_string(), resources_in("us-west-2")),
+        ]);
+
+        let groups = select_availability_zone_groups(&instances, &resources)
+            .expect("same group name in different regions should be independent");
+
+        let east_subnets = grouped_subnets(&instances[0], &resources["us-east-1"], &groups);
+        let west_subnets = grouped_subnets(&instances[1], &resources["us-west-2"], &groups);
+
+        assert_eq!(
+            east_subnets,
+            vec![("us-east-1a".to_string(), "subnet-a".to_string())]
+        );
+        assert_eq!(
+            west_subnets,
+            vec![("us-west-2a".to_string(), "subnet-a".to_string())]
+        );
+    }
 }
