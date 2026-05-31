@@ -308,9 +308,9 @@ pub struct UnreliableReceiver<T: UnreliablePolicy> {
 }
 
 impl<T: Policy> Receiver<T> {
-    /// Returns whether senders can still enqueue messages.
-    pub fn is_open(&self) -> bool {
-        !self.state.is_disconnected()
+    /// Returns whether senders can no longer enqueue messages.
+    pub fn is_closed(&self) -> bool {
+        self.state.is_disconnected()
     }
 
     /// Receive the next message.
@@ -331,9 +331,9 @@ impl<T: Policy> Receiver<T> {
 }
 
 impl<T: UnreliablePolicy> UnreliableReceiver<T> {
-    /// Returns whether senders can still enqueue messages.
-    pub fn is_open(&self) -> bool {
-        !self.state.is_disconnected()
+    /// Returns whether senders can no longer enqueue messages.
+    pub fn is_closed(&self) -> bool {
+        self.state.is_disconnected()
     }
 
     /// Receive the next message.
@@ -1125,9 +1125,9 @@ mod tests {
     }
 
     #[test]
-    fn unreliable_receiver_is_open_while_sender_is_connected() {
+    fn unreliable_receiver_is_closed_after_sender_disconnects() {
         let (sender, mut receiver) = new_unreliable(NZUsize!(1));
-        assert!(receiver.is_open());
+        assert!(!receiver.is_closed());
         assert_eq!(
             sender.enqueue(Message::Vote(1)),
             Unreliable::new(Feedback::Ok)
@@ -1135,7 +1135,7 @@ mod tests {
 
         drop(sender);
 
-        assert!(!receiver.is_open());
+        assert!(receiver.is_closed());
         assert_eq!(receiver.try_recv(), Ok(Message::Vote(1)));
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
     }
@@ -1497,14 +1497,14 @@ mod tests {
     }
 
     #[test]
-    fn reliable_receiver_is_open_while_sender_is_connected() {
+    fn reliable_receiver_is_closed_after_sender_disconnects() {
         let (sender, mut receiver) = new(NZUsize!(1));
-        assert!(receiver.is_open());
+        assert!(!receiver.is_closed());
         assert_eq!(sender.enqueue(SpillMessage::FillReady), Feedback::Ok);
 
         drop(sender);
 
-        assert!(!receiver.is_open());
+        assert!(receiver.is_closed());
         assert_eq!(receiver.try_recv(), Ok(SpillMessage::FillReady));
         assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
     }

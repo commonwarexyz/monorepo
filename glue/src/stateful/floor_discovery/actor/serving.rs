@@ -54,10 +54,10 @@ where
         select_loop! {
             self.context,
             on_start => {
-                let mailbox_message = if self.mailbox.is_open() {
-                    Either::Left(self.mailbox.recv())
-                } else {
+                let mailbox_message = if self.mailbox.is_closed() {
                     Either::Right(future::pending())
+                } else {
+                    Either::Left(self.mailbox.recv())
                 };
             },
             on_stopped => {
