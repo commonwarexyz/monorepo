@@ -60,7 +60,16 @@ where
 
     /// Open a subscription to the receipt of the floor finalization from peers.
     ///
-    /// If the floor finalization has already been selected, returns it immediately.
+    /// While the actor is still discovering, this requests discovery if no floor has been selected
+    /// yet. Dropping the receiver cancels this subscription; if all subscribers are dropped before
+    /// a floor is selected, discovery may be abandoned. If marshal is later attached, the actor
+    /// transitions to serving without a cached floor and later subscriptions will not restart
+    /// discovery.
+    ///
+    /// Callers that need a floor must keep the receiver alive until it resolves and should attach
+    /// only after consuming that floor.
+    ///
+    /// If a floor has already been selected, the receiver resolves immediately.
     pub fn subscribe(&self) -> oneshot::Receiver<Finalization<S, V::Commitment>> {
         let (tx, rx) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Subscribe { response: tx });
@@ -70,7 +79,9 @@ where
     /// Attach a marshal mailbox so the actor can serve the latest finalization to peers.
     ///
     /// This transitions the actor from discovery to serving. It is applied only after any
-    /// discovered floor has been delivered to its subscribers.
+    /// discovered floor has been delivered to its subscribers. If no floor was ever requested, or
+    /// every pending subscriber was dropped before a floor was selected, the actor serves without a
+    /// cached floor.
     pub fn attach(&self, marshal: MarshalMailbox<S, V>) {
         let _ = self.sender.enqueue(Message::Attach { marshal });
     }

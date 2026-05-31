@@ -1,9 +1,9 @@
 //! Gather a recent finalization to sync from.
 //!
 //! A node that is starting fresh (or recovering from far behind) needs a recent, trustworthy
-//! finalized block, the "floor", as the point to begin state sync from. It cannot trust any
+//! finalization, the "floor", as the point to begin state sync from. It cannot trust any
 //! single peer to name that point, so the [`FloorDiscovery`] asks many peers and adopts only a
-//! finalization that a `threshold` (`f + 1`) of distinct peers independently report.
+//! finalization that a threshold (`f + 1`) of distinct peers independently report.
 //!
 //! # Protocol
 //!
@@ -21,6 +21,11 @@
 //!                    |
 //!                    +-- RequestLatest --> peer 4
 //! ```
+//!
+//! A subscription is the request to discover a floor. If all floor subscribers are dropped before
+//! a floor is selected, discovery is cancelled. Attaching marshal after that makes the node a
+//! source: it transitions to serving without a cached floor. Callers that need a floor must keep a
+//! subscription alive until it resolves and attach marshal only after consuming that floor.
 //!
 //! ## Collect and tally
 //!

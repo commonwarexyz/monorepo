@@ -77,8 +77,9 @@ where
                 self.floor_subscribers.retain(|s| !s.is_closed());
 
                 // Hand off to serving once a marshal is attached and no floor seeker is left
-                // waiting. A node that never needed a floor (a source) attaches with none and
-                // transitions immediately; a joiner attaches only after its floor was consumed.
+                // waiting. Dropping all subscribers cancels discovery; if marshal is attached
+                // after that, the node becomes a source and serves without a cached floor. A
+                // joiner must keep its subscription alive until the floor is consumed.
                 if marshal.is_some() && self.floor_subscribers.is_empty() {
                     break;
                 }
