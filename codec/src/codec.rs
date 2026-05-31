@@ -364,12 +364,14 @@ impl<T: Read<Cfg = ()> + FixedSize> DecodeFixed for T {}
 ///
 /// This macro adds:
 /// - `TryFrom<[u8; T::SIZE]> for T`
+/// - `TryFrom<&[u8]> for T`
 /// - `From<T> for [u8; T::SIZE]`
 /// - `From<&T> for [u8; T::SIZE]`
 ///
 /// `impl_fixed_conversions!(T)` requires `T` to implement [Read] with `Cfg = ()` and [EncodeFixed].
 /// For types that already implement infallible `From<[u8; T::SIZE]>`, use
-/// `impl_fixed_conversions!(T, infallible)` to generate only the `T`-to-bytes conversions.
+/// `impl_fixed_conversions!(T, infallible)` to skip the `TryFrom<[u8; T::SIZE]>` impl (which would
+/// conflict with the standard library's blanket impl).
 #[cfg(not(any(
     commonware_stability_GAMMA,
     commonware_stability_DELTA,
@@ -387,6 +389,14 @@ macro_rules! impl_fixed_conversions {
             }
         }
 
+        impl<$($generics)*> core::convert::TryFrom<&[u8]> for $type {
+            type Error = $crate::Error;
+
+            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+                <$type as $crate::Decode>::decode_cfg(bytes, &())
+            }
+        }
+
         impl<$($generics)*> core::convert::From<$type> for $bytes {
             fn from(value: $type) -> Self {
                 $crate::EncodeFixed::encode_fixed(&value)
@@ -401,6 +411,14 @@ macro_rules! impl_fixed_conversions {
     };
 
     ([$($generics:tt)*] $type:ty, $bytes:ty, infallible) => {
+        impl<$($generics)*> core::convert::TryFrom<&[u8]> for $type {
+            type Error = $crate::Error;
+
+            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+                <$type as $crate::Decode>::decode_cfg(bytes, &())
+            }
+        }
+
         impl<$($generics)*> core::convert::From<$type> for $bytes {
             fn from(value: $type) -> Self {
                 $crate::EncodeFixed::encode_fixed(&value)
@@ -425,6 +443,14 @@ macro_rules! impl_fixed_conversions {
             }
         }
 
+        impl core::convert::TryFrom<&[u8]> for $type {
+            type Error = $crate::Error;
+
+            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+                <$type as $crate::Decode>::decode_cfg(bytes, &())
+            }
+        }
+
         impl core::convert::From<$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
             fn from(value: $type) -> Self {
                 $crate::EncodeFixed::encode_fixed(&value)
@@ -439,6 +465,14 @@ macro_rules! impl_fixed_conversions {
     };
 
     ($type:ty, infallible) => {
+        impl core::convert::TryFrom<&[u8]> for $type {
+            type Error = $crate::Error;
+
+            fn try_from(bytes: &[u8]) -> Result<Self, Self::Error> {
+                <$type as $crate::Decode>::decode_cfg(bytes, &())
+            }
+        }
+
         impl core::convert::From<$type> for [u8; <$type as $crate::FixedSize>::SIZE] {
             fn from(value: $type) -> Self {
                 $crate::EncodeFixed::encode_fixed(&value)
@@ -550,6 +584,18 @@ mod tests {
         assert_eq!(encoded, [1, 2]);
         assert_eq!(<[u8; FixedBytes::SIZE]>::from(value), encoded);
         assert_eq!(FixedBytes::try_from(encoded).unwrap(), FixedBytes([1, 2]));
+        assert_eq!(
+            FixedBytes::try_from([1u8, 2].as_slice()).unwrap(),
+            FixedBytes([1, 2])
+        );
+        assert!(matches!(
+            FixedBytes::try_from([1u8].as_slice()),
+            Err(Error::EndOfBuffer)
+        ));
+        assert!(matches!(
+            FixedBytes::try_from([1u8, 2, 3].as_slice()),
+            Err(Error::ExtraData(1))
+        ));
     }
 
     #[test]
@@ -602,6 +648,14 @@ mod tests {
             InfallibleFixedBytes::from(encoded),
             InfallibleFixedBytes([1, 2])
         );
+        assert_eq!(
+            InfallibleFixedBytes::try_from([1u8, 2].as_slice()).unwrap(),
+            InfallibleFixedBytes([1, 2])
+        );
+        assert!(matches!(
+            InfallibleFixedBytes::try_from([1u8, 2, 3].as_slice()),
+            Err(Error::ExtraData(1))
+        ));
     }
 
     #[derive(Debug, Eq, PartialEq)]
@@ -635,6 +689,10 @@ mod tests {
         assert_eq!(<[u8; 3]>::from(value), encoded);
         assert_eq!(
             GenericFixed::<3>::try_from(encoded).unwrap(),
+            GenericFixed([1, 2, 3])
+        );
+        assert_eq!(
+            GenericFixed::<3>::try_from([1u8, 2, 3].as_slice()).unwrap(),
             GenericFixed([1, 2, 3])
         );
     }
@@ -676,6 +734,10 @@ mod tests {
         assert_eq!(<[u8; 3]>::from(value), encoded);
         assert_eq!(
             GenericInfallible::<3>::from(encoded),
+            GenericInfallible([1, 2, 3])
+        );
+        assert_eq!(
+            GenericInfallible::<3>::try_from([1u8, 2, 3].as_slice()).unwrap(),
             GenericInfallible([1, 2, 3])
         );
     }
