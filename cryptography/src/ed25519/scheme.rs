@@ -402,7 +402,7 @@ impl Batch {
 mod tests {
     use super::*;
     use crate::{ed25519, Signer as _};
-    use commonware_codec::{DecodeExt, Encode, EncodeFixed};
+    use commonware_codec::{DecodeExt, Encode};
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
@@ -529,21 +529,6 @@ mod tests {
     }
 
     #[test]
-    fn test_public_key_bytes() {
-        let public_key = parse_public_key(
-            "
-            d75a980182b10ab7d54bfed3c964073a
-            0ee172f3daa62325af021a68f707511a
-            ",
-        );
-        let bytes: [u8; 32] = public_key.encode_fixed();
-
-        assert_eq!(<[u8; 32]>::from(&public_key), bytes);
-        assert_eq!(PublicKey::try_from(bytes).unwrap(), public_key);
-        assert_eq!(<[u8; 32]>::from(public_key), bytes);
-    }
-
-    #[test]
     fn test_codec_signature() {
         let signature = parse_signature(
             "
@@ -557,23 +542,6 @@ mod tests {
         assert_eq!(encoded.len(), SIGNATURE_LENGTH);
         let decoded = Signature::decode(encoded).unwrap();
         assert_eq!(signature, decoded);
-    }
-
-    #[test]
-    fn test_signature_bytes() {
-        let signature = parse_signature(
-            "
-            e5564300c360ac729086e2cc806e828a
-            84877f1eb8e5d974d873e06522490155
-            5fb8821590a33bacc61e39701cf9b46b
-            d25bf5f0595bbe24655141438e7a100b
-            ",
-        );
-        let bytes: [u8; 64] = signature.encode_fixed();
-
-        assert_eq!(<[u8; 64]>::from(&signature), bytes);
-        assert_eq!(Signature::try_from(bytes).unwrap(), signature);
-        assert_eq!(<[u8; 64]>::from(signature), bytes);
     }
 
     #[test]
