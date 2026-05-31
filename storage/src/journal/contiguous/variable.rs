@@ -2451,6 +2451,8 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
+            // Build two durable data sections. Section 1 is only reachable if replay incorrectly
+            // skips the missing tail of section 0.
             let journal = Journal::<_, FixedBytes<31>>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -2468,10 +2470,16 @@ mod tests {
             let mut names = context.scan(&data_partition).await.unwrap();
             names.sort();
             assert_eq!(names.len(), 2);
+
+            // Truncate at a valid physical page boundary. This leaves a clean short data section,
+            // not trailing corruption.
             let (section0, size0) = context.open(&data_partition, &names[0]).await.unwrap();
             assert!(size0 > physical_page_size);
             section0.resize(physical_page_size).await.unwrap();
             section0.sync().await.unwrap();
+
+            // Remove offsets so recovery must rebuild by replaying data and checking section
+            // continuity.
             context
                 .remove(&format!("{}-blobs", cfg.offsets_partition()), None)
                 .await
@@ -2481,6 +2489,8 @@ mod tests {
                 .await
                 .unwrap();
 
+            // Recovery must stop at the short non-tail section rather than accepting section 1's
+            // items as later logical positions.
             let journal = Journal::<_, FixedBytes<31>>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -2501,6 +2511,7 @@ mod tests {
                 "orphaned newer section should be truncated away"
             );
 
+            // Appends resume directly after the recovered prefix.
             assert_eq!(
                 journal.append(&FixedBytes::new([42; 31])).await.unwrap(),
                 items_in_page

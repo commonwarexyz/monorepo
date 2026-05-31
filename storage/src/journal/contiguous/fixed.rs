@@ -3557,6 +3557,8 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(20));
 
+            // Build two durable sections. Section 1 is only reachable if section 0 remains a full
+            // non-tail section after recovery.
             let journal = Journal::<_, u32>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -3571,6 +3573,8 @@ mod tests {
             assert_eq!(PAGE_SIZE.get() as u64 % u32::SIZE as u64, 0);
             assert!(items_in_page < cfg.items_per_blob.get());
 
+            // Truncate at a valid physical page boundary. This leaves no invalid trailing page; the
+            // oldest section is simply short while section 1 still exists.
             let (section0, size0) = context
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
@@ -3579,6 +3583,7 @@ mod tests {
             section0.resize(physical_page_size).await.unwrap();
             section0.sync().await.unwrap();
 
+            // Recovery must stop at the short non-tail section rather than skipping to section 1.
             let journal = Journal::<_, u32>::init(context.child("second"), cfg.clone())
                 .await
                 .unwrap();
@@ -3595,6 +3600,7 @@ mod tests {
                 "orphaned newer section should be truncated away"
             );
 
+            // Appends resume directly after the recovered prefix.
             assert_eq!(journal.append(&42).await.unwrap(), items_in_page);
             assert_eq!(journal.read(items_in_page).await.unwrap(), 42);
 
