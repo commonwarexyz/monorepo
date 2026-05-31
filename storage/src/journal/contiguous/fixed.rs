@@ -3432,6 +3432,63 @@ mod tests {
         });
     }
 
+    /// Test recovery when the oldest section is empty but a newer section still holds durable items.
+    ///
+    /// This is the fixed-journal analog of the variable-journal empty-oldest-section gap bug. A
+    /// contiguous journal can only populate a later section after filling the earlier one, so an
+    /// empty oldest section with a populated newer section is an orphaned gap. Length-based recovery
+    /// walks from the oldest section, finds it short (empty), and truncates everything from there,
+    /// aligning the journal to empty without panicking.
+    #[test_traced]
+    fn test_fixed_recovery_empty_oldest_section_orphaned_newer_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+
+            // Durably persist sections 0 and 1 (positions 0..20).
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..20u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            // Empty the oldest data section in place, leaving section 1's items orphaned past the
+            // gap.
+            let (section0, size0) = context
+                .open(&blob_partition(&cfg), &0u64.to_be_bytes())
+                .await
+                .unwrap();
+            assert!(size0 > 0, "section 0 should start durable");
+            section0.resize(0).await.unwrap();
+            section0.sync().await.unwrap();
+
+            // Recovery aligns to an empty journal instead of panicking.
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..0);
+            assert!(matches!(
+                journal.read(0).await,
+                Err(Error::ItemOutOfRange(0))
+            ));
+            let names = scan_partition(&context, &blob_partition(&cfg)).await;
+            assert_eq!(
+                names.len(),
+                1,
+                "orphaned newer section should be truncated away"
+            );
+
+            // The orphaned newer section is truncated away and appends resume from position 0.
+            assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 0);
+            assert_eq!(journal.read(0).await.unwrap(), test_digest(42));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test the contiguous fixed journal with items_per_blob: 1.
     ///
     /// This is an edge case where each item creates its own blob, and the
