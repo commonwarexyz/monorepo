@@ -518,7 +518,7 @@ mod tests {
             InfallibleFixedBytes([1, 2])
         );
         assert_eq!(
-            InfallibleFixedBytes::try_from(&encoded).unwrap(),
+            InfallibleFixedBytes::from(&encoded),
             InfallibleFixedBytes([1, 2])
         );
         assert_eq!(
@@ -606,7 +606,7 @@ mod tests {
             GenericInfallible([1, 2, 3])
         );
         assert_eq!(
-            GenericInfallible::<3>::try_from(&encoded).unwrap(),
+            GenericInfallible::<3>::from(&encoded),
             GenericInfallible([1, 2, 3])
         );
         assert_eq!(

@@ -27,9 +27,8 @@ fn codec_path() -> proc_macro2::TokenStream {
 /// Derives byte-array conversion impls for a fixed-size type.
 ///
 /// Generates:
-/// - `TryFrom<[u8; SIZE]>`, or `From<[u8; SIZE]>` when `infallible` (decoding via
-///   `DecodeFixed`).
-/// - `TryFrom<&[u8; SIZE]>`
+/// - `TryFrom<[u8; SIZE]>` and `TryFrom<&[u8; SIZE]>`, or `From<[u8; SIZE]>` and
+///   `From<&[u8; SIZE]>` when `infallible` (decoding via `DecodeFixed`).
 /// - `TryFrom<&[u8]>`
 /// - `From<T> for [u8; SIZE]`
 /// - `From<&T> for [u8; SIZE]`
@@ -91,12 +90,18 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
         |ty| quote!(#ty),
     );
 
-    let from_array = if infallible {
+    let from_arrays = if infallible {
         quote! {
             impl #impl_generics core::convert::From<#bytes> for #name #ty_generics #where_clause {
                 fn from(bytes: #bytes) -> Self {
                     <Self as #codec::DecodeFixed>::decode_fixed(bytes)
                         .expect("infallible decode of fixed-size array")
+                }
+            }
+
+            impl #impl_generics core::convert::From<&#bytes> for #name #ty_generics #where_clause {
+                fn from(bytes: &#bytes) -> Self {
+                    <Self as core::convert::From<#bytes>>::from(*bytes)
                 }
             }
         }
@@ -109,19 +114,19 @@ pub fn fixed_array(input: TokenStream) -> TokenStream {
                     <Self as #codec::DecodeFixed>::decode_fixed(bytes)
                 }
             }
+
+            impl #impl_generics core::convert::TryFrom<&#bytes> for #name #ty_generics #where_clause {
+                type Error = #codec::Error;
+
+                fn try_from(bytes: &#bytes) -> core::result::Result<Self, Self::Error> {
+                    <Self as #codec::DecodeFixed>::decode_fixed(*bytes)
+                }
+            }
         }
     };
 
     let expanded = quote! {
-        #from_array
-
-        impl #impl_generics core::convert::TryFrom<&#bytes> for #name #ty_generics #where_clause {
-            type Error = #codec::Error;
-
-            fn try_from(bytes: &#bytes) -> core::result::Result<Self, Self::Error> {
-                <Self as #codec::DecodeFixed>::decode_fixed(*bytes)
-            }
-        }
+        #from_arrays
 
         impl #impl_generics core::convert::TryFrom<&[u8]> for #name #ty_generics #where_clause {
             type Error = #codec::Error;
