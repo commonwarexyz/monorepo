@@ -2433,6 +2433,87 @@ mod tests {
         });
     }
 
+    /// Test recovery when the oldest data section ends at a clean page boundary but is still short.
+    ///
+    /// No trailing bytes are repaired in this case: the data section simply contains fewer complete
+    /// items than its capacity. Replaying from the start must still detect the jump to the newer
+    /// section and truncate it instead of skipping missing logical positions.
+    #[test_traced]
+    fn test_variable_recovery_clean_short_oldest_section_orphaned_newer_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-clean-short-oldest-section".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, FixedBytes<31>>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..128u8 {
+                journal.append(&FixedBytes::new([i; 31])).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let physical_page_size = LARGE_PAGE_SIZE.get() as u64 + 12;
+            let items_in_page = LARGE_PAGE_SIZE.get() as u64 / 32;
+            assert!(items_in_page < cfg.items_per_section.get());
+
+            let data_partition = cfg.data_partition();
+            let mut names = context.scan(&data_partition).await.unwrap();
+            names.sort();
+            assert_eq!(names.len(), 2);
+            let (section0, size0) = context.open(&data_partition, &names[0]).await.unwrap();
+            assert!(size0 > physical_page_size);
+            section0.resize(physical_page_size).await.unwrap();
+            section0.sync().await.unwrap();
+            context
+                .remove(&format!("{}-blobs", cfg.offsets_partition()), None)
+                .await
+                .unwrap();
+            context
+                .remove(&format!("{}-metadata", cfg.offsets_partition()), None)
+                .await
+                .unwrap();
+
+            let journal = Journal::<_, FixedBytes<31>>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..items_in_page);
+            assert_eq!(
+                journal.read(items_in_page - 1).await.unwrap(),
+                FixedBytes::new([(items_in_page - 1) as u8; 31])
+            );
+            assert!(matches!(
+                journal.read(items_in_page).await,
+                Err(Error::ItemOutOfRange(pos)) if pos == items_in_page
+            ));
+
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(
+                data_blobs.len(),
+                1,
+                "orphaned newer section should be truncated away"
+            );
+
+            assert_eq!(
+                journal.append(&FixedBytes::new([42; 31])).await.unwrap(),
+                items_in_page
+            );
+            assert_eq!(
+                journal.read(items_in_page).await.unwrap(),
+                FixedBytes::new([42; 31])
+            );
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test that a crash partway through a multi-section sync leaves a contiguous durable prefix
     /// that recovery preserves.
     ///
