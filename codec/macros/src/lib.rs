@@ -24,7 +24,7 @@ fn codec_path() -> proc_macro2::TokenStream {
     }
 }
 
-/// Derives byte-array conversion traits for a fixed-size type.
+/// Derives byte-array conversion impls for a fixed-size type.
 ///
 /// Generates:
 /// - `TryFrom<[u8; SIZE]>` (skipped when `infallible`, since the standard library's blanket

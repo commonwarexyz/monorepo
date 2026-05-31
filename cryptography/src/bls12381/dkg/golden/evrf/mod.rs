@@ -12,8 +12,8 @@ use crate::{
 use bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read,
-    ReadExt, Write,
+    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
+    Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};

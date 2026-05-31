@@ -6,9 +6,7 @@
 use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{
-    varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
