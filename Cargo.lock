@@ -1411,6 +1411,7 @@ dependencies = [
  "commonware-storage",
  "commonware-utils",
  "futures",
+ "paste",
  "pin-project",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
