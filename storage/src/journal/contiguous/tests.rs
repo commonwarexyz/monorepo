@@ -9,6 +9,177 @@ use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+pub(super) mod partition_sync_fault {
+    use commonware_runtime::{
+        deterministic, telemetry::metrics, Blob, Clock, Error, IoBufs, IoBufsMut, Metrics, Name,
+        Storage, Supervisor, Tracing,
+    };
+    use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
+    use std::{
+        future::Future,
+        io::Error as IoError,
+        ops::RangeInclusive,
+        time::{Duration, SystemTime},
+    };
+
+    pub(in crate::journal::contiguous) struct Context {
+        inner: deterministic::Context,
+        fail_partition: String,
+    }
+
+    impl Context {
+        pub(in crate::journal::contiguous) fn new(
+            inner: deterministic::Context,
+            fail_partition: String,
+        ) -> Self {
+            Self {
+                inner,
+                fail_partition,
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    pub(in crate::journal::contiguous) struct BlobWithSyncFault<B: Blob> {
+        inner: B,
+        partition: String,
+        fail_partition: String,
+    }
+
+    impl Supervisor for Context {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                fail_partition: self.fail_partition.clone(),
+            }
+        }
+
+        fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            self.inner = self.inner.with_attribute(key, value);
+            self
+        }
+    }
+
+    impl Tracing for Context {
+        fn with_span(mut self) -> Self {
+            self.inner = self.inner.with_span();
+            self
+        }
+    }
+
+    impl Metrics for Context {
+        fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> metrics::Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl Clock for Context {
+        fn current(&self) -> SystemTime {
+            self.inner.current()
+        }
+
+        fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+            self.inner.sleep(duration)
+        }
+
+        fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+            self.inner.sleep_until(deadline)
+        }
+    }
+
+    impl GovernorClock for Context {
+        type Instant = SystemTime;
+
+        fn now(&self) -> Self::Instant {
+            self.current()
+        }
+    }
+
+    impl ReasonablyRealtime for Context {}
+
+    impl Storage for Context {
+        type Blob = BlobWithSyncFault<<deterministic::Context as Storage>::Blob>;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), Error> {
+            let (inner, len, version) =
+                self.inner.open_versioned(partition, name, versions).await?;
+            Ok((
+                BlobWithSyncFault {
+                    inner,
+                    partition: partition.to_string(),
+                    fail_partition: self.fail_partition.clone(),
+                },
+                len,
+                version,
+            ))
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), Error> {
+            self.inner.remove(partition, name).await
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+            self.inner.scan(partition).await
+        }
+    }
+
+    impl<B: Blob> Blob for BlobWithSyncFault<B> {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.inner.read_at(offset, len).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            self.inner.read_at_buf(offset, len, bufs).await
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            self.inner.write_at(offset, bufs).await
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            self.inner.write_at_sync(offset, bufs).await
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            self.inner.resize(len).await
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            if self.partition == self.fail_partition {
+                return Err(Error::Io(IoError::other("injected partition sync fault")));
+            }
+            self.inner.sync().await
+        }
+    }
+}
+
 pub(super) trait PersistableContiguous:
     Mutable<Item = u64> + Persistable<Error = Error>
 {
