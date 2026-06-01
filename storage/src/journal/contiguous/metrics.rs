@@ -295,3 +295,23 @@ impl<E: Clock> Deref for VariableMetrics<E> {
         &self.common
     }
 }
+
+/// Metrics for the sealed-tail section store.
+pub(super) struct SectionsMetrics {
+    /// Number of sections (sealed + tail) currently held.
+    pub tracked: Gauge,
+    /// Number of underlying section blob syncs triggered by `Sections`.
+    pub synced: Counter,
+    /// Number of sections removed by `Sections::prune`.
+    pub pruned: Counter,
+}
+
+impl SectionsMetrics {
+    pub(super) fn new<E: RuntimeMetrics>(context: &E) -> Self {
+        Self {
+            tracked: context.gauge("tracked", "Number of sections held"),
+            synced: context.counter("synced", "Number of section sync calls"),
+            pruned: context.counter("pruned", "Number of sections pruned"),
+        }
+    }
+}

@@ -704,23 +704,26 @@ pub mod tests {
         let state1 = {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
-            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+            // Heap-pin large generic sub-futures so generated DB variants do not inflate this
+            // test future enough to overflow the smaller Windows test thread stack.
+            let mut db: C =
+                Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
             db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.sync().await.unwrap();
+            let merkleized = Box::pin(db.new_batch().merkleize(&db, None)).await.unwrap();
+            Box::pin(db.apply_batch(merkleized)).await.unwrap();
+            Box::pin(db.sync()).await.unwrap();
 
             // Drop and reopen the db
             let root = db.root();
             drop(db);
-            let db: C = open_db_clone(context.child("second"), partition).await;
+            let db: C = Box::pin(open_db_clone(context.child("second"), partition)).await;
 
             // Ensure the root matches
             assert_eq!(db.root(), root);
 
-            db.destroy().await.unwrap();
+            Box::pin(db.destroy()).await.unwrap();
             context.auditor().state()
         };
 
@@ -729,20 +732,20 @@ pub mod tests {
         let state2 = executor.start(|mut context| async move {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
-            let mut db: C = open_db(context.child("first"), partition.clone()).await;
+            let mut db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
             db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
                 .await
                 .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.sync().await.unwrap();
+            let merkleized = Box::pin(db.new_batch().merkleize(&db, None)).await.unwrap();
+            Box::pin(db.apply_batch(merkleized)).await.unwrap();
+            Box::pin(db.sync()).await.unwrap();
 
             let root = db.root();
             drop(db);
-            let db: C = open_db(context.child("second"), partition).await;
+            let db: C = Box::pin(open_db(context.child("second"), partition)).await;
             assert_eq!(db.root(), root);
 
-            db.destroy().await.unwrap();
+            Box::pin(db.destroy()).await.unwrap();
             context.auditor().state()
         });
 

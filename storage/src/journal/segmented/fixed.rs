@@ -137,26 +137,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         Ok(position)
     }
 
-    /// Append pre-encoded bytes to the given section.
-    ///
-    /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
-    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
-        assert!(!buf.is_empty());
-        assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
-        let blob = self.manager.get_or_create(section).await?;
-        blob.append(buf).await?;
-        trace!(
-            section,
-            count = buf.len() / Self::CHUNK_SIZE,
-            "appended items"
-        );
-        Ok(())
-    }
-
     /// Read the item at the given section and position.
     ///
     /// # Errors
@@ -435,15 +415,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
         self.manager.clear().await
-    }
-
-    /// Ensure a section exists, creating an empty blob if needed.
-    ///
-    /// This is used to maintain the invariant that at least one blob always exists
-    /// (the "tail" blob), which allows reconstructing journal size on reopen.
-    pub(crate) async fn ensure_section_exists(&mut self, section: u64) -> Result<(), Error> {
-        self.manager.get_or_create(section).await?;
-        Ok(())
     }
 }
 
