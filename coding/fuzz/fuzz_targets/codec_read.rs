@@ -1,12 +1,13 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::Read;
-use commonware_coding::{PhasedAsScheme, ReedSolomon, Scheme, Zoda};
+use commonware_coding::{PhasedAsScheme, PhasedScheme, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
 use libfuzzer_sys::fuzz_target;
 
 type ZodaShard = <PhasedAsScheme<Zoda<Sha256>> as Scheme>::Shard;
+type ZodaWeakShard = <Zoda<Sha256> as PhasedScheme>::WeakShard;
 type ReedSolomonShard = <ReedSolomon<Sha256> as Scheme>::Shard;
 
 const MAX_DATA_BYTES: usize = 1 << 20;
@@ -15,6 +16,7 @@ const MAX_INPUT_LEN: usize = 1 << 20;
 #[derive(Arbitrary, Debug)]
 enum SchemeSelector {
     Zoda,
+    ZodaWeak,
     ReedSolomon,
 }
 
@@ -36,13 +38,20 @@ fn fuzz(input: FuzzInput) {
         maximum_shard_size: max_data_bytes,
     };
 
+    let mut arbitrary = Unstructured::new(&shard_bytes);
     let mut buf = shard_bytes.as_slice();
     match input.scheme {
         SchemeSelector::Zoda => {
             let _ = ZodaShard::read_cfg(&mut buf, &codec_config);
+            let _ = ZodaShard::arbitrary(&mut arbitrary);
+        }
+        SchemeSelector::ZodaWeak => {
+            let _ = ZodaWeakShard::read_cfg(&mut buf, &codec_config);
+            let _ = ZodaWeakShard::arbitrary(&mut arbitrary);
         }
         SchemeSelector::ReedSolomon => {
             let _ = ReedSolomonShard::read_cfg(&mut buf, &codec_config);
+            let _ = ReedSolomonShard::arbitrary(&mut arbitrary);
         }
     }
 }

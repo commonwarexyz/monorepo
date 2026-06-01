@@ -1,5 +1,6 @@
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_coding::{Config, PhasedScheme, Scheme};
+use commonware_codec::{Encode, Read};
+use commonware_coding::{CodecConfig, Config, PhasedAsScheme, PhasedScheme, Scheme};
 use commonware_parallel::Sequential;
 use commonware_utils::NZU16;
 use std::iter;
@@ -75,6 +76,9 @@ pub fn fuzz<S: Scheme>(input: FuzzInput) {
     let (commitment, shards) = S::encode(&config, data.as_slice(), &STRATEGY).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
     let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
+    if let Some((_, shard)) = shards.first() {
+        exercise_codec(shard, data.len());
+    }
     shuffle.shuffle(&mut shards);
 
     // Check and collect `to_use` shards.
@@ -136,13 +140,50 @@ pub fn fuzz_phased<S: PhasedScheme>(input: PhasedFuzzInput) {
     let (commitment, shards) = S::encode(b"", &config, data.as_slice(), &STRATEGY).unwrap();
     assert_eq!(shards.len(), (recovery + min) as usize);
     let mut shards = (0u16..).zip(shards).collect::<Vec<_>>();
+    if let Some((_, shard)) = shards.first() {
+        exercise_codec(shard, data.len());
+    }
+
+    let scheme_checked_shards = shards
+        .iter()
+        .take(to_use as usize)
+        .map(|(i, shard)| {
+            <PhasedAsScheme<S> as Scheme>::check(&config, &commitment, *i, shard).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let decoded = <PhasedAsScheme<S> as Scheme>::decode(
+        &config,
+        &commitment,
+        scheme_checked_shards.iter(),
+        &STRATEGY,
+    )
+    .unwrap();
+    assert_eq!(&decoded, &data);
+    let _ = <PhasedAsScheme<S> as Scheme>::decode(&config, &commitment, iter::empty(), &STRATEGY);
+    if let Some(first) = scheme_checked_shards.first() {
+        let mut other_data = data.clone();
+        other_data.push(0);
+        let (other_commitment, other_shards) =
+            S::encode(b"", &config, other_data.as_slice(), &STRATEGY).unwrap();
+        let other_checked =
+            <PhasedAsScheme<S> as Scheme>::check(&config, &other_commitment, 0, &other_shards[0])
+                .unwrap();
+        let _ = <PhasedAsScheme<S> as Scheme>::decode(
+            &config,
+            &commitment,
+            [first, &other_checked].into_iter(),
+            &STRATEGY,
+        );
+    }
+
     shuffle.shuffle(&mut shards);
 
     // From here on, we take the point of view of the last participant.
     // This lets us move our strong shard out directly while keeping the rest for forwarding.
     let (my_i, my_shard) = shards.pop().unwrap();
-    let (my_checking_data, my_checked_shard, _) =
+    let (my_checking_data, my_checked_shard, my_weak_shard) =
         S::weaken(b"", &config, &commitment, my_i, my_shard).unwrap();
+    exercise_codec(&my_weak_shard, data.len());
 
     // Check `to_use - 1` forwarded shards, then include our own checked shard.
     let checked_shards = shards
@@ -164,4 +205,17 @@ pub fn fuzz_phased<S: PhasedScheme>(input: PhasedFuzzInput) {
     )
     .unwrap();
     assert_eq!(&decoded, &data);
+}
+
+fn exercise_codec<T>(shard: &T, maximum_shard_size: usize)
+where
+    T: Clone + Encode + Eq + Read<Cfg = CodecConfig>,
+{
+    let encoded = shard.encode();
+    let cfg = CodecConfig {
+        maximum_shard_size: encoded.len().max(maximum_shard_size).max(1),
+    };
+    let mut buf = encoded.as_ref();
+    let _ = T::read_cfg(&mut buf, &cfg);
+    let _ = shard == &shard.clone();
 }

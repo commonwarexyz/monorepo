@@ -1346,10 +1346,12 @@ name = "commonware-coding-fuzz"
 version = "2026.5.0"
 dependencies = [
  "arbitrary",
+ "bytes",
  "commonware-codec",
  "commonware-coding",
  "commonware-cryptography",
  "commonware-parallel",
+ "commonware-storage",
  "commonware-utils",
  "libfuzzer-sys",
  "rand_chacha 0.3.1",
