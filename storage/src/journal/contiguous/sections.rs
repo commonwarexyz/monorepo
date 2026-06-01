@@ -557,20 +557,31 @@ impl<E: Context> Sections<E> {
         Ok(pruned)
     }
 
-    /// Rewind to `(section, size)`. Removes every section strictly greater than `section`
-    /// newest-first, ensures `section` is the tail (opening it if it is missing), and finally
-    /// resizes that tail to `size`.
+    /// Rewind so that `section` becomes the tail, truncated to `size` bytes, discarding every
+    /// section newer than it.
+    ///
+    /// The target `section` can be in one of three states, all handled here:
+    /// - it is already the tail: just shrink it to `size`;
+    /// - it is a sealed historical section: demote it back to a writable tail, then shrink it;
+    /// - it does not exist (a gap that newer sections were hiding): open a fresh empty tail there.
+    ///
+    /// In steady state the tail is always the newest section and every sealed section is older, so
+    /// "sections newer than the target" means the tail (if above the target) plus any sealed
+    /// sections above it.
     ///
     /// # Crash safety
     ///
-    /// Sections are removed newest-first; a crash mid-rewind leaves a contiguous prefix. The
-    /// pre-demote sync runs before any destructive work — a sync failure leaves the in-memory
-    /// state matching the pre-rewind on-disk state.
+    /// Newer sections are removed newest-first, so a crash at any point leaves a contiguous prefix
+    /// on disk. When the target is a sealed section it is fsynced before those removals begin, so a
+    /// crash partway through still recovers a size no shorter than `(section, size)`. That sync is
+    /// the only fallible step before destructive work; if it fails, nothing has been removed and
+    /// in-memory state still matches disk.
     pub(super) async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
         self.core.prune_guard(section)?;
 
-        // Step 1: make the target durable before destructive work. If demotion or newer-section
-        // removal later fails, recovery can still retain the target section.
+        // Step 1: if the target is a sealed section, fsync it before touching anything else, so the
+        // bytes we intend to keep are durable if a later removal crashes. Safe to fail here: no
+        // destructive work has run yet.
         let target_is_sealed = if let Some(s) = self.sealed.get(&section) {
             s.sync().await.map_err(Error::Runtime)?;
             self.core.metrics.synced.inc();
@@ -579,8 +590,10 @@ impl<E: Context> Sections<E> {
             false
         };
 
-        // Step 2: collect sections strictly newer than the target, newest-first. Drop the tail if
-        // it's above target.
+        // Step 2: remove every section strictly newer than the target, newest-first. The tail (when
+        // it sits above the target) is the newest of all, so drop it first, then the sealed sections
+        // above the target in descending order. Removing newest-first keeps the on-disk prefix
+        // contiguous at every step.
         if let Some(tail) = self.tail.as_ref() {
             if tail.section > section {
                 let old = self.tail.take().unwrap();
@@ -589,16 +602,17 @@ impl<E: Context> Sections<E> {
                 self.core.metrics.tracked.dec();
             }
         }
-        let to_remove: Vec<u64> = match section.checked_add(1) {
-            Some(after_section) => self
+        let newer_sealed: Vec<u64> = match section.checked_add(1) {
+            Some(first_newer) => self
                 .sealed
-                .range(after_section..)
+                .range(first_newer..)
                 .rev()
                 .map(|(&s, _)| s)
                 .collect(),
+            // `section == u64::MAX`: nothing can be newer.
             None => Vec::new(),
         };
-        for s in to_remove {
+        for s in newer_sealed {
             let sealed = self.sealed.remove(&s).unwrap();
             drop(sealed);
             self.core.remove_blob(s).await?;
@@ -606,25 +620,26 @@ impl<E: Context> Sections<E> {
             debug!(section = s, "removed section during rewind");
         }
 
-        // Step 3: ensure the target is the tail. If currently sealed, demote. If it was a missing
-        // gap that became exposed by dropping the newer tail, open an empty tail there.
+        // Step 3: make the target the tail. Exactly one branch applies; the third state (target is
+        // already the tail) needs no work here and falls through to the resize below.
         if target_is_sealed {
-            // Remove the sealed handle to release its Arc + page-cache id before reopening.
-            // (Both Append::new and the prior Sealed reference the same Blob handle, but only one
-            // should be live at a time per the contiguous invariant.)
+            // Demote the sealed target. Drop the Sealed handle before reopening as an Append: both
+            // wrap the same blob, but only one handle (and one page-cache id) may be live at a time
+            // per the contiguous invariant.
             let _ = self.sealed.remove(&section);
             self.core.metrics.tracked.dec();
             let blob = self.core.open_append(section).await?;
             self.core.metrics.tracked.inc();
             self.tail = Some(Tail { section, blob });
-        }
-        if self.tail.is_none() {
+        } else if self.tail.is_none() {
+            // The target is a gap exposed by dropping the newer tail in Step 2; open it empty.
             let blob = self.core.open_append(section).await?;
             self.core.metrics.tracked.inc();
             self.tail = Some(Tail { section, blob });
         }
 
-        // Step 4: resize the tail down to `size` (no-op if already shorter).
+        // Step 4: shrink the tail to `size`. No-op when it is already at or below `size` (e.g. a
+        // freshly opened gap tail, which starts empty).
         if let Some(tail) = self.tail.as_ref() {
             if tail.section == section {
                 let current = tail.blob.size().await;
