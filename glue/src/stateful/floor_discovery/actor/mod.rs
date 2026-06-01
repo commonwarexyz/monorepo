@@ -1,6 +1,3 @@
-mod discovery;
-mod serving;
-
 use super::mailbox::{Mailbox, Message};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_consensus::{marshal::core::Variant, simplex::scheme::Scheme, types::Epoch};
@@ -12,6 +9,9 @@ use commonware_utils::NonZeroDuration;
 use discovery::Discovery;
 use rand_core::CryptoRngCore;
 use std::num::NonZeroUsize;
+
+mod discovery;
+mod serving;
 
 /// Configuration for the [`FloorDiscovery`] actor.
 pub struct Config<E, D, T, P, B>

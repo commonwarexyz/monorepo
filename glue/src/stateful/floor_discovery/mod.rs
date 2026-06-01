@@ -581,6 +581,17 @@ mod test {
             .to_vec()
     }
 
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::{wire, Scheme, Variant};
+        use commonware_codec::conformance::CodecConformance;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<wire::Tag>,
+            CodecConformance<wire::Message<Scheme, Variant>>,
+        }
+    }
+
     /// Storage configuration for one of marshal's immutable archives.
     fn archive_config(prefix: &str, name: &str, page_cache: CacheRef) -> immutable::Config<()> {
         immutable::Config {

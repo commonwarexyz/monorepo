@@ -5,6 +5,7 @@ use commonware_cryptography::certificate::Scheme;
 
 /// The first byte of a floor discovery wire message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum Tag {
     /// A request for the receiver's latest finalization.
     Request,
@@ -92,5 +93,22 @@ where
             Tag::Request => Ok(Self::Request),
             Tag::Response => Ok(Self::Response(Finalization::read_cfg(reader, cfg)?)),
         }
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl<S, V> arbitrary::Arbitrary<'_> for Message<S, V>
+where
+    S: Scheme,
+    V: Variant,
+    S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
+    V::Commitment: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let tag = Tag::arbitrary(u)?;
+        Ok(match tag {
+            Tag::Request => Self::Request,
+            Tag::Response => Self::Response(Finalization::arbitrary(u)?),
+        })
     }
 }
