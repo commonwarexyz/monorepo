@@ -185,6 +185,13 @@ impl<E: Context> SectionsInit<E> {
         }
     }
 
+    /// Direct access to the [`Append`] handle for `section`, if it exists. Used by callers that
+    /// need to inspect section contents (e.g. replay the tail to find the last valid item
+    /// boundary) before transitioning to steady state.
+    pub(super) fn section(&self, section: u64) -> Option<&Append<E::Blob>> {
+        self.pending.get(&section)
+    }
+
     /// Shrink the given section to `size` bytes. No-op if the section is absent or already at or
     /// below the requested size. Shrinking is synced so init-time repairs are durable before
     /// [`Self::into_sections`] runs.
@@ -329,16 +336,34 @@ impl<E: Context> Sections<E> {
         }
     }
 
+    /// Existing section numbers greater than or equal to `start`, in ascending order.
+    pub(super) fn sections_from(&self, start: u64) -> Vec<u64> {
+        let mut sections: Vec<u64> = self
+            .sealed
+            .range(start..)
+            .map(|(&section, _)| section)
+            .collect();
+        if let Some(tail) = &self.tail {
+            if tail.section >= start {
+                sections.push(tail.section);
+            }
+        }
+        sections
+    }
+
     /// Section index of the tail, if a tail exists.
-    #[allow(dead_code)]
     pub(super) fn tail_section(&self) -> Option<u64> {
         self.tail.as_ref().map(|t| t.section)
     }
 
     /// Returns `true` if no sections exist.
-    #[allow(dead_code)]
     pub(super) fn is_empty(&self) -> bool {
         self.sealed.is_empty() && self.tail.is_none()
+    }
+
+    /// Number of existing sections.
+    pub(super) fn len(&self) -> usize {
+        self.sealed.len() + usize::from(self.tail.is_some())
     }
 
     /// Logical size, in bytes, of the given section. Returns 0 if the section does not exist.
@@ -359,7 +384,6 @@ impl<E: Context> Sections<E> {
 
     /// Non-blocking variant of [`Self::section_size`]. Returns `None` for any section other than
     /// the tail when it cannot be observed without waiting.
-    #[allow(dead_code)]
     pub(super) fn try_section_size(&self, section: u64) -> Option<u64> {
         if section < self.core.oldest_retained_section {
             return None;
