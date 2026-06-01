@@ -330,15 +330,9 @@ impl<E: Context> Sections<E> {
     }
 
     /// Section index of the tail, if a tail exists.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(super) fn tail_section(&self) -> Option<u64> {
         self.tail.as_ref().map(|t| t.section)
-    }
-
-    /// Returns `true` if no sections exist.
-    #[allow(dead_code)]
-    pub(super) fn is_empty(&self) -> bool {
-        self.sealed.is_empty() && self.tail.is_none()
     }
 
     /// Logical size, in bytes, of the given section. Returns 0 if the section does not exist.
@@ -355,25 +349,6 @@ impl<E: Context> Sections<E> {
         // Missing unpruned sections are reported as zero-length so recovery code can distinguish an
         // empty tail from an out-of-range read.
         Ok(0)
-    }
-
-    /// Non-blocking variant of [`Self::section_size`]. Returns `None` for any section other than
-    /// the tail when it cannot be observed without waiting.
-    #[allow(dead_code)]
-    pub(super) fn try_section_size(&self, section: u64) -> Option<u64> {
-        if section < self.core.oldest_retained_section {
-            return None;
-        }
-        if let Some(s) = self.sealed.get(&section) {
-            return Some(s.size());
-        }
-        if let Some(t) = &self.tail {
-            if t.section == section {
-                return t.blob.try_size();
-            }
-        }
-        // Mirror `section_size`: absent-but-unpruned sections behave like empty sections for sizing.
-        Some(0)
     }
 
     /// Read exactly `len` bytes at `(section, offset)`.
