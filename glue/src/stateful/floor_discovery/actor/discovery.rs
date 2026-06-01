@@ -1,17 +1,18 @@
 use super::serving::Serving;
 use crate::stateful::floor_discovery::{mailbox::Message, wire};
+use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Decode, Encode, Error as CodecError, ReadExt};
 use commonware_consensus::{
     marshal::core::Variant,
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{
+        scheme::Scheme,
+        types::{Finalization, Proposal},
+    },
     types::Epoch,
     Epochable,
 };
-use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
-    PublicKey,
-};
+use commonware_cryptography::{certificate::Provider, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
@@ -120,23 +121,18 @@ where
                 debug!("network receiver closed, shutting down");
                 return;
             } => {
-                // Block peers whose payloads do not decode. Discovery cannot serve, so peer
-                // requests are ignored.
-                let cfg = <S as CertificateScheme>::certificate_codec_config_unbounded();
-                let message = match wire::Message::<S, V>::decode_cfg(message, &cfg) {
-                    Ok(message) => message,
+                let finalization = match self.decode_finalization(message) {
+                    Ok(Some(finalization)) => finalization,
+                    Ok(None) => continue,
                     Err(err) => {
                         commonware_p2p::block!(
                             self.blocker,
                             peer,
                             ?err,
-                            "finalization decode failed"
+                            "invalid finalization message"
                         );
                         continue;
                     }
-                };
-                let wire::Message::Response(finalization) = message else {
-                    continue;
                 };
 
                 // Once a floor has been selected, ignore further finalizations.
@@ -172,6 +168,30 @@ where
         }
         .run(sender, receiver)
         .await;
+    }
+
+    /// Decodes a [`Finalization`] from a message, using the claimed [`Epoch`] within
+    /// the [`Proposal`] to look up the appropriate certificate scheme for decoding.
+    fn decode_finalization(
+        &self,
+        mut message: impl Buf,
+    ) -> Result<Option<Finalization<S, V::Commitment>>, CodecError> {
+        let tag = wire::Tag::read(&mut message)?;
+        if tag != wire::Tag::Response {
+            return Ok(None);
+        }
+        let proposal = Proposal::<V::Commitment>::read(&mut message)?;
+        let Some(scheme) = self.scheme(proposal.epoch()) else {
+            return Ok(None);
+        };
+        S::Certificate::decode_cfg(&mut message, &scheme.certificate_codec_config()).map(
+            |certificate| {
+                Some(Finalization {
+                    proposal,
+                    certificate,
+                })
+            },
+        )
     }
 
     /// Verifies a [`Finalization`] from `peer`.
