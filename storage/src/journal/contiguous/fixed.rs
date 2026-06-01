@@ -106,6 +106,7 @@ use commonware_utils::{
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
 };
 use futures::{
+    future::try_join_all,
     stream::{self, Stream},
     StreamExt,
 };
@@ -1319,10 +1320,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Flush dirty sections to storage under the read lock, allowing concurrent reads.
     ///
-    /// Sections are synced in section order. Ordering is not required for recovery: appends only
-    /// add data, so committed sections are never at risk, and recovery truncates at the first short
-    /// or missing section, so a crash that leaves a gap still recovers a contiguous prefix no
-    /// shorter than the last completed commit.
+    /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
+    /// data, so committed sections are never at risk, and recovery truncates at the first short or
+    /// missing section, so a crash that leaves a gap still recovers a contiguous prefix no shorter
+    /// than the last completed commit.
     async fn flush_dirty_sections(&self) -> Result<(), Error> {
         let inner = self.inner.read().await;
         if let Some(start_section) = inner.dirty_from_section {
@@ -1334,9 +1335,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 // With no retained blobs, any earlier dirty section was cleared or pruned.
                 // Syncing the tail section is harmless when it does not exist.
                 .unwrap_or(tail_section);
-            for section in start_section..=tail_section {
-                inner.sections.sync_section(section).await?;
-            }
+            try_join_all(
+                (start_section..=tail_section).map(|section| inner.sections.sync_section(section)),
+            )
+            .await?;
         }
         Ok(())
     }
