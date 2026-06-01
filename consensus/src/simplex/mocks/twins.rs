@@ -1813,68 +1813,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual timing probe for case generation"]
-    fn timing_probe_cases() {
-        eprintln!("label,cases,seconds");
-        for (label, framework) in [
-            (
-                "n5_r3_sampled_max20",
-                Framework {
-                    participants: 5,
-                    faults: 1,
-                    rounds: 3,
-                    mode: Mode::Sampled,
-                    max_cases: 20,
-                },
-            ),
-            (
-                "n5_r3_sustained_max20",
-                Framework {
-                    participants: 5,
-                    faults: 1,
-                    rounds: 3,
-                    mode: Mode::Sustained,
-                    max_cases: 20,
-                },
-            ),
-            (
-                "n7_r3_sampled_max20",
-                Framework {
-                    participants: 7,
-                    faults: 2,
-                    rounds: 3,
-                    mode: Mode::Sampled,
-                    max_cases: 20,
-                },
-            ),
-            (
-                "n10_r5_sustained_max20",
-                Framework {
-                    participants: 10,
-                    faults: 3,
-                    rounds: 5,
-                    mode: Mode::Sustained,
-                    max_cases: 20,
-                },
-            ),
-            (
-                "n10_r5_sampled_max20",
-                Framework {
-                    participants: 10,
-                    faults: 3,
-                    rounds: 5,
-                    mode: Mode::Sampled,
-                    max_cases: 20,
-                },
-            ),
-        ] {
-            let start = std::time::Instant::now();
-            let cases = cases(&mut test_rng(), framework);
-            eprintln!("{label},{},{}", cases.len(), start.elapsed().as_secs_f64());
-        }
-    }
-
-    #[test]
     fn unique_index_sampling_handles_near_full_ranges() {
         let total = 100_000u128;
         let samples = 99_999usize;
