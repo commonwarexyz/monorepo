@@ -1011,7 +1011,7 @@ const fn role_subset_count(len: usize) -> u128 {
 /// Builds all local refinements for a cell.
 ///
 /// A local refinement is the shape this cell can have after one round. The
-/// shape only stores contiguous part sizes; `multiplicity` records how many
+/// shape only stores contiguous part sizes, `multiplicity` records how many
 /// assignments of those parts to the ordered non-leader roles produce the same
 /// shape.
 fn build_local_refinements(size: usize, is_leader: bool) -> Vec<LocalRefinement> {
