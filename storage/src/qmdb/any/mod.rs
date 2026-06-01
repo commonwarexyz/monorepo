@@ -1564,6 +1564,60 @@ pub(crate) mod test {
         });
     }
 
+    /// batch.pending_overlay() snapshots own mutations + uncommitted ancestor
+    /// diffs with get()'s priority: newest wins, None hides, committed state
+    /// is excluded.
+    #[test_traced("INFO")]
+    fn test_any_batch_pending_overlay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let ctx = context.child("db");
+            let mut db: UnorderedVariable = UnorderedVariableDb::init(
+                ctx.child("storage"),
+                variable_db_config::<OneCap>("po", &ctx),
+            )
+            .await
+            .unwrap();
+
+            // Committed state is NOT part of the overlay.
+            let ka = key(0);
+            commit_writes(&mut db, [(ka, Some(val(0)))], None).await;
+            let batch = db.new_batch();
+            assert!(batch.pending_overlay().is_empty());
+
+            // A parentless batch's overlay is exactly its own mutations:
+            // Some shadows the committed value, None hides it.
+            let kb = key(1);
+            let vb = val(1);
+            let batch = batch.write(kb, Some(vb)).write(ka, None);
+            let overlay = batch.pending_overlay();
+            assert_eq!(overlay.len(), 2);
+            assert_eq!(overlay.get(&kb), Some(&Some(vb)));
+            assert_eq!(overlay.get(&ka), Some(&None));
+
+            // A child forked from an uncommitted parent sees the parent's
+            // diff under its own mutations.
+            let kc = key(2);
+            let vc = val(2);
+            let parent = batch.merkleize(&db, None).await.unwrap();
+            let child = parent.new_batch().write(kc, Some(vc));
+            let overlay = child.pending_overlay();
+            assert_eq!(overlay.get(&kb), Some(&Some(vb)));
+            assert_eq!(overlay.get(&ka), Some(&None));
+            assert_eq!(overlay.get(&kc), Some(&Some(vc)));
+
+            // Across a deeper chain the newest write wins.
+            let vb2 = val(100);
+            let middle = child.merkleize(&db, None).await.unwrap();
+            let grandchild = middle.new_batch::<Sha256>().write(kb, Some(vb2));
+            let overlay = grandchild.pending_overlay();
+            assert_eq!(overlay.get(&kb), Some(&Some(vb2)));
+            assert_eq!(overlay.get(&kc), Some(&Some(vc)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     /// merkleized.get() reflects the resolved diff after merkleize.
     #[test_traced("INFO")]
     fn test_any_batch_get_on_merkleized() {

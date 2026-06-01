@@ -34,7 +34,7 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap::{self, Readable as _};
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     hash::BuildHasherDefault,
     sync::Arc,
 };
@@ -337,6 +337,13 @@ where
     pub fn write(mut self, key: U::Key, value: Option<U::Value>) -> Self {
         self.inner = self.inner.write(key, value);
         self
+    }
+
+    /// Return this batch and its uncommitted ancestors as one pending overlay.
+    ///
+    /// `Some(value)` shadows the committed value for that key, and `None` hides it.
+    pub fn pending_overlay(&self) -> BTreeMap<U::Key, Option<U::Value>> {
+        self.inner.pending_overlay()
     }
 }
 

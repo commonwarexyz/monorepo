@@ -1004,6 +1004,28 @@ where
 
         Ok(results)
     }
+
+    /// Return this batch and its uncommitted ancestors as one pending overlay.
+    ///
+    /// The map has the same priority as `get`: local mutations override parent
+    /// diffs, which override older ancestor diffs. `Some(value)` shadows the
+    /// committed value for that key, and `None` hides it.
+    pub fn pending_overlay(&self) -> BTreeMap<U::Key, Option<U::Value>> {
+        let mut overlay = BTreeMap::new();
+        if let Some(parent) = self.base.parent() {
+            let mut chain = vec![Arc::clone(parent)];
+            chain.extend(parent.ancestors());
+            for batch in chain.into_iter().rev() {
+                for (key, entry) in batch.diff.iter() {
+                    overlay.insert(key.clone(), entry.value().cloned());
+                }
+            }
+        }
+        for (key, value) in &self.mutations {
+            overlay.insert(key.clone(), value.clone());
+        }
+        overlay
+    }
 }
 
 // Unordered-specific methods.
