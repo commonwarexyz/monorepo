@@ -14,6 +14,19 @@
 //! Advancing one round refines those cells by splitting each group according to
 //! the role its members take in the new round.
 //!
+//! ## Algorithm
+//!
+//! In each round, every non-leader participant belongs to one of four ordered
+//! role buckets: outside both halves, visible to both halves, visible only to
+//! the secondary half, or visible only to the primary half. The leader is a
+//! singleton at the end of its cell and must be visible to at least one half.
+//! A transition records only the next residual cell boundaries. For a fixed
+//! set of part sizes, multiple role-bucket choices can produce the same next
+//! boundaries, so the transition stores their count as `multiplicity`.
+//! Scenario counts are computed over this compressed transition DAG, and
+//! `round_from_edge` reconstructs sampled rounds by decoding the chosen edge's
+//! rank as mixed-radix digits in cell order.
+//!
 //! Scenario generation guarantees that every case within a campaign is
 //! structurally distinct -- no duplicate (scenario, compromised-assignment)
 //! pairs are ever emitted. The scenario space is counted with an exact
@@ -188,7 +201,7 @@ impl<C> Elector<C> {
                     round.leader() < participants,
                     "scenario leader out of bounds"
                 );
-                Participant::new(round.leader() as u32)
+                Participant::from_usize(round.leader())
             })
             .collect();
         Self {
@@ -253,10 +266,10 @@ pub enum Mode {
 ///
 /// Each canonical scenario tracks residual symmetry cells -- participants that
 /// were treated identically across all rounds. Two compromised-node assignments
-/// that differ only in which members of a symmetry cell are compromised produce
-/// identical test behavior, so the framework generates only one representative
-/// per equivalence class. This keeps the case budget focused on structurally
-/// distinct attack configurations.
+/// that differ only in which members of a symmetry cell are compromised are
+/// equivalent under relabeling for the adversarial prefix, so the framework
+/// generates only one representative per equivalence class. This keeps the case
+/// budget focused on structurally distinct attack configurations.
 ///
 /// The generator selects canonical scenarios first: all scenarios when the
 /// scenario count fits within [`Framework::max_cases`], or uniformly sampled
@@ -568,16 +581,7 @@ impl CellState {
 
     /// Converts the state back into cell sizes.
     fn to_cells(&self, n: usize) -> Vec<usize> {
-        let mut cells = Vec::new();
-        let mut start = 0usize;
-        for idx in 0..n.saturating_sub(1) {
-            if self.boundary_after(idx) {
-                cells.push(idx + 1 - start);
-                start = idx + 1;
-            }
-        }
-        cells.push(n - start);
-        cells
+        self.ranges(n).into_iter().map(|(_, len)| len).collect()
     }
 
     /// Converts the state into contiguous `(start, len)` cell ranges.
@@ -612,7 +616,9 @@ impl CellState {
 /// A non-leader cell can split into at most the four non-empty role buckets
 /// `outside`, `both`, `secondary-only`, and `primary-only`. The leader cell
 /// uses the same buckets for its non-leader prefix and then appends the leader
-/// singleton as the final part.
+/// singleton as the final part. `parts` stores the resulting non-empty bucket
+/// sizes; `multiplicity` counts how many ordered role-bucket choices produce
+/// those same sizes.
 #[derive(Clone, Copy, Debug)]
 struct LocalRefinement {
     parts: [usize; 5],
@@ -885,6 +891,10 @@ impl ScenarioGenerator {
         let mut secondary_mask = BitMask::zero(self.n);
         let mut leader = None;
 
+        // The edge fixes only the next residual cell boundaries. Decode the
+        // edge-local rank in cell order: each low digit selects this cell's
+        // role subset, and the leader cell has an extra digit for which half
+        // sees the leader.
         for (cell_idx, (start, size)) in state.ranges(self.n).into_iter().enumerate() {
             let parts = parts_in_cell(&edge.next, start, size);
             if cell_idx == edge.leader_cell {
@@ -962,7 +972,7 @@ const fn role_subset_count(len: usize) -> u128 {
         2 => 6,
         3 => 4,
         4 => 1,
-        _ => 0,
+        _ => panic!("role bucket count exceeds role space"),
     }
 }
 
@@ -2096,6 +2106,60 @@ mod tests {
     }
 
     #[test]
+    fn bitmask_sets_ranges_across_words() {
+        let mut mask = BitMask::zero(130);
+        mask.set(64);
+        assert!(!mask.contains(63));
+        assert!(mask.contains(64));
+        assert!(!mask.contains(65));
+
+        mask.set_range(62, 5);
+        for idx in 62..=66 {
+            assert!(mask.contains(idx), "bit {idx} should be set");
+        }
+        assert!(!mask.contains(61));
+        assert!(!mask.contains(67));
+        assert!(!mask.contains(129));
+    }
+
+    #[test]
+    fn scenario_masks_route_across_words() {
+        let mut primary_mask = BitMask::zero(70);
+        primary_mask.set_range(62, 4);
+        let mut secondary_mask = BitMask::zero(70);
+        secondary_mask.set(64);
+        secondary_mask.set(69);
+        let scenario = Scenario {
+            rounds: vec![RoundScenario {
+                leader: 64,
+                primary_mask,
+                secondary_mask,
+            }],
+        };
+        let participants: Vec<_> = (0..70).collect();
+
+        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        assert_eq!(primary, vec![62, 63, 64, 65]);
+        assert_eq!(secondary, vec![64, 69]);
+        assert_eq!(
+            scenario.route(View::new(1), &63, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &64, &participants),
+            SplitTarget::Both
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &69, &participants),
+            SplitTarget::Secondary
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &0, &participants),
+            SplitTarget::None
+        );
+    }
+
+    #[test]
     fn route_returns_none_for_participants_outside_selected_partitions() {
         let scenario = Scenario {
             rounds: vec![round(4, 0, 0b0001, 0b0010)],
@@ -2151,7 +2215,7 @@ mod tests {
             let round = Round::new(Epoch::new(0), View::new((round_idx as u64) + 1));
             assert_eq!(
                 twins.elect(round, None),
-                Participant::new(round_scenario.leader() as u32),
+                Participant::from_usize(round_scenario.leader()),
                 "unexpected leader in scripted attack round"
             );
         }
