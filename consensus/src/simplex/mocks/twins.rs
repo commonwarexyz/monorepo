@@ -568,7 +568,7 @@ impl CellState {
 /// `outside`, `both`, `secondary-only`, and `primary-only`. The leader cell
 /// uses the same buckets for its non-leader prefix and then appends the leader
 /// singleton as the final part. `parts` stores the resulting non-empty bucket
-/// sizes; `multiplicity` counts how many ordered role-bucket choices produce
+/// sizes, `multiplicity` counts how many ordered role-bucket choices produce
 /// those same sizes.
 #[derive(Clone, Copy, Debug)]
 struct LocalRefinement {
@@ -600,8 +600,7 @@ impl LocalRefinement {
 /// `multiplicity` is the exact number of `RoundScenario`s that produce `next`
 /// when `leader_cell` supplies the canonical leader. During suffix counting,
 /// this edge contributes `multiplicity * suffix_count(next)`. This value must
-/// match the product of the per-cell local spaces decoded by
-/// `round_from_edge`.
+/// match the product of the per-cell local spaces decoded by `round_from_edge`.
 #[derive(Clone, Copy, Debug)]
 struct TransitionEdge {
     next: CellState,
@@ -612,7 +611,7 @@ struct TransitionEdge {
 /// Compressed outgoing transitions for one residual cell state.
 ///
 /// `overflowed` is set when at least one transition multiplicity cannot be
-/// represented as a `u128`; scenario counting treats that as count overflow.
+/// represented as a `u128`, scenario counting treats that as count overflow.
 #[derive(Clone, Debug, Default)]
 struct TransitionSet {
     edges: Vec<TransitionEdge>,
@@ -630,6 +629,10 @@ fn build_transitions(
     transitions: &mut TransitionSet,
 ) {
     if cell_idx == ranges.len() {
+        // Every current cell has chosen one local refinement. The accumulated
+        // boundary mask identifies the residual state reached by this round,
+        // and multiplicity is the product of the local role spaces that map to
+        // that same residual state.
         transitions.edges.push(TransitionEdge {
             next: next_state,
             leader_cell,
@@ -644,6 +647,11 @@ fn build_transitions(
         .map(|(start, len)| start + len)
         .expect("transition ranges must be non-empty");
     for refinement in refinements_by_cell[cell_idx].iter().copied() {
+        // Choose one refinement for this cell and carry its contribution into
+        // the DFS prefix. Different refinements may produce the same
+        // `next_state`, keeping them as separate edges is intentional because
+        // unranking uses each edge's multiplicity to reconstruct a concrete
+        // round.
         let Some(multiplicity) = multiplicity.checked_mul(refinement.multiplicity) else {
             transitions.overflowed = true;
             continue;
@@ -674,10 +682,22 @@ enum Role {
     Primary,
 }
 
-/// Compressed transition DAG and scenario unranker.
+/// Scenario generator for a fixed participant count.
+///
+/// The generator lazily memoizes the compressed transition DAG keyed by
+/// residual symmetry state. Each transition set describes the canonical
+/// one-round refinements reachable from a state, with edge multiplicities
+/// carrying the number of concrete role choices represented by that edge.
+/// Generation first builds exact suffix counts over this DAG, then enumerates
+/// or samples scenario ranks and unpacks each selected rank into concrete
+/// [`RoundScenario`] masks.
 struct ScenarioGenerator {
+    /// Number of participants in the generated scenarios.
     n: usize,
+    /// Memoized outgoing transitions for each residual symmetry state.
     transition_memo: HashMap<CellState, TransitionSet>,
+    /// Memoized cell-local refinements keyed by cell size and whether the cell
+    /// contains the round leader.
     local_memo: HashMap<(usize, bool), Vec<LocalRefinement>>,
 }
 
@@ -693,7 +713,7 @@ impl ScenarioGenerator {
 
     /// Enumerates canonical scenarios with their residual symmetry cells.
     ///
-    /// Returns all scenarios when the space fits within `max_scenarios`;
+    /// Returns all scenarios when the space fits within `max_scenarios`,
     /// otherwise samples `max_scenarios` without replacement.
     ///
     /// # Panics
@@ -706,10 +726,18 @@ impl ScenarioGenerator {
         max_scenarios: usize,
     ) -> Vec<(Scenario, Cells)> {
         let initial = CellState::initial(self.n);
+
+        // Count the complete canonical scenario space before choosing which
+        // ranks to materialize. The same count table is reused by unranking so
+        // each selected rank can skip whole compressed subtrees.
         let counts = self
             .counts(&initial, rounds)
             .expect("scenario space overflows u128; reduce rounds or participants");
         let total = counts[rounds][&initial];
+
+        // If the requested budget covers the whole space, enumerate ranks in
+        // canonical order. Otherwise sample distinct ranks uniformly and
+        // materialize only those scenarios.
         if total <= max_scenarios as u128 {
             return (0..total)
                 .map(|idx| self.scenario_from_rank(&initial, rounds, idx, &counts))
@@ -731,6 +759,9 @@ impl ScenarioGenerator {
         initial: &CellState,
         rounds: usize,
     ) -> Option<Vec<HashMap<CellState, u128>>> {
+        // First discover which residual states can appear at each depth from
+        // the initial state. Later DP layers only need to account for these
+        // reachable states.
         let mut layers = Vec::with_capacity(rounds + 1);
         layers.push(HashSet::from([*initial]));
 
@@ -749,11 +780,17 @@ impl ScenarioGenerator {
             layers.push(next_layer);
         }
 
+        // A zero-round suffix has exactly one continuation: emit no more
+        // rounds. Seed that base case for every state reachable after the full
+        // scripted prefix.
         let mut counts = vec![HashMap::new(); rounds + 1];
         for state in layers[rounds].iter() {
             counts[0].insert(*state, 1);
         }
 
+        // Fold suffix counts back toward the initial state. Each outgoing edge
+        // contributes its round multiplicity times the number of suffixes from
+        // the edge's next residual state.
         for remaining in 1..=rounds {
             let depth = rounds - remaining;
             for state in layers[depth].iter() {
@@ -790,6 +827,10 @@ impl ScenarioGenerator {
         let mut scenario = Vec::with_capacity(rounds);
         let mut state = *initial;
 
+        // Walk the scenario prefix from left to right. At each residual state,
+        // each edge owns a contiguous rank interval equal to its concrete
+        // round multiplicity times the number of suffixes behind its next
+        // state.
         for remaining in (1..=rounds).rev() {
             self.ensure_transitions(&state);
             let transitions = self.transitions(&state);
@@ -810,6 +851,9 @@ impl ScenarioGenerator {
                     .expect("canonical scenario count should fit in u128");
 
                 if rank < subtree_count {
+                    // The high digit selects which concrete round within this
+                    // edge to decode, the remainder is the suffix rank used at
+                    // the next residual state.
                     let transition_rank = rank / suffix;
                     scenario.push(self.round_from_edge(&state, edge, transition_rank));
                     state = edge.next;
@@ -832,6 +876,10 @@ impl ScenarioGenerator {
         }
         let ranges = state.ranges(self.n);
         let mut transitions = TransitionSet::default();
+
+        // Try each residual cell as the canonical source of this round's
+        // leader. The leader cell's local refinements reserve its final
+        // participant as a singleton leader part.
         for leader_cell in 0..ranges.len() {
             let refinements: Vec<_> = ranges
                 .iter()
@@ -841,6 +889,9 @@ impl ScenarioGenerator {
                         .to_vec()
                 })
                 .collect();
+
+            // Combine one local refinement per cell into complete outgoing
+            // edges for this leader choice.
             build_transitions(
                 &ranges,
                 &refinements,
@@ -885,6 +936,8 @@ impl ScenarioGenerator {
         // role subset, and the leader cell has an extra digit for which half
         // sees the leader.
         for (cell_idx, (start, size)) in state.ranges(self.n).into_iter().enumerate() {
+            // Recover this current cell's part sizes by slicing it with the
+            // next state's residual boundaries.
             let parts = edge.next.parts_in_cell(start, size);
             if cell_idx == edge.leader_cell {
                 let non_leader_len = parts.len() - 1;
@@ -893,6 +946,9 @@ impl ScenarioGenerator {
                 let local_rank = rank % local_space;
                 rank /= local_space;
 
+                // The leader cell first consumes a role-subset digit for its
+                // non-leader prefix, then one of three leader placements:
+                // primary-only, secondary-only, or both halves.
                 let roles = roles_from_rank(non_leader_len, local_rank / 3);
                 apply_roles(
                     start,
@@ -918,6 +974,7 @@ impl ScenarioGenerator {
                 let local_rank = rank % role_count;
                 rank /= role_count;
 
+                // Non-leader cells only consume a role-subset digit.
                 let roles = roles_from_rank(parts.len(), local_rank);
                 apply_roles(
                     start,
@@ -952,15 +1009,25 @@ const fn role_subset_count(len: usize) -> u128 {
 }
 
 /// Builds all local refinements for a cell.
+///
+/// A local refinement is the shape this cell can have after one round. The
+/// shape only stores contiguous part sizes; `multiplicity` records how many
+/// assignments of those parts to the ordered non-leader roles produce the same
+/// shape.
 fn build_local_refinements(size: usize, is_leader: bool) -> Vec<LocalRefinement> {
     let mut refinements = Vec::new();
     let available = if is_leader { size - 1 } else { size };
     let mut prefix = Vec::new();
     for_each_composition(available, 4, &mut prefix, &mut |parts| {
+        // `parts` partitions the non-leader portion into the non-empty role
+        // buckets that will remain distinguishable after this round.
         let role_choices = role_subset_count(parts.len());
         let mut local = Vec::with_capacity(parts.len() + usize::from(is_leader));
         local.extend_from_slice(parts);
         let multiplicity = if is_leader {
+            // The leader is always the final participant in its current cell
+            // and becomes a singleton residual cell. It can be visible to the
+            // primary half, the secondary half, or both halves.
             local.push(1);
             role_choices * 3
         } else {
@@ -1021,6 +1088,10 @@ fn for_each_composition_with_len<F: FnMut(&[usize])>(
 
 /// Returns the ranked subset of `len` roles from the four ordered non-leader
 /// roles. The selected roles are returned in canonical role order.
+///
+/// A local refinement with `len` parts does not store which role bucket each
+/// part came from. Its rank selects one of the `C(4, len)` non-empty subsets of
+/// the ordered role list: outside, both, secondary-only, primary-only.
 fn roles_from_rank(len: usize, rank: u128) -> [Role; 4] {
     let mut seen = 0u128;
     for mask in 0u8..16 {
@@ -1030,6 +1101,9 @@ fn roles_from_rank(len: usize, rank: u128) -> [Role; 4] {
         if seen == rank {
             let mut roles = [Role::Outside; 4];
             let mut next = 0usize;
+            // Scan masks in numeric order while assigning selected bits in the
+            // canonical role order. This is the inverse of the
+            // `role_subset_count(len)` space used by local refinements.
             for (bit, role) in [Role::Outside, Role::Both, Role::Secondary, Role::Primary]
                 .into_iter()
                 .enumerate()
