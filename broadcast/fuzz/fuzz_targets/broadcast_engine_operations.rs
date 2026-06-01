@@ -11,9 +11,13 @@ use commonware_cryptography::{
     sha256::Digest,
     Digestible, Hasher, Sha256, Signer,
 };
-use commonware_p2p::{simulated::Network, Recipients};
-use commonware_runtime::{deterministic, Buf, BufMut, Clock, Quota, Runner, Supervisor as _};
-use commonware_utils::{channel::oneshot, futures::Pool, vec::Bounded, NZUsize};
+use commonware_p2p::{simulated::Network, Manager as _, Recipients, Sender as _, TrackedPeers};
+use commonware_runtime::{
+    deterministic, Buf, BufMut, Clock, IoBuf, Quota, Runner, Spawner as _, Supervisor as _,
+};
+use commonware_utils::{
+    channel::oneshot, futures::Pool, ordered::Set, vec::Bounded, FuzzRng, NZUsize,
+};
 use futures::FutureExt as _;
 use libfuzzer_sys::fuzz_target;
 use rand::{seq::SliceRandom, SeedableRng};
@@ -27,6 +31,60 @@ const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
 /// Capped to avoid overflow in governor rate limiter which uses nanoseconds internally
 /// and can only represent durations up to ~584 years.
 const MAX_SLEEP_DURATION_MS: u64 = 1000;
+
+/// Minimum number of pressure rounds in one `PressureMailbox` action.
+const MIN_PRESSURE_MAILBOX_COUNT: u8 = 2;
+
+/// Maximum number of pressure rounds in one `PressureMailbox` action.
+const MAX_PRESSURE_MAILBOX_COUNT: u8 = 8;
+
+/// Minimum number of peers in one fuzz run.
+const MIN_PEERS: u64 = 1;
+
+/// Maximum number of peers in one fuzz run.
+const MAX_PEERS: u64 = 5;
+
+/// Minimum simulated network success rate, as a percentage.
+const MIN_NETWORK_SUCCESS_PERCENT: u8 = 30;
+
+/// Maximum simulated network success rate, as a percentage.
+const MAX_NETWORK_SUCCESS_PERCENT: u8 = 100;
+
+/// Scale factor for percentage values.
+const PERCENT_DENOMINATOR: f64 = 100.0;
+
+/// Minimum simulated network latency in milliseconds.
+const MIN_NETWORK_LATENCY_MS: u64 = 1;
+
+/// Maximum simulated network latency in milliseconds.
+const MAX_NETWORK_LATENCY_MS: u64 = 100;
+
+/// Minimum simulated network jitter in milliseconds.
+const MIN_NETWORK_JITTER_MS: u64 = 0;
+
+/// Maximum simulated network jitter in milliseconds.
+const MAX_NETWORK_JITTER_MS: u64 = 50;
+
+/// Minimum engine cache size.
+const MIN_CACHE_SIZE: usize = 5;
+
+/// Maximum engine cache size.
+const MAX_CACHE_SIZE: usize = 10;
+
+/// Minimum mailbox size.
+const MIN_MAILBOX_SIZE: usize = 1;
+
+/// Maximum mailbox size.
+const MAX_MAILBOX_SIZE: usize = 4;
+
+/// Minimum number of actions in one fuzz run.
+const MIN_ACTIONS: usize = 1;
+
+/// Maximum number of actions in one fuzz run.
+const MAX_ACTIONS: usize = 32;
+
+/// Maximum raw fuzz bytes used to drive runtime scheduling randomness.
+const MAX_RAW_FUZZ_BYTES: usize = 32_768;
 
 /// Maximum number of recently broadcast digests tracked for `Recent` lookups.
 ///
@@ -118,6 +176,38 @@ enum BroadcastAction {
         peer_index: usize,
         digest: Source,
     },
+    SubscribeDropped {
+        peer_index: usize,
+        digest: Source,
+    },
+    SubscribePreparedDropped {
+        peer_index: usize,
+        digest: Source,
+    },
+    GetDropped {
+        peer_index: usize,
+        digest: Source,
+    },
+    SendRaw {
+        sender_index: usize,
+        recipient_index: usize,
+        payload: Vec<u8>,
+    },
+    TrackPeers {
+        primary_mask: u8,
+    },
+    DropMailbox {
+        peer_index: usize,
+    },
+    CloseNetworkReceiver {
+        peer_index: usize,
+    },
+    AbortNetwork,
+    PressureMailbox {
+        peer_index: usize,
+        message: FuzzMessage,
+        count: u8,
+    },
     Sleep {
         duration_ms: u64,
     },
@@ -125,7 +215,7 @@ enum BroadcastAction {
 
 impl<'a> Arbitrary<'a> for BroadcastAction {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let variant = u.int_in_range(0..=3)?;
+        let variant = u.int_in_range(0..=13)?;
         match variant {
             0 => Ok(BroadcastAction::SendMessage {
                 peer_index: u.arbitrary()?,
@@ -140,6 +230,38 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
                 peer_index: u.arbitrary()?,
                 digest: u.arbitrary()?,
             }),
+            3 => Ok(BroadcastAction::SubscribeDropped {
+                peer_index: u.arbitrary()?,
+                digest: u.arbitrary()?,
+            }),
+            4 => Ok(BroadcastAction::SubscribePreparedDropped {
+                peer_index: u.arbitrary()?,
+                digest: u.arbitrary()?,
+            }),
+            5 => Ok(BroadcastAction::GetDropped {
+                peer_index: u.arbitrary()?,
+                digest: u.arbitrary()?,
+            }),
+            6 => Ok(BroadcastAction::SendRaw {
+                sender_index: u.arbitrary()?,
+                recipient_index: u.arbitrary()?,
+                payload: u.arbitrary()?,
+            }),
+            7 => Ok(BroadcastAction::TrackPeers {
+                primary_mask: u.arbitrary()?,
+            }),
+            8 => Ok(BroadcastAction::DropMailbox {
+                peer_index: u.arbitrary()?,
+            }),
+            9 => Ok(BroadcastAction::CloseNetworkReceiver {
+                peer_index: u.arbitrary()?,
+            }),
+            10 => Ok(BroadcastAction::AbortNetwork),
+            11 => Ok(BroadcastAction::PressureMailbox {
+                peer_index: u.arbitrary()?,
+                message: u.arbitrary()?,
+                count: u.int_in_range(MIN_PRESSURE_MAILBOX_COUNT..=MAX_PRESSURE_MAILBOX_COUNT)?,
+            }),
             _ => Ok(BroadcastAction::Sleep {
                 duration_ms: u.int_in_range(0..=MAX_SLEEP_DURATION_MS)?,
             }),
@@ -149,34 +271,49 @@ impl<'a> Arbitrary<'a> for BroadcastAction {
 
 #[derive(Debug)]
 pub struct FuzzInput {
+    raw_fuzz_bytes: Vec<u8>,
     peer_seeds: Vec<u64>,
     network_success_rate: f64,
     network_latency_ms: u64,
     network_jitter_ms: u64,
     cache_size: usize,
+    mailbox_size: usize,
     actions: Vec<BroadcastAction>,
 }
 
 impl<'a> arbitrary::Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let num_peers = u.int_in_range(1..=5)?;
+        let raw_len = u.len().min(MAX_RAW_FUZZ_BYTES);
+        let raw_fuzz_bytes = if raw_len == 0 {
+            vec![0]
+        } else {
+            u.peek_bytes(raw_len)
+                .expect("raw_len is in bounds")
+                .to_vec()
+        };
+        let num_peers = u.int_in_range(MIN_PEERS..=MAX_PEERS)?;
         let peer_seeds = (0..num_peers).collect::<Vec<_>>(); // avoid duplicate seeds
-        let network_success_rate = u.int_in_range(30..=100)? as f64 / 100.0;
-        let network_latency_ms = u.int_in_range(1..=100)?;
-        let network_jitter_ms = u.int_in_range(0..=50)?;
-        let cache_size = u.int_in_range(5..=10)?;
+        let network_success_rate =
+            u.int_in_range(MIN_NETWORK_SUCCESS_PERCENT..=MAX_NETWORK_SUCCESS_PERCENT)? as f64
+                / PERCENT_DENOMINATOR;
+        let network_latency_ms = u.int_in_range(MIN_NETWORK_LATENCY_MS..=MAX_NETWORK_LATENCY_MS)?;
+        let network_jitter_ms = u.int_in_range(MIN_NETWORK_JITTER_MS..=MAX_NETWORK_JITTER_MS)?;
+        let cache_size = u.int_in_range(MIN_CACHE_SIZE..=MAX_CACHE_SIZE)?;
+        let mailbox_size = u.int_in_range(MIN_MAILBOX_SIZE..=MAX_MAILBOX_SIZE)?;
 
-        let num_actions = u.int_in_range(1..=10)?;
+        let num_actions = u.int_in_range(MIN_ACTIONS..=MAX_ACTIONS)?;
         let actions = (0..num_actions)
             .map(|_| BroadcastAction::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
 
         Ok(FuzzInput {
+            raw_fuzz_bytes,
             peer_seeds,
             network_success_rate,
             network_latency_ms,
             network_jitter_ms,
             cache_size,
+            mailbox_size,
             actions,
         })
     }
@@ -212,7 +349,9 @@ fn drain_ready_subscriptions(pending: &mut Pool<Subscription>) {
 }
 
 fn fuzz(input: FuzzInput) {
-    let executor = deterministic::Runner::default();
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_fuzz_bytes.clone())));
+    let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         // Generate peer identities before building the network so the initial
         // peer set can be seeded through the constructor.
@@ -233,10 +372,11 @@ fn fuzz(input: FuzzInput) {
             peers.clone(),
         )
         .await;
-        network.start();
+        let network_handle = network.start();
 
         // Create peers
         let mut mailboxes: BTreeMap<PublicKey, Mailbox<PublicKey, FuzzMessage>> = BTreeMap::new();
+        let mut raw_senders = BTreeMap::new();
         for (i, public_key) in peers.iter().cloned().enumerate() {
             // Create channel
             let (sender, receiver) = oracle
@@ -244,11 +384,12 @@ fn fuzz(input: FuzzInput) {
                 .register(0, TEST_QUOTA)
                 .await
                 .unwrap();
+            raw_senders.insert(public_key.clone(), sender.clone());
 
             // Create mailbox
             let config = Config {
                 public_key: public_key.clone(),
-                mailbox_size: NZUsize!(1024),
+                mailbox_size: input.mailbox_size.try_into().unwrap(),
                 deque_size: input.cache_size,
                 priority: false,
                 codec_config: RangeCfg::from(..),
@@ -276,10 +417,16 @@ fn fuzz(input: FuzzInput) {
                 }
             }
         }
+        context.sleep(Duration::from_millis(1)).await;
 
         // Execute fuzzed actions
         let mut recent_digests = Bounded::new(NZUsize!(MAX_RECENT_DIGESTS));
         let mut pending_subscriptions = Pool::default();
+        let mut next_peer_set = 1;
+        let mailbox_size = input.mailbox_size;
+        let network_settle = Duration::from_millis(
+            input.network_latency_ms + input.network_jitter_ms.saturating_mul(4) + 1,
+        );
         for action in input.actions {
             match action {
                 BroadcastAction::SendMessage {
@@ -294,6 +441,7 @@ fn fuzz(input: FuzzInput) {
                         let resolved_recipients = resolve_recipients(&recipients, &peers);
                         recent_digests.push(message.digest());
                         let _ = mailbox.broadcast(resolved_recipients, message);
+                        context.sleep(network_settle).await;
                     }
                 }
                 BroadcastAction::Subscribe {
@@ -327,12 +475,144 @@ fn fuzz(input: FuzzInput) {
                         }
                     }
                 }
+                BroadcastAction::SubscribeDropped {
+                    peer_index,
+                    digest: source,
+                } => {
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
+                    let clamped_peer_idx = peer_index % peers.len();
+                    let peer = peers[clamped_peer_idx].clone();
+
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                        drop(mailbox.subscribe(digest));
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                }
+                BroadcastAction::SubscribePreparedDropped {
+                    peer_index,
+                    digest: source,
+                } => {
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
+                    let clamped_peer_idx = peer_index % peers.len();
+                    let peer = peers[clamped_peer_idx].clone();
+
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                        let (responder, receiver) = oneshot::channel();
+                        drop(receiver);
+                        mailbox.subscribe_prepared(digest, responder);
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                }
+                BroadcastAction::GetDropped {
+                    peer_index,
+                    digest: source,
+                } => {
+                    let Some(digest) = source.resolve(&recent_digests) else {
+                        continue;
+                    };
+                    let clamped_peer_idx = peer_index % peers.len();
+                    let peer = peers[clamped_peer_idx].clone();
+
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                        let _ = mailbox.get(digest).now_or_never();
+                    }
+                }
+                BroadcastAction::SendRaw {
+                    sender_index,
+                    recipient_index,
+                    mut payload,
+                } => {
+                    let sender_peer = peers[sender_index % peers.len()].clone();
+                    let recipient = if peers.len() == 1 {
+                        peers[0].clone()
+                    } else {
+                        let recipient_index = recipient_index % (peers.len() - 1);
+                        peers
+                            .iter()
+                            .filter(|peer| **peer != sender_peer)
+                            .nth(recipient_index)
+                            .unwrap()
+                            .clone()
+                    };
+                    payload.truncate(1024);
+
+                    if let Some(sender) = raw_senders.get_mut(&sender_peer) {
+                        let _ =
+                            sender.send(Recipients::One(recipient), IoBuf::from(payload), false);
+                        context.sleep(network_settle).await;
+                    }
+                }
+                BroadcastAction::TrackPeers { primary_mask } => {
+                    let primary = Set::from_iter_dedup(
+                        peers
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| primary_mask & (1u8 << i) != 0)
+                            .map(|(_, peer)| peer.clone()),
+                    );
+                    let secondary = Set::from_iter_dedup(
+                        peers
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| primary_mask & (1u8 << i) == 0)
+                            .map(|(_, peer)| peer.clone()),
+                    );
+                    let mut manager = oracle.manager();
+                    let _ = manager.track(next_peer_set, TrackedPeers::new(primary, secondary));
+                    next_peer_set += 1;
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                BroadcastAction::DropMailbox { peer_index } => {
+                    let peer = peers[peer_index % peers.len()].clone();
+                    mailboxes.remove(&peer);
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                BroadcastAction::CloseNetworkReceiver { peer_index } => {
+                    let peer = peers[peer_index % peers.len()].clone();
+                    let _ = oracle.control(peer).register(0, TEST_QUOTA).await;
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                BroadcastAction::AbortNetwork => {
+                    network_handle.abort();
+                    context.sleep(Duration::from_millis(1)).await;
+                }
+                BroadcastAction::PressureMailbox {
+                    peer_index,
+                    message,
+                    count,
+                } => {
+                    let peer = peers[peer_index % peers.len()].clone();
+
+                    if let Some(mailbox) = mailboxes.get(&peer).cloned() {
+                        let digest = message.digest();
+                        recent_digests.push(digest);
+                        let pressure_count = usize::from(count).max(mailbox_size + 3);
+                        for _ in 0..pressure_count {
+                            let _ = mailbox.broadcast(Recipients::All, message.clone());
+
+                            let (responder, receiver) = oneshot::channel();
+                            drop(receiver);
+                            mailbox.subscribe_prepared(digest, responder);
+
+                            let _ = mailbox.get(digest).now_or_never();
+                        }
+                        context.sleep(Duration::from_millis(1)).await;
+                    }
+                }
                 BroadcastAction::Sleep { duration_ms } => {
                     context.sleep(Duration::from_millis(duration_ms)).await;
                 }
             }
             drain_ready_subscriptions(&mut pending_subscriptions);
         }
+        let _ = context
+            .child("shutdown")
+            .stop(0, Some(Duration::from_millis(100)))
+            .await;
     });
 }
 
