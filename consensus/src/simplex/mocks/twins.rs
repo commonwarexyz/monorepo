@@ -1,6 +1,6 @@
 //! Twins framework scenario generator and executor helpers.
 //!
-//! This module follows the campaign structure from
+//! This module follows the testing architecture from
 //! [Twins: BFT Systems Made Robust](https://arxiv.org/pdf/2004.10617):
 //! 1. Generate primary/secondary recipient-set scenarios.
 //! 2. Combine those sets with leader choices per round.
