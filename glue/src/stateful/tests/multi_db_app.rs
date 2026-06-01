@@ -18,7 +18,7 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as
 use commonware_consensus::{
     marshal::{
         self,
-        core::Actor as MarshalActor,
+        core::{Actor as MarshalActor, CommitmentFallback},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -652,7 +652,11 @@ impl EngineDefinition for MultiDbEngine {
 
         if should_state_sync {
             let finalization = sync_floor.expect("sync floor missing");
-            let height = finalization.round().view().get();
+            let floor = marshal_mailbox
+                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .await
+                .expect("marshal must yield sync floor block");
+            let height = floor.height().get();
             *self
                 .sync_entries
                 .lock()
