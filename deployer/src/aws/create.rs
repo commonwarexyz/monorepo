@@ -121,6 +121,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             return Err(Error::InvalidInstanceName(instance.name.clone()));
         }
     }
+
+    // Validate storage settings before allocating any AWS resources.
     validate_storage_config(&config)?;
 
     // Determine unique regions
@@ -1491,7 +1493,6 @@ mod tests {
         }
     }
 
-    // IOPS validation covers required fields, global ranges, size ratios, and unsupported types.
     #[test]
     fn monitoring_io2_requires_storage_iops() {
         let cfg = config(monitoring("io2", None), Vec::new());

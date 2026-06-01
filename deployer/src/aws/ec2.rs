@@ -384,6 +384,14 @@ pub(crate) fn parse_storage_class(
 }
 
 /// Validates configured EBS options.
+///
+/// Source docs for EBS request-side limits:
+/// - IOPS and throughput request fields:
+///   https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_EbsBlockDevice.html
+/// - gp3 size, IOPS, and throughput ratios:
+///   https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html
+/// - io1/io2 size-to-IOPS ratios:
+///   https://docs.aws.amazon.com/ebs/latest/userguide/provisioned-iops.html
 pub(crate) fn validate_storage_options(
     target: &str,
     storage_class: &VolumeType,
@@ -391,13 +399,6 @@ pub(crate) fn validate_storage_options(
     storage_iops: Option<i32>,
     storage_throughput: Option<i32>,
 ) -> Result<(), super::Error> {
-    // Source docs for EBS request-side limits:
-    // IOPS and throughput request fields:
-    // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_EbsBlockDevice.html
-    // gp3 size, IOPS, and throughput ratios:
-    // https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html
-    // io1/io2 size-to-IOPS ratios:
-    // https://docs.aws.amazon.com/ebs/latest/userguide/provisioned-iops.html
     // Provisioned IOPS SSD volumes require an explicit IOPS value at launch.
     if storage_iops.is_none() && matches!(storage_class, VolumeType::Io1 | VolumeType::Io2) {
         return Err(super::Error::MissingStorageIops {
@@ -406,11 +407,11 @@ pub(crate) fn validate_storage_options(
         });
     }
 
+    // Request IOPS is limited by both the EbsBlockDevice range and the
+    // volume-type-specific storage size ratio.
     if let Some(storage_iops) = storage_iops {
         let storage_size = i64::from(storage_size);
         let storage_iops = i64::from(storage_iops);
-        // Request IOPS is limited by both the EbsBlockDevice range and the
-        // volume-type-specific storage size ratio.
         let valid = match storage_class {
             VolumeType::Gp3 => {
                 let max_iops = 80_000.min(3_000.max(storage_size * 500));
