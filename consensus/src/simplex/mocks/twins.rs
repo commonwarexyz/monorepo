@@ -477,12 +477,7 @@ impl BitMask {
     }
 
     #[cfg(test)]
-    fn any_word_except(
-        &self,
-        other: &Self,
-        excluded: usize,
-        f: impl Fn(u64, u64) -> u64,
-    ) -> bool {
+    fn any_word_except(&self, other: &Self, excluded: usize, f: impl Fn(u64, u64) -> u64) -> bool {
         match (self, other) {
             (Self::Inline(lhs), Self::Inline(rhs)) => {
                 let mut word = f(*lhs, *rhs);
@@ -1519,10 +1514,7 @@ mod tests {
             }
             cells.push(1);
 
-            out.insert((
-                round(n, leader, mask, mask),
-                cells,
-            ));
+            out.insert((round(n, leader, mask, mask), cells));
         }
 
         for outside in 0..n {
@@ -1621,7 +1613,8 @@ mod tests {
         let scenarios = generate_scenarios(&mut test_rng(), 3, 1, usize::MAX);
         assert!(scenarios.iter().any(|(scenario, _)| {
             let round = &scenario.rounds[0];
-            !round.primary_mask.contains(round.leader) && round.secondary_mask.contains(round.leader)
+            !round.primary_mask.contains(round.leader)
+                && round.secondary_mask.contains(round.leader)
         }));
     }
 
