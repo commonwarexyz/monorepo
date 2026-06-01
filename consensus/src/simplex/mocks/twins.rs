@@ -33,7 +33,7 @@
 //! role buckets: outside both halves, visible to both halves, visible only to
 //! the secondary half, or visible only to the primary half. The generated
 //! leader is a singleton at the end of its cell and must be visible to at least
-//! one half; total leader isolation is outside this scenario space.
+//! one half. Total leader isolation is outside this scenario space.
 //!
 //! A residual cell is a group of participants with identical role history in
 //! the scripted prefix. When a participant leads, it becomes a permanent
@@ -41,9 +41,9 @@
 //! its old cell. A transition records only the next residual cell boundaries.
 //! For a fixed set of part sizes, multiple role-bucket choices can produce the
 //! same next boundaries, so the transition stores their count as
-//! `multiplicity`. Scenario counts are computed over this compressed
-//! transition DAG, and `round_from_edge` reconstructs sampled rounds by
-//! decoding the chosen edge's rank as mixed-radix digits in cell order.
+//! `multiplicity`. Scenario counts are computed over this compressed transition
+//! DAG, and `round_from_edge` reconstructs sampled rounds by decoding the
+//! chosen edge's rank as mixed-radix digits in cell order.
 //!
 //! For example, with one cell of three participants and leader `2`, a round can
 //! split the two non-leaders as `[both = 1, primary-only = 1]` and place the
@@ -60,8 +60,8 @@
 //! transition and the exact number of concrete round scenarios represented by
 //! that transition. Counts are computed bottom-up over the reachable residual
 //! states. When the scenario space exceeds the configured budget, sampled
-//! campaigns choose canonical scenarios uniformly without replacement. For
-//! each selected scenario, `cases()` computes the residual symmetry cells and
+//! campaigns choose canonical scenarios uniformly without replacement. For each
+//! selected scenario, `cases()` computes the residual symmetry cells and
 //! generates only the unique compromised-node assignments: two assignments that
 //! differ only in which members of a cell are chosen are equivalent and
 //! collapsed to a single representative.
@@ -78,15 +78,33 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
 use rand::{seq::SliceRandom, Rng};
-use std::{collections::{HashMap, HashSet}, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 
+/// Maximum participant count supported by the scenario generator.
 const MAX_PARTICIPANTS: usize = u64::BITS as usize;
+
+/// Sizes of the residual symmetry cells in canonical participant order.
+///
+/// For example, `[2, 1]` represents cells `{0, 1}` and `{2}`.
+type Cells = Vec<usize>;
+
+/// Sizes of contiguous role parts within one residual cell.
+type Parts = Vec<usize>;
+
+/// Participant index in canonical scenario order.
+type ParticipantIndex = usize;
+
+/// Canonical compromised participant indices for one generated case.
+type Compromised = Vec<ParticipantIndex>;
 
 /// Per-round adversarial setting from the Twins framework.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RoundScenario {
     // Participant index chosen to lead this round.
-    leader: usize,
+    leader: ParticipantIndex,
     // Bitmasks selecting which participant identities each twin half can
     // exchange messages with. The masks may overlap.
     primary_mask: u64,
@@ -97,6 +115,29 @@ impl RoundScenario {
     /// Returns the designated leader index for this round scenario.
     pub const fn leader(&self) -> usize {
         self.leader
+    }
+
+    /// Returns recipient sets for this round's twin halves.
+    fn partitions<P: Clone>(&self, participants: &[P]) -> (Vec<P>, Vec<P>) {
+        let primary = partition_for_mask(self.primary_mask, participants);
+        let secondary = partition_for_mask(self.secondary_mask, participants);
+        (primary, secondary)
+    }
+
+    /// Routes a sender according to this round's recipient masks.
+    fn route<P: PartialEq>(&self, sender: &P, participants: &[P]) -> SplitTarget {
+        let sender_idx = participants
+            .iter()
+            .position(|participant| participant == sender)
+            .expect("sender missing from runtime participant list");
+        let in_primary = mask_contains(self.primary_mask, sender_idx);
+        let in_secondary = mask_contains(self.secondary_mask, sender_idx);
+        match (in_primary, in_secondary) {
+            (true, true) => SplitTarget::Both,
+            (true, false) => SplitTarget::Primary,
+            (false, true) => SplitTarget::Secondary,
+            (false, false) => SplitTarget::None,
+        }
     }
 }
 
@@ -123,7 +164,7 @@ impl Scenario {
     pub fn partitions<P: Clone>(&self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
-            return masks_to_partitions(round.primary_mask, round.secondary_mask, participants);
+            return round.partitions(participants);
         }
         (participants.to_vec(), participants.to_vec())
     }
@@ -141,18 +182,7 @@ impl Scenario {
     pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
-            let sender_idx = participants
-                .iter()
-                .position(|participant| participant == sender)
-                .expect("sender missing from runtime participant list");
-            let in_primary = mask_contains(round.primary_mask, sender_idx);
-            let in_secondary = mask_contains(round.secondary_mask, sender_idx);
-            return match (in_primary, in_secondary) {
-                (true, true) => SplitTarget::Both,
-                (true, false) => SplitTarget::Primary,
-                (false, true) => SplitTarget::Secondary,
-                (false, false) => SplitTarget::None,
-            };
+            return round.route(sender, participants);
         }
         // After attack rounds, both halves see everyone.
         SplitTarget::Both
@@ -268,9 +298,10 @@ where
             return leader;
         }
 
-        // After the scripted attack prefix, the caller's fallback elector
-        // controls leader selection. Twins campaigns should not prevent the
-        // protocol from timing out in later views (if a twin is elected).
+        // After the scripted attack prefix, intentionally resume the caller's
+        // fallback elector rather than forcing an honest-only suffix. Twins
+        // campaigns should not prevent the protocol from timing out in
+        // later views (if a twin is elected).
         self.fallback.elect(round, certificate)
     }
 }
@@ -296,9 +327,9 @@ pub enum Mode {
 /// that differ only in which members of a symmetry cell are compromised are
 /// equivalent under relabeling for the adversarial prefix, so the framework
 /// generates only one representative per equivalence class. This keeps the case
-/// budget focused on structurally distinct attack configurations.
-/// The synchronous suffix may elect different concrete participant indices
-/// after such a relabeling, but under full synchrony the pass/fail verdict is
+/// budget focused on structurally distinct attack configurations. The
+/// synchronous suffix may elect different concrete participant indices after
+/// such a relabeling, but under full synchrony the pass/fail verdict is
 /// invariant to that relabeling.
 ///
 /// The generator selects canonical scenarios first: all scenarios when the
@@ -306,7 +337,7 @@ pub enum Mode {
 /// scenario ranks when it does not. It then expands the selected scenarios
 /// across their symmetry-unique compromised assignments, shuffles the cases,
 /// and truncates to [`Framework::max_cases`]. Scenario counts must fit in
-/// `u128`; overflowing configurations panic.
+/// `u128`, overflowing configurations panic.
 #[derive(Clone, Copy, Debug)]
 pub struct Framework {
     /// Number of participants in the network. Must be at most 64.
@@ -326,7 +357,7 @@ pub struct Framework {
 #[derive(Clone, Debug)]
 pub struct Case {
     /// Compromised participant indices for this case.
-    pub compromised: Vec<usize>,
+    pub compromised: Compromised,
     /// Multi-round scenario for this case.
     pub scenario: Scenario,
 }
@@ -360,20 +391,15 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
     assert!(framework.rounds > 0, "rounds must be > 0");
     assert!(framework.max_cases > 0, "max_cases must be > 0");
 
+    let mut generator = ScenarioGenerator::new(framework.participants);
     let scenarios = match framework.mode {
-        Mode::Sampled => generate_scenarios(
-            rng,
-            framework.participants,
-            framework.rounds,
-            framework.max_cases,
-        ),
+        Mode::Sampled => generator.generate(rng, framework.rounds, framework.max_cases),
         Mode::Sustained => {
             // Generate 1-round scenarios and repeat across all rounds.
             // The 1-round residual cells are valid here because applying
             // the same recipient-set pattern repeatedly never distinguishes
             // participants that were indistinguishable after the first round.
-            let single_round =
-                generate_scenarios(rng, framework.participants, 1, framework.max_cases);
+            let single_round = generator.generate(rng, 1, framework.max_cases);
             single_round
                 .into_iter()
                 .map(|(s, cells)| {
@@ -413,29 +439,18 @@ fn partition_for_mask<P: Clone>(mask: u64, participants: &[P]) -> Vec<P> {
     group
 }
 
-/// Converts twins routing bitmasks into concrete recipient sets.
-fn masks_to_partitions<P: Clone>(
-    primary_mask: u64,
-    secondary_mask: u64,
-    participants: &[P],
-) -> (Vec<P>, Vec<P>) {
-    let primary = partition_for_mask(primary_mask, participants);
-    let secondary = partition_for_mask(secondary_mask, participants);
-    (primary, secondary)
-}
-
 /// Sets bit `idx` in `mask`.
-fn set_mask_bit(mask: &mut u64, idx: usize) {
-    debug_assert!(idx < MAX_PARTICIPANTS);
+#[inline]
+const fn set_mask_bit(mask: &mut u64, idx: usize) {
     *mask |= 1u64 << idx;
 }
 
 /// Sets every bit in the contiguous range `[start, start + len)`.
-fn set_mask_range(mask: &mut u64, start: usize, len: usize) {
+#[inline]
+const fn set_mask_range(mask: &mut u64, start: usize, len: usize) {
     if len == 0 {
         return;
     }
-    debug_assert!(start + len <= MAX_PARTICIPANTS);
     let range = if len == u64::BITS as usize {
         u64::MAX
     } else {
@@ -445,6 +460,7 @@ fn set_mask_range(mask: &mut u64, start: usize, len: usize) {
 }
 
 /// Returns whether bit `idx` is set in `mask`.
+#[inline]
 const fn mask_contains(mask: u64, idx: usize) -> bool {
     idx < MAX_PARTICIPANTS && (mask & (1u64 << idx)) != 0
 }
@@ -475,10 +491,11 @@ struct CellState {
 impl CellState {
     /// Returns the state with a single symmetry cell covering all participants.
     fn initial(n: usize) -> Self {
-        assert!(n <= MAX_PARTICIPANTS, "participants must be <= {MAX_PARTICIPANTS}");
-        Self {
-            boundaries: 0,
-        }
+        assert!(
+            n <= MAX_PARTICIPANTS,
+            "participants must be <= {MAX_PARTICIPANTS}"
+        );
+        Self { boundaries: 0 }
     }
 
     /// Converts explicit cell sizes into a boundary mask.
@@ -500,7 +517,7 @@ impl CellState {
     }
 
     /// Converts the state back into cell sizes.
-    fn to_cells(self, n: usize) -> Vec<usize> {
+    fn to_cells(self, n: usize) -> Cells {
         self.ranges(n).into_iter().map(|(_, len)| len).collect()
     }
 
@@ -516,6 +533,20 @@ impl CellState {
         }
         ranges.push((start, n - start));
         ranges
+    }
+
+    /// Returns the positive parts of the cell `[start, start + size)`.
+    fn parts_in_cell(&self, start: usize, size: usize) -> Parts {
+        let end = start + size;
+        let mut parts = Vec::new();
+        let mut part_start = start;
+        for idx in start..end {
+            if idx + 1 == end || self.boundary_after(idx) {
+                parts.push(idx + 1 - part_start);
+                part_start = idx + 1;
+            }
+        }
+        parts
     }
 
     /// Adds boundaries for `parts` starting at `start`.
@@ -660,6 +691,36 @@ impl ScenarioGenerator {
         }
     }
 
+    /// Enumerates canonical scenarios with their residual symmetry cells.
+    ///
+    /// Returns all scenarios when the space fits within `max_scenarios`;
+    /// otherwise samples `max_scenarios` without replacement.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the scenario space overflows `u128`.
+    fn generate(
+        &mut self,
+        rng: &mut impl Rng,
+        rounds: usize,
+        max_scenarios: usize,
+    ) -> Vec<(Scenario, Cells)> {
+        let initial = CellState::initial(self.n);
+        let counts = self
+            .counts(&initial, rounds)
+            .expect("scenario space overflows u128; reduce rounds or participants");
+        let total = counts[rounds][&initial];
+        if total <= max_scenarios as u128 {
+            return (0..total)
+                .map(|idx| self.scenario_from_rank(&initial, rounds, idx, &counts))
+                .collect();
+        }
+        sample_unique_indices(rng, total, max_scenarios)
+            .into_iter()
+            .map(|idx| self.scenario_from_rank(&initial, rounds, idx, &counts))
+            .collect()
+    }
+
     /// Builds bottom-up scenario counts for paths starting at `initial`.
     ///
     /// `counts[r][state]` is the exact number of canonical scenario suffixes
@@ -725,7 +786,7 @@ impl ScenarioGenerator {
         rounds: usize,
         mut rank: u128,
         counts: &[HashMap<CellState, u128>],
-    ) -> (Scenario, Vec<usize>) {
+    ) -> (Scenario, Cells) {
         let mut scenario = Vec::with_capacity(rounds);
         let mut state = *initial;
 
@@ -824,7 +885,7 @@ impl ScenarioGenerator {
         // role subset, and the leader cell has an extra digit for which half
         // sees the leader.
         for (cell_idx, (start, size)) in state.ranges(self.n).into_iter().enumerate() {
-            let parts = parts_in_cell(&edge.next, start, size);
+            let parts = edge.next.parts_in_cell(start, size);
             if cell_idx == edge.leader_cell {
                 let non_leader_len = parts.len() - 1;
                 let role_count = role_subset_count(non_leader_len);
@@ -877,20 +938,6 @@ impl ScenarioGenerator {
     }
 }
 
-/// Returns the positive parts of the cell `[start, start + size)` in `state`.
-fn parts_in_cell(state: &CellState, start: usize, size: usize) -> Vec<usize> {
-    let end = start + size;
-    let mut parts = Vec::new();
-    let mut part_start = start;
-    for idx in start..end {
-        if idx + 1 == end || state.boundary_after(idx) {
-            parts.push(idx + 1 - part_start);
-            part_start = idx + 1;
-        }
-    }
-    parts
-}
-
 /// Number of ways to choose `len` non-empty role buckets from four ordered
 /// non-leader roles.
 const fn role_subset_count(len: usize) -> u128 {
@@ -931,7 +978,7 @@ fn build_local_refinements(size: usize, is_leader: bool) -> Vec<LocalRefinement>
 fn for_each_composition<F: FnMut(&[usize])>(
     total: usize,
     max_parts: usize,
-    current: &mut Vec<usize>,
+    current: &mut Parts,
     f: &mut F,
 ) {
     if total == 0 {
@@ -948,7 +995,7 @@ fn for_each_composition<F: FnMut(&[usize])>(
 fn for_each_composition_with_len<F: FnMut(&[usize])>(
     remaining: usize,
     parts_left: usize,
-    current: &mut Vec<usize>,
+    current: &mut Parts,
     f: &mut F,
 ) {
     if parts_left == 0 {
@@ -1030,7 +1077,7 @@ fn apply_roles(
 /// permuting participants within the same cell. This function emits exactly
 /// one canonical representative per equivalence class by always picking the
 /// first indices from each cell.
-fn compromised_sets_for_cells(cells: &[usize], faults: usize) -> Vec<Vec<usize>> {
+fn compromised_sets_for_cells(cells: &[usize], faults: usize) -> Vec<Compromised> {
     let ranges = cells_to_ranges(cells);
     let mut result = Vec::new();
     let mut current = Vec::new();
@@ -1045,8 +1092,8 @@ fn allocate_faults(
     ranges: &[(usize, usize)],
     cell_idx: usize,
     remaining: usize,
-    current: &mut Vec<usize>,
-    result: &mut Vec<Vec<usize>>,
+    current: &mut Compromised,
+    result: &mut Vec<Compromised>,
 ) {
     if remaining == 0 {
         result.push(current.clone());
@@ -1100,34 +1147,6 @@ fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec
     sampled
 }
 
-/// Enumerates canonical scenarios with their residual symmetry cells.
-///
-/// Returns all scenarios when the space fits within `max_scenarios`;
-/// otherwise samples `max_scenarios` without replacement. Panics if the
-/// scenario space overflows u128 and cannot be sampled.
-fn generate_scenarios(
-    rng: &mut impl Rng,
-    n: usize,
-    rounds: usize,
-    max_scenarios: usize,
-) -> Vec<(Scenario, Vec<usize>)> {
-    let mut generator = ScenarioGenerator::new(n);
-    let initial = CellState::initial(n);
-    let counts = generator
-        .counts(&initial, rounds)
-        .expect("scenario space overflows u128; reduce rounds or participants");
-    let total = counts[rounds][&initial];
-    if total <= max_scenarios as u128 {
-        return (0..total)
-            .map(|idx| generator.scenario_from_rank(&initial, rounds, idx, &counts))
-            .collect();
-    }
-    sample_unique_indices(rng, total, max_scenarios)
-        .into_iter()
-        .map(|idx| generator.scenario_from_rank(&initial, rounds, idx, &counts))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1161,7 +1180,7 @@ mod tests {
     // generator uses compressed transition edges, while this helper expands
     // next-round refinements directly so tests can compare the DAG counter and
     // unranker against a simpler implementation.
-    fn reference_next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
+    fn reference_next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Cells)> {
         let n = cells.iter().sum();
 
         #[derive(Clone, Copy)]
@@ -1179,7 +1198,7 @@ mod tests {
 
         const LEADER_PLACEMENTS: &[(bool, bool)] = &[(true, false), (false, true), (true, true)];
 
-        fn push_nonzero_cells(next_cells: &mut Vec<usize>, sizes: [usize; 4]) {
+        fn push_nonzero_cells(next_cells: &mut Cells, sizes: [usize; 4]) {
             for size in sizes {
                 if size > 0 {
                     next_cells.push(size);
@@ -1193,8 +1212,8 @@ mod tests {
             leader_cell: usize,
             cell_idx: usize,
             state: PrimaryState,
-            next_cells: &mut Vec<usize>,
-            out: &mut Vec<(RoundScenario, Vec<usize>)>,
+            next_cells: &mut Cells,
+            out: &mut Vec<(RoundScenario, Cells)>,
         ) {
             if cell_idx == ranges.len() {
                 out.push((
@@ -1269,8 +1288,8 @@ mod tests {
             leader_cell: usize,
             cell_idx: usize,
             state: SecondaryState,
-            next_cells: &mut Vec<usize>,
-            out: &mut Vec<(RoundScenario, Vec<usize>)>,
+            next_cells: &mut Cells,
+            out: &mut Vec<(RoundScenario, Cells)>,
         ) {
             if cell_idx == ranges.len() {
                 if state.primary_mask == state.secondary_mask {
@@ -1393,7 +1412,7 @@ mod tests {
     fn reference_scenario_count(
         cells: &[usize],
         rounds: usize,
-        memo: &mut HashMap<(Vec<usize>, usize), Option<u128>>,
+        memo: &mut HashMap<(Cells, usize), Option<u128>>,
     ) -> Option<u128> {
         if rounds == 0 {
             return Some(1);
@@ -1415,7 +1434,7 @@ mod tests {
         result
     }
 
-    fn reference_scenarios(cells: &[usize], rounds: usize) -> HashSet<(Scenario, Vec<usize>)> {
+    fn reference_scenarios(cells: &[usize], rounds: usize) -> HashSet<(Scenario, Cells)> {
         if rounds == 0 {
             return HashSet::from([(Scenario { rounds: Vec::new() }, cells.to_vec())]);
         }
@@ -1430,7 +1449,7 @@ mod tests {
         out
     }
 
-    fn expected_single_round_transitions(n: usize) -> HashSet<(RoundScenario, Vec<usize>)> {
+    fn expected_single_round_transitions(n: usize) -> HashSet<(RoundScenario, Cells)> {
         let mut out = HashSet::new();
 
         for outside in 0..n {
@@ -1545,7 +1564,9 @@ mod tests {
     #[test]
     fn generated_single_round_scenarios_match_expected_canonical_space() {
         for n in 3..=5 {
-            let generated: HashSet<_> = generate_scenarios(&mut test_rng(), n, 1, usize::MAX)
+            let mut generator = ScenarioGenerator::new(n);
+            let generated: HashSet<_> = generator
+                .generate(&mut test_rng(), 1, usize::MAX)
                 .into_iter()
                 .map(|(scenario, cells)| (scenario.rounds[0], cells))
                 .collect();
@@ -1595,7 +1616,9 @@ mod tests {
     #[test]
     fn compressed_unranking_matches_reference_space() {
         for (n, rounds) in [(2usize, 3usize), (3, 2)] {
-            let generated: HashSet<_> = generate_scenarios(&mut test_rng(), n, rounds, usize::MAX)
+            let mut generator = ScenarioGenerator::new(n);
+            let generated: HashSet<_> = generator
+                .generate(&mut test_rng(), rounds, usize::MAX)
                 .into_iter()
                 .collect();
             assert_eq!(
@@ -1718,7 +1741,8 @@ mod tests {
 
     #[test]
     fn generated_split_round_leaders_belong_to_at_least_one_half() {
-        let scenarios = generate_scenarios(&mut test_rng(), 4, 2, usize::MAX);
+        let mut generator = ScenarioGenerator::new(4);
+        let scenarios = generator.generate(&mut test_rng(), 2, usize::MAX);
         for (scenario, _) in scenarios {
             for round in scenario.rounds {
                 if round.primary_mask == round.secondary_mask {
@@ -1900,7 +1924,8 @@ mod tests {
 
     #[test]
     fn pruned_scenarios_vary_across_round_positions() {
-        let scenarios = generate_scenarios(&mut test_rng(), 5, 3, 32);
+        let mut generator = ScenarioGenerator::new(5);
+        let scenarios = generator.generate(&mut test_rng(), 3, 32);
         for round in 0..3 {
             let unique: HashSet<_> = scenarios
                 .iter()
@@ -1948,7 +1973,8 @@ mod tests {
             max_cases: usize::MAX,
         };
         let all_cases = cases(&mut test_rng(), framework);
-        let scenarios = generate_scenarios(&mut test_rng(), 5, 1, usize::MAX);
+        let mut generator = ScenarioGenerator::new(5);
+        let scenarios = generator.generate(&mut test_rng(), 1, usize::MAX);
         // Naive cross-product would be scenarios * C(5,1) = scenarios * 5.
         // Symmetry-aware should produce fewer.
         let naive = scenarios.len() * 5;
