@@ -387,9 +387,17 @@ pub(crate) fn parse_storage_class(
 pub(crate) fn validate_storage_options(
     target: &str,
     storage_class: &VolumeType,
+    storage_size: i32,
     storage_iops: Option<i32>,
     storage_throughput: Option<i32>,
 ) -> Result<(), super::Error> {
+    // Source docs for EBS request-side limits:
+    // IOPS and throughput request fields:
+    // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_EbsBlockDevice.html
+    // gp3 size, IOPS, and throughput ratios:
+    // https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html
+    // io1/io2 size-to-IOPS ratios:
+    // https://docs.aws.amazon.com/ebs/latest/userguide/provisioned-iops.html
     if storage_iops.is_none() && matches!(storage_class, VolumeType::Io1 | VolumeType::Io2) {
         return Err(super::Error::MissingStorageIops {
             target: target.to_string(),
@@ -398,21 +406,36 @@ pub(crate) fn validate_storage_options(
     }
 
     if let Some(storage_iops) = storage_iops {
+        let storage_size = i64::from(storage_size);
+        let storage_iops = i64::from(storage_iops);
+        // Request IOPS is limited by both the EbsBlockDevice range and the
+        // volume-type-specific storage size ratio.
         let valid = match storage_class {
-            VolumeType::Gp3 => (3_000..=80_000).contains(&storage_iops),
-            VolumeType::Io1 => (100..=64_000).contains(&storage_iops),
-            VolumeType::Io2 => (100..=256_000).contains(&storage_iops),
+            VolumeType::Gp3 => {
+                let max_iops = 80_000.min(3_000.max(storage_size * 500));
+                (3_000..=max_iops).contains(&storage_iops)
+            }
+            VolumeType::Io1 => {
+                let max_iops = 64_000.min(storage_size * 50);
+                (100..=max_iops).contains(&storage_iops)
+            }
+            VolumeType::Io2 => {
+                let max_iops = 256_000.min(storage_size * 1_000);
+                (100..=max_iops).contains(&storage_iops)
+            }
             _ => false,
         };
         if !valid {
             return Err(super::Error::InvalidStorageIops {
                 target: target.to_string(),
                 storage_class: storage_class.as_str().to_string(),
-                storage_iops,
+                storage_iops: storage_iops as i32,
             });
         }
     }
 
+    // EbsBlockDevice throughput is a gp3-only request field. gp3 throughput
+    // is capped at 0.25 MiB/s per effective provisioned IOPS.
     match (storage_throughput, storage_class) {
         (Some(storage_throughput), _) if !(125..=2_000).contains(&storage_throughput) => {
             Err(super::Error::InvalidStorageThroughput {
@@ -424,6 +447,14 @@ pub(crate) fn validate_storage_options(
             Err(super::Error::UnsupportedStorageThroughput {
                 target: target.to_string(),
                 storage_class: storage_class.as_str().to_string(),
+            })
+        }
+        (Some(storage_throughput), VolumeType::Gp3)
+            if storage_throughput > storage_iops.unwrap_or(3_000) / 4 =>
+        {
+            Err(super::Error::InvalidStorageThroughput {
+                target: target.to_string(),
+                storage_throughput,
             })
         }
         _ => Ok(()),
@@ -540,7 +571,13 @@ pub async fn launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<(Vec<String>, String), super::Error> {
-    validate_storage_options(name, &storage_class, storage_iops, storage_throughput)?;
+    validate_storage_options(
+        name,
+        &storage_class,
+        storage_size,
+        storage_iops,
+        storage_throughput,
+    )?;
 
     // Filter to subnets in AZs that support this instance type
     let instance_type_str = instance_type.to_string();

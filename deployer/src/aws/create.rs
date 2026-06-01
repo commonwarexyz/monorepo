@@ -73,6 +73,7 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
     validate_storage_options(
         MONITORING_NAME,
         &monitoring_storage_class,
+        config.monitoring.storage_size,
         config.monitoring.storage_iops,
         config.monitoring.storage_throughput,
     )?;
@@ -82,6 +83,7 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
         validate_storage_options(
             &instance.name,
             &storage_class,
+            instance.storage_size,
             instance.storage_iops,
             instance.storage_throughput,
         )?;
@@ -1547,6 +1549,26 @@ mod tests {
     }
 
     #[test]
+    fn io1_storage_iops_are_capped_by_storage_size() {
+        let mut instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+        instance.storage_class = "io1".to_string();
+        instance.storage_size = 10;
+        instance.storage_iops = Some(64_000);
+        let cfg = config(monitoring("gp3", None), vec![instance]);
+
+        let err = validate_storage_config(&cfg).expect_err("io1 storage_iops exceeds size ratio");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "worker" && storage_class == "io1" && storage_iops == 64_000
+        ));
+    }
+
+    #[test]
     fn io2_storage_iops_must_be_in_range() {
         let cfg = config(monitoring("io2", Some(256_001)), Vec::new());
 
@@ -1638,6 +1660,23 @@ mod tests {
         let cfg = config(monitoring, Vec::new());
 
         validate_storage_config(&cfg).expect("gp3 throughput is valid");
+    }
+
+    #[test]
+    fn gp3_storage_throughput_is_capped_by_iops() {
+        let mut monitoring = monitoring("gp3", None);
+        monitoring.storage_throughput = Some(2_000);
+        let cfg = config(monitoring, Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("gp3 throughput exceeds default IOPS");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageThroughput {
+                target,
+                storage_throughput,
+            } if target == "monitoring" && storage_throughput == 2_000
+        ));
     }
 
     #[test]
