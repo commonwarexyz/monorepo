@@ -398,6 +398,7 @@ pub(crate) fn validate_storage_options(
     // https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html
     // io1/io2 size-to-IOPS ratios:
     // https://docs.aws.amazon.com/ebs/latest/userguide/provisioned-iops.html
+    // Provisioned IOPS SSD volumes require an explicit IOPS value at launch.
     if storage_iops.is_none() && matches!(storage_class, VolumeType::Io1 | VolumeType::Io2) {
         return Err(super::Error::MissingStorageIops {
             target: target.to_string(),
@@ -478,6 +479,7 @@ async fn try_launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<Vec<String>, Ec2Error> {
+    // Build the root EBS mapping with optional provisioned performance settings.
     let mut ebs = EbsBlockDevice::builder()
         .volume_size(storage_size)
         .volume_type(storage_class)

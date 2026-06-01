@@ -69,6 +69,7 @@ pub struct RegionResources {
 
 /// Validates storage options before create allocates AWS resources.
 fn validate_storage_config(config: &Config) -> Result<(), Error> {
+    // Treat monitoring and binary instances uniformly because both launch an EBS volume.
     let storage_configs = std::iter::once((
         MONITORING_NAME,
         config.monitoring.storage_class.as_str(),
@@ -86,6 +87,7 @@ fn validate_storage_config(config: &Config) -> Result<(), Error> {
         )
     }));
 
+    // Reject bad storage settings before key, S3, VPC, or instance resources are created.
     for (target, storage_class, storage_size, storage_iops, storage_throughput) in storage_configs {
         let storage_class = parse_storage_class(target, storage_class)?;
         validate_storage_options(
@@ -1489,6 +1491,7 @@ mod tests {
         }
     }
 
+    // IOPS validation covers required fields, global ranges, size ratios, and unsupported types.
     #[test]
     fn monitoring_io2_requires_storage_iops() {
         let cfg = config(monitoring("io2", None), Vec::new());
@@ -1625,6 +1628,7 @@ mod tests {
         validate_storage_config(&cfg).expect("io2 with storage_iops is valid");
     }
 
+    // Throughput validation covers the gp3-only API field and gp3 ratio limits.
     #[test]
     fn storage_throughput_must_be_in_gp3_range() {
         let mut monitoring = monitoring("gp3", None);
