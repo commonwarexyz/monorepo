@@ -9,22 +9,22 @@ use std::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Idx {
+pub enum CircuitIdx {
     Witness(u32),
     Constant(u32),
     Node(u32),
 }
 
-enum Node {
-    Add(Idx, Idx),
-    Mul(Idx, Idx),
+pub enum CircuitNode {
+    Add(CircuitIdx, CircuitIdx),
+    Mul(CircuitIdx, CircuitIdx),
 }
 
 pub struct Circuit<F> {
-    witnesses: u32,
-    constants: Vec<F>,
-    nodes: Vec<Node>,
-    assertions: Vec<(Idx, Idx)>,
+    pub witnesses: u32,
+    pub constants: Vec<F>,
+    pub nodes: Vec<CircuitNode>,
+    pub assertions: Vec<(CircuitIdx, CircuitIdx)>,
 }
 
 impl<F> Default for Circuit<F> {
@@ -39,20 +39,20 @@ impl<F> Default for Circuit<F> {
 }
 
 impl<F> Circuit<F> {
-    const fn next_witness(&mut self) -> Idx {
-        let next = Idx::Witness(self.witnesses);
+    const fn next_witness(&mut self) -> CircuitIdx {
+        let next = CircuitIdx::Witness(self.witnesses);
         self.witnesses += 1;
         next
     }
 
-    fn next_constant(&mut self, x: F) -> Idx {
-        let next = Idx::Constant(self.constants.len() as u32);
+    fn next_constant(&mut self, x: F) -> CircuitIdx {
+        let next = CircuitIdx::Constant(self.constants.len() as u32);
         self.constants.push(x);
         next
     }
 
-    fn next_node(&mut self, n: Node) -> Idx {
-        let next = Idx::Node(self.nodes.len() as u32);
+    fn next_node(&mut self, n: CircuitNode) -> CircuitIdx {
+        let next = CircuitIdx::Node(self.nodes.len() as u32);
         self.nodes.push(n);
         next
     }
@@ -60,13 +60,13 @@ impl<F> Circuit<F> {
 
 /// A circuit together with concrete values for every witness and every node.
 ///
-/// Populated incrementally by [`build_with_assignment`] as the circuit is
+/// Populated incrementally by [`build_with_values`] as the circuit is
 /// constructed in prover mode. Witness indices resolve to `witnesses[i]`, and
 /// node indices to `nodes[i]`.
 pub struct ValuedCircuit<F> {
-    circuit: Circuit<F>,
-    witnesses: Vec<F>,
-    nodes: Vec<F>,
+    pub circuit: Circuit<F>,
+    pub witnesses: Vec<F>,
+    pub nodes: Vec<F>,
 }
 
 struct ValuesBuilder<F> {
@@ -88,14 +88,14 @@ pub struct Values<'a, F> {
 }
 
 #[doc(hidden)]
-impl<'a, F> Index<Idx> for Values<'a, F> {
+impl<'a, F> Index<CircuitIdx> for Values<'a, F> {
     type Output = F;
 
-    fn index(&self, index: Idx) -> &Self::Output {
+    fn index(&self, index: CircuitIdx) -> &Self::Output {
         match index {
-            Idx::Witness(id) => &self.witnesses[id as usize],
-            Idx::Constant(id) => &self.constants[id as usize],
-            Idx::Node(id) => &self.nodes[id as usize],
+            CircuitIdx::Witness(id) => &self.witnesses[id as usize],
+            CircuitIdx::Constant(id) => &self.constants[id as usize],
+            CircuitIdx::Node(id) => &self.nodes[id as usize],
         }
     }
 }
@@ -123,8 +123,8 @@ impl<'ctx, F> Context<'ctx, F> {
     fn allocate(
         self,
         init: impl for<'a> FnOnce(Values<'a, F>) -> Option<F>,
-        reserve: impl FnOnce(&mut Circuit<F>) -> Idx,
-    ) -> Idx {
+        reserve: impl FnOnce(&mut Circuit<F>) -> CircuitIdx,
+    ) -> CircuitIdx {
         let mut circuit = self.inner.circuit.lock();
         if let Some(values) = &self.inner.values {
             let mut values = values.lock();
@@ -135,17 +135,17 @@ impl<'ctx, F> Context<'ctx, F> {
             });
             let idx = reserve(&mut circuit);
             match idx {
-                Idx::Witness(_) => {
+                CircuitIdx::Witness(_) => {
                     values
                         .witnesses
                         .push(value.expect("witness allocations populate prover assignments"));
                 }
-                Idx::Node(_) => {
+                CircuitIdx::Node(_) => {
                     values
                         .nodes
                         .push(value.expect("node allocations populate prover assignments"));
                 }
-                Idx::Constant(_) => {
+                CircuitIdx::Constant(_) => {
                     assert!(
                         value.is_none(),
                         "constants do not populate prover assignments"
@@ -161,23 +161,23 @@ impl<'ctx, F> Context<'ctx, F> {
     /// Push a node into the circuit. In prover mode, `init` runs with read
     /// access to the current circuit values so it can compute the node's
     /// value, which is appended in lockstep with the node.
-    fn node(self, n: Node, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> Idx {
+    fn node(self, n: CircuitNode, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> CircuitIdx {
         self.allocate(|values| Some(init(values)), |circuit| circuit.next_node(n))
     }
 
-    fn assert_eq(self, a: Idx, b: Idx) {
+    fn assert_eq(self, a: CircuitIdx, b: CircuitIdx) {
         self.inner.circuit.lock().assertions.push((a, b));
     }
 
     /// Allocate a fresh witness slot. In prover mode, `init` runs with read
     /// access to the current circuit values to compute the witness value.
-    fn witness(self, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> Idx {
+    fn witness(self, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> CircuitIdx {
         self.allocate(|values| Some(init(values)), Circuit::next_witness)
     }
 }
 
 impl<'ctx, F> Context<'ctx, F> {
-    fn constant(self, x: F) -> Idx {
+    fn constant(self, x: F) -> CircuitIdx {
         self.allocate(|_| None, |circuit| circuit.next_constant(x))
     }
 }
@@ -185,7 +185,10 @@ impl<'ctx, F> Context<'ctx, F> {
 #[derive(Clone)]
 enum VarInner<'ctx, F> {
     Native(F),
-    Circuit { ctx: Context<'ctx, F>, idx: Idx },
+    Circuit {
+        ctx: Context<'ctx, F>,
+        idx: CircuitIdx,
+    },
 }
 
 #[derive(Clone)]
@@ -259,7 +262,7 @@ impl<'ctx, F> Var<'ctx, F> {
         }
     }
 
-    fn circuit_idx(&self) -> Idx {
+    fn circuit_idx(&self) -> CircuitIdx {
         match self.inner {
             VarInner::Circuit { idx, .. } => idx,
             VarInner::Native(_) => panic!("expected circuit-backed var"),
@@ -279,12 +282,12 @@ impl<'ctx, F: Clone> Var<'ctx, F> {
     ///
     /// `combine` is the value-level operation used both for the all-native case
     /// and for prover-mode node evaluation. `node` is the circuit node
-    /// constructor (e.g. [`Node::Add`], [`Node::Mul`]).
+    /// constructor (for example `CircuitNode::Add` or `CircuitNode::Mul`).
     fn merge(
         self,
         other: &Self,
         combine: impl Fn(&F, &F) -> F,
-        node: fn(Idx, Idx) -> Node,
+        node: fn(CircuitIdx, CircuitIdx) -> CircuitNode,
     ) -> Self {
         let (ctx, a_idx, b_idx) = match (self.inner, &other.inner) {
             (VarInner::Native(a), VarInner::Native(b)) => {
@@ -310,7 +313,7 @@ impl<'ctx, F: Object> Object for Var<'ctx, F> {}
 impl<'ctx, F: Additive> Add<&Self> for Var<'ctx, F> {
     type Output = Self;
     fn add(self, rhs: &Self) -> Self {
-        self.merge(rhs, |a, b| a.clone() + b, Node::Add)
+        self.merge(rhs, |a, b| a.clone() + b, CircuitNode::Add)
     }
 }
 
@@ -329,7 +332,7 @@ impl<'ctx, F: Additive + Ring> Neg for Var<'ctx, F> {
             },
             VarInner::Circuit { ctx, idx } => {
                 let minus_one = Var::constant(ctx, -F::one()).circuit_idx();
-                let new_idx = ctx.node(Node::Mul(minus_one, idx), move |v| -v[idx].clone());
+                let new_idx = ctx.node(CircuitNode::Mul(minus_one, idx), move |v| -v[idx].clone());
                 Self {
                     inner: VarInner::Circuit { ctx, idx: new_idx },
                 }
@@ -338,14 +341,14 @@ impl<'ctx, F: Additive + Ring> Neg for Var<'ctx, F> {
     }
 }
 
-impl<'ctx, F: Additive> Sub<&Self> for Var<'ctx, F> {
+impl<'ctx, F: Additive + Ring> Sub<&Self> for Var<'ctx, F> {
     type Output = Self;
     fn sub(self, rhs: &Self) -> Self {
         self + &(-rhs.clone())
     }
 }
 
-impl<'ctx, F: Additive> SubAssign<&Self> for Var<'ctx, F> {
+impl<'ctx, F: Additive + Ring> SubAssign<&Self> for Var<'ctx, F> {
     fn sub_assign(&mut self, rhs: &Self) {
         *self = self.clone() - rhs;
     }
@@ -354,7 +357,7 @@ impl<'ctx, F: Additive> SubAssign<&Self> for Var<'ctx, F> {
 impl<'ctx, F: Multiplicative> Mul<&Self> for Var<'ctx, F> {
     type Output = Self;
     fn mul(self, rhs: &Self) -> Self {
-        self.merge(rhs, |a, b| a.clone() * b, Node::Mul)
+        self.merge(rhs, |a, b| a.clone() * b, CircuitNode::Mul)
     }
 }
 
@@ -364,7 +367,7 @@ impl<'ctx, F: Multiplicative> MulAssign<&Self> for Var<'ctx, F> {
     }
 }
 
-impl<'ctx, F: Additive> Additive for Var<'ctx, F> {
+impl<'ctx, F: Additive + Ring> Additive for Var<'ctx, F> {
     fn zero() -> Self {
         Self {
             inner: VarInner::Native(F::zero()),
