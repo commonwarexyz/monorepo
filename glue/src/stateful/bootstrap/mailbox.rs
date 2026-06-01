@@ -7,7 +7,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
-/// A message that can be sent to the [`FloorDiscovery`](super::FloorDiscovery).
+/// A message that can be sent to the [`Bootstrap`](super::Bootstrap).
 pub(crate) enum Message<S, V>
 where
     S: Scheme,
@@ -18,9 +18,8 @@ where
         /// The response channel to send the finalization to.
         response: oneshot::Sender<Finalization<S, V::Commitment>>,
     },
-    /// Attach a marshal mailbox, transitioning the actor from requester mode to responder mode
-    /// once any discovered floor has been consumed. Responder mode answers peers' `RequestLatest`
-    /// from the attached marshal and never issues outbound requests.
+    /// Attach a marshal mailbox, allowing the actor to answer peers' request messages from the
+    /// attached marshal.
     Attach {
         /// The marshal mailbox to answer latest-finalization requests from.
         marshal: MarshalMailbox<S, V>,
@@ -39,7 +38,7 @@ where
     }
 }
 
-/// Handle to the mailbox of the [`FloorDiscovery`](super::FloorDiscovery).
+/// Handle to the mailbox of the [`Bootstrap`](super::Bootstrap).
 #[derive(Clone)]
 pub struct Mailbox<S, V>
 where
@@ -60,11 +59,10 @@ where
 
     /// Open a subscription to the receipt of the floor finalization from peers.
     ///
-    /// While the actor is still a requester, this starts sampling if no floor has been selected
-    /// yet. Dropping the receiver cancels this subscription; if all subscribers are dropped before
-    /// a floor is selected, sampling may be abandoned. If marshal is later attached, the actor
-    /// transitions to responder mode without a cached floor and later subscriptions will not
-    /// restart sampling.
+    /// Before marshal is attached, this starts sampling if no floor has been selected yet.
+    /// Dropping the receiver cancels this subscription; if all subscribers are dropped before a
+    /// floor is selected, sampling may be abandoned. If marshal is later attached without a cached
+    /// floor, later subscriptions will not restart sampling.
     ///
     /// Callers that need a floor must keep the receiver alive until it resolves and should attach
     /// only after consuming that floor.
@@ -78,10 +76,9 @@ where
 
     /// Attach a marshal mailbox so the actor can answer peers' latest-finalization requests.
     ///
-    /// This transitions the actor from requester mode to responder mode. It is applied only after
-    /// any discovered floor has been delivered to its subscribers. If no floor was ever requested,
-    /// or every pending subscriber was dropped before a floor was selected, the actor responds
-    /// without a cached floor.
+    /// Once attached, the actor can answer peers' latest-finalization requests. If no floor was
+    /// ever requested, or every pending subscriber was dropped before a floor was selected, the
+    /// actor answers peers without a cached floor for local subscribers.
     pub fn attach(&self, marshal: MarshalMailbox<S, V>) {
         let _ = self.sender.enqueue(Message::Attach { marshal });
     }

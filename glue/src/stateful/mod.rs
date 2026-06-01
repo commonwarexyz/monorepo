@@ -100,8 +100,8 @@ use std::future::Future;
 mod actor;
 pub use actor::{Config, Mailbox, Stateful, SyncPlan};
 
+pub mod bootstrap;
 pub mod db;
-pub mod floor_discovery;
 
 #[cfg(test)]
 mod tests;

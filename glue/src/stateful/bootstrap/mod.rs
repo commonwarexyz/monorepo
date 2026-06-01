@@ -2,30 +2,30 @@
 //!
 //! A node that is starting fresh (or recovering from far behind) needs a recent, trustworthy
 //! finalization, the "floor", as the point to begin state sync from. It cannot trust any
-//! single peer to name that point, so the [`FloorDiscovery`] asks many peers and adopts the
+//! single peer to name that point, so the [`Bootstrap`] asks many peers and adopts the
 //! highest valid finalization from `f + 1` distinct peer replies.
 //!
 //! # Protocol
 //!
 //! ## Solicit
 //!
-//! Once a floor subscriber appears, [`FloorDiscovery`] broadcasts a `RequestLatest` to every
+//! Once a floor subscriber appears, [`Bootstrap`] broadcasts a `Request` to every
 //! connected peer:
 //!
 //! ```text
-//!                    +-- RequestLatest --> peer 1
+//!                    +-- Request --> peer 1
 //!                    |
-//!   FloorDiscovery --+-- RequestLatest --> peer 2
+//!   Bootstrap --+-- Request --> peer 2
 //!                    |
-//!                    +-- RequestLatest --> peer 3
+//!                    +-- Request --> peer 3
 //!                    |
-//!                    +-- RequestLatest --> peer 4
+//!                    +-- Request --> peer 4
 //! ```
 //!
 //! A subscription is the request to discover a floor. If all floor subscribers are dropped before
-//! a floor is selected, discovery is cancelled. Attaching marshal after that makes the node a
-//! source: it transitions to responder mode without a cached floor. Callers that need a floor must
-//! keep a subscription alive until it resolves and attach marshal only after consuming that floor.
+//! a floor is selected, sampling is cancelled. Attaching marshal after that makes the node a
+//! source: it can answer peers without a cached floor. Callers that need a floor must keep a
+//! subscription alive until it resolves and attach marshal only after consuming that floor.
 //!
 //! ## Collect and select
 //!
@@ -35,9 +35,9 @@
 //! distinct peers have replied, the highest finalized round becomes the floor:
 //!
 //! ```text
-//!   peer 1 --Finalization(view 10)-->\                 replies
-//!   peer 2 --Finalization(view 12)--> +-> FloorDiscovery {10, 12, 13}
-//!   peer 3 --Finalization(view 13)-->/                        |
+//!   peer 1 --Response(view 10)-->\                 replies
+//!   peer 2 --Response(view 12)--> +-> Bootstrap {10, 12, 13}
+//!   peer 3 --Response(view 13)-->/                        |
 //!                                                             v
 //!                                      sample reached, highest view becomes the floor: 13
 //! ```
@@ -99,7 +99,7 @@
 //! The p2p channel supplies rate limiting and maximum encoded message size enforcement.
 
 mod actor;
-pub use actor::{Config, FloorDiscovery};
+pub use actor::{Bootstrap, Config};
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -108,7 +108,7 @@ mod wire;
 
 #[cfg(test)]
 mod test {
-    use super::{wire, Config, FloorDiscovery, Mailbox};
+    use super::{wire, Bootstrap, Config, Mailbox};
     use bytes::{Buf, BufMut};
     use commonware_actor::Feedback;
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -286,14 +286,14 @@ mod test {
         }
     }
 
-    /// A single node in the harness: its floor-discovery ingress and its marshal mailbox.
+    /// A single node in the harness: its bootstrap ingress and its marshal mailbox.
     struct Node {
         bootstrap: Option<Mailbox<Scheme, Variant>>,
         marshal: MarshalMailbox<Scheme, Variant>,
-        // A clone of the node's floor-discovery channel sender, used by tests to inject raw
+        // A clone of the node's bootstrap channel sender, used by tests to inject raw
         // bytes that appear to originate from this node.
         bootstrap_sender: Sender<ed25519::PublicKey, deterministic::Context>,
-        // The floor-discovery actor, started on demand via `start_bootstrappers` once peers have
+        // The bootstrap actor, started on demand via `start_bootstrappers` once peers have
         // been seeded with finalizations. `None` once started.
         start: Option<Box<dyn FnOnce() -> Handle<()>>>,
         // Held to keep the spawned actors alive for the duration of the test.
@@ -311,7 +311,7 @@ mod test {
     }
 
     /// A reusable harness of several real (unbuffered) marshal actors, each paired with a
-    /// [`FloorDiscovery`], wired over an all-to-all simulated p2p network.
+    /// [`Bootstrap`], wired over an all-to-all simulated p2p network.
     struct Harness {
         participants: Vec<ed25519::PublicKey>,
         schemes: Vec<Scheme>,
@@ -323,7 +323,7 @@ mod test {
 
     impl Harness {
         /// Spin up `n` nodes over a simulated network. Each node runs a real marshal actor
-        /// (seeded with only a genesis block) and a [`FloorDiscovery`] using `retry_timeout`,
+        /// (seeded with only a genesis block) and a [`Bootstrap`] using `retry_timeout`,
         /// configured with a [`ConstantProvider`] (single scheme, all epochs).
         async fn setup(
             context: &deterministic::Context,
@@ -336,7 +336,7 @@ mod test {
             .await
         }
 
-        /// Like [`Harness::setup`], but `make_provider` builds each node's [`FloorDiscovery`]
+        /// Like [`Harness::setup`], but `make_provider` builds each node's [`Bootstrap`]
         /// certificate provider from that node's scheme. Lets tests supply an epoch-keyed
         /// provider to exercise multi-epoch verification.
         async fn setup_with<D, F>(
@@ -453,13 +453,13 @@ mod test {
                     .await;
                 let marshal_handle = marshal_actor.start_unbuffered(NoopReporter, resolver);
 
-                // FloorDiscovery.
+                // Bootstrap.
                 let bootstrap_network = control
                     .register(BOOTSTRAP_CHANNEL, TEST_QUOTA)
                     .await
                     .expect("failed to register bootstrap channel");
                 let bootstrap_sender = bootstrap_network.0.clone();
-                let (bootstrapper, bootstrap_mailbox) = FloorDiscovery::new(Config {
+                let (bootstrapper, bootstrap_mailbox) = Bootstrap::new(Config {
                     context: node_ctx.child("bootstrapper"),
                     provider: make_provider(&scheme),
                     strategy: Sequential,
@@ -468,8 +468,8 @@ mod test {
                     retry_timeout,
                 });
                 // Node 0 is the discoverer and is left in discovery for the test to drive. Every
-                // other node is a source: attach its marshal so it transitions to responder mode
-                // without soliciting peers.
+                // other node is a source: attach its marshal so it can answer peers without
+                // soliciting them.
                 if index != 0 {
                     bootstrap_mailbox.attach(marshal_mailbox.clone());
                 }
@@ -496,7 +496,7 @@ mod test {
             }
         }
 
-        /// Starts every node's floor-discovery actor. Call after seeding peer marshals so each
+        /// Starts every node's bootstrap actor. Call after seeding peer marshals so each
         /// actor's first request observes the intended finalizations.
         fn start_bootstrappers(&mut self) {
             for node in &mut self.nodes {
@@ -531,8 +531,8 @@ mod test {
             let _ = marshal.report(Activity::Finalization(finalization));
         }
 
-        /// Sends raw `bytes` on the floor-discovery channel from node `from` to node `to`,
-        /// bypassing the wire encoding. Used to deliver malformed messages to a [`FloorDiscovery`].
+        /// Sends raw `bytes` on the bootstrap channel from node `from` to node `to`,
+        /// bypassing the wire encoding. Used to deliver malformed messages to a [`Bootstrap`].
         fn send_raw(&self, from: usize, to: usize, bytes: Vec<u8>) {
             let mut sender = self.nodes[from].bootstrap_sender.clone();
             sender.send(Recipients::One(self.participants[to].clone()), bytes, false);
@@ -584,9 +584,9 @@ mod test {
         provider
     }
 
-    /// Encodes a finalization as the bytes of a [`wire::Message::Finalization`].
+    /// Encodes a finalization as the bytes of a [`wire::Message::Response`].
     fn finalization_bytes(finalization: Finalization<Scheme, Sha256Digest>) -> Vec<u8> {
-        wire::Message::<Scheme, Variant>::Finalization(finalization)
+        wire::Message::<Scheme, Variant>::Response(finalization)
             .encode()
             .to_vec()
     }
@@ -789,7 +789,7 @@ mod test {
         });
     }
 
-    /// A peer that sends a finalization-tagged payload that cannot be decoded is blocked.
+    /// A peer that sends a response-tagged payload that cannot be decoded is blocked.
     #[test]
     fn test_blocks_peer_sending_malformed_finalization() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -797,6 +797,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
             harness.start_bootstrappers();
+            let _subscription = harness.nodes[0].bootstrap().subscribe();
 
             let mut junk = vec![1u8];
             junk.extend_from_slice(&[0xAB; 32]);
@@ -824,6 +825,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
             harness.start_bootstrappers();
+            let _subscription = harness.nodes[0].bootstrap().subscribe();
 
             // A finalization signed by a foreign key set: it decodes cleanly under node 0's
             // codec config but fails verification against node 0's scheme.
@@ -871,10 +873,10 @@ mod test {
         });
     }
 
-    /// Responder mode only needs request tags. A finalization-tagged payload is ignored without
-    /// attempting to decode the certificate bytes.
+    /// After marshal is attached, a response-tagged payload is ignored without attempting to
+    /// decode the certificate bytes.
     #[test]
-    fn test_responder_ignores_finalization_payloads() {
+    fn test_attached_actor_ignores_response_payloads() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let mut harness =
@@ -894,7 +896,7 @@ mod test {
                     harness.participants[1].clone(),
                     harness.participants[0].clone(),
                 )),
-                "responder node should ignore finalization payloads without decoding them"
+                "attached node should ignore response payloads without decoding them"
             );
         });
     }
@@ -932,10 +934,10 @@ mod test {
         });
     }
 
-    /// Responder mode drains mailbox messages that were already queued before the last mailbox handle
+    /// The actor drains mailbox messages that were already queued before the last mailbox handle
     /// was dropped.
     #[test]
-    fn test_responder_drains_queued_subscribe_after_mailbox_drop() {
+    fn test_drains_queued_subscribe_after_mailbox_drop() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let mut harness =
@@ -1064,6 +1066,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_bootstrappers();
+            let _subscription = harness.nodes[0].bootstrap().subscribe();
 
             // Node 1 first sends a valid finalization, then an invalid (foreign) one.
             let (_, valid) = harness.finalization(1, 1);
@@ -1168,6 +1171,7 @@ mod test {
                 })
                 .await;
             harness.start_bootstrappers();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             // A finalization for the unknown epoch 5: dropped before verification, so the sender
             // is not blocked.
@@ -1184,7 +1188,6 @@ mod test {
                 )),
                 "an unknown-epoch finalization must be ignored, not blocked"
             );
-            let mut subscription = harness.nodes[0].bootstrap().subscribe();
             context.sleep(Duration::from_millis(50)).await;
             assert!(
                 matches!(
@@ -1215,6 +1218,7 @@ mod test {
                 })
                 .await;
             harness.start_bootstrappers();
+            let _subscription = harness.nodes[0].bootstrap().subscribe();
 
             let mut unknown = finalization_prefix(Epoch::new(5), 1, 1);
             unknown.extend_from_slice(&[0xFF; 16]);
