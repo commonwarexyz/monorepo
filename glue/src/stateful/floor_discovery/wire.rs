@@ -1,7 +1,22 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, ReadExt, Write};
 use commonware_consensus::{marshal::core::Variant, simplex::types::Finalization};
 use commonware_cryptography::certificate::Scheme;
+
+pub(crate) enum Tag {
+    RequestLatest,
+    Finalization,
+}
+
+impl Tag {
+    pub(crate) fn read(reader: &mut impl Buf) -> Result<Self, Error> {
+        match u8::read(reader)? {
+            0 => Ok(Self::RequestLatest),
+            1 => Ok(Self::Finalization),
+            n => Err(Error::InvalidEnum(n)),
+        }
+    }
+}
 
 /// A message exchanged with peers over the p2p channel during floor discovery.
 pub(crate) enum Message<S, V>
@@ -42,22 +57,6 @@ where
         1 + match self {
             Self::RequestLatest => 0,
             Self::Finalization(finalization) => finalization.encode_size(),
-        }
-    }
-}
-
-impl<S, V> Read for Message<S, V>
-where
-    S: Scheme,
-    V: Variant,
-{
-    type Cfg = <S::Certificate as Read>::Cfg;
-
-    fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        match u8::read(reader)? {
-            0 => Ok(Self::RequestLatest),
-            1 => Ok(Self::Finalization(Finalization::read_cfg(reader, cfg)?)),
-            n => Err(Error::InvalidEnum(n)),
         }
     }
 }

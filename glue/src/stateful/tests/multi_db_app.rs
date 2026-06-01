@@ -18,7 +18,7 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as
 use commonware_consensus::{
     marshal::{
         self,
-        core::{Actor as MarshalActor, CommitmentFallback},
+        core::Actor as MarshalActor,
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -653,20 +653,14 @@ impl EngineDefinition for MultiDbEngine {
 
         if should_state_sync {
             let finalization = sync_floor.expect("sync floor missing");
-            let block = marshal_mailbox
-                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
-                .await
-                .expect("sync floor block must be available");
-            let height = block.height();
+            let height = finalization.round().view().get();
             *self
                 .sync_entries
                 .lock()
                 .entry(public_key.clone())
                 .or_insert(0) += 1;
-            self.sync_heights
-                .lock()
-                .insert(public_key.clone(), height.get());
-            state_sync_height = Some(height.get());
+            self.sync_heights.lock().insert(public_key.clone(), height);
+            state_sync_height = Some(height);
         }
 
         // Initialize stateful from marshal's processed frontier.

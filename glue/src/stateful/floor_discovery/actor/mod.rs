@@ -1,5 +1,5 @@
-mod discovery;
-mod serving;
+mod requester;
+mod responder;
 
 use super::mailbox::{Mailbox, Message};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
@@ -9,8 +9,8 @@ use commonware_p2p::{Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::NonZeroDuration;
-use discovery::Discovery;
 use rand_core::CryptoRngCore;
+use requester::Requester;
 use std::num::NonZeroUsize;
 
 /// Configuration for the [`FloorDiscovery`] actor.
@@ -39,11 +39,11 @@ where
 
 /// Discovers a sync floor by adopting the highest finalization from a peer sample.
 ///
-/// The actor is a two-phase state machine. It starts in discovery, waits until a subscriber needs
-/// a floor, then solicits and samples peers' finalizations without serving any of its own. Once a
-/// marshal is attached, it hands off to serving, answering peers' requests from that marshal and
-/// never issuing outbound requests. A source node that never needed a floor attaches a marshal
-/// without consuming one and transitions straight to serving without soliciting peers.
+/// The actor is a two-phase state machine. It starts as a requester, waits until a subscriber needs
+/// a floor, then asks peers for their latest finalizations and samples the replies. Once a marshal
+/// is attached, it becomes a responder, answering peers' requests from that marshal and never
+/// issuing outbound requests. A source node that never needed a floor attaches a marshal without
+/// consuming one and transitions straight to responder mode without asking peers.
 pub struct FloorDiscovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
@@ -102,7 +102,7 @@ where
         self,
         (mut sender, mut receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        Discovery {
+        Requester {
             context: self.context,
             mailbox: self.mailbox,
             provider: self.provider,

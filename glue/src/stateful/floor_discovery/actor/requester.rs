@@ -1,17 +1,18 @@
-use super::serving::Serving;
+use super::responder::Responder;
 use crate::stateful::floor_discovery::{mailbox::Message, wire};
+use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Encode, Error as CodecError, Read, ReadExt as _};
 use commonware_consensus::{
     marshal::core::Variant,
-    simplex::{scheme::Scheme, types::Finalization},
+    simplex::{
+        scheme::Scheme,
+        types::{Finalization, Proposal},
+    },
     types::Epoch,
     Epochable,
 };
-use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
-    PublicKey,
-};
+use commonware_cryptography::{certificate::Provider, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
@@ -25,12 +26,12 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::debug;
 
-/// The discovery phase of [`FloorDiscovery`](super::FloorDiscovery).
+/// The requester mode of [`FloorDiscovery`](super::FloorDiscovery).
 ///
 /// Solicits peers' latest finalizations and selects the highest floor from a peer sample. By
-/// construction it has no marshal and never serves finalizations. Once a marshal is attached
-/// (after the floor has been consumed), it hands off to [`Serving`].
-pub(super) struct Discovery<E, S, D, V, T, P, B>
+/// construction it has no marshal and never answers peers' requests. Once a marshal is attached
+/// (after the floor has been consumed), it hands off to [`Responder`].
+pub(super) struct Requester<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
@@ -50,7 +51,7 @@ where
     pub(super) floor_subscribers: Vec<oneshot::Sender<Finalization<S, V::Commitment>>>,
 }
 
-impl<E, S, D, V, T, P, B> Discovery<E, S, D, V, T, P, B>
+impl<E, S, D, V, T, P, B> Requester<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
@@ -60,8 +61,8 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    /// Runs the discovery loop until the actor shuts down or, once a marshal is attached after
-    /// the floor is consumed, hands off to [`Serving`] (running it to completion in place).
+    /// Runs the request loop until the actor shuts down or, once a marshal is attached after the
+    /// floor is consumed, hands off to [`Responder`] (running it to completion in place).
     pub(super) async fn run(
         mut self,
         sender: &mut impl Sender<PublicKey = P>,
@@ -76,9 +77,9 @@ where
             on_start => {
                 self.floor_subscribers.retain(|s| !s.is_closed());
 
-                // Hand off to serving once a marshal is attached and no floor seeker is left
+                // Hand off to responder mode once a marshal is attached and no floor seeker is left
                 // waiting. Dropping all subscribers cancels discovery; if marshal is attached
-                // after that, the node becomes a source and serves without a cached floor. A
+                // after that, the node becomes a source and responds without a cached floor. A
                 // joiner must keep its subscription alive until the floor is consumed.
                 if marshal.is_some() && self.floor_subscribers.is_empty() {
                     break;
@@ -120,30 +121,55 @@ where
                 debug!("network receiver closed, shutting down");
                 return;
             } => {
-                // Block peers whose payloads do not decode. Discovery cannot serve, so peer
-                // requests are ignored.
-                let cfg = <S as CertificateScheme>::certificate_codec_config_unbounded();
-                let message = match wire::Message::<S, V>::decode_cfg(message, &cfg) {
-                    Ok(message) => message,
+                let mut message = message;
+                let tag = match wire::Tag::read(&mut message) {
+                    Ok(tag) => tag,
                     Err(err) => {
                         commonware_p2p::block!(
                             self.blocker,
                             peer,
                             ?err,
-                            "finalization decode failed"
+                            "message decode failed"
                         );
                         continue;
                     }
                 };
-                let wire::Message::Finalization(finalization) = message else {
+
+                match tag {
+                    wire::Tag::RequestLatest => {
+                        if let Err(err) = Self::require_finished(message) {
+                            commonware_p2p::block!(
+                                self.blocker,
+                                peer,
+                                ?err,
+                                "message decode failed"
+                            );
+                        }
+                        continue;
+                    }
+                    wire::Tag::Finalization if self.floor.is_some() => {
+                        continue;
+                    }
+                    wire::Tag::Finalization => {}
+                }
+
+                let read = match self.read_finalization(message) {
+                    Ok(result) => result,
+                    Err(err) => {
+                        commonware_p2p::block!(
+                            self.blocker,
+                            peer,
+                            ?err,
+                            "message decode failed"
+                        );
+                        continue;
+                    }
+                };
+                let Some((finalization, scheme)) = read else {
                     continue;
                 };
-
-                // Once a floor has been selected, ignore further finalizations.
-                if self.floor.is_some() {
-                    continue;
-                }
-                let Some((peer, finalization)) = self.verify_finalization(peer, finalization)
+                let Some((peer, finalization)) =
+                    self.verify_finalization(peer, finalization, scheme.as_ref())
                 else {
                     continue;
                 };
@@ -162,8 +188,8 @@ where
         }
 
         // Transition: a marshal was attached after the floor was discovered and consumed. Run
-        // the serving phase to completion in place.
-        Serving {
+        // responder mode to completion in place.
+        Responder {
             context: self.context,
             mailbox: self.mailbox,
             marshal: marshal.expect("transition requires an attached marshal"),
@@ -174,23 +200,50 @@ where
         .await;
     }
 
+    /// Reads a finalization using the certificate codec config for its epoch.
+    ///
+    /// If no scheme is available for the finalization's epoch, the payload is ignored without
+    /// blocking because it cannot be judged.
+    fn read_finalization(
+        &self,
+        mut reader: impl Buf,
+    ) -> Result<Option<(Finalization<S, V::Commitment>, Arc<S>)>, CodecError> {
+        let proposal = Proposal::read(&mut reader)?;
+        let Some(scheme) = self.scheme(proposal.epoch()) else {
+            return Ok(None);
+        };
+
+        let cfg = scheme.certificate_codec_config();
+        let certificate = S::Certificate::read_cfg(&mut reader, &cfg)?;
+        Self::require_finished(reader)?;
+
+        Ok(Some((
+            Finalization {
+                proposal,
+                certificate,
+            },
+            scheme,
+        )))
+    }
+
+    fn require_finished(reader: impl Buf) -> Result<(), CodecError> {
+        let remaining = reader.remaining();
+        if remaining > 0 {
+            return Err(CodecError::ExtraData(remaining));
+        }
+        Ok(())
+    }
+
     /// Verifies a [`Finalization`] from `peer`.
     ///
-    /// Peers that send invalid finalizations are blocked. If no scheme is available for the
-    /// finalization's epoch, the payload is ignored without blocking because it cannot be judged.
+    /// Peers that send invalid finalizations are blocked.
     fn verify_finalization(
         &mut self,
         peer: P,
         finalization: Finalization<S, V::Commitment>,
+        scheme: &S,
     ) -> Option<(P, Finalization<S, V::Commitment>)> {
-        // Verify against the certificate scheme for the finalization's epoch. If no scheme is
-        // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let scheme = self.scheme(finalization.epoch())?;
-        if !finalization.verify(
-            self.context.as_present_mut(),
-            scheme.as_ref(),
-            &self.strategy,
-        ) {
+        if !finalization.verify(self.context.as_present_mut(), scheme, &self.strategy) {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
             return None;
         }

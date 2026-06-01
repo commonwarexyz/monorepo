@@ -24,8 +24,8 @@
 //!
 //! A subscription is the request to discover a floor. If all floor subscribers are dropped before
 //! a floor is selected, discovery is cancelled. Attaching marshal after that makes the node a
-//! source: it transitions to serving without a cached floor. Callers that need a floor must keep a
-//! subscription alive until it resolves and attach marshal only after consuming that floor.
+//! source: it transitions to responder mode without a cached floor. Callers that need a floor must
+//! keep a subscription alive until it resolves and attach marshal only after consuming that floor.
 //!
 //! ## Collect and select
 //!
@@ -288,7 +288,7 @@ mod test {
 
     /// A single node in the harness: its floor-discovery ingress and its marshal mailbox.
     struct Node {
-        bootstrap: Mailbox<Scheme, Variant>,
+        bootstrap: Option<Mailbox<Scheme, Variant>>,
         marshal: MarshalMailbox<Scheme, Variant>,
         // A clone of the node's floor-discovery channel sender, used by tests to inject raw
         // bytes that appear to originate from this node.
@@ -298,6 +298,16 @@ mod test {
         start: Option<Box<dyn FnOnce() -> Handle<()>>>,
         // Held to keep the spawned actors alive for the duration of the test.
         _handles: Vec<Handle<()>>,
+    }
+
+    impl Node {
+        fn bootstrap(&self) -> &Mailbox<Scheme, Variant> {
+            self.bootstrap.as_ref().expect("bootstrap mailbox present")
+        }
+
+        fn take_bootstrap(&mut self) -> Mailbox<Scheme, Variant> {
+            self.bootstrap.take().expect("bootstrap mailbox present")
+        }
     }
 
     /// A reusable harness of several real (unbuffered) marshal actors, each paired with a
@@ -458,8 +468,8 @@ mod test {
                     retry_timeout,
                 });
                 // Node 0 is the discoverer and is left in discovery for the test to drive. Every
-                // other node is a source: attach its marshal so it transitions to serving without
-                // soliciting peers.
+                // other node is a source: attach its marshal so it transitions to responder mode
+                // without soliciting peers.
                 if index != 0 {
                     bootstrap_mailbox.attach(marshal_mailbox.clone());
                 }
@@ -469,7 +479,7 @@ mod test {
                     Box::new(move || bootstrapper.start(bootstrap_network));
 
                 nodes.push(Node {
-                    bootstrap: bootstrap_mailbox,
+                    bootstrap: Some(bootstrap_mailbox),
                     marshal: marshal_mailbox,
                     bootstrap_sender,
                     start: Some(start),
@@ -581,6 +591,18 @@ mod test {
             .to_vec()
     }
 
+    fn finalization_prefix(epoch: Epoch, height: u64, digest_byte: u8) -> Vec<u8> {
+        let block = Block::new(height, digest_byte);
+        let proposal = Proposal {
+            round: Round::new(epoch, View::new(height)),
+            parent: View::new(height.saturating_sub(1)),
+            payload: block.digest(),
+        };
+        let mut bytes = vec![1u8];
+        proposal.write(&mut bytes);
+        bytes
+    }
+
     /// Storage configuration for one of marshal's immutable archives.
     fn archive_config(prefix: &str, name: &str, page_cache: CacheRef) -> immutable::Config<()> {
         immutable::Config {
@@ -604,8 +626,8 @@ mod test {
         }
     }
 
-    /// A sample of peers serving the same finalization lets a subscribing node resolve it as
-    /// the floor.
+    /// A sample of peers answering with the same finalization lets a subscribing node resolve it
+    /// as the floor.
     #[test]
     fn test_resolves_floor_from_sample_peers() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -626,7 +648,7 @@ mod test {
 
             // The remaining node should resolve the agreed finalization as its floor.
             let floor = harness.nodes[0]
-                .bootstrap
+                .bootstrap()
                 .subscribe()
                 .await
                 .expect("floor resolved");
@@ -643,7 +665,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             let mut expected = None;
             for index in 1..=3u8 {
@@ -672,7 +694,7 @@ mod test {
             let mut harness = Harness::setup(&context, 4, retry_timeout).await;
             harness.start_bootstrappers();
             let start = context.current();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             // Node 0's first request gathers one reply, which is below the sample size (f + 1 = 2).
             let (_, finalization_f) = harness.finalization(1, 0xF);
@@ -728,7 +750,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             // Seven participants => f + 1 = 3. Two matching replies are still not enough.
             let (_, finalization) = harness.finalization(1, 1);
@@ -849,6 +871,34 @@ mod test {
         });
     }
 
+    /// Responder mode only needs request tags. A finalization-tagged payload is ignored without
+    /// attempting to decode the certificate bytes.
+    #[test]
+    fn test_responder_ignores_finalization_payloads() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut harness =
+                Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
+            harness.start_bootstrappers();
+            context.sleep(Duration::from_millis(100)).await;
+
+            let mut junk = vec![1u8];
+            junk.extend_from_slice(&[0xAB; 32]);
+            harness.send_raw(0, 1, junk);
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                !blocked.contains(&(
+                    harness.participants[1].clone(),
+                    harness.participants[0].clone(),
+                )),
+                "responder node should ignore finalization payloads without decoding them"
+            );
+        });
+    }
+
     /// A subscriber that arrives after the floor is already resolved receives it immediately.
     #[test]
     fn test_late_subscriber_receives_resolved_floor() {
@@ -866,7 +916,7 @@ mod test {
 
             // Resolve the floor via a first subscriber.
             let floor = harness.nodes[0]
-                .bootstrap
+                .bootstrap()
                 .subscribe()
                 .await
                 .expect("floor resolved");
@@ -874,11 +924,48 @@ mod test {
 
             // A subscriber arriving afterwards is served the cached floor immediately.
             let late = harness.nodes[0]
-                .bootstrap
+                .bootstrap()
                 .subscribe()
                 .await
                 .expect("late subscriber served");
             assert_eq!(late, finalization);
+        });
+    }
+
+    /// Responder mode drains mailbox messages that were already queued before the last mailbox handle
+    /// was dropped.
+    #[test]
+    fn test_responder_drains_queued_subscribe_after_mailbox_drop() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut harness =
+                Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
+            let (block, finalization) = harness.finalization(1, 1);
+            for index in [1, 2, 3] {
+                harness
+                    .inject(index, block.clone(), finalization.clone())
+                    .await;
+            }
+            harness.start_bootstrappers();
+
+            let floor = harness.nodes[0]
+                .bootstrap()
+                .subscribe()
+                .await
+                .expect("floor resolved");
+            assert_eq!(floor, finalization);
+
+            let marshal = harness.nodes[0].marshal.clone();
+            harness.nodes[0].bootstrap().attach(marshal);
+            let mailbox = harness.nodes[0].take_bootstrap();
+            let mut late = mailbox.subscribe();
+            drop(mailbox);
+
+            context.sleep(Duration::from_millis(100)).await;
+            let served = late
+                .try_recv()
+                .expect("queued subscription should be drained");
+            assert_eq!(served, finalization);
         });
     }
 
@@ -899,7 +986,7 @@ mod test {
             harness.start_bootstrappers();
 
             let floor = harness.nodes[0]
-                .bootstrap
+                .bootstrap()
                 .subscribe()
                 .await
                 .expect("floor resolved");
@@ -936,7 +1023,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             // Deliver two different valid finalizations from node 1, then the second from node 2.
             // If node 1's second answer were counted, the second finalization would incorrectly
@@ -1011,7 +1098,7 @@ mod test {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             // Two peers agree on a stale finalization, but the sample also includes a newer
             // valid finalization. The highest reply should win.
@@ -1048,7 +1135,7 @@ mod test {
                 })
                 .await;
             harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             // Two peers report the same epoch-1 finalization, signed by the epoch-1 committee.
             let (_, finalization) = build_finalization_at(&epoch_one, Epoch::new(1), 1, 7);
@@ -1097,7 +1184,7 @@ mod test {
                 )),
                 "an unknown-epoch finalization must be ignored, not blocked"
             );
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
             context.sleep(Duration::from_millis(50)).await;
             assert!(
                 matches!(
@@ -1105,6 +1192,43 @@ mod test {
                     Err(oneshot::error::TryRecvError::Empty)
                 ),
                 "an unknown-epoch finalization must not resolve the floor"
+            );
+        });
+    }
+
+    /// If the proposal names an epoch with no scheme, discovery ignores the payload before
+    /// decoding certificate bytes.
+    #[test]
+    fn test_unknown_epoch_does_not_decode_certificate() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut rng = test_rng();
+            let Fixture {
+                schemes: epoch_one, ..
+            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_FD_EPOCH_ONE", 4);
+            let provider = epoch_provider([(Epoch::new(1), epoch_one[0].clone())]);
+
+            let mut harness =
+                Harness::setup_with(&context, 4, NZDuration!(Duration::from_secs(3600)), {
+                    let provider = provider.clone();
+                    move |_scheme| provider.clone()
+                })
+                .await;
+            harness.start_bootstrappers();
+
+            let mut unknown = finalization_prefix(Epoch::new(5), 1, 1);
+            unknown.extend_from_slice(&[0xFF; 16]);
+            harness.send_raw(1, 0, unknown);
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                !blocked.contains(&(
+                    harness.participants[0].clone(),
+                    harness.participants[1].clone(),
+                )),
+                "unknown-epoch certificate bytes must not be decoded or blocked"
             );
         });
     }
@@ -1127,7 +1251,7 @@ mod test {
             provider.insert(Epoch::new(1), harness.schemes[0].clone());
             provider.insert(Epoch::new(2), harness.schemes[0].clone());
             harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].bootstrap().subscribe();
 
             // Peer 1 reports an epoch-1 finalization; it verifies and is buffered below the
             // sample size.

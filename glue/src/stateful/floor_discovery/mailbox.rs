@@ -18,11 +18,11 @@ where
         /// The response channel to send the finalization to.
         response: oneshot::Sender<Finalization<S, V::Commitment>>,
     },
-    /// Attach a marshal mailbox, transitioning the actor from discovery to serving once any
-    /// discovered floor has been consumed. Serving answers peers' `RequestLatest` from the
-    /// attached marshal and never issues outbound requests.
+    /// Attach a marshal mailbox, transitioning the actor from requester mode to responder mode
+    /// once any discovered floor has been consumed. Responder mode answers peers' `RequestLatest`
+    /// from the attached marshal and never issues outbound requests.
     Attach {
-        /// The marshal mailbox to serve the latest finalization from.
+        /// The marshal mailbox to answer latest-finalization requests from.
         marshal: MarshalMailbox<S, V>,
     },
 }
@@ -60,11 +60,11 @@ where
 
     /// Open a subscription to the receipt of the floor finalization from peers.
     ///
-    /// While the actor is still discovering, this requests discovery if no floor has been selected
+    /// While the actor is still a requester, this starts sampling if no floor has been selected
     /// yet. Dropping the receiver cancels this subscription; if all subscribers are dropped before
-    /// a floor is selected, discovery may be abandoned. If marshal is later attached, the actor
-    /// transitions to serving without a cached floor and later subscriptions will not restart
-    /// discovery.
+    /// a floor is selected, sampling may be abandoned. If marshal is later attached, the actor
+    /// transitions to responder mode without a cached floor and later subscriptions will not
+    /// restart sampling.
     ///
     /// Callers that need a floor must keep the receiver alive until it resolves and should attach
     /// only after consuming that floor.
@@ -76,12 +76,12 @@ where
         rx
     }
 
-    /// Attach a marshal mailbox so the actor can serve the latest finalization to peers.
+    /// Attach a marshal mailbox so the actor can answer peers' latest-finalization requests.
     ///
-    /// This transitions the actor from discovery to serving. It is applied only after any
-    /// discovered floor has been delivered to its subscribers. If no floor was ever requested, or
-    /// every pending subscriber was dropped before a floor was selected, the actor serves without a
-    /// cached floor.
+    /// This transitions the actor from requester mode to responder mode. It is applied only after
+    /// any discovered floor has been delivered to its subscribers. If no floor was ever requested,
+    /// or every pending subscriber was dropped before a floor was selected, the actor responds
+    /// without a cached floor.
     pub fn attach(&self, marshal: MarshalMailbox<S, V>) {
         let _ = self.sender.enqueue(Message::Attach { marshal });
     }
