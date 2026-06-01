@@ -45,6 +45,8 @@ pub enum Error {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("invalid channel")]
     InvalidChannel,
+    #[error("invalid protection")]
+    InvalidProtection,
     #[error("types: {0}")]
     Types(types::Error),
     #[error("missing greeting")]

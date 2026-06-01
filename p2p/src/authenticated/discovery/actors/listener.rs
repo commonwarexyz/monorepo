@@ -1,6 +1,7 @@
 //! Listener
 
 use crate::authenticated::{
+    connection,
     discovery::actors::{spawner, tracker},
     Mailbox,
 };
@@ -12,7 +13,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, KeyedRateLimiter, Listener, Metrics, Network, Quota,
     SinkOf, Spawner, StreamOf,
 };
-use commonware_stream::encrypted::{listen, Config as StreamConfig};
+use commonware_stream::encrypted::Config as StreamConfig;
 use commonware_utils::{concurrency::Limiter, net::SubnetMask, IpAddrExt};
 use rand_core::CryptoRngCore;
 use std::{net::SocketAddr, num::NonZeroU32};
@@ -28,10 +29,16 @@ const CLEANUP_INTERVAL: u32 = 16_384;
 pub struct Config<C: Signer> {
     pub address: SocketAddr,
     pub stream_cfg: StreamConfig<C>,
+    pub mixed: bool,
     pub allow_private_ips: bool,
     pub max_concurrent_handshakes: NonZeroU32,
     pub allowed_handshake_rate_per_ip: Quota,
     pub allowed_handshake_rate_per_subnet: Quota,
+}
+
+struct ConnectionConfig<C: Signer> {
+    stream: StreamConfig<C>,
+    mixed: bool,
 }
 
 pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: Signer> {
@@ -39,6 +46,7 @@ pub struct Actor<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + M
 
     address: SocketAddr,
     stream_cfg: StreamConfig<C>,
+    mixed: bool,
     allow_private_ips: bool,
     handshake_limiter: Limiter,
     allowed_handshake_rate_per_ip: Quota,
@@ -74,6 +82,7 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
 
             address: cfg.address,
             stream_cfg: cfg.stream_cfg,
+            mixed: cfg.mixed,
             allow_private_ips: cfg.allow_private_ips,
             handshake_limiter: Limiter::new(cfg.max_concurrent_handshakes),
             allowed_handshake_rate_per_ip: cfg.allowed_handshake_rate_per_ip,
@@ -89,18 +98,19 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
     async fn handshake(
         context: E,
         address: SocketAddr,
-        stream_cfg: StreamConfig<C>,
+        connection_cfg: ConnectionConfig<C>,
         sink: SinkOf<E>,
         stream: StreamOf<E>,
         tracker: tracker::Mailbox<C::PublicKey>,
         mut supervisor: Mailbox<spawner::Message<SinkOf<E>, StreamOf<E>, C::PublicKey>>,
     ) {
-        let (peer, send, recv) = match listen(
+        let (peer, send, recv) = match connection::listen(
             context,
             |peer| tracker.acceptable(peer),
-            stream_cfg,
+            connection_cfg.stream,
             stream,
             sink,
+            connection_cfg.mixed,
         )
         .await
         {
@@ -219,12 +229,21 @@ impl<E: Spawner + BufferPooler + Clock + Network + CryptoRngCore + Metrics, C: S
 
                 // Spawn a new handshaker to upgrade connection
                 self.context.child("handshaker").spawn({
-                    let stream_cfg = self.stream_cfg.clone();
+                    let connection_cfg = ConnectionConfig {
+                        stream: self.stream_cfg.clone(),
+                        mixed: self.mixed,
+                    };
                     let tracker = tracker.clone();
                     let supervisor = supervisor.clone();
                     move |context| async move {
                         Self::handshake(
-                            context, address, stream_cfg, sink, stream, tracker, supervisor,
+                            context,
+                            address,
+                            connection_cfg,
+                            sink,
+                            stream,
+                            tracker,
+                            supervisor,
                         )
                         .await;
 
@@ -276,6 +295,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
+                    mixed: false,
                     allow_private_ips: true,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip,
@@ -422,6 +442,7 @@ mod tests {
                 Config {
                     address,
                     stream_cfg,
+                    mixed: false,
                     allow_private_ips: false,
                     max_concurrent_handshakes: NZU32!(8),
                     allowed_handshake_rate_per_ip: Quota::per_hour(NZU32!(100)),

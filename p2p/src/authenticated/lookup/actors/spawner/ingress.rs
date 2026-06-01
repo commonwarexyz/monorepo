@@ -1,8 +1,7 @@
-use crate::authenticated::{lookup::actors::tracker::Reservation, Mailbox};
+use crate::authenticated::{connection, lookup::actors::tracker::Reservation, Mailbox};
 use commonware_actor::{mailbox::UnreliablePolicy, Feedback, Unreliable};
 use commonware_cryptography::PublicKey;
 use commonware_runtime::{Sink, Stream};
-use commonware_stream::encrypted::{Receiver, Sender};
 use std::collections::VecDeque;
 
 /// Messages that can be processed by the spawner actor.
@@ -12,7 +11,7 @@ pub enum Message<Si: Sink, St: Stream, P: PublicKey> {
         /// The peer's public key.
         peer: P,
         /// The connection to the peer.
-        connection: (Sender<Si>, Receiver<St>),
+        connection: (connection::Sender<Si>, connection::Receiver<St>),
         /// The reservation for the peer.
         reservation: Reservation<P>,
     },
@@ -36,7 +35,7 @@ impl<Si: Sink, St: Stream, P: PublicKey> Mailbox<Message<Si, St, P>> {
     /// is harmless since stale connections do not need to be spawned.
     pub fn spawn(
         &mut self,
-        connection: (Sender<Si>, Receiver<St>),
+        connection: (connection::Sender<Si>, connection::Receiver<St>),
         reservation: Reservation<P>,
     ) -> Unreliable<Feedback> {
         self.0.enqueue(Message::Spawn {
@@ -57,10 +56,7 @@ mod tests {
         Signer as _,
     };
     use commonware_runtime::{deterministic, mocks, Runner as _, Spawner as _, Supervisor as _};
-    use commonware_stream::encrypted::{
-        dial, listen, Config as StreamConfig, Receiver as EncryptedReceiver,
-        Sender as EncryptedSender,
-    };
+    use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::NZUsize;
     use futures::FutureExt as _;
     use std::time::Duration;
@@ -69,8 +65,8 @@ mod tests {
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
+        connection::Sender<mocks::Sink>,
+        connection::Receiver<mocks::Stream>,
     );
 
     fn stream_config(key: PrivateKey) -> StreamConfig<PrivateKey> {
@@ -97,12 +93,13 @@ mod tests {
         let listener = context.child("listener").spawn({
             let expected = local_pk.clone();
             move |context| async move {
-                listen(
+                connection::listen(
                     context,
                     |_| async { true },
                     stream_config(remote_key),
                     remote_stream,
                     remote_sink,
+                    false,
                 )
                 .await
                 .map(|(peer, sender, receiver)| {
@@ -112,12 +109,13 @@ mod tests {
             }
         });
 
-        let dialer = dial(
+        let dialer = connection::dial(
             context.child("dialer"),
             stream_config(local_key),
             remote_pk,
             local_stream,
             local_sink,
+            false,
         )
         .await
         .expect("dial failed");

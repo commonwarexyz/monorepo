@@ -264,8 +264,8 @@ mod tests {
             discovery::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider, Receiver, Recipients,
-        Sender,
+        ChannelEncryption, CheckedSender as _, Ingress, LimitedSender as _, Manager, Provider,
+        Receiver, Recipients, Sender,
     };
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::{ed25519, Signer as _};
@@ -2414,7 +2414,13 @@ mod tests {
             // one slow-peer drop. The fast peer should still receive every
             // broadcast.
             for i in 0..11 {
-                let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
+                let sent = messenger.content(
+                    Recipients::All,
+                    0,
+                    ChannelEncryption::Encrypted,
+                    message.clone().into(),
+                    false,
+                );
                 assert_ne!(
                     sent,
                     Unreliable::new(Feedback::Closed),

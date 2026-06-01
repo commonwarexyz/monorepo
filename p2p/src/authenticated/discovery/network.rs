@@ -6,7 +6,7 @@ use super::{
     config::Config,
     types,
 };
-use crate::{authenticated::discovery::types::InfoVerifier, Channel};
+use crate::{authenticated::discovery::types::InfoVerifier, Channel, ChannelConfig};
 use commonware_cryptography::Signer;
 use commonware_macros::select;
 use commonware_runtime::{
@@ -23,6 +23,7 @@ const TRACKER_SUFFIX: &[u8] = b"_TRACKER";
 
 /// Unique suffix for all messages signed in a stream.
 const STREAM_SUFFIX: &[u8] = b"_STREAM";
+const MIXED_STREAM_SUFFIX: &[u8] = b"_STREAM_MIXED";
 
 /// Implementation of an `authenticated` network.
 pub struct Network<
@@ -122,11 +123,23 @@ impl<
         channels::Sender<C::PublicKey, E>,
         channels::Receiver<C::PublicKey>,
     ) {
+        self.register_with(ChannelConfig::new(channel, rate, backlog))
+    }
+
+    /// Register a new channel over the network with explicit settings.
+    #[allow(clippy::type_complexity)]
+    pub fn register_with(
+        &mut self,
+        cfg: ChannelConfig,
+    ) -> (
+        channels::Sender<C::PublicKey, E>,
+        channels::Receiver<C::PublicKey>,
+    ) {
         let context = self
             .context
             .child("channel")
-            .with_attribute("index", channel);
-        self.channels.register(channel, rate, backlog, context)
+            .with_attribute("index", cfg.channel);
+        self.channels.register(cfg, context)
     }
 
     /// Starts the network.
@@ -137,6 +150,8 @@ impl<
     }
 
     async fn run(self) {
+        let mixed = self.channels.has_plaintext();
+
         // Start tracker
         let mut tracker_task = self.tracker.start();
 
@@ -161,7 +176,14 @@ impl<
         // Start listener
         let stream_cfg = StreamConfig {
             signing_key: self.cfg.crypto,
-            namespace: union(&self.cfg.namespace, STREAM_SUFFIX),
+            namespace: union(
+                &self.cfg.namespace,
+                if mixed {
+                    MIXED_STREAM_SUFFIX
+                } else {
+                    STREAM_SUFFIX
+                },
+            ),
             max_message_size: self
                 .cfg
                 .max_message_size
@@ -175,6 +197,7 @@ impl<
             listener::Config {
                 address: self.cfg.listen,
                 stream_cfg: stream_cfg.clone(),
+                mixed,
                 allow_private_ips: self.cfg.allow_private_ips,
                 max_concurrent_handshakes: self.cfg.max_concurrent_handshakes,
                 allowed_handshake_rate_per_ip: self.cfg.allowed_handshake_rate_per_ip,
@@ -189,6 +212,7 @@ impl<
             self.context.child("dialer"),
             dialer::Config {
                 stream_cfg,
+                mixed,
                 dial_frequency: self.cfg.dial_frequency,
                 peer_connection_cooldown: self.cfg.peer_connection_cooldown,
                 allow_private_ips: self.cfg.allow_private_ips,

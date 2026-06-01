@@ -1,6 +1,6 @@
 use crate::{
     authenticated::data::{Data, EncodedData},
-    Channel,
+    Channel, ChannelEncryption,
 };
 use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBufs};
@@ -29,8 +29,13 @@ pub enum Message {
 
 impl Message {
     /// Encode `Message::Data` bytes for transmission using pooled header allocation.
-    pub(crate) fn encode_data(pool: &BufferPool, channel: Channel, message: IoBufs) -> EncodedData {
-        EncodedData::new(pool, DATA_PREFIX, channel, message)
+    pub(crate) fn encode_data(
+        pool: &BufferPool,
+        channel: Channel,
+        encryption: ChannelEncryption,
+        message: IoBufs,
+    ) -> EncodedData {
+        EncodedData::new(pool, DATA_PREFIX, channel, encryption, message)
     }
 }
 

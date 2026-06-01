@@ -2,7 +2,7 @@ use super::Error;
 use crate::{
     authenticated::lookup::actors::router::{self, Messenger},
     utils::limited::{CheckedSender, LimitedSender},
-    Channel, Message as NetworkMessage, Recipients,
+    Channel, ChannelConfig, ChannelEncryption, Message as NetworkMessage, Recipients,
 };
 use commonware_actor::{
     mailbox::{self, UnreliablePolicy},
@@ -33,6 +33,7 @@ impl<P: PublicKey> UnreliablePolicy for Inbound<P> {
 #[derive(Debug, Clone)]
 pub struct UnlimitedSender<P: PublicKey> {
     channel: Channel,
+    encryption: ChannelEncryption,
     max_size: u32,
     messenger: Messenger<P>,
 }
@@ -55,7 +56,7 @@ impl<P: PublicKey> crate::UnlimitedSender for UnlimitedSender<P> {
         );
 
         self.messenger
-            .content(recipients, self.channel, message, priority)
+            .content(recipients, self.channel, self.encryption, message, priority)
     }
 }
 
@@ -75,6 +76,7 @@ impl<P: PublicKey, C: Clock> Clone for Sender<P, C> {
 impl<P: PublicKey, C: Clock> Sender<P, C> {
     pub(super) fn new(
         channel: Channel,
+        encryption: ChannelEncryption,
         max_size: u32,
         messenger: Messenger<P>,
         clock: C,
@@ -82,6 +84,7 @@ impl<P: PublicKey, C: Clock> Sender<P, C> {
     ) -> Self {
         let master_sender = UnlimitedSender {
             channel,
+            encryption,
             max_size,
             messenger: messenger.clone(),
         };
@@ -147,7 +150,14 @@ impl<P: PublicKey> crate::Receiver for Receiver<P> {
 pub struct Channels<P: PublicKey> {
     messenger: router::Messenger<P>,
     max_size: u32,
-    receivers: BTreeMap<Channel, (Quota, mailbox::UnreliableSender<Inbound<P>>)>,
+    receivers: BTreeMap<Channel, RegisteredChannel<P>>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct RegisteredChannel<P: PublicKey> {
+    pub(crate) rate: Quota,
+    pub(crate) encryption: ChannelEncryption,
+    pub(crate) sender: mailbox::UnreliableSender<Inbound<P>>,
 }
 
 impl<P: PublicKey> Channels<P> {
@@ -161,19 +171,35 @@ impl<P: PublicKey> Channels<P> {
 
     pub fn register<C: Clock + Metrics>(
         &mut self,
-        channel: Channel,
-        rate: Quota,
-        backlog: usize,
+        cfg: ChannelConfig,
         context: C,
     ) -> (Sender<P, C>, Receiver<P>) {
+        let ChannelConfig {
+            channel,
+            rate,
+            backlog,
+            encryption,
+        } = cfg;
         let backlog = NonZeroUsize::new(backlog).expect("message backlog must be non-zero");
         let (sender, receiver) = mailbox::new_unreliable(context.child("mailbox"), backlog);
-        if self.receivers.insert(channel, (rate, sender)).is_some() {
+        if self
+            .receivers
+            .insert(
+                channel,
+                RegisteredChannel {
+                    rate,
+                    encryption,
+                    sender,
+                },
+            )
+            .is_some()
+        {
             panic!("duplicate channel registration: {channel}");
         }
         (
             Sender::new(
                 channel,
+                encryption,
                 self.max_size,
                 self.messenger.clone(),
                 context,
@@ -183,7 +209,13 @@ impl<P: PublicKey> Channels<P> {
         )
     }
 
-    pub fn collect(self) -> BTreeMap<u64, (Quota, mailbox::UnreliableSender<Inbound<P>>)> {
+    pub(crate) fn has_plaintext(&self) -> bool {
+        self.receivers
+            .values()
+            .any(|channel| channel.encryption == ChannelEncryption::Plaintext)
+    }
+
+    pub(crate) fn collect(self) -> BTreeMap<u64, RegisteredChannel<P>> {
         self.receivers
     }
 }

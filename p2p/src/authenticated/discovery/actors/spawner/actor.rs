@@ -166,7 +166,7 @@ impl<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::authenticated::discovery::types;
+    use crate::authenticated::{connection, discovery::types};
     use commonware_actor::{mailbox, Feedback, Unreliable};
     use commonware_cryptography::{
         ed25519::{PrivateKey, PublicKey},
@@ -174,10 +174,7 @@ mod tests {
     };
     use commonware_macros::select;
     use commonware_runtime::{deterministic, mocks, Runner as _, Supervisor as _};
-    use commonware_stream::encrypted::{
-        dial, listen, Config as StreamConfig, Receiver as EncryptedReceiver,
-        Sender as EncryptedSender,
-    };
+    use commonware_stream::encrypted::Config as StreamConfig;
     use commonware_utils::{NZUsize, SystemTimeExt};
     use std::{
         net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -189,8 +186,8 @@ mod tests {
     const MAX_MESSAGE_SIZE: u32 = 64 * 1024;
 
     type Connection = (
-        EncryptedSender<mocks::Sink>,
-        EncryptedReceiver<mocks::Stream>,
+        connection::Sender<mocks::Sink>,
+        connection::Receiver<mocks::Stream>,
     );
 
     fn stream_config(key: PrivateKey) -> StreamConfig<PrivateKey> {
@@ -233,12 +230,13 @@ mod tests {
         let listener = context.child("listener").spawn({
             let expected = peer.clone();
             move |context| async move {
-                listen(
+                connection::listen(
                     context,
                     |_| async { true },
                     stream_config(local_key),
                     local_stream,
                     local_sink,
+                    false,
                 )
                 .await
                 .map(|(connected_peer, sender, receiver)| {
@@ -248,12 +246,13 @@ mod tests {
             }
         });
 
-        let dialer = dial(
+        let dialer = connection::dial(
             context.child("dialer"),
             stream_config(peer_key),
             local,
             peer_stream,
             peer_sink,
+            false,
         )
         .await
         .expect("dial failed");

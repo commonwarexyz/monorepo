@@ -5,7 +5,7 @@ use crate::{
         relay::Relay,
     },
     utils::limited::Connected,
-    Channel, Recipients,
+    Channel, ChannelEncryption, Recipients,
 };
 use commonware_actor::{
     mailbox::{self, UnreliablePolicy},
@@ -121,11 +121,12 @@ impl<P: PublicKey> Messenger<P> {
         &self,
         recipients: Recipients<P>,
         channel: Channel,
+        encryption: ChannelEncryption,
         message: IoBufs,
         priority: bool,
     ) -> Unreliable<Feedback> {
         // Build Data and encode Message::Data once for all recipients
-        let encoded = types::Message::encode_data(&self.pool, channel, message);
+        let encoded = types::Message::encode_data(&self.pool, channel, encryption, message);
 
         self.sender.0.enqueue(Message::Content {
             recipients,

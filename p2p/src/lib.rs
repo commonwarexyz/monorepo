@@ -16,7 +16,7 @@ stability_mod!(ALPHA, pub mod simulated);
 stability_scope!(BETA {
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::PublicKey;
-    use commonware_runtime::{IoBuf, IoBufs};
+    use commonware_runtime::{IoBuf, IoBufs, Quota};
     use commonware_utils::{
         channel::mpsc,
         ordered::{Map, Set},
@@ -37,6 +37,58 @@ stability_scope!(BETA {
 
     /// Alias for identifying communication channels.
     pub type Channel = u64;
+
+    /// Protection applied to application data on a channel.
+    ///
+    /// Channel data is encrypted by default. Select [`ChannelEncryption::Plaintext`]
+    /// when the payload must remain visible on the wire while still being authenticated
+    /// by the stream session.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ChannelEncryption {
+        /// Encrypt channel messages.
+        Encrypted,
+        /// Authenticate channel messages without encrypting them.
+        Plaintext,
+    }
+
+    /// Configuration for registering a channel.
+    #[derive(Clone, Debug)]
+    pub struct ChannelConfig {
+        /// Unique identifier for the channel.
+        pub channel: Channel,
+        /// Rate at which messages can be received over the channel.
+        pub rate: Quota,
+        /// Maximum number of messages that can be queued on the channel.
+        pub backlog: usize,
+        /// Protection applied to channel messages.
+        pub encryption: ChannelEncryption,
+    }
+
+    impl ChannelConfig {
+        /// Create an encrypted channel configuration.
+        ///
+        /// Use [`ChannelConfig::unencrypted`] to opt into authenticated plaintext data.
+        pub const fn new(channel: Channel, rate: Quota, backlog: usize) -> Self {
+            Self {
+                channel,
+                rate,
+                backlog,
+                encryption: ChannelEncryption::Encrypted,
+            }
+        }
+
+        /// Encrypt messages on this channel.
+        pub const fn encrypted(mut self) -> Self {
+            self.encryption = ChannelEncryption::Encrypted;
+            self
+        }
+
+        /// Authenticate messages on this channel without encrypting them.
+        pub const fn unencrypted(mut self) -> Self {
+            self.encryption = ChannelEncryption::Plaintext;
+            self
+        }
+    }
 
     /// Enum indicating the set of recipients to send a message to.
     #[derive(Clone, Debug)]

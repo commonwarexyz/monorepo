@@ -26,6 +26,11 @@
 //! nonce reuse (which would compromise message confidentiality) while saving bandwidth (as there is
 //! no need to transmit nonces explicitly).
 //!
+//! Callers that need authenticated but unencrypted records can use [dial_session] and
+//! [listen_session]. Session records share the same handshake, ciphers, and nonce sequence as
+//! encrypted records, but each record explicitly selects either [Protection::Encrypted] or
+//! [Protection::Authenticated].
+//!
 //! # Security
 //!
 //! ## Requirements
@@ -68,8 +73,8 @@ use commonware_cryptography::{
 use commonware_formatting::hex;
 use commonware_macros::select;
 use commonware_runtime::{
-    BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs, Sink,
-    Stream,
+    Buf, BufMut, BufferPool, BufferPooler, Clock, Error as RuntimeError, IoBuf, IoBufMut, IoBufs,
+    Sink, Stream,
 };
 use commonware_utils::SystemTimeExt;
 use rand_core::CryptoRngCore;
@@ -96,6 +101,8 @@ pub enum Error {
     RecvTooLarge(usize),
     #[error("invalid varint length prefix")]
     InvalidVarint,
+    #[error("invalid frame protection: {0}")]
+    InvalidFrameProtection(u8),
     #[error("send failed")]
     SendFailed(RuntimeError),
     #[error("send zero size")]
@@ -167,6 +174,45 @@ impl<S> Config<S> {
     }
 }
 
+/// Protection applied to a session frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Protection {
+    /// Encrypt and authenticate the frame payload.
+    Encrypted,
+    /// Authenticate the frame payload without encrypting it.
+    Authenticated,
+}
+
+impl Protection {
+    const ENCRYPTED: u8 = 0;
+    const AUTHENTICATED: u8 = 1;
+
+    const fn encode(self) -> u8 {
+        match self {
+            Self::Encrypted => Self::ENCRYPTED,
+            Self::Authenticated => Self::AUTHENTICATED,
+        }
+    }
+
+    const fn decode(value: u8) -> Result<Self, Error> {
+        match value {
+            Self::ENCRYPTED => Ok(Self::Encrypted),
+            Self::AUTHENTICATED => Ok(Self::Authenticated),
+            _ => Err(Error::InvalidFrameProtection(value)),
+        }
+    }
+}
+
+/// A received session frame.
+#[derive(Debug)]
+pub struct Frame {
+    /// The frame protection mode.
+    pub protection: Protection,
+
+    /// The authenticated payload bytes.
+    pub payload: IoBufs,
+}
+
 // Handshake frames are fixed-size protocol messages, so we cap receives to
 // their exact encoded length instead of the application message limit.
 async fn recv_handshake_frame<M, T>(stream: &mut T) -> Result<M, Error>
@@ -188,9 +234,26 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
     ctx: R,
     config: Config<S>,
     peer: S::PublicKey,
+    stream: I,
+    sink: O,
+) -> Result<(Sender<O>, Receiver<I>), Error> {
+    let (sender, receiver) = dial_session(ctx, config, peer, stream, sink).await?;
+    Ok((Sender { inner: sender }, Receiver { inner: receiver }))
+}
+
+/// Establishes an authenticated session to a peer as the dialer.
+pub async fn dial_session<
+    R: BufferPooler + CryptoRngCore + Clock,
+    S: Signer,
+    I: Stream,
+    O: Sink,
+>(
+    ctx: R,
+    config: Config<S>,
+    peer: S::PublicKey,
     mut stream: I,
     mut sink: O,
-) -> Result<(Sender<O>, Receiver<I>), Error> {
+) -> Result<(SessionSender<O>, SessionReceiver<I>), Error> {
     let pool = ctx.network_buffer_pool().clone();
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
@@ -220,13 +283,13 @@ pub async fn dial<R: BufferPooler + CryptoRngCore + Clock, S: Signer, I: Stream,
         send_frame(&mut sink, ack.encode(), config.max_message_size).await?;
 
         Ok((
-            Sender {
+            SessionSender {
                 cipher: send,
                 sink,
                 max_message_size: config.max_message_size,
                 pool: pool.clone(),
             },
-            Receiver {
+            SessionReceiver {
                 cipher: recv,
                 stream,
                 max_message_size: config.max_message_size,
@@ -254,9 +317,28 @@ pub async fn listen<
     ctx: R,
     bouncer: F,
     config: Config<S>,
+    stream: I,
+    sink: O,
+) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
+    let (peer, sender, receiver) = listen_session(ctx, bouncer, config, stream, sink).await?;
+    Ok((peer, Sender { inner: sender }, Receiver { inner: receiver }))
+}
+
+/// Accepts an authenticated session from a peer as the listener.
+pub async fn listen_session<
+    R: BufferPooler + CryptoRngCore + Clock,
+    S: Signer,
+    I: Stream,
+    O: Sink,
+    Fut: Future<Output = bool>,
+    F: FnOnce(S::PublicKey) -> Fut,
+>(
+    ctx: R,
+    bouncer: F,
+    config: Config<S>,
     mut stream: I,
     mut sink: O,
-) -> Result<(S::PublicKey, Sender<O>, Receiver<I>), Error> {
+) -> Result<(S::PublicKey, SessionSender<O>, SessionReceiver<I>), Error> {
     let pool = ctx.network_buffer_pool().clone();
     let timeout = ctx.sleep(config.handshake_timeout);
     let inner_routine = async move {
@@ -287,13 +369,13 @@ pub async fn listen<
 
         Ok((
             peer,
-            Sender {
+            SessionSender {
                 cipher: send,
                 sink,
                 max_message_size: config.max_message_size,
                 pool: pool.clone(),
             },
-            Receiver {
+            SessionReceiver {
                 cipher: recv,
                 stream,
                 max_message_size: config.max_message_size,
@@ -310,6 +392,16 @@ pub async fn listen<
 
 /// Sends encrypted messages to a peer.
 pub struct Sender<O> {
+    inner: SessionSender<O>,
+}
+
+/// Receives encrypted messages from a peer.
+pub struct Receiver<I> {
+    inner: SessionReceiver<I>,
+}
+
+/// Sends protected messages to a peer.
+pub struct SessionSender<O> {
     cipher: SendCipher,
     sink: O,
     max_message_size: u32,
@@ -322,7 +414,12 @@ struct ChunkPlan {
     total_len: usize,
 }
 
-impl<O: Sink> Sender<O> {
+struct ProtectedChunkPlan {
+    messages: Vec<(Protection, IoBufs)>,
+    total_len: usize,
+}
+
+impl<O: Sink> SessionSender<O> {
     /// Returns the total encoded size of one encrypted frame.
     ///
     /// The returned size includes the length prefix, ciphertext, and AEAD tag.
@@ -362,6 +459,50 @@ impl<O: Sink> Sender<O> {
         Ok(())
     }
 
+    /// Returns the total encoded size of one protected session frame.
+    fn protected_frame_len(&self, plaintext_len: usize) -> Result<usize, Error> {
+        framed_len(
+            1 + plaintext_len + TAG_SIZE as usize,
+            self.max_message_size
+                .saturating_add(TAG_SIZE)
+                .saturating_add(1),
+        )
+    }
+
+    /// Appends one protected session frame.
+    fn append_protected_frame(
+        &mut self,
+        chunk: &mut IoBufMut,
+        protection: Protection,
+        mut bufs: IoBufs,
+    ) -> Result<(), Error> {
+        let message_len = bufs.len();
+        append_frame(
+            chunk,
+            1 + message_len + TAG_SIZE as usize,
+            self.max_message_size
+                .saturating_add(TAG_SIZE)
+                .saturating_add(1),
+            |chunk, payload_offset| {
+                chunk.put_u8(protection.encode());
+                let message_offset = chunk.len();
+                chunk.put(&mut bufs);
+
+                let tag = match protection {
+                    Protection::Encrypted => self
+                        .cipher
+                        .send_in_place(&mut chunk.as_mut()[message_offset..])?,
+                    Protection::Authenticated => self.cipher.authenticate(
+                        &chunk.as_ref()[message_offset..payload_offset + 1 + message_len],
+                    )?,
+                };
+                chunk.put_slice(&tag);
+                Ok(())
+            },
+        )?;
+        Ok(())
+    }
+
     /// Builds one contiguous chunk containing one or more encrypted frames.
     ///
     /// Callers compute `total_len` up front so this helper can allocate once,
@@ -373,6 +514,19 @@ impl<O: Sink> Sender<O> {
         let mut chunk = self.pool.alloc(total_len);
         for msg in messages {
             self.append_encrypted_frame(&mut chunk, msg)?;
+        }
+        assert_eq!(chunk.len(), total_len);
+        Ok(chunk.freeze())
+    }
+
+    /// Builds one contiguous chunk containing protected session frames.
+    fn build_protected_chunk<I>(&mut self, messages: I, total_len: usize) -> Result<IoBuf, Error>
+    where
+        I: IntoIterator<Item = (Protection, IoBufs)>,
+    {
+        let mut chunk = self.pool.alloc(total_len);
+        for (protection, msg) in messages {
+            self.append_protected_frame(&mut chunk, protection, msg)?;
         }
         assert_eq!(chunk.len(), total_len);
         Ok(chunk.freeze())
@@ -439,6 +593,60 @@ impl<O: Sink> Sender<O> {
         Ok(chunks)
     }
 
+    /// Plans protected `send_many` chunk boundaries.
+    fn plan_protected_chunks<B, I>(&self, bufs: I) -> Result<Vec<ProtectedChunkPlan>, Error>
+    where
+        B: Into<IoBufs>,
+        I: IntoIterator<Item = (Protection, B)>,
+    {
+        let bufs = bufs.into_iter();
+        let (lower, _) = bufs.size_hint();
+        let mut chunks = Vec::with_capacity(lower.max(1));
+        let mut batch = Vec::new();
+        let mut batch_total = 0usize;
+        let max_batch_size = self.pool.config().max_size.get();
+
+        for (protection, buf) in bufs {
+            let msg = buf.into();
+            let frame_len = self.protected_frame_len(msg.len())?;
+
+            if frame_len > max_batch_size {
+                if !batch.is_empty() {
+                    chunks.push(ProtectedChunkPlan {
+                        messages: std::mem::take(&mut batch),
+                        total_len: batch_total,
+                    });
+                    batch_total = 0;
+                }
+                chunks.push(ProtectedChunkPlan {
+                    messages: vec![(protection, msg)],
+                    total_len: frame_len,
+                });
+                continue;
+            }
+
+            if batch_total.saturating_add(frame_len) > max_batch_size {
+                chunks.push(ProtectedChunkPlan {
+                    messages: std::mem::take(&mut batch),
+                    total_len: batch_total,
+                });
+                batch_total = 0;
+            }
+
+            batch_total += frame_len;
+            batch.push((protection, msg));
+        }
+
+        if !batch.is_empty() {
+            chunks.push(ProtectedChunkPlan {
+                messages: batch,
+                total_len: batch_total,
+            });
+        }
+
+        Ok(chunks)
+    }
+
     /// Encrypts and sends a message to the peer.
     ///
     /// Allocates a buffer from the pool, copies plaintext, encrypts in-place,
@@ -477,17 +685,67 @@ impl<O: Sink> Sender<O> {
             .await
             .map_err(Error::SendFailed)
     }
+
+    /// Sends one protected session frame.
+    pub async fn send_protected(
+        &mut self,
+        protection: Protection,
+        bufs: impl Into<IoBufs>,
+    ) -> Result<(), Error> {
+        let bufs = bufs.into();
+        let frame_len = self.protected_frame_len(bufs.len())?;
+        let chunk = self.build_protected_chunk(std::iter::once((protection, bufs)), frame_len)?;
+        self.sink.send(chunk).await.map_err(Error::SendFailed)
+    }
+
+    /// Sends multiple protected session frames in a single sink call when possible.
+    pub async fn send_many_protected<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    where
+        B: Into<IoBufs>,
+        I: IntoIterator<Item = (Protection, B)>,
+    {
+        let plans = self.plan_protected_chunks(bufs)?;
+        if plans.is_empty() {
+            return Ok(());
+        }
+
+        let mut chunks = Vec::with_capacity(plans.len());
+        for plan in plans {
+            chunks.push(self.build_protected_chunk(plan.messages, plan.total_len)?);
+        }
+
+        self.sink
+            .send(IoBufs::from(chunks))
+            .await
+            .map_err(Error::SendFailed)
+    }
 }
 
-/// Receives encrypted messages from a peer.
-pub struct Receiver<I> {
+impl<O: Sink> Sender<O> {
+    /// Encrypts and sends a message to the peer.
+    pub async fn send(&mut self, bufs: impl Into<IoBufs>) -> Result<(), Error> {
+        self.inner.send(bufs).await
+    }
+
+    /// Encrypts and sends multiple messages in a single sink call.
+    pub async fn send_many<B, I>(&mut self, bufs: I) -> Result<(), Error>
+    where
+        B: Into<IoBufs>,
+        I: IntoIterator<Item = B>,
+    {
+        self.inner.send_many(bufs).await
+    }
+}
+
+/// Receives protected messages from a peer.
+pub struct SessionReceiver<I> {
     cipher: RecvCipher,
     stream: I,
     max_message_size: u32,
     pool: BufferPool,
 }
 
-impl<I: Stream> Receiver<I> {
+impl<I: Stream> SessionReceiver<I> {
     /// Receives and decrypts a message from the peer.
     ///
     /// Receives ciphertext, allocates a buffer from the pool, copies ciphertext,
@@ -513,6 +771,56 @@ impl<I: Stream> Receiver<I> {
         decryption_buf.truncate(plaintext_len);
 
         Ok(decryption_buf.freeze().into())
+    }
+
+    /// Receives one protected session frame.
+    pub async fn recv_protected(&mut self) -> Result<Frame, Error> {
+        let frame = recv_frame(
+            &mut self.stream,
+            self.max_message_size
+                .saturating_add(TAG_SIZE)
+                .saturating_add(1),
+        )
+        .await?;
+        let mut frame = frame.coalesce_with_pool(&self.pool);
+        if frame.len() < 1 + TAG_SIZE as usize {
+            return Err(Error::HandshakeError(HandshakeError::DecryptionFailed));
+        }
+
+        let protection = Protection::decode(frame.as_ref()[0])?;
+        frame.advance(1);
+
+        match protection {
+            Protection::Encrypted => {
+                let ciphertext_len = frame.len();
+                let mut decryption_buf = self.pool.alloc(ciphertext_len);
+                decryption_buf.put_slice(frame.as_ref());
+                let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
+                decryption_buf.truncate(plaintext_len);
+                Ok(Frame {
+                    protection,
+                    payload: decryption_buf.freeze().into(),
+                })
+            }
+            Protection::Authenticated => {
+                let payload_len = frame.len() - TAG_SIZE as usize;
+                let tag = frame.as_ref()[payload_len..]
+                    .try_into()
+                    .expect("tag size mismatch");
+                self.cipher.verify(&frame.as_ref()[..payload_len], tag)?;
+                Ok(Frame {
+                    protection,
+                    payload: frame.slice(..payload_len).into(),
+                })
+            }
+        }
+    }
+}
+
+impl<I: Stream> Receiver<I> {
+    /// Receives and decrypts a message from the peer.
+    pub async fn recv(&mut self) -> Result<IoBufs, Error> {
+        self.inner.recv().await
     }
 }
 
@@ -578,6 +886,27 @@ mod test {
         }
     }
 
+    struct RecordingSink<S> {
+        inner: S,
+        sends: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl<S> RecordingSink<S> {
+        fn new(inner: S, sends: Arc<Mutex<Vec<Vec<u8>>>>) -> Self {
+            Self { inner, sends }
+        }
+    }
+
+    impl<S: commonware_runtime::Sink> commonware_runtime::Sink for RecordingSink<S> {
+        async fn send(&mut self, bufs: impl Into<IoBufs> + Send) -> Result<(), RuntimeError> {
+            let bufs = bufs.into();
+            let mut sent = Vec::with_capacity(bufs.len());
+            bufs.for_each_chunk(|chunk| sent.extend_from_slice(chunk));
+            self.sends.lock().push(sent);
+            self.inner.send(bufs).await
+        }
+    }
+
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
@@ -623,6 +952,119 @@ mod test {
                 let ack = dialer_receiver.recv().await?;
                 assert_eq!(ack.coalesce(), *msg);
             }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_session_can_authenticate_plaintext_messages() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+            let messages = Arc::new(Mutex::new(Vec::new()));
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+
+            let dialer_config = transport_config(dialer_crypto.clone());
+            let listener_config = transport_config(listener_crypto.clone());
+
+            let listener_handle = context.child("listener").spawn(move |context| async move {
+                listen_session(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, _dialer_receiver) = dial_session(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                RecordingSink::new(dialer_sink, messages.clone()),
+            )
+            .await?;
+
+            let (_listener_peer, _listener_sender, mut listener_receiver) =
+                listener_handle.await.unwrap()?;
+            messages.lock().clear();
+
+            dialer_sender
+                .send_protected(Protection::Authenticated, b"visible payload".as_ref())
+                .await?;
+            let frame = listener_receiver.recv_protected().await?;
+            assert_eq!(frame.protection, Protection::Authenticated);
+            assert_eq!(frame.payload.coalesce(), IoBuf::from(b"visible payload"));
+
+            let sends = messages.lock();
+            assert_eq!(sends.len(), 1);
+            assert!(sends[0]
+                .windows(b"visible payload".len())
+                .any(|window| window == b"visible payload"));
+
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_session_can_mix_encrypted_and_authenticated_messages() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+
+            let dialer_config = transport_config(dialer_crypto.clone());
+            let listener_config = transport_config(listener_crypto.clone());
+
+            let listener_handle = context.child("listener").spawn(move |context| async move {
+                listen_session(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, _dialer_receiver) = dial_session(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await?;
+
+            let (_listener_peer, _listener_sender, mut listener_receiver) =
+                listener_handle.await.unwrap()?;
+
+            dialer_sender
+                .send_many_protected(vec![
+                    (Protection::Encrypted, IoBufs::from(IoBuf::from(b"secret"))),
+                    (
+                        Protection::Authenticated,
+                        IoBufs::from(IoBuf::from(b"plain")),
+                    ),
+                ])
+                .await?;
+
+            let secret = listener_receiver.recv_protected().await?;
+            assert_eq!(secret.protection, Protection::Encrypted);
+            assert_eq!(secret.payload.coalesce(), IoBuf::from(b"secret"));
+
+            let plain = listener_receiver.recv_protected().await?;
+            assert_eq!(plain.protection, Protection::Authenticated);
+            assert_eq!(plain.payload.coalesce(), IoBuf::from(b"plain"));
+
             Ok(())
         })
     }

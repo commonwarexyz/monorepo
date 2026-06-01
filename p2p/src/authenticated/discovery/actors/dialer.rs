@@ -1,6 +1,7 @@
 //! Actor responsible for dialing peers and establishing connections.
 
 use crate::authenticated::{
+    connection,
     discovery::{
         actors::{
             spawner,
@@ -18,7 +19,7 @@ use commonware_runtime::{
     BufferPooler, Clock, ContextCell, Handle, Metrics, Network, Resolver, SinkOf, Spawner,
     StreamOf,
 };
-use commonware_stream::encrypted::{dial, Config as StreamConfig};
+use commonware_stream::encrypted::Config as StreamConfig;
 use rand::seq::SliceRandom;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
@@ -32,6 +33,7 @@ type SupervisorMailbox<E, C> =
 pub struct Config<C: Signer> {
     /// Configuration for the stream.
     pub stream_cfg: StreamConfig<C>,
+    pub mixed: bool,
 
     /// The frequency at which to dial a single peer from the queue. This also limits the rate at
     /// which we attempt to dial peers in general.
@@ -56,6 +58,7 @@ pub struct Actor<E: Spawner + Clock + Network + Resolver + Metrics, C: Signer> {
 
     // ---------- Configuration ----------
     stream_cfg: StreamConfig<C>,
+    mixed: bool,
     dial_frequency: Duration,
     peer_connection_cooldown: Duration,
     allow_private_ips: bool,
@@ -76,6 +79,7 @@ impl<
             context: ContextCell::new(context),
             queue: Vec::new(),
             stream_cfg: cfg.stream_cfg,
+            mixed: cfg.mixed,
             dial_frequency: cfg.dial_frequency,
             peer_connection_cooldown: cfg.peer_connection_cooldown,
             allow_private_ips: cfg.allow_private_ips,
@@ -100,6 +104,7 @@ impl<
         // Spawn dialer to connect to peer
         self.context.child("dialer").spawn({
             let config = self.stream_cfg.clone();
+            let mixed = self.mixed;
             let mut supervisor = supervisor.clone();
             let allow_private_ips = self.allow_private_ips;
             move |mut context| async move {
@@ -125,7 +130,16 @@ impl<
                 debug!(?peer, ?ingress, "dialed peer");
 
                 // Upgrade connection
-                let instance = match dial(context, config, peer.clone(), stream, sink).await {
+                let instance = match connection::dial(
+                    context,
+                    config,
+                    peer.clone(),
+                    stream,
+                    sink,
+                    mixed,
+                )
+                .await
+                {
                     Ok(instance) => instance,
                     Err(err) => {
                         debug!(?err, "failed to upgrade connection");
@@ -233,6 +247,7 @@ mod tests {
 
             let dialer_cfg = Config {
                 stream_cfg: test_stream_config(signer),
+                mixed: false,
                 dial_frequency,
                 peer_connection_cooldown: Duration::from_secs(60),
                 allow_private_ips: true,
@@ -318,6 +333,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream_cfg: test_stream_config(signer),
+                    mixed: false,
                     dial_frequency,
                     peer_connection_cooldown: dial_frequency,
                     allow_private_ips: true,
@@ -377,6 +393,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream_cfg: test_stream_config(signer),
+                    mixed: false,
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_secs(60),
                     allow_private_ips: true,
@@ -455,6 +472,7 @@ mod tests {
                 context.child("dialer"),
                 Config {
                     stream_cfg: test_stream_config(signer),
+                    mixed: false,
                     dial_frequency,
                     peer_connection_cooldown: Duration::from_millis(50),
                     allow_private_ips: true,

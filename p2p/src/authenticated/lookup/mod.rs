@@ -216,8 +216,8 @@ mod tests {
             lookup::actors::router::{Actor as RouterActor, Config as RouterConfig},
             relay::Relay,
         },
-        Address, AddressableManager, CheckedSender as _, Ingress, LimitedSender as _, Provider,
-        Receiver, Recipients, Sender,
+        Address, AddressableManager, ChannelConfig, ChannelEncryption, CheckedSender as _, Ingress,
+        LimitedSender as _, Provider, Receiver, Recipients, Sender,
     };
     use commonware_actor::{Feedback, Unreliable};
     use commonware_cryptography::{ed25519, Signer as _};
@@ -275,6 +275,25 @@ mod tests {
         n: usize,
         mode: Mode,
     ) {
+        run_network_with_channel_config(
+            context,
+            max_message_size,
+            base_port,
+            n,
+            mode,
+            ChannelConfig::new(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG),
+        )
+        .await;
+    }
+
+    async fn run_network_with_channel_config(
+        context: impl Spawner + BufferPooler + Clock + CryptoRngCore + RNetwork + Resolver + Metrics,
+        max_message_size: u32,
+        base_port: u16,
+        n: usize,
+        mode: Mode,
+        channel_config: ChannelConfig,
+    ) {
         // Create peers
         let mut peers_and_sks = Vec::new();
         for i in 0..n {
@@ -304,8 +323,7 @@ mod tests {
             oracle.track(0, Map::try_from(peers.clone()).unwrap());
 
             // Register basic application
-            let (mut sender, mut receiver) =
-                network.register(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG);
+            let (mut sender, mut receiver) = network.register_with(channel_config.clone());
 
             // Wait to connect to all peers, and then send messages to everyone
             network.start();
@@ -412,6 +430,26 @@ mod tests {
 
         // Ensure no message rate limiting occurred
         assert_no_rate_limiting(&context.encode());
+    }
+
+    #[test_traced]
+    fn test_unencrypted_channel_connectivity() {
+        const NUM_PEERS: usize = 4;
+        const BASE_PORT: u16 = 23000;
+
+        let executor = deterministic::Runner::seeded(0);
+        executor.start(|context| async move {
+            run_network_with_channel_config(
+                context.child("network"),
+                MAX_MESSAGE_SIZE,
+                BASE_PORT,
+                NUM_PEERS,
+                Mode::All,
+                ChannelConfig::new(0, Quota::per_second(NZU32!(100)), DEFAULT_MESSAGE_BACKLOG)
+                    .unencrypted(),
+            )
+            .await;
+        });
     }
 
     fn run_deterministic_test(seed: u64, mode: Mode) {
@@ -2144,7 +2182,13 @@ mod tests {
 
             let message = IoBuf::from(vec![0u8; 100]);
             for i in 0..11 {
-                let sent = messenger.content(Recipients::All, 0, message.clone().into(), false);
+                let sent = messenger.content(
+                    Recipients::All,
+                    0,
+                    ChannelEncryption::Encrypted,
+                    message.clone().into(),
+                    false,
+                );
                 assert_ne!(
                     sent,
                     Unreliable::new(Feedback::Closed),

@@ -1,4 +1,4 @@
-use crate::Channel;
+use crate::{Channel, ChannelEncryption};
 use commonware_codec::{varint::UInt, EncodeSize, Error, RangeCfg, Read, ReadExt as _, Write};
 use commonware_runtime::{Buf, BufMut, BufferPool, IoBuf, IoBufs};
 use std::collections::HashMap;
@@ -48,6 +48,9 @@ pub struct EncodedData {
     /// The channel this data belongs to (used for metrics/logging).
     pub channel: Channel,
 
+    /// Protection to use when transmitting this data.
+    pub encryption: ChannelEncryption,
+
     /// Pre-encoded `Payload::Data(...)` bytes ready for transmission.
     pub payload: IoBufs,
 }
@@ -64,7 +67,13 @@ impl EncodedData {
 
     /// Encode `Payload::Data` bytes in-place as:
     /// `prefix || channel || message_len || message`.
-    pub fn new(pool: &BufferPool, prefix: u8, channel: Channel, mut message: IoBufs) -> Self {
+    pub fn new(
+        pool: &BufferPool,
+        prefix: u8,
+        channel: Channel,
+        encryption: ChannelEncryption,
+        mut message: IoBufs,
+    ) -> Self {
         let payload_len = message.len();
         let header_len =
             prefix.encode_size() + UInt(channel).encode_size() + payload_len.encode_size();
@@ -77,6 +86,7 @@ impl EncodedData {
 
         Self {
             channel,
+            encryption,
             payload: message,
         }
     }
@@ -141,8 +151,15 @@ mod tests {
             let mut expected = IoBufs::from(data.encode());
             expected.prepend(IoBuf::from(vec![7]));
 
-            let encoded = EncodedData::new(context.network_buffer_pool(), 7, 12345, message);
+            let encoded = EncodedData::new(
+                context.network_buffer_pool(),
+                7,
+                12345,
+                ChannelEncryption::Encrypted,
+                message,
+            );
             assert_eq!(encoded.channel, 12345);
+            assert_eq!(encoded.encryption, ChannelEncryption::Encrypted);
             assert_eq!(encoded.payload.coalesce(), expected.coalesce());
         });
     }

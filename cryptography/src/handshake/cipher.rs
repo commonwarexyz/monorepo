@@ -81,6 +81,34 @@ cfg_if::cfg_if! {
                     .map_err(|_| Error::DecryptionFailed)?;
                 Ok(data.len() - TAG_SIZE)
             }
+
+            fn authenticate(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+            ) -> Result<[u8; TAG_SIZE], Error> {
+                let nonce = aead::Nonce::assume_unique_for_key(*nonce);
+                let mut empty = [];
+                let tag = self
+                    .0
+                    .seal_in_place_separate_tag(nonce, aead::Aad::from(data), &mut empty)
+                    .map_err(|_| Error::EncryptionFailed)?;
+                Ok(tag.as_ref().try_into().expect("tag size mismatch"))
+            }
+
+            fn verify(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+                tag: &[u8; TAG_SIZE],
+            ) -> Result<(), Error> {
+                let nonce = aead::Nonce::assume_unique_for_key(*nonce);
+                let mut tag = *tag;
+                self.0
+                    .open_in_place(nonce, aead::Aad::from(data), &mut tag)
+                    .map_err(|_| Error::DecryptionFailed)?;
+                Ok(())
+            }
         }
     } else {
         use chacha20poly1305::{aead::AeadInPlace, ChaCha20Poly1305, KeyInit as _};
@@ -123,6 +151,30 @@ cfg_if::cfg_if! {
                     .map_err(|_| Error::DecryptionFailed)?;
                 Ok(plaintext_len)
             }
+
+            fn authenticate(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+            ) -> Result<[u8; TAG_SIZE], Error> {
+                let tag = self
+                    .0
+                    .encrypt_in_place_detached(nonce.into(), data, &mut [])
+                    .map_err(|_| Error::EncryptionFailed)?;
+                Ok(tag.into())
+            }
+
+            fn verify(
+                &self,
+                nonce: &[u8; NONCE_SIZE_BYTES],
+                data: &[u8],
+                tag: &[u8; TAG_SIZE],
+            ) -> Result<(), Error> {
+                self.0
+                    .decrypt_in_place_detached(nonce.into(), data, &mut [], tag.into())
+                    .map_err(|_| Error::DecryptionFailed)?;
+                Ok(())
+            }
         }
     }
 }
@@ -152,6 +204,14 @@ impl SendCipher {
         let nonce = self.nonce.inc()?;
         self.inner
             .expose(|cipher| cipher.encrypt_in_place(&nonce, data))
+    }
+
+    /// Authenticates `data` without encrypting it.
+    #[inline]
+    pub fn authenticate(&mut self, data: &[u8]) -> Result<[u8; TAG_SIZE], Error> {
+        let nonce = self.nonce.inc()?;
+        self.inner
+            .expose(|cipher| cipher.authenticate(&nonce, data))
     }
 
     /// Encrypts data and returns the ciphertext.
@@ -208,6 +268,13 @@ impl RecvCipher {
             .expose(|cipher| cipher.decrypt_in_place(&nonce, encrypted_data))
     }
 
+    /// Verifies `data` authenticated without encryption.
+    #[inline]
+    pub fn verify(&mut self, data: &[u8], tag: &[u8; TAG_SIZE]) -> Result<(), Error> {
+        let nonce = self.nonce.inc()?;
+        self.inner.expose(|cipher| cipher.verify(&nonce, data, tag))
+    }
+
     /// Decrypts ciphertext and returns the original data.
     ///
     /// # Errors
@@ -255,6 +322,29 @@ mod tests {
         let ciphertext = send.send(b"hello").unwrap();
         assert!(matches!(
             recv.recv(&ciphertext),
+            Err(Error::DecryptionFailed)
+        ));
+    }
+
+    #[test]
+    fn test_authenticate_verify_roundtrip() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        let plaintext = b"visible";
+        let tag = send.authenticate(plaintext).unwrap();
+        recv.verify(plaintext, &tag).unwrap();
+    }
+
+    #[test]
+    fn test_authenticate_verify_detects_tampering() {
+        let mut send = SendCipher::new(&mut test_rng());
+        let mut recv = RecvCipher::new(&mut test_rng());
+
+        let plaintext = b"visible";
+        let tag = send.authenticate(plaintext).unwrap();
+        assert!(matches!(
+            recv.verify(b"changed", &tag),
             Err(Error::DecryptionFailed)
         ));
     }

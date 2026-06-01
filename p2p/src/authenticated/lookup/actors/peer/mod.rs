@@ -38,4 +38,6 @@ pub enum Error {
     UnexpectedFailure(commonware_runtime::Error),
     #[error("invalid channel")]
     InvalidChannel,
+    #[error("invalid protection")]
+    InvalidProtection,
 }

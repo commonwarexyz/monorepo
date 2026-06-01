@@ -1,11 +1,15 @@
 use super::{Config, Error, Mailbox, Message};
-use crate::authenticated::{
-    data::EncodedData,
-    lookup::{
-        channels::{self, Channels},
-        metrics, types,
+use crate::{
+    authenticated::{
+        connection,
+        data::EncodedData,
+        lookup::{
+            channels::{self, Channels},
+            metrics, types,
+        },
+        relay::{try_recv, Message as RelayMessage, Prioritized, Relay},
     },
-    relay::{try_recv, Message as RelayMessage, Prioritized, Relay},
+    ChannelEncryption,
 };
 use commonware_actor::mailbox;
 use commonware_codec::Decode;
@@ -15,7 +19,6 @@ use commonware_runtime::{
     iobuf::EncodeExt, telemetry::metrics::CounterFamily, BufferPooler, Clock, Handle, IoBufs,
     Metrics, Quota, RateLimiter, Sink, Spawner, Stream,
 };
-use commonware_stream::encrypted::{Receiver, Sender};
 use commonware_utils::{channel::ring, time::SYSTEM_TIME_PRECISION};
 use futures::{FutureExt as _, StreamExt as _};
 use rand_core::CryptoRngCore;
@@ -65,10 +68,11 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
         peer: &C,
         msg: EncodedData,
         rate_limits: &HashMap<u64, V>,
-    ) -> (metrics::Message<C>, IoBufs) {
+    ) -> (metrics::Message<C>, ChannelEncryption, IoBufs) {
         let encoded = msg.validate_channel(rate_limits);
         (
             metrics::Message::new_data(peer, encoded.channel),
+            encoded.encryption,
             encoded.payload,
         )
     }
@@ -76,12 +80,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     /// Records the send metric and appends the payload to the batch.
     fn push_batched(
         sent_messages: &CounterFamily<metrics::Message<C>>,
-        batch: &mut Vec<IoBufs>,
+        batch: &mut Vec<(ChannelEncryption, IoBufs)>,
         metric: metrics::Message<C>,
+        encryption: ChannelEncryption,
         payload: IoBufs,
     ) {
         sent_messages.get_or_create(&metric).inc();
-        batch.push(payload);
+        batch.push((encryption, payload));
     }
 
     fn try_recv_control(control: &mut ring::Receiver<Message>) -> Option<Message> {
@@ -97,7 +102,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     fn extend_send_many<V>(
         peer: &C,
         batch_size: usize,
-        batch: &mut Vec<IoBufs>,
+        batch: &mut Vec<(ChannelEncryption, IoBufs)>,
         control: &mut ring::Receiver<Message>,
         high: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
         low: &mut mailbox::UnreliableReceiver<RelayMessage<EncodedData>>,
@@ -111,13 +116,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 }
             }
             if let Some(msg) = try_recv(high) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
+                let (metric, encryption, payload) = Self::prepare_data(peer, msg, rate_limits);
+                Self::push_batched(sent_messages, batch, metric, encryption, payload);
                 continue;
             }
             if let Some(msg) = try_recv(low) {
-                let (metric, payload) = Self::prepare_data(peer, msg, rate_limits);
-                Self::push_batched(sent_messages, batch, metric, payload);
+                let (metric, encryption, payload) = Self::prepare_data(peer, msg, rate_limits);
+                Self::push_batched(sent_messages, batch, metric, encryption, payload);
                 continue;
             }
             break;
@@ -144,23 +149,26 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
     pub async fn run<Si: Sink, St: Stream>(
         self,
         peer: C,
-        (mut conn_sender, mut conn_receiver): (Sender<Si>, Receiver<St>),
+        (mut conn_sender, mut conn_receiver): (connection::Sender<Si>, connection::Receiver<St>),
         channels: Channels<C>,
     ) -> Result<(), Error> {
         // Instantiate rate limiters for each message type
         let mut rate_limits = HashMap::new();
+        let mut encryption_by_channel = HashMap::new();
         let mut senders = HashMap::new();
-        for (channel, (rate, sender)) in channels.collect() {
+        for (channel, registered) in channels.collect() {
             let rate_limiter = RateLimiter::direct_with_clock(
-                rate,
+                registered.rate,
                 self.context
                     .child("rate_limiter")
                     .with_attribute("channel", channel),
             );
             rate_limits.insert(channel, rate_limiter);
-            senders.insert(channel, sender);
+            encryption_by_channel.insert(channel, registered.encryption);
+            senders.insert(channel, registered.sender);
         }
         let rate_limits = Arc::new(rate_limits);
+        let encryption_by_channel = Arc::new(encryption_by_channel);
         let pool = self.context.network_buffer_pool().clone();
 
         // Use half the ping frequency for rate limiting to allow for timing
@@ -191,6 +199,7 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                             &self.sent_messages,
                             &mut batch,
                             metrics::Message::new_ping(&peer),
+                            ChannelEncryption::Encrypted,
                             types::Message::Ping.encode_with_pool(&pool),
                         );
                         Self::extend_send_many(
@@ -219,12 +228,13 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 Message::Kill => return Err(Error::PeerKilled(peer.to_string())),
                             },
                             Prioritized::Data(encoded) => {
-                                let (metric, payload) =
+                                let (metric, encryption, payload) =
                                     Self::prepare_data(&peer, encoded, &rate_limits);
                                 Self::push_batched(
                                     &self.sent_messages,
                                     &mut batch,
                                     metric,
+                                    encryption,
                                     payload,
                                 );
                             }
@@ -255,7 +265,8 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                 .spawn(move |context| async move {
                     loop {
                         // Receive a message from the peer
-                        let msg = conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
+                        let (received_encryption, msg) =
+                            conn_receiver.recv().await.map_err(Error::ReceiveFailed)?;
 
                         // Parse the message
                         let max_data_length = msg.len(); // apply loose bound to data read to prevent memory exhaustion
@@ -276,6 +287,25 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                         let (metric, rate_limiter) = match &msg {
                             types::Message::Data(data) => match rate_limits.get(&data.channel) {
                                 Some(rate_limit) => {
+                                    let Some(expected) = encryption_by_channel.get(&data.channel)
+                                    else {
+                                        unreachable!(
+                                            "rate limit exists without channel encryption"
+                                        );
+                                    };
+                                    if *expected != received_encryption {
+                                        debug!(
+                                            ?peer,
+                                            channel = data.channel,
+                                            ?expected,
+                                            ?received_encryption,
+                                            "invalid channel protection"
+                                        );
+                                        self.received_messages
+                                            .get_or_create(&metrics::Message::new_invalid(&peer))
+                                            .inc();
+                                        return Err(Error::InvalidProtection);
+                                    }
                                     (metrics::Message::new_data(&peer, data.channel), rate_limit)
                                 }
                                 None => {
@@ -287,6 +317,10 @@ impl<E: Spawner + BufferPooler + Clock + CryptoRngCore + Metrics, C: PublicKey> 
                                 }
                             },
                             types::Message::Ping => {
+                                if received_encryption != ChannelEncryption::Encrypted {
+                                    debug!(?peer, "received unencrypted ping");
+                                    return Err(Error::InvalidProtection);
+                                }
                                 (metrics::Message::new_ping(&peer), &ping_rate_limiter)
                             }
                         };
@@ -485,7 +519,10 @@ mod tests {
             let mut channels = create_channels(context.child("channels"));
             let quota =
                 commonware_runtime::Quota::per_second(std::num::NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
+            let (_sender, _receiver) = channels.register(
+                crate::ChannelConfig::new(0, quota, 10),
+                context.child("channel"),
+            );
 
             // Simulate the attack: send a Data message with an arbitrary
             // unregistered channel value. Before the fix, this would create
@@ -499,7 +536,11 @@ mod tests {
 
             // The actor should reject the message and return InvalidChannel.
             let result = peer_actor
-                .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
+                .run(
+                    local_pk.clone(),
+                    (remote_sender.into(), remote_receiver.into()),
+                    channels,
+                )
                 .await;
             assert!(
                 matches!(result, Err(Error::InvalidChannel)),
@@ -586,13 +627,21 @@ mod tests {
 
             let mut channels = create_channels(context.child("channels"));
             let quota = commonware_runtime::Quota::per_second(NonZeroU32::new(100).unwrap());
-            let (_sender, _receiver) = channels.register(0, quota, 10, context.child("channel"));
+            let (_sender, _receiver) = channels.register(
+                crate::ChannelConfig::new(0, quota, 10),
+                context.child("channel"),
+            );
 
             let pool = context.network_buffer_pool().clone();
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"first"))),
+                        types::Message::encode_data(
+                            &pool,
+                            0,
+                            ChannelEncryption::Encrypted,
+                            IoBufs::from(IoBuf::from(b"first")),
+                        ),
                         false,
                     )
                     .accepted(),
@@ -601,7 +650,12 @@ mod tests {
             assert!(
                 relay
                     .send(
-                        types::Message::encode_data(&pool, 0, IoBufs::from(IoBuf::from(b"second"))),
+                        types::Message::encode_data(
+                            &pool,
+                            0,
+                            ChannelEncryption::Encrypted,
+                            IoBufs::from(IoBuf::from(b"second")),
+                        ),
                         false,
                     )
                     .accepted(),
@@ -610,7 +664,11 @@ mod tests {
 
             let peer_handle = context.child("task").spawn(move |_context| async move {
                 peer_actor
-                    .run(local_pk.clone(), (remote_sender, remote_receiver), channels)
+                    .run(
+                        local_pk.clone(),
+                        (remote_sender.into(), remote_receiver.into()),
+                        channels,
+                    )
                     .await
             });
 
