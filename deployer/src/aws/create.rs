@@ -67,6 +67,7 @@ pub struct RegionResources {
     pub monitoring_sg_id: Option<String>,
 }
 
+/// Validates storage options before create allocates AWS resources.
 fn validate_storage_config(config: &Config) -> Result<(), Error> {
     let monitoring_storage_class =
         parse_storage_class(MONITORING_NAME, &config.monitoring.storage_class)?;
