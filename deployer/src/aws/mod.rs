@@ -495,8 +495,12 @@ cfg_if::cfg_if! {
                 target: String,
                 storage_class: String,
             },
-            #[error("storage_iops for {target} must be positive: {storage_iops}")]
-            InvalidStorageIops { target: String, storage_iops: i32 },
+            #[error("storage_iops for {target} is invalid for storage_class {storage_class}: {storage_iops}")]
+            InvalidStorageIops {
+                target: String,
+                storage_class: String,
+                storage_iops: i32,
+            },
             #[error("storage_throughput is only supported for {target} when storage_class is gp3: {storage_class}")]
             UnsupportedStorageThroughput {
                 target: String,

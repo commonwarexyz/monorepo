@@ -1512,17 +1512,69 @@ mod tests {
     }
 
     #[test]
-    fn storage_iops_must_be_positive() {
+    fn gp3_storage_iops_must_be_in_range() {
         let cfg = config(monitoring("gp3", Some(0)), Vec::new());
 
-        let err = validate_storage_config(&cfg).expect_err("storage_iops must be positive");
+        let err = validate_storage_config(&cfg).expect_err("gp3 storage_iops is too low");
 
         assert!(matches!(
             err,
             Error::InvalidStorageIops {
                 target,
+                storage_class,
                 storage_iops,
-            } if target == "monitoring" && storage_iops == 0
+            } if target == "monitoring" && storage_class == "gp3" && storage_iops == 0
+        ));
+    }
+
+    #[test]
+    fn io1_storage_iops_must_be_in_range() {
+        let mut instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+        instance.storage_class = "io1".to_string();
+        instance.storage_iops = Some(64_001);
+        let cfg = config(monitoring("gp3", None), vec![instance]);
+
+        let err = validate_storage_config(&cfg).expect_err("io1 storage_iops is too high");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "worker" && storage_class == "io1" && storage_iops == 64_001
+        ));
+    }
+
+    #[test]
+    fn io2_storage_iops_must_be_in_range() {
+        let cfg = config(monitoring("io2", Some(256_001)), Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("io2 storage_iops is too high");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "monitoring" && storage_class == "io2" && storage_iops == 256_001
+        ));
+    }
+
+    #[test]
+    fn unsupported_storage_class_rejects_storage_iops() {
+        let cfg = config(monitoring("gp2", Some(3_000)), Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("gp2 does not accept storage_iops");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "monitoring" && storage_class == "gp2" && storage_iops == 3_000
         ));
     }
 

@@ -390,24 +390,37 @@ pub(crate) fn validate_storage_options(
     storage_iops: Option<i32>,
     storage_throughput: Option<i32>,
 ) -> Result<(), super::Error> {
-    match (storage_iops, storage_throughput) {
-        (Some(storage_iops), _) if storage_iops <= 0 => Err(super::Error::InvalidStorageIops {
+    if storage_iops.is_none() && matches!(storage_class, VolumeType::Io1 | VolumeType::Io2) {
+        return Err(super::Error::MissingStorageIops {
             target: target.to_string(),
-            storage_iops,
-        }),
-        (None, _) if matches!(storage_class, VolumeType::Io1 | VolumeType::Io2) => {
-            Err(super::Error::MissingStorageIops {
+            storage_class: storage_class.as_str().to_string(),
+        });
+    }
+
+    if let Some(storage_iops) = storage_iops {
+        let valid = match storage_class {
+            VolumeType::Gp3 => (3_000..=80_000).contains(&storage_iops),
+            VolumeType::Io1 => (100..=64_000).contains(&storage_iops),
+            VolumeType::Io2 => (100..=256_000).contains(&storage_iops),
+            _ => false,
+        };
+        if !valid {
+            return Err(super::Error::InvalidStorageIops {
                 target: target.to_string(),
                 storage_class: storage_class.as_str().to_string(),
-            })
+                storage_iops,
+            });
         }
-        (_, Some(storage_throughput)) if !(125..=2_000).contains(&storage_throughput) => {
+    }
+
+    match (storage_throughput, storage_class) {
+        (Some(storage_throughput), _) if !(125..=2_000).contains(&storage_throughput) => {
             Err(super::Error::InvalidStorageThroughput {
                 target: target.to_string(),
                 storage_throughput,
             })
         }
-        (_, Some(_)) if !matches!(storage_class, VolumeType::Gp3) => {
+        (Some(_), storage_class) if !matches!(storage_class, VolumeType::Gp3) => {
             Err(super::Error::UnsupportedStorageThroughput {
                 target: target.to_string(),
                 storage_class: storage_class.as_str().to_string(),
