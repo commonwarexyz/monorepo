@@ -467,7 +467,7 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
 ///
 /// Bit `i` is set when there is a cell boundary after participant `i`. The
 /// unset gaps between boundaries belong to the same residual symmetry cell.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct CellState {
     boundaries: u64,
 }
@@ -500,7 +500,7 @@ impl CellState {
     }
 
     /// Converts the state back into cell sizes.
-    fn to_cells(&self, n: usize) -> Vec<usize> {
+    fn to_cells(self, n: usize) -> Vec<usize> {
         self.ranges(n).into_iter().map(|(_, len)| len).collect()
     }
 
@@ -571,7 +571,7 @@ impl LocalRefinement {
 /// this edge contributes `multiplicity * suffix_count(next)`. This value must
 /// match the product of the per-cell local spaces decoded by
 /// `round_from_edge`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct TransitionEdge {
     next: CellState,
     leader_cell: usize,
@@ -588,42 +588,46 @@ struct TransitionSet {
     overflowed: bool,
 }
 
-/// Builder for the outgoing transition set of one residual cell state.
-struct TransitionBuilder<'a> {
-    n: usize,
-    ranges: &'a [(usize, usize)],
+/// Recursively combines precomputed local cell refinements into compressed edges.
+fn build_transitions(
+    ranges: &[(usize, usize)],
+    refinements_by_cell: &[Vec<LocalRefinement>],
     leader_cell: usize,
-    refinements_by_cell: &'a [Vec<LocalRefinement>],
-}
+    cell_idx: usize,
+    next_state: CellState,
+    multiplicity: u128,
+    transitions: &mut TransitionSet,
+) {
+    if cell_idx == ranges.len() {
+        transitions.edges.push(TransitionEdge {
+            next: next_state,
+            leader_cell,
+            multiplicity,
+        });
+        return;
+    }
 
-impl TransitionBuilder<'_> {
-    /// Recursively combines precomputed local cell refinements into compressed edges.
-    fn build(
-        &self,
-        cell_idx: usize,
-        next_state: CellState,
-        multiplicity: u128,
-        transitions: &mut TransitionSet,
-    ) {
-        if cell_idx == self.ranges.len() {
-            transitions.edges.push(TransitionEdge {
-                next: next_state,
-                leader_cell: self.leader_cell,
-                multiplicity,
-            });
-            return;
-        }
-
-        let (start, _) = self.ranges[cell_idx];
-        for refinement in self.refinements_by_cell[cell_idx].iter().copied() {
-            let Some(multiplicity) = multiplicity.checked_mul(refinement.multiplicity) else {
-                transitions.overflowed = true;
-                continue;
-            };
-            let mut next_state = next_state.clone();
-            next_state.add_local_boundaries(start, self.n, refinement.parts());
-            self.build(cell_idx + 1, next_state, multiplicity, transitions);
-        }
+    let (start, _) = ranges[cell_idx];
+    let n = ranges
+        .last()
+        .map(|(start, len)| start + len)
+        .expect("transition ranges must be non-empty");
+    for refinement in refinements_by_cell[cell_idx].iter().copied() {
+        let Some(multiplicity) = multiplicity.checked_mul(refinement.multiplicity) else {
+            transitions.overflowed = true;
+            continue;
+        };
+        let mut next_state = next_state;
+        next_state.add_local_boundaries(start, n, refinement.parts());
+        build_transitions(
+            ranges,
+            refinements_by_cell,
+            leader_cell,
+            cell_idx + 1,
+            next_state,
+            multiplicity,
+            transitions,
+        );
     }
 }
 
@@ -667,7 +671,7 @@ impl ScenarioGenerator {
         rounds: usize,
     ) -> Option<Vec<HashMap<CellState, u128>>> {
         let mut layers = Vec::with_capacity(rounds + 1);
-        layers.push(HashSet::from([initial.clone()]));
+        layers.push(HashSet::from([*initial]));
 
         for depth in 0..rounds {
             let mut next_layer = HashSet::new();
@@ -678,7 +682,7 @@ impl ScenarioGenerator {
                     return None;
                 }
                 for edge in &transitions.edges {
-                    next_layer.insert(edge.next.clone());
+                    next_layer.insert(edge.next);
                 }
             }
             layers.push(next_layer);
@@ -686,7 +690,7 @@ impl ScenarioGenerator {
 
         let mut counts = vec![HashMap::new(); rounds + 1];
         for state in layers[rounds].iter() {
-            counts[0].insert(state.clone(), 1);
+            counts[0].insert(*state, 1);
         }
 
         for remaining in 1..=rounds {
@@ -707,7 +711,7 @@ impl ScenarioGenerator {
                     let edge_count = edge.multiplicity.checked_mul(suffix)?;
                     total = total.checked_add(edge_count)?;
                 }
-                counts[remaining].insert(state.clone(), total);
+                counts[remaining].insert(*state, total);
             }
         }
 
@@ -723,7 +727,7 @@ impl ScenarioGenerator {
         counts: &[HashMap<CellState, u128>],
     ) -> (Scenario, Vec<usize>) {
         let mut scenario = Vec::with_capacity(rounds);
-        let mut state = initial.clone();
+        let mut state = *initial;
 
         for remaining in (1..=rounds).rev() {
             self.ensure_transitions(&state);
@@ -747,7 +751,7 @@ impl ScenarioGenerator {
                 if rank < subtree_count {
                     let transition_rank = rank / suffix;
                     scenario.push(self.round_from_edge(&state, edge, transition_rank));
-                    state = edge.next.clone();
+                    state = edge.next;
                     rank %= suffix;
                     selected = true;
                     break;
@@ -776,15 +780,17 @@ impl ScenarioGenerator {
                         .to_vec()
                 })
                 .collect();
-            TransitionBuilder {
-                n: self.n,
-                ranges: &ranges,
+            build_transitions(
+                &ranges,
+                &refinements,
                 leader_cell,
-                refinements_by_cell: &refinements,
-            }
-            .build(0, CellState::initial(self.n), 1, &mut transitions);
+                0,
+                CellState::initial(self.n),
+                1,
+                &mut transitions,
+            );
         }
-        self.transition_memo.insert(state.clone(), transitions);
+        self.transition_memo.insert(*state, transitions);
     }
 
     /// Returns memoized compressed transition edges for `state`.
