@@ -775,26 +775,25 @@ impl<I: Stream> SessionReceiver<I> {
 
     /// Receives one protected session frame.
     pub async fn recv_protected(&mut self) -> Result<Frame, Error> {
-        let frame = recv_frame(
+        let mut frame = recv_frame(
             &mut self.stream,
             self.max_message_size
                 .saturating_add(TAG_SIZE)
                 .saturating_add(1),
         )
         .await?;
-        let mut frame = frame.coalesce_with_pool(&self.pool);
         if frame.len() < 1 + TAG_SIZE as usize {
             return Err(Error::HandshakeError(HandshakeError::DecryptionFailed));
         }
 
-        let protection = Protection::decode(frame.as_ref()[0])?;
+        let protection = Protection::decode(frame.chunk()[0])?;
         frame.advance(1);
 
         match protection {
             Protection::Encrypted => {
                 let ciphertext_len = frame.len();
                 let mut decryption_buf = self.pool.alloc(ciphertext_len);
-                decryption_buf.put_slice(frame.as_ref());
+                decryption_buf.put(&mut frame);
                 let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
                 decryption_buf.truncate(plaintext_len);
                 Ok(Frame {
@@ -804,13 +803,28 @@ impl<I: Stream> SessionReceiver<I> {
             }
             Protection::Authenticated => {
                 let payload_len = frame.len() - TAG_SIZE as usize;
-                let tag = frame.as_ref()[payload_len..]
+                let payload = frame.split_to(payload_len);
+                let tag: [u8; handshake::TAG_SIZE] = frame
+                    .coalesce_with_pool(&self.pool)
+                    .as_ref()
                     .try_into()
                     .expect("tag size mismatch");
-                self.cipher.verify(&frame.as_ref()[..payload_len], tag)?;
+
+                let payload = match payload.try_into_single() {
+                    Ok(payload) => {
+                        self.cipher.verify(payload.as_ref(), &tag)?;
+                        payload
+                    }
+                    Err(payload) => {
+                        let payload = payload.coalesce_with_pool(&self.pool);
+                        self.cipher.verify(payload.as_ref(), &tag)?;
+                        payload
+                    }
+                };
+
                 Ok(Frame {
                     protection,
-                    payload: frame.slice(..payload_len).into(),
+                    payload: payload.into(),
                 })
             }
         }
