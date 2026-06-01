@@ -372,6 +372,36 @@ pub async fn add_monitoring_ingress(
     Ok(())
 }
 
+/// Parses a configured EBS storage class.
+pub(crate) fn parse_storage_class(
+    target: &str,
+    storage_class: &str,
+) -> Result<VolumeType, super::Error> {
+    VolumeType::try_parse(storage_class).map_err(|_| super::Error::InvalidStorageClass {
+        target: target.to_string(),
+        storage_class: storage_class.to_string(),
+    })
+}
+
+/// Validates configured EBS IOPS.
+pub(crate) fn validate_storage_iops(
+    target: &str,
+    storage_class: &VolumeType,
+    storage_iops: Option<i32>,
+) -> Result<(), super::Error> {
+    match (storage_iops, storage_class) {
+        (Some(storage_iops), _) if storage_iops <= 0 => Err(super::Error::InvalidStorageIops {
+            target: target.to_string(),
+            storage_iops,
+        }),
+        (None, VolumeType::Io1 | VolumeType::Io2) => Err(super::Error::MissingStorageIops {
+            target: target.to_string(),
+            storage_class: storage_class.as_str().to_string(),
+        }),
+        _ => Ok(()),
+    }
+}
+
 /// Attempts to launch EC2 instances. May fail on transient errors or rate limits.
 #[allow(clippy::too_many_arguments)]
 async fn try_launch_instances(
@@ -380,6 +410,7 @@ async fn try_launch_instances(
     instance_type: InstanceType,
     storage_size: i32,
     storage_class: VolumeType,
+    storage_iops: Option<i32>,
     key_name: &str,
     subnet_id: &str,
     sg_id: &str,
@@ -387,6 +418,14 @@ async fn try_launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<Vec<String>, Ec2Error> {
+    let mut ebs = EbsBlockDevice::builder()
+        .volume_size(storage_size)
+        .volume_type(storage_class)
+        .delete_on_termination(true);
+    if let Some(storage_iops) = storage_iops {
+        ebs = ebs.iops(storage_iops);
+    }
+
     let resp = client
         .run_instances()
         .image_id(ami_id)
@@ -414,13 +453,7 @@ async fn try_launch_instances(
         .block_device_mappings(
             BlockDeviceMapping::builder()
                 .device_name("/dev/sda1")
-                .ebs(
-                    EbsBlockDevice::builder()
-                        .volume_size(storage_size)
-                        .volume_type(storage_class)
-                        .delete_on_termination(true)
-                        .build(),
-                )
+                .ebs(ebs.build())
                 .build(),
         )
         .send()
@@ -464,6 +497,7 @@ pub async fn launch_instances(
     instance_type: InstanceType,
     storage_size: i32,
     storage_class: VolumeType,
+    storage_iops: Option<i32>,
     key_name: &str,
     subnets: &[(String, String)],
     az_support: &BTreeMap<String, BTreeSet<String>>,
@@ -473,6 +507,8 @@ pub async fn launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<(Vec<String>, String), super::Error> {
+    validate_storage_iops(name, &storage_class, storage_iops)?;
+
     // Filter to subnets in AZs that support this instance type
     let instance_type_str = instance_type.to_string();
     let eligible: Vec<(&str, &str)> = subnets
@@ -501,6 +537,7 @@ pub async fn launch_instances(
                 instance_type.clone(),
                 storage_size,
                 storage_class.clone(),
+                storage_iops,
                 key_name,
                 subnet_id,
                 sg_id,

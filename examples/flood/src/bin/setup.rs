@@ -55,6 +55,11 @@ fn main() {
                 .value_parser(value_parser!(String)),
         )
         .arg(
+            Arg::new("storage_iops")
+                .long("storage-iops")
+                .value_parser(value_parser!(i32)),
+        )
+        .arg(
             Arg::new("worker-threads")
                 .long("worker-threads")
                 .required(true)
@@ -139,6 +144,7 @@ fn main() {
     let instance_type = matches.get_one::<String>("instance_type").unwrap();
     let storage_size = *matches.get_one::<i32>("storage_size").unwrap();
     let storage_class = matches.get_one::<String>("storage_class").unwrap();
+    let storage_iops = matches.get_one::<i32>("storage_iops").copied();
     let worker_threads = *matches.get_one::<usize>("worker-threads").unwrap();
     let message_size = *matches.get_one::<u32>("message-size").unwrap();
     let message_backlog = *matches.get_one::<usize>("message-backlog").unwrap();
@@ -173,6 +179,7 @@ fn main() {
             instance_type: instance_type.clone(),
             storage_size,
             storage_class: storage_class.clone(),
+            storage_iops,
             binary: BINARY_NAME.to_string(),
             config: peer_config_file,
             profiling: instrument,
@@ -188,6 +195,7 @@ fn main() {
             instance_type: instance_type.clone(),
             storage_size,
             storage_class: storage_class.clone(),
+            storage_iops,
             dashboard: "dashboard.json".to_string(),
         },
         ports: vec![aws::PortConfig {
