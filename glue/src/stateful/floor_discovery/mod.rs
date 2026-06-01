@@ -9,17 +9,17 @@
 //!
 //! ## Solicit
 //!
-//! Once a floor subscriber appears, [`FloorDiscovery`] broadcasts a `RequestLatest` to every
+//! Once a floor subscriber appears, [`FloorDiscovery`] broadcasts a `Request` to every
 //! connected peer:
 //!
 //! ```text
-//!                    +-- RequestLatest --> peer 1
+//!                    +-- Request --> peer 1
 //!                    |
-//!   FloorDiscovery --+-- RequestLatest --> peer 2
+//!   FloorDiscovery --+-- Request --> peer 2
 //!                    |
-//!                    +-- RequestLatest --> peer 3
+//!                    +-- Request --> peer 3
 //!                    |
-//!                    +-- RequestLatest --> peer 4
+//!                    +-- Request --> peer 4
 //! ```
 //!
 //! A subscription is the request to discover a floor. If all floor subscribers are dropped before
@@ -35,9 +35,9 @@
 //! distinct peers have replied, the highest finalized round becomes the floor:
 //!
 //! ```text
-//!   peer 1 --Finalization(view 10)-->\                 replies
-//!   peer 2 --Finalization(view 12)--> +-> FloorDiscovery {10, 12, 13}
-//!   peer 3 --Finalization(view 13)-->/                        |
+//!   peer 1 --Response(view 10)-->\                 replies
+//!   peer 2 --Response(view 12)--> +-> FloorDiscovery {10, 12, 13}
+//!   peer 3 --Response(view 13)-->/                        |
 //!                                                             v
 //!                                      sample reached, highest view becomes the floor: 13
 //! ```
@@ -574,9 +574,9 @@ mod test {
         provider
     }
 
-    /// Encodes a finalization as the bytes of a [`wire::Message::Finalization`].
+    /// Encodes a finalization as the bytes of a [`wire::Message::Response`].
     fn finalization_bytes(finalization: Finalization<Scheme, Sha256Digest>) -> Vec<u8> {
-        wire::Message::<Scheme, Variant>::Finalization(finalization)
+        wire::Message::<Scheme, Variant>::Response(finalization)
             .encode()
             .to_vec()
     }

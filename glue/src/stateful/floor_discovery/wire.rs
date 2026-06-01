@@ -1,7 +1,41 @@
 use bytes::{Buf, BufMut};
-use commonware_codec::{EncodeSize, Error, Read, ReadExt, Write};
+use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{marshal::core::Variant, simplex::types::Finalization};
 use commonware_cryptography::certificate::Scheme;
+
+/// The first byte of a floor discovery wire message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Tag {
+    /// A request for the receiver's latest finalization.
+    Request,
+    /// A response carrying a finalization payload.
+    Response,
+}
+
+impl FixedSize for Tag {
+    const SIZE: usize = u8::SIZE;
+}
+
+impl Write for Tag {
+    fn write(&self, writer: &mut impl BufMut) {
+        match self {
+            Self::Request => 0u8.write(writer),
+            Self::Response => 1u8.write(writer),
+        }
+    }
+}
+
+impl Read for Tag {
+    type Cfg = ();
+
+    fn read_cfg(reader: &mut impl Buf, _: &Self::Cfg) -> Result<Self, Error> {
+        match u8::read(reader)? {
+            0 => Ok(Self::Request),
+            1 => Ok(Self::Response),
+            n => Err(Error::InvalidEnum(n)),
+        }
+    }
+}
 
 /// A message exchanged with peers over the p2p channel during floor discovery.
 pub(crate) enum Message<S, V>
@@ -10,9 +44,9 @@ where
     V: Variant,
 {
     /// Request the receiver's latest [`Finalization`].
-    RequestLatest,
-    /// A [`Finalization`], sent in response to a [`Message::RequestLatest`].
-    Finalization(Finalization<S, V::Commitment>),
+    Request,
+    /// A [`Finalization`], sent in response to a [`Message::Request`].
+    Response(Finalization<S, V::Commitment>),
 }
 
 impl<S, V> Write for Message<S, V>
@@ -22,11 +56,11 @@ where
 {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
-            Self::RequestLatest => {
-                0u8.write(writer);
+            Self::Request => {
+                Tag::Request.write(writer);
             }
-            Self::Finalization(finalization) => {
-                1u8.write(writer);
+            Self::Response(finalization) => {
+                Tag::Response.write(writer);
                 finalization.write(writer);
             }
         }
@@ -40,8 +74,8 @@ where
 {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::RequestLatest => 0,
-            Self::Finalization(finalization) => finalization.encode_size(),
+            Self::Request => 0,
+            Self::Response(finalization) => finalization.encode_size(),
         }
     }
 }
@@ -54,10 +88,9 @@ where
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, Error> {
-        match u8::read(reader)? {
-            0 => Ok(Self::RequestLatest),
-            1 => Ok(Self::Finalization(Finalization::read_cfg(reader, cfg)?)),
-            n => Err(Error::InvalidEnum(n)),
+        match Tag::read(reader)? {
+            Tag::Request => Ok(Self::Request),
+            Tag::Response => Ok(Self::Response(Finalization::read_cfg(reader, cfg)?)),
         }
     }
 }

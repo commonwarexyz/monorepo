@@ -1,6 +1,6 @@
 use crate::stateful::floor_discovery::{mailbox::Message, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
-use commonware_codec::{Decode, Encode};
+use commonware_codec::{Encode, ReadExt as _};
 use commonware_consensus::{
     marshal::{
         core::{Mailbox as MarshalMailbox, Variant},
@@ -8,7 +8,7 @@ use commonware_consensus::{
     },
     simplex::{scheme::Scheme, types::Finalization},
 };
-use commonware_cryptography::{certificate::Scheme as CertificateScheme, PublicKey};
+use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
@@ -19,7 +19,7 @@ use tracing::debug;
 
 /// The serving phase of [`FloorDiscovery`](super::FloorDiscovery).
 ///
-/// Answers peers' `RequestLatest` with the latest finalization from the attached marshal. By
+/// Answers peers' `Request` with the latest finalization from the attached marshal. By
 /// construction it never issues outbound requests. It is reached only after discovery has
 /// consumed its floor and a marshal has been attached.
 pub(super) struct Serving<E, S, V, P, B>
@@ -77,33 +77,31 @@ where
                 // Already serving; an additional marshal attachment is ignored.
                 Message::Attach { .. } => {}
             },
-            Ok((peer, message)) = receiver.recv() else {
+            Ok((peer, mut message)) = receiver.recv() else {
                 debug!("network receiver closed, shutting down");
                 return;
             } => {
-                let cfg = <S as CertificateScheme>::certificate_codec_config_unbounded();
-                let message = match wire::Message::<S, V>::decode_cfg(message, &cfg) {
-                    Ok(message) => message,
+                let tag = match wire::Tag::read(&mut message) {
+                    Ok(tag) => tag,
                     Err(err) => {
                         commonware_p2p::block!(
                             self.blocker,
                             peer,
                             ?err,
-                            "finalization decode failed"
+                            "tag decode failed"
                         );
                         continue;
                     }
                 };
-                // Serving only answers requests; finalizations from peers are ignored.
-                let wire::Message::RequestLatest = message else {
+                if tag != wire::Tag::Request {
                     continue;
-                };
+                }
                 let Some(finalization) = self.produce_latest().await else {
                     continue;
                 };
                 sender.send(
                     Recipients::One(peer),
-                    wire::Message::<S, V>::Finalization(finalization).encode(),
+                    wire::Message::<S, V>::Response(finalization).encode(),
                     false,
                 );
             },

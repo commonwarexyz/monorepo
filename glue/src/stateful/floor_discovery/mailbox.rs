@@ -19,7 +19,7 @@ where
         response: oneshot::Sender<Finalization<S, V::Commitment>>,
     },
     /// Attach a marshal mailbox, transitioning the actor from discovery to serving once any
-    /// discovered floor has been consumed. Serving answers peers' `RequestLatest` from the
+    /// discovered floor has been consumed. Serving answers peers' `Request` from the
     /// attached marshal and never issues outbound requests.
     Attach {
         /// The marshal mailbox to serve the latest finalization from.

@@ -135,7 +135,7 @@ where
                         continue;
                     }
                 };
-                let wire::Message::Finalization(finalization) = message else {
+                let wire::Message::Response(finalization) = message else {
                     continue;
                 };
 
@@ -245,7 +245,7 @@ where
         finalizations.clear();
         sender.send(
             Recipients::All,
-            wire::Message::<S, V>::RequestLatest.encode(),
+            wire::Message::<S, V>::Request.encode(),
             false,
         );
     }
