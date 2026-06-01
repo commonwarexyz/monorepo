@@ -218,6 +218,8 @@ where
                             false,
                         );
                     }
+                    // OK to ignore: this may be a delayed response to a request we sent before
+                    // selecting a floor or before all subscribers were dropped.
                     wire::Tag::Response if floor.is_some() || floor_subscribers.is_empty() => {
                         continue;
                     }

@@ -42,8 +42,9 @@
 //!                                      sample reached, highest view becomes the floor: 13
 //! ```
 //!
-//! A peer that sends an undecodable or unverifiable finalization is blocked. A peer that sends a
-//! second valid finalization in a round is ignored, never overwriting its first answer.
+//! While a floor is actively being sampled, a peer that sends an undecodable or unverifiable
+//! finalization is blocked. A peer that sends a second valid finalization in a round is ignored,
+//! never overwriting its first answer.
 //!
 //! ## Retry
 //!
@@ -859,6 +860,30 @@ mod test {
 
             // An unrecognized wire tag is rejected by the decoder.
             harness.send_raw(1, 0, vec![0xFF]);
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                blocked.contains(&(
+                    harness.participants[0].clone(),
+                    harness.participants[1].clone(),
+                )),
+                "node 0 should have blocked node 1"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocks_peer_sending_malformed_request() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut harness =
+                Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
+            harness.start_bootstrappers();
+
+            // A request has only its tag. Trailing bytes indicate a malformed frame.
+            harness.send_raw(1, 0, vec![0, 0xAB]);
 
             context.sleep(Duration::from_millis(100)).await;
 

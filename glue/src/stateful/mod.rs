@@ -56,9 +56,9 @@
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
 //!   [`db::StateSyncSet::sync`]. For each finalized block while state sync
-//!   is live, the actor synchronously asks bootstrap to observe that block's
+//!   is live, the actor synchronously asks the syncer to observe that block's
 //!   sync targets. If the live session accepts the block, the actor
-//!   acknowledges it immediately. Once bootstrap freezes databases at
+//!   acknowledges it immediately. Once the syncer freezes databases at
 //!   `database_anchor`, the actor enters normal processing. If a finalized block
 //!   above `database_anchor` arrives first, the actor processes it during handoff.
 //!   Durable metadata is marked in-progress before any database mutation and is
