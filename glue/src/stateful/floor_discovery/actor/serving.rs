@@ -51,20 +51,21 @@ where
         sender: &mut impl Sender<PublicKey = P>,
         receiver: &mut impl Receiver<PublicKey = P>,
     ) {
+        let mut mailbox_drained = false;
         select_loop! {
             self.context,
             on_start => {
-                let mailbox_message = if self.mailbox.is_closed() {
-                    Either::Right(future::pending())
+                let mailbox_message = if mailbox_drained {
+                    Either::Left(future::pending())
                 } else {
-                    Either::Left(self.mailbox.recv())
+                    Either::Right(self.mailbox.recv())
                 };
             },
             on_stopped => {
                 debug!("shutdown signal received");
             },
             Some(message) = mailbox_message else {
-                debug!("mailbox closed");
+                mailbox_drained = true;
                 continue;
             } => match message {
                 // If a floor was discovered, serve it to any late subscriber. A source node that
