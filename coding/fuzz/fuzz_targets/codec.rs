@@ -1,6 +1,6 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_coding::{Config, PhasedAsScheme, ReedSolomon, Scheme, Zoda};
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
@@ -38,6 +38,9 @@ fn fuzz_encode<S: Scheme>(minimum_shards: u16, extra_shards: u16, data: Vec<u8>)
 }
 
 fuzz_target!(|input: FuzzInput| {
+    let mut arbitrary = Unstructured::new(&input.data);
+    let _ = Config::arbitrary(&mut arbitrary);
+
     match input.scheme {
         SchemeSelector::Zoda => fuzz_encode::<PhasedAsScheme<Zoda<Sha256>>>(
             input.minimum_shards,
