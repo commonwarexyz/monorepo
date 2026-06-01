@@ -1,0 +1,895 @@
+//! Read-only counterpart to [`super::Append`] for blobs whose logical content will no longer
+//! change. The wrapper provides page-cache-backed read APIs for immutable views and cannot be
+//! mutated.
+//!
+//! # Sealing and durability
+//!
+//! [`super::Append::seal`] consumes a writable handle and returns a [`Sealed`] handle without
+//! fsyncing the underlying blob. Buffered logical bytes are flushed to the blob (so subsequent
+//! reads observe them), but a crash before [`Sealed::sync`] may lose the most recently sealed
+//! bytes. Callers that need durability must invoke [`Sealed::sync`] (typically driven from a
+//! higher-level commit path).
+//!
+//! # Cheap sharing
+//!
+//! [`Sealed`] is `Clone` and shares its state via `Arc<SealedInner>`. Clones do not coordinate via
+//! any lock; they share the underlying [`Blob`] handle (which provides its own synchronization)
+//! and the page cache.
+
+use super::{read::PageReader, CacheRef, Replay, CHECKSUM_SIZE};
+use crate::{Blob, Error, IoBuf, IoBufs};
+use futures::stream::{FuturesUnordered, StreamExt};
+use std::{
+    num::{NonZeroU16, NonZeroUsize},
+    sync::Arc,
+};
+
+/// A [Blob] wrapper that provides immutable, page-cache-backed reads. The read-only counterpart
+/// to [`super::Append`].
+pub struct Sealed<B: Blob> {
+    inner: Arc<SealedInner<B>>,
+}
+
+impl<B: Blob> Clone for Sealed<B> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+struct SealedInner<B: Blob> {
+    /// The underlying blob being wrapped.
+    blob: B,
+
+    /// Logical size of the sealed view, in bytes.
+    size: u64,
+
+    /// Logical bytes of the partial last page, if the blob ends in one. Bytes at offsets
+    /// `[size - partial_page.len(), size)` come from here; bytes below come from full pages on the
+    /// blob (via the page cache).
+    partial_page: Option<IoBuf>,
+
+    /// Reference to the page cache used for reads of full pages.
+    cache_ref: CacheRef,
+
+    /// Page-cache id. Inherited from the originating [`super::Append`] when constructed via
+    /// [`super::Append::seal`], so hot full pages remain valid across the transition.
+    id: u64,
+}
+
+impl<B: Blob> Sealed<B> {
+    /// Construct a [`Sealed`] from already-validated parts. Invoked by [`super::Append::seal`].
+    pub(super) fn from_parts(
+        blob: B,
+        size: u64,
+        partial_page: Option<IoBuf>,
+        cache_ref: CacheRef,
+        id: u64,
+    ) -> Self {
+        Self {
+            inner: Arc::new(SealedInner {
+                blob,
+                size,
+                partial_page,
+                cache_ref,
+                id,
+            }),
+        }
+    }
+
+    /// Returns the logical size of the sealed view.
+    pub fn size(&self) -> u64 {
+        self.inner.size
+    }
+
+    /// Make pending bytes on the underlying blob durable. Idempotent.
+    pub async fn sync(&self) -> Result<(), Error> {
+        self.inner.blob.sync().await
+    }
+
+    /// Logical offset at which the partial-page bytes begin. Equal to `size` when there is no
+    /// partial page.
+    fn partial_offset(&self) -> u64 {
+        self.inner.size
+            - self
+                .inner
+                .partial_page
+                .as_ref()
+                .map_or(0, |p| p.len() as u64)
+    }
+
+    /// Read exactly `len` immutable bytes starting at `offset`.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        // Allocate a single contiguous buffer and fill it via read_into.
+        // SAFETY: read_into below initializes all `len` bytes.
+        let mut buf = unsafe { self.inner.cache_ref.pool().alloc_len(len) };
+        self.read_into(buf.as_mut(), offset).await?;
+        Ok(buf.into())
+    }
+
+    /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
+    /// `buf.len()` bytes were satisfied from either the page cache or the in-memory partial page.
+    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+        // Reject out-of-bounds requests up front so we don't consult the cache (which may hold
+        // pages cached past `size` if a sibling Append handle wrote them).
+        let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
+            return false;
+        };
+        if end_offset > self.inner.size {
+            return false;
+        }
+        if buf.is_empty() {
+            return true;
+        }
+
+        let partial_offset = self.partial_offset();
+        if end_offset <= partial_offset {
+            return self
+                .inner
+                .cache_ref
+                .read_cached_exact(self.inner.id, buf, offset);
+        }
+
+        let Some(partial) = self.inner.partial_page.as_ref() else {
+            return false;
+        };
+        if offset >= partial_offset {
+            let src_start = (offset - partial_offset) as usize;
+            buf.copy_from_slice(&partial.as_ref()[src_start..src_start + buf.len()]);
+            return true;
+        }
+
+        let prefix_len = (partial_offset - offset) as usize;
+        let suffix_len = buf.len() - prefix_len;
+        if !self
+            .inner
+            .cache_ref
+            .read_cached_exact(self.inner.id, &mut buf[..prefix_len], offset)
+        {
+            return false;
+        }
+        buf[prefix_len..].copy_from_slice(&partial.as_ref()[..suffix_len]);
+        true
+    }
+
+    /// Reads bytes starting at `logical_offset` into `buf`.
+    pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
+        let end_offset = logical_offset
+            .checked_add(buf.len() as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        if end_offset > self.inner.size {
+            return Err(Error::BlobInsufficientLength);
+        }
+
+        let partial_offset = self.partial_offset();
+
+        // Copy any suffix from the in-memory partial page, leaving the prefix below
+        // `partial_offset` to be served from the page cache or blob.
+        let remaining = if end_offset <= partial_offset {
+            buf.len()
+        } else {
+            let overlap_start = partial_offset.max(logical_offset);
+            let dst_start = (overlap_start - logical_offset) as usize;
+            let src_start = (overlap_start - partial_offset) as usize;
+            let copied = buf.len() - dst_start;
+            let partial = self
+                .inner
+                .partial_page
+                .as_ref()
+                .expect("partial bytes exist when end_offset > partial_offset");
+            buf[dst_start..].copy_from_slice(&partial.as_ref()[src_start..src_start + copied]);
+            dst_start
+        };
+
+        if remaining == 0 {
+            return Ok(());
+        }
+
+        // Try the page cache first.
+        let cached =
+            self.inner
+                .cache_ref
+                .read_cached(self.inner.id, &mut buf[..remaining], logical_offset);
+        if cached == remaining {
+            return Ok(());
+        }
+
+        // Slow path: read from the underlying blob (via the cache).
+        let uncached_offset = logical_offset + cached as u64;
+        let uncached_len = remaining - cached;
+        self.inner
+            .cache_ref
+            .read(
+                &self.inner.blob,
+                self.inner.id,
+                &mut buf[cached..cached + uncached_len],
+                uncached_offset,
+            )
+            .await
+    }
+
+    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
+    ///
+    /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
+    /// non-overlapping, and within bounds.
+    pub async fn read_many_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: usize,
+    ) -> Result<(), Error> {
+        super::validate_read_many_into(buf.len(), offsets, item_size, self.inner.size)?;
+        if offsets.is_empty() || item_size == 0 {
+            return Ok(());
+        }
+
+        let partial_offset = self.partial_offset();
+        let mut cache_ranges: Vec<(&mut [u8], u64)> = Vec::new();
+        for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
+            let end = offset
+                .checked_add(item_size as u64)
+                .expect("offset overflow checked above");
+            if end <= partial_offset {
+                cache_ranges.push((item_buf, offset));
+            } else if offset >= partial_offset {
+                let partial = self
+                    .inner
+                    .partial_page
+                    .as_ref()
+                    .expect("partial bytes exist when end > partial_offset");
+                let src = (offset - partial_offset) as usize;
+                item_buf.copy_from_slice(&partial.as_ref()[src..src + item_size]);
+            } else {
+                let prefix_len = (partial_offset - offset) as usize;
+                let partial = self
+                    .inner
+                    .partial_page
+                    .as_ref()
+                    .expect("partial bytes exist when end > partial_offset");
+                item_buf[prefix_len..].copy_from_slice(&partial.as_ref()[..item_size - prefix_len]);
+                cache_ranges.push((&mut item_buf[..prefix_len], offset));
+            }
+        }
+
+        if cache_ranges.is_empty() {
+            return Ok(());
+        }
+
+        // Fast path: try the page cache for all ranges in a single lock acquisition.
+        self.inner
+            .cache_ref
+            .read_cached_many(self.inner.id, &mut cache_ranges);
+        if cache_ranges.is_empty() {
+            return Ok(());
+        }
+
+        // Slow path: read remaining ranges from the underlying blob, concurrently.
+        let mut reads = cache_ranges
+            .iter_mut()
+            .map(|(item_buf, offset)| {
+                self.inner
+                    .cache_ref
+                    .read(&self.inner.blob, self.inner.id, item_buf, *offset)
+            })
+            .collect::<FuturesUnordered<_>>();
+        while let Some(result) = reads.next().await {
+            result?;
+        }
+
+        Ok(())
+    }
+
+    /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
+    ///
+    /// Sealed values have no write buffer to flush, so unlike [`super::Append::replay`] this method
+    /// is not async.
+    pub fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
+        let logical_page_size = self.inner.cache_ref.page_size();
+        let logical_page_size_nz =
+            NonZeroU16::new(logical_page_size as u16).expect("page_size is non-zero");
+        let physical_page_size = logical_page_size
+            .checked_add(CHECKSUM_SIZE)
+            .ok_or(Error::OffsetOverflow)?;
+        let prefetch_pages = (buffer_size.get() / physical_page_size as usize).max(1);
+
+        let partial_len = self
+            .inner
+            .partial_page
+            .as_ref()
+            .map_or(0, |p| p.len() as u64);
+        let full_pages = (self.inner.size - partial_len) / logical_page_size;
+        let (physical_blob_size, logical_blob_size) = if partial_len > 0 {
+            let physical = full_pages
+                .checked_add(1)
+                .and_then(|pages| physical_page_size.checked_mul(pages))
+                .ok_or(Error::OffsetOverflow)?;
+            let logical = logical_page_size
+                .checked_mul(full_pages)
+                .and_then(|size| size.checked_add(partial_len))
+                .ok_or(Error::OffsetOverflow)?;
+            (physical, logical)
+        } else {
+            let physical = physical_page_size
+                .checked_mul(full_pages)
+                .ok_or(Error::OffsetOverflow)?;
+            let logical = logical_page_size
+                .checked_mul(full_pages)
+                .ok_or(Error::OffsetOverflow)?;
+            (physical, logical)
+        };
+
+        let reader = PageReader::new(
+            self.inner.blob.clone(),
+            physical_blob_size,
+            logical_blob_size,
+            prefetch_pages,
+            logical_page_size_nz,
+        );
+        Ok(Replay::new(reader))
+    }
+
+    /// Page-cache id used for reads. Exposed for tests that verify the id is preserved across
+    /// [`super::Append::seal`].
+    #[cfg(test)]
+    pub(super) fn cache_id(&self) -> u64 {
+        self.inner.id
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        buffer::{paged::Append, tests::SyncTrackingBlob},
+        deterministic, Buf, Runner as _, Storage as _,
+    };
+    use commonware_macros::test_traced;
+    use commonware_utils::{NZUsize, NZU16};
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky page size to test alignment
+    const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    /// Seal an [Append] and assert no fsync (full or range) occurred during the seal itself.
+    #[test_traced("DEBUG")]
+    fn test_seal_no_fsync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Append some data crossing several pages but don't sync.
+            let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
+            append.append(&data).await.unwrap();
+
+            let (_durable_before, _writes_before, full_before, range_before) = blob.snapshot();
+
+            // Seal -- this must flush logical bytes to the blob but NOT fsync.
+            let sealed = append.seal().await.unwrap();
+
+            let (_durable_after, _writes_after, full_after, range_after) = blob.snapshot();
+            assert_eq!(full_after, full_before, "seal must not invoke Blob::sync");
+            assert_eq!(
+                range_after, range_before,
+                "seal must not invoke Blob::write_at_sync"
+            );
+
+            assert_eq!(sealed.size(), 300);
+        });
+    }
+
+    /// Sealing requires unique ownership of the writable handle's shared state.
+    #[test_traced("DEBUG")]
+    fn test_seal_rejects_cloned_append() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"cloned").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let clone = append.clone();
+            append.append(b"hello").await.unwrap();
+
+            let err = match append.seal().await {
+                Ok(_) => panic!("seal with cloned Append should fail"),
+                Err(err) => err,
+            };
+            assert!(matches!(err, Error::NotUnique));
+
+            clone.append(b" world").await.unwrap();
+            let sealed = clone.seal().await.unwrap();
+            assert_eq!(sealed.size(), 11);
+        });
+    }
+
+    /// `Sealed::sync` forwards to the underlying blob's sync, making prior writes durable.
+    #[test_traced("DEBUG")]
+    fn test_sealed_sync_makes_blob_durable() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write data with no fsync.
+            let data: Vec<u8> = (0u8..=255).cycle().take(300).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let (durable_before, _, full_before, _) = blob.snapshot();
+            assert!(
+                durable_before.is_empty(),
+                "no bytes should be durable before Sealed::sync"
+            );
+
+            sealed.sync().await.unwrap();
+
+            let (durable_after, _, full_after, _) = blob.snapshot();
+            assert_eq!(
+                full_after,
+                full_before + 1,
+                "Sealed::sync must invoke Blob::sync exactly once"
+            );
+            assert!(
+                !durable_after.is_empty(),
+                "blob bytes must be durable after Sealed::sync"
+            );
+        });
+    }
+
+    /// Sealing preserves the originating [Append]'s page-cache id.
+    #[test_traced("DEBUG")]
+    fn test_seal_preserves_cache_id() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"cache_id").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let append_id = append.cache_id();
+            let sealed = append.seal().await.unwrap();
+            assert_eq!(sealed.cache_id(), append_id);
+        });
+    }
+
+    /// Sealing an empty blob yields an empty sealed view.
+    #[test_traced("DEBUG")]
+    fn test_seal_empty_blob() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"empty").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            assert_eq!(sealed.size(), 0);
+
+            // Out-of-bounds reads error.
+            let mut buf = [0u8; 1];
+            let err = sealed.read_into(&mut buf, 0).await.unwrap_err();
+            assert!(matches!(err, Error::BlobInsufficientLength));
+        });
+    }
+
+    /// Sealing a blob whose logical size is exactly a page-multiple has no partial page.
+    #[test_traced("DEBUG")]
+    fn test_seal_full_pages_only() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"full").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Append exactly two pages.
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            assert_eq!(sealed.size(), data.len() as u64);
+
+            // Read everything back.
+            let mut buf = vec![0u8; data.len()];
+            sealed.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(buf, data);
+        });
+    }
+
+    /// Sealing a blob whose logical size is smaller than one page yields only a partial page.
+    #[test_traced("DEBUG")]
+    fn test_seal_partial_only() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"partial").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Append fewer than one page of data.
+            let data: Vec<u8> = (0u8..=50).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            assert_eq!(sealed.size(), data.len() as u64);
+
+            let mut buf = vec![0u8; data.len()];
+            sealed.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(buf, data);
+        });
+    }
+
+    /// Reads that straddle the partial-page boundary stitch together cache and partial bytes.
+    #[test_traced("DEBUG")]
+    fn test_seal_full_plus_partial_straddle() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"straddle").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // One full page + a partial.
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size + 17;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            assert_eq!(sealed.size(), total as u64);
+
+            // Straddle read: 5 bytes before the boundary and 10 after.
+            let off = (page_size - 5) as u64;
+            let len = 15usize;
+            let mut buf = vec![0u8; len];
+            sealed.read_into(&mut buf, off).await.unwrap();
+            assert_eq!(buf, data[page_size - 5..page_size - 5 + len]);
+
+            // Read fully within partial.
+            let off = page_size as u64;
+            let mut buf = vec![0u8; 10];
+            sealed.read_into(&mut buf, off).await.unwrap();
+            assert_eq!(buf, data[page_size..page_size + 10]);
+
+            // Read fully within first full page.
+            let mut buf = vec![0u8; 20];
+            sealed.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(buf, data[..20]);
+        });
+    }
+
+    /// `Sealed::read_at` exposes the same data as `read_into`.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_at() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"read_at").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (0u8..=255).cycle().take(250).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let bufs = sealed.read_at(0, data.len()).await.unwrap();
+            let coalesced = bufs.coalesce();
+            assert_eq!(coalesced.as_ref(), data.as_slice());
+        });
+    }
+
+    /// `Sealed::read_many_into` returns items at sorted, possibly straddling, offsets.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Two pages worth so reads exercise both cache and partial.
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size + 50;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            // 4-byte items at three positions: pure cache, straddling boundary, pure partial.
+            let offsets = [0u64, (page_size - 2) as u64, (page_size + 10) as u64];
+            let item_size = 4usize;
+            let mut out = vec![0u8; offsets.len() * item_size];
+            sealed
+                .read_many_into(&mut out, &offsets, item_size)
+                .await
+                .unwrap();
+
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+        });
+    }
+
+    /// `Sealed::read_many_into` falls back to blob reads for full-page cache misses.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into_cache_miss() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany_miss").await.unwrap();
+            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let offsets = [0u64, page_size as u64];
+            let item_size = 4usize;
+            let mut out = vec![0u8; offsets.len() * item_size];
+            sealed
+                .read_many_into(&mut out, &offsets, item_size)
+                .await
+                .unwrap();
+
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &out[i * item_size..(i + 1) * item_size],
+                    &data[off as usize..off as usize + item_size],
+                );
+            }
+        });
+    }
+
+    /// `Sealed::read_many_into` validates all caller-provided offsets before reading.
+    #[test_traced("DEBUG")]
+    fn test_sealed_read_many_into_rejects_invalid_offsets() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rmany_bad").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            append.append(&[7; 32]).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let mut out = vec![0u8; 8];
+            let err = sealed
+                .read_many_into(&mut out, &[8, 4], 4)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidInput(_)));
+
+            let err = sealed
+                .read_many_into(&mut out, &[u64::MAX - 1, 8], 4)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::OffsetOverflow));
+
+            let err = sealed
+                .read_many_into(&mut out, &[28, 32], 4)
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::BlobInsufficientLength));
+        });
+    }
+
+    /// `try_read_sync` succeeds when bytes come purely from the in-memory partial page.
+    #[test_traced("DEBUG")]
+    fn test_sealed_try_read_sync_partial() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"trs_partial")
+                .await
+                .unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size + 30;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            // Read fully within partial.
+            let mut buf = vec![0u8; 10];
+            assert!(sealed.try_read_sync(page_size as u64, &mut buf));
+            assert_eq!(buf, data[page_size..page_size + 10]);
+
+            // Out of bounds returns false.
+            let mut buf = vec![0u8; 10];
+            assert!(!sealed.try_read_sync(total as u64, &mut buf));
+        });
+    }
+
+    /// `try_read_sync` can stitch a cached full-page prefix to in-memory partial bytes.
+    #[test_traced("DEBUG")]
+    fn test_sealed_try_read_sync_straddles_cached_and_partial() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"trs_straddle")
+                .await
+                .unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size + 30;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let mut buf = vec![0u8; 12];
+            assert!(sealed.try_read_sync((page_size - 4) as u64, &mut buf));
+            assert_eq!(buf, data[page_size - 4..page_size + 8]);
+        });
+    }
+
+    /// Failed synchronous reads must not partially overwrite the caller's buffer.
+    #[test_traced("DEBUG")]
+    fn test_sealed_try_read_sync_failure_preserves_buffer() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"trs_fail").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size + 5).collect();
+            append.append(&data).await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let mut buf = vec![9u8; 10];
+            assert!(!sealed.try_read_sync(data.len() as u64, &mut buf));
+            assert_eq!(buf, vec![9u8; 10]);
+        });
+    }
+
+    /// `Sealed::replay` streams all logical bytes including the partial page.
+    #[test_traced("DEBUG")]
+    fn test_sealed_replay() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"replay").await.unwrap();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Two pages + a partial, synced so the bytes are on disk before sealing.
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size * 2 + 25;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+            let sealed = append.seal().await.unwrap();
+
+            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            assert_eq!(replay.blob_size(), total as u64);
+
+            // Drain all logical bytes.
+            let mut out = Vec::with_capacity(total);
+            while replay.ensure(1).await.unwrap() {
+                let chunk = replay.chunk();
+                let copy_len = chunk.len();
+                out.extend_from_slice(chunk);
+                replay.advance(copy_len);
+            }
+            assert_eq!(out, data);
+        });
+    }
+
+    /// `Sealed::replay` works without a prior `Append::sync` because `Append::seal` writes bytes
+    /// to the blob without fsyncing.
+    #[test_traced("DEBUG")]
+    fn test_seal_replay_without_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SyncTrackingBlob::new();
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size * 2 + 25;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            append.append(&data).await.unwrap();
+            // Seal without a prior append sync.
+            let sealed = append.seal().await.unwrap();
+
+            // Seal must not have fsynced.
+            let (_durable, _writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(full_syncs, 0, "seal must not invoke Blob::sync");
+            assert_eq!(range_syncs, 0, "seal must not invoke Blob::write_at_sync");
+
+            // Replay must observe all bytes even though they were never fsynced.
+            let mut replay = sealed.replay(NZUsize!(BUFFER_SIZE)).unwrap();
+            assert_eq!(replay.blob_size(), total as u64);
+
+            let mut out = Vec::with_capacity(total);
+            while replay.ensure(1).await.unwrap() {
+                let chunk = replay.chunk();
+                let copy_len = chunk.len();
+                out.extend_from_slice(chunk);
+                replay.advance(copy_len);
+            }
+            assert_eq!(out, data);
+        });
+    }
+
+    /// Bytes made durable via `Sealed::sync` can be reopened through the paged blob format.
+    #[test_traced("DEBUG")]
+    fn test_sealed_sync_reopens() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref =
+                super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let data: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize + 17)
+                .collect();
+            {
+                let (blob, blob_size) = context.open("test_partition", b"reopen").await.unwrap();
+                let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                    .await
+                    .unwrap();
+                append.append(&data).await.unwrap();
+                let sealed = append.seal().await.unwrap();
+                sealed.sync().await.unwrap();
+            }
+
+            let (blob, blob_size) = context.open("test_partition", b"reopen").await.unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let mut buf = vec![0; data.len()];
+            append.read_into(&mut buf, 0).await.unwrap();
+            assert_eq!(buf, data);
+        });
+    }
+}

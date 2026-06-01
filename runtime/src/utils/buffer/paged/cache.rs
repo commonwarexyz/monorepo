@@ -246,6 +246,30 @@ impl CacheRef {
         original_len - buf.len()
     }
 
+    /// Try to read the specified bytes from the page cache only. Returns `false` without modifying
+    /// `buf` unless every requested byte is already cached.
+    pub(super) fn read_cached_exact(
+        &self,
+        blob_id: u64,
+        buf: &mut [u8],
+        logical_offset: u64,
+    ) -> bool {
+        let page_cache = self.cache.read();
+        if !page_cache.contains_range(blob_id, logical_offset, buf.len()) {
+            return false;
+        }
+
+        let mut offset = logical_offset;
+        let mut buf = buf;
+        while !buf.is_empty() {
+            let count = page_cache.read_at(blob_id, buf, offset);
+            debug_assert!(count > 0);
+            offset += count as u64;
+            buf = &mut buf[count..];
+        }
+        true
+    }
+
     /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
     ///
     /// Each element of `ranges` is `(dest_slice, logical_offset)`. Fully-cached ranges have
@@ -508,6 +532,24 @@ impl Cache {
         bytes_to_copy
     }
 
+    /// Returns true if every byte in `[logical_offset, logical_offset + len)` is cached.
+    fn contains_range(&self, blob_id: u64, mut logical_offset: u64, mut len: usize) -> bool {
+        while len > 0 {
+            let (page_num, offset_in_page) =
+                Self::offset_to_page(self.page_size as u64, logical_offset);
+            if !self.index.contains_key(&(blob_id, page_num)) {
+                return false;
+            }
+            let cached_in_page = (self.page_size - offset_in_page as usize).min(len);
+            len -= cached_in_page;
+            logical_offset = match logical_offset.checked_add(cached_in_page as u64) {
+                Some(next) => next,
+                None => return false,
+            };
+        }
+        true
+    }
+
     /// Put the given `page` into the page cache.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         assert_eq!(page.len(), self.page_size);
@@ -623,6 +665,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16};
     use futures::future::pending;
+    use rstest::rstest;
     use std::{
         num::NonZeroU16,
         sync::{
@@ -640,6 +683,15 @@ mod tests {
     // Logical page size (what CacheRef uses and what gets cached).
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_SIZE_U64: u64 = PAGE_SIZE.get() as u64;
+
+    fn expected_cached_bytes(logical_offset: u64, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|i| {
+                let page = (logical_offset + i as u64) / PAGE_SIZE_U64;
+                page as u8 + 1
+            })
+            .collect()
+    }
 
     /// A blob that signals once a read starts and then never returns.
     #[derive(Clone)]
@@ -1338,5 +1390,44 @@ mod tests {
         assert!(buf2 == page2);
         // Missed page's buffer should be untouched (still zeroed).
         assert!(buf1.iter().all(|b| *b == 0));
+    }
+
+    #[rstest]
+    #[case::empty_read_is_always_satisfied(vec![], 0, 0, true)]
+    #[case::single_cached_page(vec![0], 3, 5, true)]
+    #[case::cached_range_can_cross_pages(vec![0, 1], PAGE_SIZE_U64 - 2, 4, true)]
+    #[case::missing_first_page_is_a_miss(vec![1], 0, 4, false)]
+    #[case::missing_later_page_is_a_miss(vec![0], PAGE_SIZE_U64 - 2, 4, false)]
+    fn test_read_cached_exact(
+        #[case] cached_pages: Vec<u64>,
+        #[case] logical_offset: u64,
+        #[case] len: usize,
+        #[case] expected_hit: bool,
+    ) {
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        let sentinel = 0xEE;
+        let page_size = PAGE_SIZE.get() as usize;
+
+        {
+            let mut cache = cache_ref.cache.write();
+            for page in cached_pages {
+                // Use a distinct byte per page so cross-page reads prove both halves were copied.
+                cache.cache(blob_id, &vec![page as u8 + 1; page_size], page);
+            }
+        }
+
+        let mut buf = vec![sentinel; len];
+        let hit = cache_ref.read_cached_exact(blob_id, &mut buf, logical_offset);
+        assert_eq!(hit, expected_hit);
+
+        if expected_hit {
+            assert_eq!(buf, expected_cached_bytes(logical_offset, len));
+        } else {
+            // `read_cached_exact` is all-or-nothing: a miss anywhere in the range must leave the
+            // caller's buffer untouched.
+            assert_eq!(buf, vec![sentinel; len]);
+        }
     }
 }

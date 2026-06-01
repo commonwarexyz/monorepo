@@ -30,15 +30,56 @@ use commonware_cryptography::{crc32, Crc32};
 mod append;
 mod cache;
 mod read;
+mod sealed;
 
 pub use append::Append;
 pub use cache::CacheRef;
 pub use read::Replay;
+pub use sealed::Sealed;
 use tracing::{debug, error};
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
 const CHECKSUM_SLOT_SIZE: usize = u16::SIZE + crc32::Digest::SIZE;
+
+/// Ensure `buf` has one `item_size` slot per offset, offsets are sorted and non-overlapping, and
+/// every requested range lies within the blob's logical size.
+fn validate_read_many_into(
+    buf_len: usize,
+    offsets: &[u64],
+    item_size: usize,
+    size: u64,
+) -> Result<(), Error> {
+    let expected_len = offsets
+        .len()
+        .checked_mul(item_size)
+        .ok_or(Error::OffsetOverflow)?;
+    if buf_len != expected_len {
+        return Err(Error::InvalidInput(
+            "read_many_into requires buf.len() == offsets.len() * item_size",
+        ));
+    }
+    if offsets.is_empty() || item_size == 0 {
+        return Ok(());
+    }
+
+    let mut previous_end = None;
+    for &offset in offsets {
+        let end = offset
+            .checked_add(item_size as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        if previous_end.is_some_and(|previous_end| offset < previous_end) {
+            return Err(Error::InvalidInput(
+                "read_many_into offsets must be sorted and non-overlapping",
+            ));
+        }
+        if end > size {
+            return Err(Error::BlobInsufficientLength);
+        }
+        previous_end = Some(end);
+    }
+    Ok(())
+}
 
 /// Read the designated page from the underlying blob and return its logical bytes as a vector if it
 /// passes the integrity check, returning error otherwise. Safely handles partial pages. Caller can
@@ -256,6 +297,67 @@ impl arbitrary::Arbitrary<'_> for Checksum {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    enum ValidationExpectation {
+        Ok,
+        InvalidInput,
+        OffsetOverflow,
+        BlobInsufficientLength,
+    }
+
+    #[rstest]
+    #[case::empty_offsets_are_a_noop(0, vec![], 4, 0, ValidationExpectation::Ok)]
+    #[case::zero_sized_items_are_a_noop(0, vec![0, 8], 0, 0, ValidationExpectation::Ok)]
+    #[case::buffer_must_have_one_slot_per_offset(
+        7,
+        vec![0, 4],
+        4,
+        16,
+        ValidationExpectation::InvalidInput
+    )]
+    #[case::offsets_must_not_overlap(8, vec![0, 2], 4, 16, ValidationExpectation::InvalidInput)]
+    #[case::offsets_must_be_sorted(8, vec![8, 4], 4, 16, ValidationExpectation::InvalidInput)]
+    #[case::offset_plus_item_size_must_not_overflow(
+        4,
+        vec![u64::MAX - 1],
+        4,
+        u64::MAX,
+        ValidationExpectation::OffsetOverflow
+    )]
+    #[case::range_must_stay_within_logical_size(
+        4,
+        vec![8],
+        4,
+        10,
+        ValidationExpectation::BlobInsufficientLength
+    )]
+    #[case::range_may_end_exactly_at_logical_size(2, vec![8], 2, 10, ValidationExpectation::Ok)]
+    fn test_validate_read_many_into(
+        #[case] buf_len: usize,
+        #[case] offsets: Vec<u64>,
+        #[case] item_size: usize,
+        #[case] size: u64,
+        #[case] expected: ValidationExpectation,
+    ) {
+        // These cases pin the shared batch-read contract used by both Append and Sealed:
+        // the caller provides one fixed-size output slot per offset, offsets are monotonic and
+        // non-overlapping, and every requested byte must be within the logical blob size.
+        let result = validate_read_many_into(buf_len, &offsets, item_size, size);
+
+        match expected {
+            ValidationExpectation::Ok => assert!(result.is_ok()),
+            ValidationExpectation::InvalidInput => {
+                assert!(matches!(result, Err(Error::InvalidInput(_))))
+            }
+            ValidationExpectation::OffsetOverflow => {
+                assert!(matches!(result, Err(Error::OffsetOverflow)))
+            }
+            ValidationExpectation::BlobInsufficientLength => {
+                assert!(matches!(result, Err(Error::BlobInsufficientLength)))
+            }
+        }
+    }
 
     #[test]
     fn test_crc_record_encode_read_roundtrip() {
