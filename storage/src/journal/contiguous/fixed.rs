@@ -106,6 +106,7 @@ use commonware_utils::{
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
 };
 use futures::{
+    future::try_join_all,
     stream::{self, Stream},
     StreamExt,
 };
@@ -193,7 +194,7 @@ pub struct Config {
 
 /// Inner state protected by a single RwLock.
 struct Inner<E: Context, A: CodecFixedShared> {
-    /// The typed section store. Historical sections are sealed (immutable, no `RwLock`); only the
+    /// The underlying blobs. Historical sections are sealed (immutable, no `RwLock`); only the
     /// tail is writable.
     sections: Sections<E>,
 
@@ -523,8 +524,15 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
             }
         }
 
+        // Concatenate the per-section replays into one stream of `(global position, item)` pairs in
+        // ascending position order. Each section is fully drained before the next one starts.
         let stream = stream::iter(per_section_replays).flat_map(
             move |(section, replay, initial_position)| {
+                // `unfold` repeatedly calls the closure below, threading `SectionReplayState`
+                // through each call, to turn one section's byte `Replay` into a stream of items.
+                // Each call returns a *batch* of items (decoding several buffered items per await is
+                // cheaper than one await per item); the trailing `flat_map(stream::iter)` then
+                // flattens those batches back into a stream of individual items.
                 stream::unfold(
                     SectionReplayState {
                         section,
@@ -533,14 +541,20 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                         done: false,
                     },
                     move |mut state| async move {
+                        // A previous call hit the section's end or an error and set `done`. Returning
+                        // `None` terminates this section's stream.
                         if state.done {
                             return None;
                         }
 
                         let mut batch: Vec<Result<(u64, A), Error>> = Vec::new();
                         loop {
+                            // Pull more bytes from the blob until at least one whole item is
+                            // buffered (or the section ends / a read fails).
                             match state.replay.ensure(chunk_size).await {
+                                // At least one item's worth of bytes is buffered; decode below.
                                 Ok(true) => {}
+                                // Section fully drained. Emit any items decoded so far, then stop.
                                 Ok(false) => {
                                     state.done = true;
                                     return if batch.is_empty() {
@@ -549,6 +563,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                                         Some((batch, state))
                                     };
                                 }
+                                // Read failure: surface it as the section's final item, then stop.
                                 Err(err) => {
                                     batch.push(Err(Error::Runtime(err)));
                                     state.done = true;
@@ -556,9 +571,12 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                                 }
                             }
 
+                            // Decode every whole item currently buffered.
                             while state.replay.remaining() >= chunk_size {
                                 match A::read(&mut state.replay) {
                                     Ok(item) => {
+                                        // Translate the item's index within this section into its
+                                        // absolute position in the journal.
                                         let global_pos = first_in_section(
                                             pruning_boundary,
                                             state.section,
@@ -574,6 +592,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                                                 batch.push(Ok((pos, item)));
                                                 state.position += 1;
                                             }
+                                            // Position overflow: emit the error and stop.
                                             Err(err) => {
                                                 batch.push(Err(err));
                                                 state.done = true;
@@ -581,6 +600,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                                             }
                                         }
                                     }
+                                    // Corrupt bytes: surface the decode error and stop the section.
                                     Err(err) => {
                                         batch.push(Err(Error::Codec(err)));
                                         state.done = true;
@@ -589,6 +609,9 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                                 }
                             }
 
+                            // Yield the decoded items. `ensure(chunk_size)` returning `Ok(true)`
+                            // guarantees we decoded at least one, so `batch` is non-empty here; the
+                            // guard simply keeps the loop from yielding an empty batch.
                             if !batch.is_empty() {
                                 return Some((batch, state));
                             }
@@ -603,11 +626,16 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
     }
 }
 
-/// State for replaying a single section's blob.
+/// State threaded through the `unfold` that replays a single section's blob.
 struct SectionReplayState<B: commonware_runtime::Blob> {
+    /// The section being replayed.
     section: u64,
+    /// Sequential reader over the section's logical bytes.
     replay: Replay<B>,
+    /// Index of the next item to emit, relative to the section's first retained item. Added to the
+    /// section's first position to recover the item's absolute journal position.
     position: u64,
+    /// Set once the section is exhausted or an error was emitted; the next call returns `None`.
     done: bool,
 }
 
@@ -1319,10 +1347,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Flush dirty sections to storage under the read lock, allowing concurrent reads.
     ///
-    /// Sections are synced in section order. Ordering is not required for recovery: appends only
-    /// add data, so committed sections are never at risk, and recovery truncates at the first short
-    /// or missing section, so a crash that leaves a gap still recovers a contiguous prefix no
-    /// shorter than the last completed commit.
+    /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
+    /// data, so committed sections are never at risk, and recovery truncates at the first short or
+    /// missing section, so a crash that leaves a gap still recovers a contiguous prefix no shorter
+    /// than the last completed commit.
     async fn flush_dirty_sections(&self) -> Result<(), Error> {
         let inner = self.inner.read().await;
         if let Some(start_section) = inner.dirty_from_section {
@@ -1334,9 +1362,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 // With no retained blobs, any earlier dirty section was cleared or pruned.
                 // Syncing the tail section is harmless when it does not exist.
                 .unwrap_or(tail_section);
-            for section in start_section..=tail_section {
-                inner.sections.sync_section(section).await?;
-            }
+            try_join_all(
+                (start_section..=tail_section).map(|section| inner.sections.sync_section(section)),
+            )
+            .await?;
         }
         Ok(())
     }
