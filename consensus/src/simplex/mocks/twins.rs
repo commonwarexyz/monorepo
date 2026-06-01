@@ -14,13 +14,17 @@
 //! Advancing one round refines those cells by splitting each group according to
 //! the role its members take in the new round.
 //!
-//! The full enumeration approach guarantees that every case within a campaign
-//! is structurally distinct -- no duplicate (scenario, compromised-assignment)
-//! pairs are ever emitted. For each canonical scenario, `cases()` computes the
-//! residual symmetry cells and generates only the unique compromised-node
-//! assignments: two assignments that differ only in which members of a cell
-//! are chosen are equivalent and collapsed to a single representative. When the
-//! case space exceeds `max_cases`, scenarios are sampled without replacement.
+//! Scenario generation guarantees that every case within a campaign is
+//! structurally distinct -- no duplicate (scenario, compromised-assignment)
+//! pairs are ever emitted. The scenario space is counted with an exact
+//! compressed transition DAG: each edge stores a residual symmetry-cell
+//! transition and the exact number of concrete round scenarios represented by
+//! that transition. When the scenario space exceeds the configured budget,
+//! sampled campaigns choose canonical scenarios uniformly without replacement.
+//! For each selected scenario, `cases()` computes the residual symmetry cells
+//! and generates only the unique compromised-node assignments: two assignments
+//! that differ only in which members of a cell are chosen are equivalent and
+//! collapsed to a single representative.
 //!
 //! These recipient sets are not required to be disjoint. A participant may
 //! appear in both masks for a round, meaning both twin halves can exchange
@@ -87,9 +91,14 @@ impl Scenario {
 
     /// Routes a message from sender to the correct twin half at a given view.
     ///
-    /// Unlike [`partitions`](Self::partitions), this avoids allocating temporary
-    /// Vecs by comparing bitmasks directly for inbound twin traffic. When a
-    /// sender appears in both masks, this returns [`SplitTarget::Both`].
+    /// For scripted rounds, inbound twin traffic is routed by checking the
+    /// sender against the primary and secondary bitmasks. When a sender appears
+    /// in both masks, this returns [`SplitTarget::Both`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if `sender` is not present in `participants` for a scripted
+    /// round.
     pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
@@ -125,6 +134,10 @@ fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -
 }
 
 /// Returns the strict disjoint split at index `view % n`.
+///
+/// # Panics
+///
+/// Panics if `participants` is empty.
 pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
     let split = (view.get() as usize) % participants.len();
     let (primary, secondary) = participants.split_at(split);
@@ -132,6 +145,11 @@ pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec
 }
 
 /// Routes a sender according to [`view_partitions`].
+///
+/// # Panics
+///
+/// Panics if `participants` is empty or `sender` is not present in
+/// `participants`.
 pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
     let (primary, secondary) = view_partitions(view, participants);
     route_with_groups(sender, &primary, &secondary)
@@ -156,6 +174,10 @@ impl<C: Default> Default for Elector<C> {
 
 impl<C> Elector<C> {
     /// Create a twins elector from a scenario and fallback elector.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any scenario leader is outside `0..participants`.
     pub fn new(fallback: C, scenario: &Scenario, participants: usize) -> Self {
         let round_leaders: Vec<_> = scenario
             .rounds()
@@ -208,10 +230,9 @@ where
             return leader;
         }
 
-        // After the scripted attack prefix, intentionally resume the caller's
-        // fallback elector rather than forcing an honest-only suffix. Twins
-        // campaigns should not prevent the protocol from timing out in
-        // later views (if a twin is elected).
+        // After the scripted attack prefix, the caller's fallback elector
+        // controls leader selection. Twins campaigns should not prevent the
+        // protocol from timing out in later views (if a twin is elected).
         self.fallback.elect(round, certificate)
     }
 }
@@ -236,10 +257,12 @@ pub enum Mode {
 /// per equivalence class. This keeps the case budget focused on structurally
 /// distinct attack configurations.
 ///
-/// The total case count is the sum, over generated scenarios, of the number of
-/// symmetry-unique compromised assignments for that scenario's residual cells.
-/// [`Framework::max_cases`] caps the total emitted cases; the full scenario
-/// space must fit within this budget (panics otherwise).
+/// The generator selects canonical scenarios first: all scenarios when the
+/// scenario count fits within [`Framework::max_cases`], or uniformly sampled
+/// scenario ranks when it does not. It then expands the selected scenarios
+/// across their symmetry-unique compromised assignments, shuffles the cases,
+/// and truncates to [`Framework::max_cases`]. Scenario counts must fit in
+/// `u128`; overflowing configurations panic.
 #[derive(Clone, Copy, Debug)]
 pub struct Framework {
     /// Number of participants in the network.
@@ -250,12 +273,8 @@ pub struct Framework {
     pub rounds: usize,
     /// How multi-round scenarios are constructed.
     pub mode: Mode,
-    /// Upper bound on the total number of emitted cases (scenario x
-    /// compromised-assignment pairs). Also used to cap the number of
-    /// scenarios enumerated (since each scenario produces >= 1 case).
-    /// When the scenario space exceeds this, scenarios are sampled
-    /// uniformly without replacement; the resulting cases are then
-    /// shuffled and truncated to this budget.
+    /// Upper bound on emitted cases. This also caps the number of canonical
+    /// scenarios selected before compromised assignments are expanded.
     pub max_cases: usize,
 }
 
@@ -270,11 +289,19 @@ pub struct Case {
 
 /// Generate executable Twins cases from framework parameters.
 ///
-/// The full enumeration approach guarantees no duplicate cases within a
-/// campaign. For each canonical scenario, the generator computes the residual
-/// symmetry cells and emits only the structurally unique compromised-node
-/// assignments. When the total exceeds [`Framework::max_cases`], scenarios
-/// are sampled without replacement so every emitted case is distinct.
+/// The generator computes exact scenario counts from compressed transition
+/// multiplicities. It emits every scenario when the count fits within
+/// [`Framework::max_cases`] and samples scenario ranks uniformly without
+/// replacement when it does not. For each canonical scenario, the generator
+/// computes the residual symmetry cells and emits only the structurally unique
+/// compromised-node assignments.
+///
+/// # Panics
+///
+/// Panics if `framework` has fewer than 2 participants, more participants than
+/// fit in the route masks, zero faults, faults greater than or equal to
+/// participants, zero rounds, or zero max cases. Panics if the canonical
+/// scenario count overflows `u128`.
 pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
     assert!(framework.participants > 1, "participants must be > 1");
     assert!(
@@ -375,244 +402,495 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-/// Enumerates all canonical next-round refinements from the current cell state.
+/// Compact representation of a canonical cell partition.
 ///
-/// Each round refines participants into up to 4 non-leader placements relative
-/// to the primary and secondary recipient sets: outside both, shared by both
-/// halves, primary-only, and secondary-only. The chosen leader is then
-/// isolated into its own singleton cell and may be visible to either half or
-/// both halves.
-fn next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
-    // Accumulated state for a round where the secondary recipient set differs:
-    // the masks built so far and leader.
-    #[derive(Clone, Copy)]
-    struct SecondaryState {
-        primary_mask: u64,
-        secondary_mask: u64,
-        leader: Option<usize>,
+/// Bit `i` is set when there is a cell boundary after participant `i`. The
+/// unset gaps between boundaries belong to the same residual symmetry cell.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct CellState(u64);
+
+impl CellState {
+    /// Converts explicit cell sizes into a boundary mask.
+    fn from_cells(cells: &[usize]) -> Self {
+        let mut mask = 0u64;
+        let mut end = 0usize;
+        for size in cells.iter().take(cells.len().saturating_sub(1)) {
+            end += size;
+            mask |= 1u64 << (end - 1);
+        }
+        Self(mask)
     }
 
-    const LEADER_PLACEMENTS: &[(bool, bool)] = &[(true, false), (false, true), (true, true)];
+    /// Returns whether this state has a boundary after `idx`.
+    const fn boundary_after(self, idx: usize) -> bool {
+        (self.0 & (1u64 << idx)) != 0
+    }
 
-    fn push_nonzero_cells(next_cells: &mut Vec<usize>, sizes: [usize; 4]) {
-        for size in sizes {
-            if size > 0 {
-                next_cells.push(size);
+    /// Converts the state back into cell sizes.
+    fn to_cells(self, n: usize) -> Vec<usize> {
+        let mut cells = Vec::new();
+        let mut start = 0usize;
+        for idx in 0..n.saturating_sub(1) {
+            if self.boundary_after(idx) {
+                cells.push(idx + 1 - start);
+                start = idx + 1;
             }
+        }
+        cells.push(n - start);
+        cells
+    }
+
+    /// Converts the state into contiguous `(start, len)` cell ranges.
+    fn ranges(self, n: usize) -> Vec<(usize, usize)> {
+        let mut ranges = Vec::new();
+        let mut start = 0usize;
+        for idx in 0..n.saturating_sub(1) {
+            if self.boundary_after(idx) {
+                ranges.push((start, idx + 1 - start));
+                start = idx + 1;
+            }
+        }
+        ranges.push((start, n - start));
+        ranges
+    }
+}
+
+/// One local cell refinement used while building compressed transition edges.
+///
+/// A non-leader cell can split into at most the four non-empty role buckets
+/// `outside`, `both`, `secondary-only`, and `primary-only`. The leader cell
+/// uses the same buckets for its non-leader prefix and then appends the leader
+/// singleton as the final part.
+#[derive(Clone, Copy, Debug)]
+struct LocalRefinement {
+    parts: [usize; 5],
+    len: usize,
+    multiplicity: u128,
+}
+
+impl LocalRefinement {
+    /// Creates a refinement from `parts`, copying them into fixed storage.
+    fn new(parts: &[usize], multiplicity: u128) -> Self {
+        let mut stored = [0usize; 5];
+        stored[..parts.len()].copy_from_slice(parts);
+        Self {
+            parts: stored,
+            len: parts.len(),
+            multiplicity,
         }
     }
 
-    /// Refines cells for a round where both halves have identical recipient
-    /// sets.
-    fn no_secondary(
+    /// Returns the non-zero contiguous parts that form this refinement.
+    fn parts(&self) -> &[usize] {
+        &self.parts[..self.len]
+    }
+}
+
+/// Compressed group of concrete next-round scenarios.
+///
+/// `multiplicity` is the exact number of `RoundScenario`s that produce `next`
+/// when `leader_cell` supplies the canonical leader. During suffix counting,
+/// this edge contributes `multiplicity * suffix_count(next)`. `None` means the
+/// multiplicity overflowed `u128`, so the scenario count should also report
+/// overflow.
+#[derive(Clone, Copy, Debug)]
+struct TransitionEdge {
+    next: CellState,
+    leader_cell: usize,
+    multiplicity: Option<u128>,
+}
+
+/// Role of a non-leader contiguous part in a round refinement.
+///
+/// The declaration order is the canonical role order used when reconstructing
+/// a concrete transition from its rank.
+#[derive(Clone, Copy, Debug)]
+enum Role {
+    Outside,
+    Both,
+    Secondary,
+    Primary,
+}
+
+/// Exact compressed counter and unranker for canonical scenarios.
+struct ScenarioGenerator {
+    n: usize,
+    count_memo: Vec<HashMap<CellState, Option<u128>>>,
+    transition_memo: HashMap<CellState, Arc<[TransitionEdge]>>,
+    local_memo: HashMap<(usize, bool), Arc<[LocalRefinement]>>,
+}
+
+impl ScenarioGenerator {
+    /// Creates a generator for `n` participants and at most `rounds` suffixes.
+    fn new(n: usize, rounds: usize) -> Self {
+        Self {
+            n,
+            count_memo: vec![HashMap::new(); rounds + 1],
+            transition_memo: HashMap::new(),
+            local_memo: HashMap::new(),
+        }
+    }
+
+    /// Counts exact scenario suffixes reachable from `state`.
+    ///
+    /// This uses the compressed transition DAG. An edge may represent millions
+    /// of concrete rounds when many role assignments leave the same residual
+    /// symmetry cells, but its multiplicity preserves the exact count.
+    fn count(&mut self, state: CellState, rounds: usize) -> Option<u128> {
+        if rounds == 0 {
+            return Some(1);
+        }
+        if let Some(cached) = self.count_memo[rounds].get(&state) {
+            return *cached;
+        }
+
+        let result = (|| {
+            let mut total = 0u128;
+            for edge in self.transitions(state).iter().copied() {
+                let multiplicity = edge.multiplicity?;
+                let suffix = self.count(edge.next, rounds - 1)?;
+                let edge_count = multiplicity.checked_mul(suffix)?;
+                total = total.checked_add(edge_count)?;
+            }
+            Some(total)
+        })();
+        self.count_memo[rounds].insert(state, result);
+        result
+    }
+
+    /// Reconstructs the scenario at `rank` under the compressed ordering.
+    fn scenario_from_rank(
+        &mut self,
+        state: CellState,
+        rounds: usize,
+        rank: u128,
+    ) -> (Scenario, Vec<usize>) {
+        let mut scenario = Vec::with_capacity(rounds);
+        let residual = self.push_scenario_from_rank(state, rounds, rank, &mut scenario);
+        (Scenario { rounds: scenario }, residual.to_cells(self.n))
+    }
+
+    /// Appends the ranked scenario suffix to `scenario` and returns its final
+    /// residual cell state.
+    fn push_scenario_from_rank(
+        &mut self,
+        state: CellState,
+        rounds: usize,
+        mut rank: u128,
+        scenario: &mut Vec<RoundScenario>,
+    ) -> CellState {
+        if rounds == 0 {
+            return state;
+        }
+
+        for edge in self.transitions(state).iter().copied() {
+            let suffix = self
+                .count(edge.next, rounds - 1)
+                .expect("canonical scenario count should fit in u128");
+            let multiplicity = edge
+                .multiplicity
+                .expect("transition multiplicity should fit in u128");
+            let subtree_count = multiplicity
+                .checked_mul(suffix)
+                .expect("canonical scenario count should fit in u128");
+
+            if rank < subtree_count {
+                // Split the rank into the selected concrete transition inside
+                // this compressed edge and the selected suffix below it.
+                let transition_rank = rank / suffix;
+                let suffix_rank = rank % suffix;
+                scenario.push(self.round_from_edge(state, edge, transition_rank));
+                return self.push_scenario_from_rank(edge.next, rounds - 1, suffix_rank, scenario);
+            }
+            rank -= subtree_count;
+        }
+
+        unreachable!("canonical scenario rank out of bounds")
+    }
+
+    /// Returns compressed transition edges for `state`.
+    fn transitions(&mut self, state: CellState) -> Arc<[TransitionEdge]> {
+        if let Some(edges) = self.transition_memo.get(&state) {
+            return edges.clone();
+        }
+
+        let ranges = state.ranges(self.n);
+        let mut edges = Vec::new();
+        for leader_cell in 0..ranges.len() {
+            self.build_transitions(&ranges, leader_cell, 0, 0, Some(1), &mut edges);
+        }
+        let edges: Arc<[TransitionEdge]> = Arc::from(edges);
+        self.transition_memo.insert(state, edges.clone());
+        edges
+    }
+
+    /// Recursively combines local cell refinements into compressed edges.
+    fn build_transitions(
+        &mut self,
         ranges: &[(usize, usize)],
         leader_cell: usize,
         cell_idx: usize,
-        primary_mask: u64,
-        leader: Option<usize>,
-        next_cells: &mut Vec<usize>,
-        out: &mut Vec<(RoundScenario, Vec<usize>)>,
+        next_mask: u64,
+        multiplicity: Option<u128>,
+        edges: &mut Vec<TransitionEdge>,
     ) {
         if cell_idx == ranges.len() {
-            // Primary and secondary coincide in this branch, so the round is
-            // fully described by a single recipient mask.
-            out.push((
-                RoundScenario {
-                    leader: leader.expect("leader cell should assign a leader"),
-                    primary_mask,
-                    secondary_mask: primary_mask,
-                },
-                next_cells.clone(),
-            ));
+            edges.push(TransitionEdge {
+                next: CellState(next_mask),
+                leader_cell,
+                multiplicity,
+            });
             return;
         }
 
         let (start, size) = ranges[cell_idx];
-        // The designated leader must be isolated into its own singleton cell,
-        // so the leader's source cell can contribute at most `size - 1`
-        // non-leader members to the ordinary recipient-set buckets.
-        let max_outside = if cell_idx == leader_cell {
-            size - 1
-        } else {
-            size
-        };
-        for outside in 0..=max_outside {
-            // Within a cell we keep participants contiguous in canonical role
-            // order: excluded from both partitions first, then shared by both
-            // halves, and finally the leader singleton (if this is the leader
-            // cell). `next_cells` records those refined cell sizes.
-            let both = if cell_idx == leader_cell {
-                size - outside - 1
-            } else {
-                size - outside
-            };
-
-            if outside > 0 {
-                next_cells.push(outside);
-            }
-            if both > 0 {
-                next_cells.push(both);
-            }
-
-            let mut next_primary = primary_mask | range_mask(start + outside, both);
-            let mut next_leader = leader;
-            if cell_idx == leader_cell {
-                // Place the leader at the end of its refined block so later
-                // rounds can distinguish it from the rest of the cell.
-                let leader_idx = start + outside + both;
-                next_primary |= 1u64 << leader_idx;
-                next_cells.push(1);
-                next_leader = Some(leader_idx);
-            }
-
-            no_secondary(
+        let is_leader = cell_idx == leader_cell;
+        let refinements = self.local_refinements(size, is_leader);
+        for refinement in refinements.iter().copied() {
+            let next_mask = add_local_boundaries(next_mask, start, self.n, refinement.parts());
+            let multiplicity = multiplicity.and_then(|m| m.checked_mul(refinement.multiplicity));
+            self.build_transitions(
                 ranges,
                 leader_cell,
                 cell_idx + 1,
-                next_primary,
-                next_leader,
-                next_cells,
-                out,
+                next_mask,
+                multiplicity,
+                edges,
             );
-
-            // Backtrack in reverse push order before exploring the next split.
-            if cell_idx == leader_cell {
-                next_cells.pop();
-            }
-            if both > 0 {
-                next_cells.pop();
-            }
-            if outside > 0 {
-                next_cells.pop();
-            }
         }
     }
 
-    /// Refines cells for a round where the halves have distinct recipient
-    /// sets.
-    fn with_secondary(
-        ranges: &[(usize, usize)],
-        leader_cell: usize,
-        cell_idx: usize,
-        state: SecondaryState,
-        next_cells: &mut Vec<usize>,
-        out: &mut Vec<(RoundScenario, Vec<usize>)>,
-    ) {
-        if cell_idx == ranges.len() {
-            if state.primary_mask == state.secondary_mask {
-                // Equal recipient masks are already emitted by
-                // `no_secondary`, so skipping them here avoids duplicates.
-                return;
+    /// Returns all local refinements for a cell of `size`.
+    fn local_refinements(&mut self, size: usize, is_leader: bool) -> Arc<[LocalRefinement]> {
+        self.local_memo
+            .entry((size, is_leader))
+            .or_insert_with(|| Arc::from(build_local_refinements(size, is_leader)))
+            .clone()
+    }
+
+    /// Reconstructs one concrete round represented by `edge`.
+    fn round_from_edge(
+        &self,
+        state: CellState,
+        edge: TransitionEdge,
+        mut rank: u128,
+    ) -> RoundScenario {
+        let mut primary_mask = 0u64;
+        let mut secondary_mask = 0u64;
+        let mut leader = None;
+
+        for (cell_idx, (start, size)) in state.ranges(self.n).into_iter().enumerate() {
+            let parts = parts_in_cell(edge.next, start, size);
+            if cell_idx == edge.leader_cell {
+                let non_leader_len = parts.len() - 1;
+                let role_count = role_subset_count(non_leader_len);
+                let local_space = role_count * 3;
+                let local_rank = rank % local_space;
+                rank /= local_space;
+
+                let roles = roles_from_rank(non_leader_len, local_rank / 3);
+                apply_roles(
+                    start,
+                    &parts[..non_leader_len],
+                    &roles[..non_leader_len],
+                    &mut primary_mask,
+                    &mut secondary_mask,
+                );
+
+                let leader_idx = start + size - 1;
+                let leader_bit = 1u64 << leader_idx;
+                match local_rank % 3 {
+                    0 => primary_mask |= leader_bit,
+                    1 => secondary_mask |= leader_bit,
+                    2 => {
+                        primary_mask |= leader_bit;
+                        secondary_mask |= leader_bit;
+                    }
+                    _ => unreachable!("leader placement rank out of bounds"),
+                }
+                leader = Some(leader_idx);
+            } else {
+                let role_count = role_subset_count(parts.len());
+                let local_rank = rank % role_count;
+                rank /= role_count;
+
+                let roles = roles_from_rank(parts.len(), local_rank);
+                apply_roles(
+                    start,
+                    &parts,
+                    &roles[..parts.len()],
+                    &mut primary_mask,
+                    &mut secondary_mask,
+                );
             }
-            out.push((
-                RoundScenario {
-                    leader: state.leader.expect("leader cell should assign a leader"),
-                    primary_mask: state.primary_mask,
-                    secondary_mask: state.secondary_mask,
-                },
-                next_cells.clone(),
-            ));
-            return;
         }
 
-        let (start, size) = ranges[cell_idx];
-        let has_leader = cell_idx == leader_cell;
-        let available = if has_leader { size - 1 } else { size };
-        let outside_range = 0..=available;
+        assert_eq!(rank, 0, "transition rank should be fully consumed");
+        RoundScenario {
+            leader: leader.expect("leader cell should assign a leader"),
+            primary_mask,
+            secondary_mask,
+        }
+    }
+}
 
-        for outside in outside_range {
-            let remaining_after_outside = available - outside;
-            for both in 0..=remaining_after_outside {
-                let remaining = remaining_after_outside - both;
-                for secondary in 0..=remaining {
-                    // The canonical contiguous layout for a refined cell is:
-                    // outside -> both-halves -> secondary-only -> primary-only
-                    // -> leader.
-                    let primary = remaining - secondary;
-                    let checkpoint = next_cells.len();
-                    push_nonzero_cells(next_cells, [outside, both, secondary, primary]);
+/// Adds boundaries for `parts` starting at `start` to `mask`.
+fn add_local_boundaries(mut mask: u64, start: usize, n: usize, parts: &[usize]) -> u64 {
+    let mut offset = 0usize;
+    for part in parts {
+        offset += part;
+        let end = start + offset;
+        if end < n {
+            mask |= 1u64 << (end - 1);
+        }
+    }
+    mask
+}
 
-                    let shared_mask = range_mask(start + outside, both);
-                    let next_secondary = state.secondary_mask
-                        | shared_mask
-                        | range_mask(start + outside + both, secondary);
-                    let next_primary = state.primary_mask
-                        | shared_mask
-                        | range_mask(start + outside + both + secondary, primary);
-                    if has_leader {
-                        // As in `no_secondary`, keep the leader as a singleton
-                        // at the tail of its source cell's refined block.
-                        // Enumerate all distinct twin-half placements so the
-                        // leader may be isolated with either recipient set or
-                        // bridge both halves when the masks differ.
-                        let leader_idx = start + outside + both + secondary + primary;
-                        next_cells.push(1);
-                        for &(leader_in_primary, leader_in_secondary) in LEADER_PLACEMENTS {
-                            let leader_bit = 1u64 << leader_idx;
-                            with_secondary(
-                                ranges,
-                                leader_cell,
-                                cell_idx + 1,
-                                SecondaryState {
-                                    primary_mask: if leader_in_primary {
-                                        next_primary | leader_bit
-                                    } else {
-                                        next_primary
-                                    },
-                                    secondary_mask: if leader_in_secondary {
-                                        next_secondary | leader_bit
-                                    } else {
-                                        next_secondary
-                                    },
-                                    leader: Some(leader_idx),
-                                },
-                                next_cells,
-                                out,
-                            );
-                        }
-                    } else {
-                        with_secondary(
-                            ranges,
-                            leader_cell,
-                            cell_idx + 1,
-                            SecondaryState {
-                                primary_mask: next_primary,
-                                secondary_mask: next_secondary,
-                                leader: state.leader,
-                            },
-                            next_cells,
-                            out,
-                        );
-                    }
-                    next_cells.truncate(checkpoint);
+/// Returns the positive parts of the cell `[start, start + size)` in `state`.
+fn parts_in_cell(state: CellState, start: usize, size: usize) -> Vec<usize> {
+    let end = start + size;
+    let mut parts = Vec::new();
+    let mut part_start = start;
+    for idx in start..end {
+        if idx + 1 == end || state.boundary_after(idx) {
+            parts.push(idx + 1 - part_start);
+            part_start = idx + 1;
+        }
+    }
+    parts
+}
+
+/// Number of ways to choose `len` non-empty role buckets from four ordered
+/// non-leader roles.
+const fn role_subset_count(len: usize) -> u128 {
+    match len {
+        0 => 1,
+        1 => 4,
+        2 => 6,
+        3 => 4,
+        4 => 1,
+        _ => 0,
+    }
+}
+
+/// Builds all local refinements for a cell.
+fn build_local_refinements(size: usize, is_leader: bool) -> Vec<LocalRefinement> {
+    let mut refinements = Vec::new();
+    let available = if is_leader { size - 1 } else { size };
+    let mut prefix = Vec::new();
+    for_each_composition(available, 4, &mut prefix, &mut |parts| {
+        let role_choices = role_subset_count(parts.len());
+        let mut local = Vec::with_capacity(parts.len() + usize::from(is_leader));
+        local.extend_from_slice(parts);
+        let multiplicity = if is_leader {
+            local.push(1);
+            role_choices * 3
+        } else {
+            role_choices
+        };
+        refinements.push(LocalRefinement::new(&local, multiplicity));
+    });
+    refinements
+}
+
+/// Enumerates positive compositions of `total` into at most `max_parts` parts.
+///
+/// The empty composition is emitted for `total == 0`, which is needed for a
+/// singleton leader cell with no non-leader prefix.
+fn for_each_composition<F: FnMut(&[usize])>(
+    total: usize,
+    max_parts: usize,
+    current: &mut Vec<usize>,
+    f: &mut F,
+) {
+    if total == 0 {
+        f(current);
+        return;
+    }
+    for parts in 1..=total.min(max_parts) {
+        for_each_composition_with_len(total, parts, current, f);
+    }
+}
+
+/// Enumerates positive compositions of `remaining` with exactly `parts_left`
+/// parts.
+fn for_each_composition_with_len<F: FnMut(&[usize])>(
+    remaining: usize,
+    parts_left: usize,
+    current: &mut Vec<usize>,
+    f: &mut F,
+) {
+    if parts_left == 0 {
+        if remaining == 0 {
+            f(current);
+        }
+        return;
+    }
+    if parts_left == 1 {
+        current.push(remaining);
+        f(current);
+        current.pop();
+        return;
+    }
+
+    let max_first = remaining - (parts_left - 1);
+    for first in 1..=max_first {
+        current.push(first);
+        for_each_composition_with_len(remaining - first, parts_left - 1, current, f);
+        current.pop();
+    }
+}
+
+/// Returns the ranked subset of `len` roles from the four ordered non-leader
+/// roles. The selected roles are returned in canonical role order.
+fn roles_from_rank(len: usize, rank: u128) -> [Role; 4] {
+    let mut seen = 0u128;
+    for mask in 0u8..16 {
+        if mask.count_ones() as usize != len {
+            continue;
+        }
+        if seen == rank {
+            let mut roles = [Role::Outside; 4];
+            let mut next = 0usize;
+            for (bit, role) in [Role::Outside, Role::Both, Role::Secondary, Role::Primary]
+                .into_iter()
+                .enumerate()
+            {
+                if (mask & (1u8 << bit)) != 0 {
+                    roles[next] = role;
+                    next += 1;
                 }
             }
+            return roles;
         }
+        seen += 1;
     }
+    unreachable!("role subset rank out of bounds")
+}
 
-    let ranges = cells_to_ranges(cells);
-    let mut out = Vec::new();
-    for leader_cell in 0..cells.len() {
-        // Any current symmetry cell may supply the next leader. Enumerate the
-        // equal-recipient-set and split-recipient-set cases separately to keep
-        // the output canonical and duplicate-free.
-        let mut next_cells = Vec::new();
-        no_secondary(&ranges, leader_cell, 0, 0, None, &mut next_cells, &mut out);
-        let mut next_cells = Vec::new();
-        with_secondary(
-            &ranges,
-            leader_cell,
-            0,
-            SecondaryState {
-                primary_mask: 0,
-                secondary_mask: 0,
-                leader: None,
-            },
-            &mut next_cells,
-            &mut out,
-        );
+/// Applies `roles` to contiguous `parts` starting at `start`.
+fn apply_roles(
+    start: usize,
+    parts: &[usize],
+    roles: &[Role],
+    primary_mask: &mut u64,
+    secondary_mask: &mut u64,
+) {
+    let mut offset = 0usize;
+    for (part, role) in parts.iter().zip(roles) {
+        let mask = range_mask(start + offset, *part);
+        match role {
+            Role::Outside => {}
+            Role::Both => {
+                *primary_mask |= mask;
+                *secondary_mask |= mask;
+            }
+            Role::Secondary => *secondary_mask |= mask,
+            Role::Primary => *primary_mask |= mask,
+        }
+        offset += part;
     }
-    out
 }
 
 /// Generates compromised-node assignments that are unique modulo residual
@@ -664,58 +942,6 @@ fn allocate_faults(
     }
 }
 
-/// Counts canonical scenario suffixes reachable from a cell state.
-fn canonical_scenario_count(
-    cells: &[usize],
-    rounds: usize,
-    memo: &mut HashMap<(Vec<usize>, usize), Option<u128>>,
-) -> Option<u128> {
-    if rounds == 0 {
-        return Some(1);
-    }
-    let key = (cells.to_vec(), rounds);
-    if let Some(cached) = memo.get(&key) {
-        return *cached;
-    }
-
-    let result = (|| {
-        let mut total = 0u128;
-        for (_, next_cells) in next_round_transitions(cells) {
-            let suffix = canonical_scenario_count(&next_cells, rounds - 1, memo)?;
-            total = total.checked_add(suffix)?;
-        }
-        Some(total)
-    })();
-    memo.insert(key, result);
-    result
-}
-
-/// Reconstructs the canonical scenario and residual cells at a given
-/// lexicographic rank.
-fn canonical_scenario_from_rank(
-    cells: &[usize],
-    rounds: usize,
-    mut rank: u128,
-    memo: &mut HashMap<(Vec<usize>, usize), Option<u128>>,
-) -> (Scenario, Vec<usize>) {
-    if rounds == 0 {
-        return (Scenario { rounds: Vec::new() }, cells.to_vec());
-    }
-
-    for (round, next_cells) in next_round_transitions(cells) {
-        let suffix = canonical_scenario_count(&next_cells, rounds - 1, memo)
-            .expect("canonical scenario count should fit in u128");
-        if rank < suffix {
-            let (mut scenario, residual) =
-                canonical_scenario_from_rank(&next_cells, rounds - 1, rank, memo);
-            scenario.rounds.insert(0, round);
-            return (scenario, residual);
-        }
-        rank -= suffix;
-    }
-    unreachable!("canonical scenario rank out of bounds")
-}
-
 /// Samples unique indices without replacement from `[0, total)`.
 fn sample_unique_indices(rng: &mut impl Rng, total: u128, samples: usize) -> Vec<u128> {
     assert!(
@@ -755,18 +981,19 @@ fn generate_scenarios(
     rounds: usize,
     max_scenarios: usize,
 ) -> Vec<(Scenario, Vec<usize>)> {
-    let mut memo = HashMap::new();
-    let initial_cells = vec![n];
-    let total = canonical_scenario_count(&initial_cells, rounds, &mut memo)
+    let mut generator = ScenarioGenerator::new(n, rounds);
+    let initial = CellState::from_cells(&[n]);
+    let total = generator
+        .count(initial, rounds)
         .expect("scenario space overflows u128; reduce rounds or participants");
     if total <= max_scenarios as u128 {
         return (0..total)
-            .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
+            .map(|idx| generator.scenario_from_rank(initial, rounds, idx))
             .collect();
     }
     sample_unique_indices(rng, total, max_scenarios)
         .into_iter()
-        .map(|idx| canonical_scenario_from_rank(&initial_cells, rounds, idx, &mut memo))
+        .map(|idx| generator.scenario_from_rank(initial, rounds, idx))
         .collect()
 }
 
@@ -783,6 +1010,251 @@ mod tests {
     use commonware_cryptography::{ed25519::PrivateKey, Sha256, Signer};
     use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
     use std::collections::HashSet;
+
+    // Independent reference enumerator for small test cases. The production
+    // generator uses compressed transition edges, while this helper expands
+    // next-round refinements directly so tests can compare the optimized
+    // counter and unranker against a simpler implementation.
+    fn reference_next_round_transitions(cells: &[usize]) -> Vec<(RoundScenario, Vec<usize>)> {
+        #[derive(Clone, Copy)]
+        struct SecondaryState {
+            primary_mask: u64,
+            secondary_mask: u64,
+            leader: Option<usize>,
+        }
+
+        const LEADER_PLACEMENTS: &[(bool, bool)] = &[(true, false), (false, true), (true, true)];
+
+        fn push_nonzero_cells(next_cells: &mut Vec<usize>, sizes: [usize; 4]) {
+            for size in sizes {
+                if size > 0 {
+                    next_cells.push(size);
+                }
+            }
+        }
+
+        fn no_secondary(
+            ranges: &[(usize, usize)],
+            leader_cell: usize,
+            cell_idx: usize,
+            primary_mask: u64,
+            leader: Option<usize>,
+            next_cells: &mut Vec<usize>,
+            out: &mut Vec<(RoundScenario, Vec<usize>)>,
+        ) {
+            if cell_idx == ranges.len() {
+                out.push((
+                    RoundScenario {
+                        leader: leader.expect("leader cell should assign a leader"),
+                        primary_mask,
+                        secondary_mask: primary_mask,
+                    },
+                    next_cells.clone(),
+                ));
+                return;
+            }
+
+            let (start, size) = ranges[cell_idx];
+            let max_outside = if cell_idx == leader_cell {
+                size - 1
+            } else {
+                size
+            };
+            for outside in 0..=max_outside {
+                let both = if cell_idx == leader_cell {
+                    size - outside - 1
+                } else {
+                    size - outside
+                };
+
+                if outside > 0 {
+                    next_cells.push(outside);
+                }
+                if both > 0 {
+                    next_cells.push(both);
+                }
+
+                let mut next_primary = primary_mask | range_mask(start + outside, both);
+                let mut next_leader = leader;
+                if cell_idx == leader_cell {
+                    let leader_idx = start + outside + both;
+                    next_primary |= 1u64 << leader_idx;
+                    next_cells.push(1);
+                    next_leader = Some(leader_idx);
+                }
+
+                no_secondary(
+                    ranges,
+                    leader_cell,
+                    cell_idx + 1,
+                    next_primary,
+                    next_leader,
+                    next_cells,
+                    out,
+                );
+
+                if cell_idx == leader_cell {
+                    next_cells.pop();
+                }
+                if both > 0 {
+                    next_cells.pop();
+                }
+                if outside > 0 {
+                    next_cells.pop();
+                }
+            }
+        }
+
+        fn with_secondary(
+            ranges: &[(usize, usize)],
+            leader_cell: usize,
+            cell_idx: usize,
+            state: SecondaryState,
+            next_cells: &mut Vec<usize>,
+            out: &mut Vec<(RoundScenario, Vec<usize>)>,
+        ) {
+            if cell_idx == ranges.len() {
+                if state.primary_mask == state.secondary_mask {
+                    return;
+                }
+                out.push((
+                    RoundScenario {
+                        leader: state.leader.expect("leader cell should assign a leader"),
+                        primary_mask: state.primary_mask,
+                        secondary_mask: state.secondary_mask,
+                    },
+                    next_cells.clone(),
+                ));
+                return;
+            }
+
+            let (start, size) = ranges[cell_idx];
+            let has_leader = cell_idx == leader_cell;
+            let available = if has_leader { size - 1 } else { size };
+
+            for outside in 0..=available {
+                let remaining_after_outside = available - outside;
+                for both in 0..=remaining_after_outside {
+                    let remaining = remaining_after_outside - both;
+                    for secondary in 0..=remaining {
+                        let primary = remaining - secondary;
+                        let checkpoint = next_cells.len();
+                        push_nonzero_cells(next_cells, [outside, both, secondary, primary]);
+
+                        let shared_mask = range_mask(start + outside, both);
+                        let next_secondary = state.secondary_mask
+                            | shared_mask
+                            | range_mask(start + outside + both, secondary);
+                        let next_primary = state.primary_mask
+                            | shared_mask
+                            | range_mask(start + outside + both + secondary, primary);
+                        if has_leader {
+                            let leader_idx = start + outside + both + secondary + primary;
+                            next_cells.push(1);
+                            for &(leader_in_primary, leader_in_secondary) in LEADER_PLACEMENTS {
+                                let leader_bit = 1u64 << leader_idx;
+                                with_secondary(
+                                    ranges,
+                                    leader_cell,
+                                    cell_idx + 1,
+                                    SecondaryState {
+                                        primary_mask: if leader_in_primary {
+                                            next_primary | leader_bit
+                                        } else {
+                                            next_primary
+                                        },
+                                        secondary_mask: if leader_in_secondary {
+                                            next_secondary | leader_bit
+                                        } else {
+                                            next_secondary
+                                        },
+                                        leader: Some(leader_idx),
+                                    },
+                                    next_cells,
+                                    out,
+                                );
+                            }
+                        } else {
+                            with_secondary(
+                                ranges,
+                                leader_cell,
+                                cell_idx + 1,
+                                SecondaryState {
+                                    primary_mask: next_primary,
+                                    secondary_mask: next_secondary,
+                                    leader: state.leader,
+                                },
+                                next_cells,
+                                out,
+                            );
+                        }
+                        next_cells.truncate(checkpoint);
+                    }
+                }
+            }
+        }
+
+        let ranges = cells_to_ranges(cells);
+        let mut out = Vec::new();
+        for leader_cell in 0..cells.len() {
+            let mut next_cells = Vec::new();
+            no_secondary(&ranges, leader_cell, 0, 0, None, &mut next_cells, &mut out);
+            let mut next_cells = Vec::new();
+            with_secondary(
+                &ranges,
+                leader_cell,
+                0,
+                SecondaryState {
+                    primary_mask: 0,
+                    secondary_mask: 0,
+                    leader: None,
+                },
+                &mut next_cells,
+                &mut out,
+            );
+        }
+        out
+    }
+
+    fn reference_scenario_count(
+        cells: &[usize],
+        rounds: usize,
+        memo: &mut HashMap<(Vec<usize>, usize), Option<u128>>,
+    ) -> Option<u128> {
+        if rounds == 0 {
+            return Some(1);
+        }
+        let key = (cells.to_vec(), rounds);
+        if let Some(cached) = memo.get(&key) {
+            return *cached;
+        }
+
+        let result = (|| {
+            let mut total = 0u128;
+            for (_, next_cells) in reference_next_round_transitions(cells) {
+                let suffix = reference_scenario_count(&next_cells, rounds - 1, memo)?;
+                total = total.checked_add(suffix)?;
+            }
+            Some(total)
+        })();
+        memo.insert(key, result);
+        result
+    }
+
+    fn reference_scenarios(cells: &[usize], rounds: usize) -> HashSet<(Scenario, Vec<usize>)> {
+        if rounds == 0 {
+            return HashSet::from([(Scenario { rounds: Vec::new() }, cells.to_vec())]);
+        }
+
+        let mut out = HashSet::new();
+        for (round, next_cells) in reference_next_round_transitions(cells) {
+            for (mut scenario, residual) in reference_scenarios(&next_cells, rounds - 1) {
+                scenario.rounds.insert(0, round);
+                out.insert((scenario, residual));
+            }
+        }
+        out
+    }
 
     fn expected_single_round_transitions(n: usize) -> HashSet<(RoundScenario, Vec<usize>)> {
         let mut out = HashSet::new();
@@ -890,6 +1362,27 @@ mod tests {
     }
 
     #[test]
+    fn sampled_cases_are_unique() {
+        let framework = Framework {
+            participants: 7,
+            faults: 2,
+            rounds: 3,
+            mode: Mode::Sampled,
+            max_cases: 64,
+        };
+        let generated = cases(&mut test_rng(), framework);
+        assert_eq!(generated.len(), framework.max_cases);
+
+        let mut seen = HashSet::new();
+        for case in generated {
+            assert!(
+                seen.insert((case.scenario, case.compromised)),
+                "duplicate generated case"
+            );
+        }
+    }
+
+    #[test]
     fn generated_scenarios_include_leaders_visible_only_to_secondary() {
         let scenarios = generate_scenarios(&mut test_rng(), 3, 1, usize::MAX);
         assert!(scenarios.iter().any(|(scenario, _)| {
@@ -937,6 +1430,57 @@ mod tests {
             .map(|(scenario, cells)| (scenario.rounds[0], cells))
             .collect();
         assert_eq!(generated, expected_single_round_transitions(4));
+    }
+
+    #[test]
+    fn cell_state_roundtrips_cell_partitions() {
+        for cells in [
+            vec![5],
+            vec![1, 4],
+            vec![2, 1, 2],
+            vec![1, 1, 1, 1],
+            vec![3, 2, 1],
+        ] {
+            let n = cells.iter().sum();
+            let state = CellState::from_cells(&cells);
+            let ranges = cells_to_ranges(&cells);
+
+            assert_eq!(state.to_cells(n), cells);
+            assert_eq!(state.ranges(n), ranges);
+        }
+    }
+
+    #[test]
+    fn compressed_counts_match_reference_enumeration() {
+        for n in 2..=4 {
+            for rounds in 1..=3 {
+                let initial_cells = vec![n];
+                let mut reference_memo = HashMap::new();
+                let reference =
+                    reference_scenario_count(&initial_cells, rounds, &mut reference_memo);
+
+                let mut generator = ScenarioGenerator::new(n, rounds);
+                let compressed = generator.count(CellState::from_cells(&initial_cells), rounds);
+                assert_eq!(
+                    compressed, reference,
+                    "count mismatch for n={n} rounds={rounds}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compressed_unranking_matches_reference_space() {
+        for (n, rounds) in [(2usize, 3usize), (3, 2), (3, 3), (4, 2), (4, 3), (5, 2)] {
+            let generated: HashSet<_> = generate_scenarios(&mut test_rng(), n, rounds, usize::MAX)
+                .into_iter()
+                .collect();
+            assert_eq!(
+                generated,
+                reference_scenarios(&[n], rounds),
+                "mismatch for n={n} rounds={rounds}"
+            );
+        }
     }
 
     #[test]
@@ -1154,13 +1698,72 @@ mod tests {
 
     #[test]
     fn canonical_scenario_count_caches_overflow_results() {
-        let initial_cells = vec![4];
-        let mut memo = HashMap::new();
-        assert_eq!(
-            canonical_scenario_count(&initial_cells, 40, &mut memo),
-            None
-        );
-        assert_eq!(memo.get(&(initial_cells, 40)), Some(&None));
+        let initial = CellState::from_cells(&[4]);
+        let mut generator = ScenarioGenerator::new(4, 40);
+        assert_eq!(generator.count(initial, 40), None);
+        assert_eq!(generator.count_memo[40].get(&initial), Some(&None));
+    }
+
+    #[test]
+    #[ignore = "manual timing probe for case generation"]
+    fn timing_probe_cases() {
+        eprintln!("label,cases,seconds");
+        for (label, framework) in [
+            (
+                "n5_r3_sampled_max20",
+                Framework {
+                    participants: 5,
+                    faults: 1,
+                    rounds: 3,
+                    mode: Mode::Sampled,
+                    max_cases: 20,
+                },
+            ),
+            (
+                "n5_r3_sustained_max20",
+                Framework {
+                    participants: 5,
+                    faults: 1,
+                    rounds: 3,
+                    mode: Mode::Sustained,
+                    max_cases: 20,
+                },
+            ),
+            (
+                "n7_r3_sampled_max20",
+                Framework {
+                    participants: 7,
+                    faults: 2,
+                    rounds: 3,
+                    mode: Mode::Sampled,
+                    max_cases: 20,
+                },
+            ),
+            (
+                "n10_r5_sustained_max20",
+                Framework {
+                    participants: 10,
+                    faults: 3,
+                    rounds: 5,
+                    mode: Mode::Sustained,
+                    max_cases: 20,
+                },
+            ),
+            (
+                "n10_r5_sampled_max20",
+                Framework {
+                    participants: 10,
+                    faults: 3,
+                    rounds: 5,
+                    mode: Mode::Sampled,
+                    max_cases: 20,
+                },
+            ),
+        ] {
+            let start = std::time::Instant::now();
+            let cases = cases(&mut test_rng(), framework);
+            eprintln!("{label},{},{}", cases.len(), start.elapsed().as_secs_f64());
+        }
     }
 
     #[test]
