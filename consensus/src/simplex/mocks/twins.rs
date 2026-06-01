@@ -1,11 +1,24 @@
 //! Twins framework scenario generator and executor helpers.
 //!
-//! This module follows the testing architecture from
+//! This module follows the campaign structure from
 //! [Twins: BFT Systems Made Robust](https://arxiv.org/pdf/2004.10617):
 //! 1. Generate primary/secondary recipient-set scenarios.
 //! 2. Combine those sets with leader choices per round.
 //! 3. Arrange those round choices into full multi-round scenarios.
 //! 4. Execute each scenario across compromised-node assignments.
+//!
+//! The original paper models disjoint network partitions over nodes and their
+//! twins. This harness deliberately uses a stronger Simplex-specific
+//! recipient-set model: the primary and secondary halves are represented as
+//! independent recipient masks, so a participant may be visible to both halves,
+//! one half, or neither half in a scripted round. After the scripted prefix,
+//! traffic returns to all-to-all synchrony and leader election resumes through
+//! the caller's fallback elector.
+//!
+//! Campaigns are intended to cover small representative Twins schedules rather
+//! than production-sized validator sets. Participant sets are capped at 64 so
+//! recipient sets and residual cell boundaries can be stored as plain `u64`
+//! masks.
 //!
 //! Scenarios are generated in a canonical unlabeled form instead of by
 //! enumerating every participant relabeling. The generator tracks participant
@@ -18,14 +31,27 @@
 //!
 //! In each round, every non-leader participant belongs to one of four ordered
 //! role buckets: outside both halves, visible to both halves, visible only to
-//! the secondary half, or visible only to the primary half. The leader is a
-//! singleton at the end of its cell and must be visible to at least one half.
-//! A transition records only the next residual cell boundaries. For a fixed
-//! set of part sizes, multiple role-bucket choices can produce the same next
-//! boundaries, so the transition stores their count as `multiplicity`.
-//! Scenario counts are computed over this compressed transition DAG, and
-//! `round_from_edge` reconstructs sampled rounds by decoding the chosen edge's
-//! rank as mixed-radix digits in cell order.
+//! the secondary half, or visible only to the primary half. The generated
+//! leader is a singleton at the end of its cell and must be visible to at least
+//! one half; total leader isolation is outside this scenario space.
+//!
+//! A residual cell is a group of participants with identical role history in
+//! the scripted prefix. When a participant leads, it becomes a permanent
+//! singleton because future rounds can distinguish it from the other members of
+//! its old cell. A transition records only the next residual cell boundaries.
+//! For a fixed set of part sizes, multiple role-bucket choices can produce the
+//! same next boundaries, so the transition stores their count as
+//! `multiplicity`. Scenario counts are computed over this compressed
+//! transition DAG, and `round_from_edge` reconstructs sampled rounds by
+//! decoding the chosen edge's rank as mixed-radix digits in cell order.
+//!
+//! For example, with one cell of three participants and leader `2`, a round can
+//! split the two non-leaders as `[both = 1, primary-only = 1]` and place the
+//! leader in the secondary half. The canonical representative sets primary to
+//! `{0, 1}` and secondary to `{0, 2}`, producing residual cells `[1, 1, 1]`.
+//! The same part sizes with `both` and `secondary-only` roles instead produce
+//! the same residual cells but different masks, so they share the transition
+//! target and contribute to its multiplicity.
 //!
 //! Scenario generation guarantees that every case within a campaign is
 //! structurally distinct -- no duplicate (scenario, compromised-assignment)
@@ -52,21 +78,19 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
 use rand::{seq::SliceRandom, Rng};
-use std::{
-    collections::{HashMap, HashSet},
-    hash::{Hash, Hasher},
-    sync::Arc,
-};
+use std::{collections::{HashMap, HashSet}, sync::Arc};
+
+const MAX_PARTICIPANTS: usize = u64::BITS as usize;
 
 /// Per-round adversarial setting from the Twins framework.
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct RoundScenario {
     // Participant index chosen to lead this round.
     leader: usize,
-    // Dynamic bitmasks selecting which participant identities each twin half can
+    // Bitmasks selecting which participant identities each twin half can
     // exchange messages with. The masks may overlap.
-    primary_mask: BitMask,
-    secondary_mask: BitMask,
+    primary_mask: u64,
+    secondary_mask: u64,
 }
 
 impl RoundScenario {
@@ -99,7 +123,7 @@ impl Scenario {
     pub fn partitions<P: Clone>(&self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
         let idx = view.get().saturating_sub(1) as usize;
         if let Some(round) = self.rounds.get(idx) {
-            return masks_to_partitions(&round.primary_mask, &round.secondary_mask, participants);
+            return masks_to_partitions(round.primary_mask, round.secondary_mask, participants);
         }
         (participants.to_vec(), participants.to_vec())
     }
@@ -121,8 +145,8 @@ impl Scenario {
                 .iter()
                 .position(|participant| participant == sender)
                 .expect("sender missing from runtime participant list");
-            let in_primary = round.primary_mask.contains(sender_idx);
-            let in_secondary = round.secondary_mask.contains(sender_idx);
+            let in_primary = mask_contains(round.primary_mask, sender_idx);
+            let in_secondary = mask_contains(round.secondary_mask, sender_idx);
             return match (in_primary, in_secondary) {
                 (true, true) => SplitTarget::Both,
                 (true, false) => SplitTarget::Primary,
@@ -264,12 +288,18 @@ pub enum Mode {
 
 /// Framework configuration for generating Twins cases.
 ///
+/// The generator uses `u64` masks for recipient sets and residual cell
+/// boundaries, so campaigns support at most 64 participants.
+///
 /// Each canonical scenario tracks residual symmetry cells -- participants that
 /// were treated identically across all rounds. Two compromised-node assignments
 /// that differ only in which members of a symmetry cell are compromised are
 /// equivalent under relabeling for the adversarial prefix, so the framework
 /// generates only one representative per equivalence class. This keeps the case
 /// budget focused on structurally distinct attack configurations.
+/// The synchronous suffix may elect different concrete participant indices
+/// after such a relabeling, but under full synchrony the pass/fail verdict is
+/// invariant to that relabeling.
 ///
 /// The generator selects canonical scenarios first: all scenarios when the
 /// scenario count fits within [`Framework::max_cases`], or uniformly sampled
@@ -279,7 +309,7 @@ pub enum Mode {
 /// `u128`; overflowing configurations panic.
 #[derive(Clone, Copy, Debug)]
 pub struct Framework {
-    /// Number of participants in the network.
+    /// Number of participants in the network. Must be at most 64.
     pub participants: usize,
     /// Number of compromised participants.
     pub faults: usize,
@@ -313,10 +343,15 @@ pub struct Case {
 /// # Panics
 ///
 /// Panics if `framework` has fewer than 2 participants, zero faults, faults
-/// greater than or equal to participants, zero rounds, or zero max cases.
-/// Panics if the canonical scenario count overflows `u128`.
+/// greater than or equal to participants, more than 64 participants, zero
+/// rounds, or zero max cases. Panics if the canonical scenario count overflows
+/// `u128`.
 pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
     assert!(framework.participants > 1, "participants must be > 1");
+    assert!(
+        framework.participants <= MAX_PARTICIPANTS,
+        "participants must be <= {MAX_PARTICIPANTS}"
+    );
     assert!(framework.faults > 0, "faults must be > 0");
     assert!(
         framework.faults < framework.participants,
@@ -343,7 +378,7 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
                 .into_iter()
                 .map(|(s, cells)| {
                     let scenario = Scenario {
-                        rounds: vec![s.rounds[0].clone(); framework.rounds],
+                        rounds: vec![s.rounds[0]; framework.rounds],
                     };
                     (scenario, cells)
                 })
@@ -368,10 +403,10 @@ pub fn cases(rng: &mut impl Rng, framework: Framework) -> Vec<Case> {
 }
 
 /// Materializes the participants selected by a bitmask.
-fn partition_for_mask<P: Clone>(mask: &BitMask, participants: &[P]) -> Vec<P> {
+fn partition_for_mask<P: Clone>(mask: u64, participants: &[P]) -> Vec<P> {
     let mut group = Vec::new();
     for (idx, participant) in participants.iter().enumerate() {
-        if mask.contains(idx) {
+        if mask_contains(mask, idx) {
             group.push(participant.clone());
         }
     }
@@ -380,8 +415,8 @@ fn partition_for_mask<P: Clone>(mask: &BitMask, participants: &[P]) -> Vec<P> {
 
 /// Converts twins routing bitmasks into concrete recipient sets.
 fn masks_to_partitions<P: Clone>(
-    primary_mask: &BitMask,
-    secondary_mask: &BitMask,
+    primary_mask: u64,
+    secondary_mask: u64,
     participants: &[P],
 ) -> (Vec<P>, Vec<P>) {
     let primary = partition_for_mask(primary_mask, participants);
@@ -389,145 +424,29 @@ fn masks_to_partitions<P: Clone>(
     (primary, secondary)
 }
 
-/// Bitmask used for participant sets and cell boundaries.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum BitMask {
-    /// Inline storage for masks that fit in one word.
-    Inline(u64),
-    /// Heap storage for masks that need more than one word.
-    Heap(Box<[u64]>),
+/// Sets bit `idx` in `mask`.
+fn set_mask_bit(mask: &mut u64, idx: usize) {
+    debug_assert!(idx < MAX_PARTICIPANTS);
+    *mask |= 1u64 << idx;
 }
 
-impl Hash for BitMask {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Self::Inline(word) => state.write_u64(*word),
-            Self::Heap(words) => {
-                state.write_usize(words.len());
-                for word in words.iter() {
-                    state.write_u64(*word);
-                }
-            }
-        }
-    }
-}
-
-impl BitMask {
-    /// Returns an all-zero mask large enough to address `bits` positions.
-    fn zero(bits: usize) -> Self {
-        if bits <= u64::BITS as usize {
-            Self::Inline(0)
-        } else {
-            Self::Heap(vec![0; bits.div_ceil(u64::BITS as usize)].into_boxed_slice())
-        }
-    }
-
-    #[cfg(test)]
-    fn from_u64(bits: usize, mask: u64) -> Self {
-        match Self::zero(bits) {
-            Self::Inline(_) => Self::Inline(mask),
-            Self::Heap(mut words) => {
-                words[0] = mask;
-                Self::Heap(words)
-            }
-        }
-    }
-
-    /// Sets bit `idx`.
-    fn set(&mut self, idx: usize) {
-        match self {
-            Self::Inline(word) => {
-                *word |= 1u64 << idx;
-            }
-            Self::Heap(words) => {
-                let word = idx / u64::BITS as usize;
-                let bit = idx % u64::BITS as usize;
-                words[word] |= 1u64 << bit;
-            }
-        }
-    }
-
-    /// Sets every bit in the contiguous range `[start, start + len)`.
-    fn set_range(&mut self, start: usize, len: usize) {
-        match self {
-            Self::Inline(word) => set_word_range(word, start, len),
-            Self::Heap(words) => {
-                let mut idx = start;
-                let end = start + len;
-                while idx < end {
-                    let word = idx / u64::BITS as usize;
-                    let bit = idx % u64::BITS as usize;
-                    let take = (u64::BITS as usize - bit).min(end - idx);
-                    set_word_range(&mut words[word], bit, take);
-                    idx += take;
-                }
-            }
-        }
-    }
-
-    /// Returns whether bit `idx` is set.
-    fn contains(&self, idx: usize) -> bool {
-        match self {
-            Self::Inline(word) => idx < u64::BITS as usize && (word & (1u64 << idx)) != 0,
-            Self::Heap(words) => {
-                let word = idx / u64::BITS as usize;
-                let bit = idx % u64::BITS as usize;
-                words
-                    .get(word)
-                    .is_some_and(|word| (word & (1u64 << bit)) != 0)
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn intersects_except(&self, other: &Self, excluded: usize) -> bool {
-        self.any_word_except(other, excluded, |lhs, rhs| lhs & rhs)
-    }
-
-    #[cfg(test)]
-    fn difference_except(&self, other: &Self, excluded: usize) -> bool {
-        self.any_word_except(other, excluded, |lhs, rhs| lhs & !rhs)
-    }
-
-    #[cfg(test)]
-    fn any_word_except(&self, other: &Self, excluded: usize, f: impl Fn(u64, u64) -> u64) -> bool {
-        match (self, other) {
-            (Self::Inline(lhs), Self::Inline(rhs)) => {
-                let mut word = f(*lhs, *rhs);
-                if excluded < u64::BITS as usize {
-                    word &= !(1u64 << excluded);
-                }
-                word != 0
-            }
-            (Self::Heap(lhs), Self::Heap(rhs)) => {
-                assert_eq!(lhs.len(), rhs.len(), "mask widths must match");
-                for (word_idx, (&lhs, &rhs)) in lhs.iter().zip(rhs.iter()).enumerate() {
-                    let mut word = f(lhs, rhs);
-                    if excluded / u64::BITS as usize == word_idx {
-                        word &= !(1u64 << (excluded % u64::BITS as usize));
-                    }
-                    if word != 0 {
-                        return true;
-                    }
-                }
-                false
-            }
-            _ => panic!("mask storage must match"),
-        }
-    }
-}
-
-/// Sets `len` bits in `word` starting at bit offset `start`.
-const fn set_word_range(word: &mut u64, start: usize, len: usize) {
+/// Sets every bit in the contiguous range `[start, start + len)`.
+fn set_mask_range(mask: &mut u64, start: usize, len: usize) {
     if len == 0 {
         return;
     }
-    let mask = if len == u64::BITS as usize {
+    debug_assert!(start + len <= MAX_PARTICIPANTS);
+    let range = if len == u64::BITS as usize {
         u64::MAX
     } else {
         ((1u64 << len) - 1) << start
     };
-    *word |= mask;
+    *mask |= range;
+}
+
+/// Returns whether bit `idx` is set in `mask`.
+const fn mask_contains(mask: u64, idx: usize) -> bool {
+    idx < MAX_PARTICIPANTS && (mask & (1u64 << idx)) != 0
 }
 
 /// Converts cell sizes into contiguous index ranges.
@@ -550,14 +469,15 @@ fn cells_to_ranges(cells: &[usize]) -> Vec<(usize, usize)> {
 /// unset gaps between boundaries belong to the same residual symmetry cell.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 struct CellState {
-    boundaries: BitMask,
+    boundaries: u64,
 }
 
 impl CellState {
     /// Returns the state with a single symmetry cell covering all participants.
     fn initial(n: usize) -> Self {
+        assert!(n <= MAX_PARTICIPANTS, "participants must be <= {MAX_PARTICIPANTS}");
         Self {
-            boundaries: BitMask::zero(n),
+            boundaries: 0,
         }
     }
 
@@ -569,14 +489,14 @@ impl CellState {
         let mut end = 0usize;
         for size in cells.iter().take(cells.len().saturating_sub(1)) {
             end += size;
-            state.boundaries.set(end - 1);
+            set_mask_bit(&mut state.boundaries, end - 1);
         }
         state
     }
 
     /// Returns whether this state has a boundary after `idx`.
-    fn boundary_after(&self, idx: usize) -> bool {
-        self.boundaries.contains(idx)
+    const fn boundary_after(&self, idx: usize) -> bool {
+        mask_contains(self.boundaries, idx)
     }
 
     /// Converts the state back into cell sizes.
@@ -605,7 +525,7 @@ impl CellState {
             offset += part;
             let end = start + offset;
             if end < n {
-                self.boundaries.set(end - 1);
+                set_mask_bit(&mut self.boundaries, end - 1);
             }
         }
     }
@@ -648,7 +568,9 @@ impl LocalRefinement {
 ///
 /// `multiplicity` is the exact number of `RoundScenario`s that produce `next`
 /// when `leader_cell` supplies the canonical leader. During suffix counting,
-/// this edge contributes `multiplicity * suffix_count(next)`.
+/// this edge contributes `multiplicity * suffix_count(next)`. This value must
+/// match the product of the per-cell local spaces decoded by
+/// `round_from_edge`.
 #[derive(Clone, Debug)]
 struct TransitionEdge {
     next: CellState,
@@ -887,8 +809,8 @@ impl ScenarioGenerator {
         edge: &TransitionEdge,
         mut rank: u128,
     ) -> RoundScenario {
-        let mut primary_mask = BitMask::zero(self.n);
-        let mut secondary_mask = BitMask::zero(self.n);
+        let mut primary_mask = 0u64;
+        let mut secondary_mask = 0u64;
         let mut leader = None;
 
         // The edge fixes only the next residual cell boundaries. Decode the
@@ -915,11 +837,11 @@ impl ScenarioGenerator {
 
                 let leader_idx = start + size - 1;
                 match local_rank % 3 {
-                    0 => primary_mask.set(leader_idx),
-                    1 => secondary_mask.set(leader_idx),
+                    0 => set_mask_bit(&mut primary_mask, leader_idx),
+                    1 => set_mask_bit(&mut secondary_mask, leader_idx),
                     2 => {
-                        primary_mask.set(leader_idx);
-                        secondary_mask.set(leader_idx);
+                        set_mask_bit(&mut primary_mask, leader_idx);
+                        set_mask_bit(&mut secondary_mask, leader_idx);
                     }
                     _ => unreachable!("leader placement rank out of bounds"),
                 }
@@ -1076,8 +998,8 @@ fn apply_roles(
     start: usize,
     parts: &[usize],
     roles: &[Role],
-    primary_mask: &mut BitMask,
-    secondary_mask: &mut BitMask,
+    primary_mask: &mut u64,
+    secondary_mask: &mut u64,
 ) {
     let mut offset = 0usize;
     for (part, role) in parts.iter().zip(roles) {
@@ -1085,11 +1007,11 @@ fn apply_roles(
         match role {
             Role::Outside => {}
             Role::Both => {
-                primary_mask.set_range(range_start, *part);
-                secondary_mask.set_range(range_start, *part);
+                set_mask_range(primary_mask, range_start, *part);
+                set_mask_range(secondary_mask, range_start, *part);
             }
-            Role::Secondary => secondary_mask.set_range(range_start, *part),
-            Role::Primary => primary_mask.set_range(range_start, *part),
+            Role::Secondary => set_mask_range(secondary_mask, range_start, *part),
+            Role::Primary => set_mask_range(primary_mask, range_start, *part),
         }
         offset += part;
     }
@@ -1214,15 +1136,11 @@ mod tests {
     use commonware_utils::{ordered::Set, test_rng, test_rng_seeded};
     use std::collections::HashSet;
 
-    fn mask(bits: usize, mask: u64) -> BitMask {
-        BitMask::from_u64(bits, mask)
-    }
-
-    fn round(n: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
+    fn round(_: usize, leader: usize, primary_mask: u64, secondary_mask: u64) -> RoundScenario {
         RoundScenario {
             leader,
-            primary_mask: mask(n, primary_mask),
-            secondary_mask: mask(n, secondary_mask),
+            primary_mask,
+            secondary_mask,
         }
     }
 
@@ -1499,7 +1417,7 @@ mod tests {
         let mut out = HashSet::new();
         for (round, next_cells) in reference_next_round_transitions(cells) {
             for (mut scenario, residual) in reference_scenarios(&next_cells, rounds - 1) {
-                scenario.rounds.insert(0, round.clone());
+                scenario.rounds.insert(0, round);
                 out.insert((scenario, residual));
             }
         }
@@ -1619,57 +1537,14 @@ mod tests {
     }
 
     #[test]
-    fn generated_scenarios_include_leaders_visible_only_to_secondary() {
-        let scenarios = generate_scenarios(&mut test_rng(), 3, 1, usize::MAX);
-        assert!(scenarios.iter().any(|(scenario, _)| {
-            let round = &scenario.rounds[0];
-            !round.primary_mask.contains(round.leader)
-                && round.secondary_mask.contains(round.leader)
-        }));
-    }
-
-    #[test]
-    fn generated_scenarios_include_shared_non_leaders_in_split_rounds() {
-        let scenarios = generate_scenarios(&mut test_rng(), 5, 1, usize::MAX);
-        assert!(scenarios.iter().any(|(scenario, _)| {
-            let round = &scenario.rounds[0];
-            round
-                .primary_mask
-                .intersects_except(&round.secondary_mask, round.leader)
-                && round
-                    .primary_mask
-                    .difference_except(&round.secondary_mask, round.leader)
-                && round
-                    .secondary_mask
-                    .difference_except(&round.primary_mask, round.leader)
-        }));
-    }
-
-    #[test]
-    fn generated_scenarios_include_shared_non_leaders_when_only_leader_splits_halves() {
-        let scenarios = generate_scenarios(&mut test_rng(), 4, 1, usize::MAX);
-        assert!(scenarios.iter().any(|(scenario, _)| {
-            let round = &scenario.rounds[0];
-            round
-                .primary_mask
-                .intersects_except(&round.secondary_mask, round.leader)
-                && !round
-                    .primary_mask
-                    .difference_except(&round.secondary_mask, round.leader)
-                && !round
-                    .secondary_mask
-                    .difference_except(&round.primary_mask, round.leader)
-                && round.primary_mask != round.secondary_mask
-        }));
-    }
-
-    #[test]
     fn generated_single_round_scenarios_match_expected_canonical_space() {
-        let generated: HashSet<_> = generate_scenarios(&mut test_rng(), 4, 1, usize::MAX)
-            .into_iter()
-            .map(|(scenario, cells)| (scenario.rounds[0].clone(), cells))
-            .collect();
-        assert_eq!(generated, expected_single_round_transitions(4));
+        for n in 3..=5 {
+            let generated: HashSet<_> = generate_scenarios(&mut test_rng(), n, 1, usize::MAX)
+                .into_iter()
+                .map(|(scenario, cells)| (scenario.rounds[0], cells))
+                .collect();
+            assert_eq!(generated, expected_single_round_transitions(n));
+        }
     }
 
     #[test]
@@ -1843,23 +1718,11 @@ mod tests {
                 if round.primary_mask == round.secondary_mask {
                     continue;
                 }
-                let leader_in_primary = round.primary_mask.contains(round.leader);
-                let leader_in_secondary = round.secondary_mask.contains(round.leader);
+                let leader_in_primary = mask_contains(round.primary_mask, round.leader);
+                let leader_in_secondary = mask_contains(round.secondary_mask, round.leader);
                 assert!(leader_in_primary || leader_in_secondary);
             }
         }
-    }
-
-    #[test]
-    fn generated_split_rounds_include_leaders_visible_to_both_halves() {
-        let scenarios = generate_scenarios(&mut test_rng(), 4, 1, usize::MAX);
-        assert!(scenarios.iter().any(|(scenario, _)| {
-            let round = &scenario.rounds[0];
-            if round.primary_mask == round.secondary_mask {
-                return false;
-            }
-            round.primary_mask.contains(round.leader) && round.secondary_mask.contains(round.leader)
-        }));
     }
 
     #[test]
@@ -2035,7 +1898,7 @@ mod tests {
         for round in 0..3 {
             let unique: HashSet<_> = scenarios
                 .iter()
-                .map(|(scenario, _)| scenario.rounds[round].clone())
+                .map(|(scenario, _)| scenario.rounds[round])
                 .collect();
             assert!(
                 unique.len() > 1,
@@ -2091,11 +1954,80 @@ mod tests {
     }
 
     #[test]
-    fn cases_support_frameworks_that_exceed_one_mask_word() {
+    fn cases_reject_more_than_64_participants() {
+        let result = std::panic::catch_unwind(|| {
+            cases(
+                &mut test_rng(),
+                Framework {
+                    participants: MAX_PARTICIPANTS + 1,
+                    faults: 1,
+                    rounds: 1,
+                    mode: Mode::Sampled,
+                    max_cases: 1,
+                },
+            )
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn mask_helpers_set_boundary_ranges() {
+        let mut mask = 0u64;
+        set_mask_bit(&mut mask, 63);
+        assert!(!mask_contains(mask, 62));
+        assert!(mask_contains(mask, 63));
+
+        let mut mask = 0u64;
+        set_mask_range(&mut mask, 60, 4);
+        for idx in 60..=63 {
+            assert!(mask_contains(mask, idx), "bit {idx} should be set");
+        }
+        assert!(!mask_contains(mask, 59));
+    }
+
+    #[test]
+    fn scenario_masks_route_within_one_word() {
+        let mut primary_mask = 0u64;
+        set_mask_range(&mut primary_mask, 60, 4);
+        let mut secondary_mask = 0u64;
+        set_mask_bit(&mut secondary_mask, 61);
+        set_mask_bit(&mut secondary_mask, 63);
+        let scenario = Scenario {
+            rounds: vec![RoundScenario {
+                leader: 63,
+                primary_mask,
+                secondary_mask,
+            }],
+        };
+        let participants: Vec<_> = (0..64).collect();
+
+        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        assert_eq!(primary, vec![60, 61, 62, 63]);
+        assert_eq!(secondary, vec![61, 63]);
+        assert_eq!(
+            scenario.route(View::new(1), &60, &participants),
+            SplitTarget::Primary
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &61, &participants),
+            SplitTarget::Both
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &63, &participants),
+            SplitTarget::Both
+        );
+        assert_eq!(
+            scenario.route(View::new(1), &0, &participants),
+            SplitTarget::None
+        );
+    }
+
+    #[test]
+    fn cases_support_64_participants() {
         let generated = cases(
             &mut test_rng(),
             Framework {
-                participants: (u64::BITS as usize) + 1,
+                participants: MAX_PARTICIPANTS,
                 faults: 1,
                 rounds: 1,
                 mode: Mode::Sampled,
@@ -2103,60 +2035,6 @@ mod tests {
             },
         );
         assert_eq!(generated.len(), 1);
-    }
-
-    #[test]
-    fn bitmask_sets_ranges_across_words() {
-        let mut mask = BitMask::zero(130);
-        mask.set(64);
-        assert!(!mask.contains(63));
-        assert!(mask.contains(64));
-        assert!(!mask.contains(65));
-
-        mask.set_range(62, 5);
-        for idx in 62..=66 {
-            assert!(mask.contains(idx), "bit {idx} should be set");
-        }
-        assert!(!mask.contains(61));
-        assert!(!mask.contains(67));
-        assert!(!mask.contains(129));
-    }
-
-    #[test]
-    fn scenario_masks_route_across_words() {
-        let mut primary_mask = BitMask::zero(70);
-        primary_mask.set_range(62, 4);
-        let mut secondary_mask = BitMask::zero(70);
-        secondary_mask.set(64);
-        secondary_mask.set(69);
-        let scenario = Scenario {
-            rounds: vec![RoundScenario {
-                leader: 64,
-                primary_mask,
-                secondary_mask,
-            }],
-        };
-        let participants: Vec<_> = (0..70).collect();
-
-        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
-        assert_eq!(primary, vec![62, 63, 64, 65]);
-        assert_eq!(secondary, vec![64, 69]);
-        assert_eq!(
-            scenario.route(View::new(1), &63, &participants),
-            SplitTarget::Primary
-        );
-        assert_eq!(
-            scenario.route(View::new(1), &64, &participants),
-            SplitTarget::Both
-        );
-        assert_eq!(
-            scenario.route(View::new(1), &69, &participants),
-            SplitTarget::Secondary
-        );
-        assert_eq!(
-            scenario.route(View::new(1), &0, &participants),
-            SplitTarget::None
-        );
     }
 
     #[test]
