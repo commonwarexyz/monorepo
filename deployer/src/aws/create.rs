@@ -70,15 +70,21 @@ pub struct RegionResources {
 fn validate_storage_config(config: &Config) -> Result<(), Error> {
     let monitoring_storage_class =
         parse_storage_class(MONITORING_NAME, &config.monitoring.storage_class)?;
-    validate_storage_iops(
+    validate_storage_options(
         MONITORING_NAME,
         &monitoring_storage_class,
         config.monitoring.storage_iops,
+        config.monitoring.storage_throughput,
     )?;
 
     for instance in &config.instances {
         let storage_class = parse_storage_class(&instance.name, &instance.storage_class)?;
-        validate_storage_iops(&instance.name, &storage_class, instance.storage_iops)?;
+        validate_storage_options(
+            &instance.name,
+            &storage_class,
+            instance.storage_iops,
+            instance.storage_throughput,
+        )?;
     }
     Ok(())
 }
@@ -633,6 +639,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 config.monitoring.storage_size,
                 monitoring_storage_class,
                 config.monitoring.storage_iops,
+                config.monitoring.storage_throughput,
                 &key_name,
                 &monitoring_subnets,
                 &monitoring_az_support,
@@ -676,6 +683,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     instance.storage_size,
                     storage_class,
                     instance.storage_iops,
+                    instance.storage_throughput,
                     &key_name,
                     &subnets,
                     &az_support,
@@ -1418,6 +1426,7 @@ mod tests {
             storage_size: 10,
             storage_class: "gp3".to_string(),
             storage_iops: None,
+            storage_throughput: None,
             binary: "binary".to_string(),
             config: "config.yaml".to_string(),
             profiling: false,
@@ -1439,6 +1448,7 @@ mod tests {
             storage_size: 10,
             storage_class: storage_class.to_string(),
             storage_iops,
+            storage_throughput: None,
             dashboard: "dashboard.json".to_string(),
         }
     }
@@ -1531,6 +1541,51 @@ mod tests {
         let cfg = config(monitoring("io2", Some(10_000)), Vec::new());
 
         validate_storage_config(&cfg).expect("io2 with storage_iops is valid");
+    }
+
+    #[test]
+    fn storage_throughput_must_be_in_gp3_range() {
+        let mut monitoring = monitoring("gp3", None);
+        monitoring.storage_throughput = Some(124);
+        let cfg = config(monitoring, Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("storage_throughput is too low");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageThroughput {
+                target,
+                storage_throughput,
+            } if target == "monitoring" && storage_throughput == 124
+        ));
+    }
+
+    #[test]
+    fn storage_throughput_requires_gp3() {
+        let mut instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+        instance.storage_class = "io2".to_string();
+        instance.storage_iops = Some(10_000);
+        instance.storage_throughput = Some(250);
+        let cfg = config(monitoring("gp3", None), vec![instance]);
+
+        let err = validate_storage_config(&cfg).expect_err("throughput is only valid for gp3");
+
+        assert!(matches!(
+            err,
+            Error::UnsupportedStorageThroughput {
+                target,
+                storage_class,
+            } if target == "worker" && storage_class == "io2"
+        ));
+    }
+
+    #[test]
+    fn gp3_accepts_storage_throughput() {
+        let mut monitoring = monitoring("gp3", None);
+        monitoring.storage_throughput = Some(250);
+        let cfg = config(monitoring, Vec::new());
+
+        validate_storage_config(&cfg).expect("gp3 throughput is valid");
     }
 
     #[test]

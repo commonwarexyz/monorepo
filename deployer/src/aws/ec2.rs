@@ -383,21 +383,36 @@ pub(crate) fn parse_storage_class(
     })
 }
 
-/// Validates configured EBS IOPS.
-pub(crate) fn validate_storage_iops(
+/// Validates configured EBS options.
+pub(crate) fn validate_storage_options(
     target: &str,
     storage_class: &VolumeType,
     storage_iops: Option<i32>,
+    storage_throughput: Option<i32>,
 ) -> Result<(), super::Error> {
-    match (storage_iops, storage_class) {
+    match (storage_iops, storage_throughput) {
         (Some(storage_iops), _) if storage_iops <= 0 => Err(super::Error::InvalidStorageIops {
             target: target.to_string(),
             storage_iops,
         }),
-        (None, VolumeType::Io1 | VolumeType::Io2) => Err(super::Error::MissingStorageIops {
-            target: target.to_string(),
-            storage_class: storage_class.as_str().to_string(),
-        }),
+        (None, _) if matches!(storage_class, VolumeType::Io1 | VolumeType::Io2) => {
+            Err(super::Error::MissingStorageIops {
+                target: target.to_string(),
+                storage_class: storage_class.as_str().to_string(),
+            })
+        }
+        (_, Some(storage_throughput)) if !(125..=2_000).contains(&storage_throughput) => {
+            Err(super::Error::InvalidStorageThroughput {
+                target: target.to_string(),
+                storage_throughput,
+            })
+        }
+        (_, Some(_)) if !matches!(storage_class, VolumeType::Gp3) => {
+            Err(super::Error::UnsupportedStorageThroughput {
+                target: target.to_string(),
+                storage_class: storage_class.as_str().to_string(),
+            })
+        }
         _ => Ok(()),
     }
 }
@@ -411,6 +426,7 @@ async fn try_launch_instances(
     storage_size: i32,
     storage_class: VolumeType,
     storage_iops: Option<i32>,
+    storage_throughput: Option<i32>,
     key_name: &str,
     subnet_id: &str,
     sg_id: &str,
@@ -424,6 +440,9 @@ async fn try_launch_instances(
         .delete_on_termination(true);
     if let Some(storage_iops) = storage_iops {
         ebs = ebs.iops(storage_iops);
+    }
+    if let Some(storage_throughput) = storage_throughput {
+        ebs = ebs.throughput(storage_throughput);
     }
 
     let resp = client
@@ -498,6 +517,7 @@ pub async fn launch_instances(
     storage_size: i32,
     storage_class: VolumeType,
     storage_iops: Option<i32>,
+    storage_throughput: Option<i32>,
     key_name: &str,
     subnets: &[(String, String)],
     az_support: &BTreeMap<String, BTreeSet<String>>,
@@ -507,7 +527,7 @@ pub async fn launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<(Vec<String>, String), super::Error> {
-    validate_storage_iops(name, &storage_class, storage_iops)?;
+    validate_storage_options(name, &storage_class, storage_iops, storage_throughput)?;
 
     // Filter to subnets in AZs that support this instance type
     let instance_type_str = instance_type.to_string();
@@ -538,6 +558,7 @@ pub async fn launch_instances(
                 storage_size,
                 storage_class.clone(),
                 storage_iops,
+                storage_throughput,
                 key_name,
                 subnet_id,
                 sg_id,
