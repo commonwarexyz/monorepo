@@ -726,11 +726,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             meta_recovery_watermark,
         )
         .await?;
+
         // Bytes beyond the persisted recovery watermark may be readable after reopen without
         // being crash-durable, so the next commit/sync must force a data sync before advancing it.
         let dirty_from_section =
             (recovery_watermark < size).then_some(recovery_watermark / items_per_blob);
-
         let mut inner = Inner {
             journal,
             size,
@@ -738,6 +738,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             pruning_boundary,
             dirty_from_section,
         };
+
         // Persist any lowered checkpoint before applying blob repairs that move recovered state
         // backward.
         Self::persist_metadata_entries(
