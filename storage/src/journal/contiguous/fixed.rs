@@ -111,6 +111,7 @@ use futures::{
 };
 use std::{
     future::Future,
+    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::warn;
@@ -192,7 +193,7 @@ pub struct Config {
 }
 
 /// Inner state protected by a single RwLock.
-struct Inner<E: Context, A: CodecFixedShared> {
+struct Inner<E: Context> {
     /// The typed section store. Historical sections are sealed (immutable, no `RwLock`); only the
     /// tail is writable.
     sections: Sections<E>,
@@ -215,8 +216,6 @@ struct Inner<E: Context, A: CodecFixedShared> {
 
     /// The earliest section modified since the last successful `commit()` or `sync()`.
     dirty_from_section: Option<u64>,
-
-    _phantom: std::marker::PhantomData<A>,
 }
 
 /// A deferred blob truncation to apply after metadata is persisted during init.
@@ -225,14 +224,14 @@ struct RecoveryRepair {
     byte_offset: u64,
 }
 
-impl<E: Context, A: CodecFixedShared> Inner<E, A> {
+impl<E: Context> Inner<E> {
     /// Read the item at position `pos` in the journal.
     ///
     /// # Errors
     ///
     ///  - [Error::ItemPruned] if the item at position `pos` is pruned.
     ///  - [Error::ItemOutOfRange] if the item at position `pos` does not exist.
-    async fn read(&self, pos: u64, items_per_blob: u64) -> Result<A, Error> {
+    async fn read<A: CodecFixedShared>(&self, pos: u64, items_per_blob: u64) -> Result<A, Error> {
         if pos >= self.size {
             return Err(Error::ItemOutOfRange(pos));
         }
@@ -261,13 +260,18 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
     }
 
     /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
-    fn try_read_sync(&self, pos: u64, items_per_blob: u64) -> Option<A> {
+    fn try_read_sync<A: CodecFixedShared>(&self, pos: u64, items_per_blob: u64) -> Option<A> {
         let mut buf = vec![0u8; A::SIZE];
         self.try_read_sync_into(pos, items_per_blob, &mut buf)
     }
 
     /// Read an item synchronously using caller-provided buffer.
-    fn try_read_sync_into(&self, pos: u64, items_per_blob: u64, buf: &mut [u8]) -> Option<A> {
+    fn try_read_sync_into<A: CodecFixedShared>(
+        &self,
+        pos: u64,
+        items_per_blob: u64,
+        buf: &mut [u8],
+    ) -> Option<A> {
         if pos >= self.size || pos < self.pruning_boundary {
             return None;
         }
@@ -299,7 +303,7 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// underlying blob will be truncated to the last valid item). Repair is performed during init.
 pub struct Journal<E: Context, A: CodecFixedShared> {
     /// Inner state with the section store and size.
-    inner: AsyncRwLock<Inner<E, A>>,
+    inner: AsyncRwLock<Inner<E>>,
 
     /// Serializes writers with `commit()` and `sync()` so a plain rwlock is sufficient.
     op_lock: AsyncMutex<()>,
@@ -309,13 +313,16 @@ pub struct Journal<E: Context, A: CodecFixedShared> {
 
     /// Metrics for monitoring journal state and activity.
     metrics: Metrics<E>,
+
+    _codec: PhantomData<fn() -> A>,
 }
 
 /// A reader guard that holds a consistent snapshot of the journal's bounds.
 pub struct Reader<'a, E: Context, A: CodecFixedShared> {
-    guard: AsyncRwLockReadGuard<'a, Inner<E, A>>,
+    guard: AsyncRwLockReadGuard<'a, Inner<E>>,
     items_per_blob: u64,
     metrics: &'a Metrics<E>,
+    _codec: PhantomData<fn() -> A>,
 }
 
 impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
@@ -619,7 +626,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
     /// Mark all sections from `section` onward as dirty.
-    fn mark_dirty_from(inner: &mut Inner<E, A>, section: u64) {
+    fn mark_dirty_from(inner: &mut Inner<E>, section: u64) {
         inner.dirty_from_section = Some(
             inner
                 .dirty_from_section
@@ -631,7 +638,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// Call `inner.metadata.sync()` separately to persist the updated entries.
     fn update_metadata_entries(
-        inner: &mut Inner<E, A>,
+        inner: &mut Inner<E>,
         items_per_blob: u64,
         pruning_boundary: u64,
         recovery_watermark: u64,
@@ -667,7 +674,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// This is used before blob state moves backward so external consumers never see a persisted
     /// recovery checkpoint beyond the rewind/clear target.
-    fn lower_recovery_watermark(inner: &mut Inner<E, A>, limit: u64) -> bool {
+    fn lower_recovery_watermark(inner: &mut Inner<E>, limit: u64) -> bool {
         let Some(current) = inner
             .metadata
             .get(&RECOVERY_WATERMARK_KEY)
@@ -836,7 +843,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 metadata,
                 pruning_boundary: clear_target,
                 dirty_from_section: None,
-                _phantom: std::marker::PhantomData,
             };
             let metrics = Metrics::new(context);
             metrics.update(clear_target, clear_target, items_per_blob);
@@ -845,6 +851,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 op_lock: AsyncMutex::new(()),
                 items_per_blob,
                 metrics,
+                _codec: PhantomData,
             });
         }
 
@@ -934,7 +941,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             metadata,
             pruning_boundary,
             dirty_from_section: None,
-            _phantom: std::marker::PhantomData,
         };
 
         let metrics = Metrics::new(context);
@@ -945,6 +951,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             op_lock: AsyncMutex::new(()),
             items_per_blob,
             metrics,
+            _codec: PhantomData,
         })
     }
 
@@ -1386,6 +1393,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             guard: self.inner.read().await,
             items_per_blob: self.items_per_blob,
             metrics: &self.metrics,
+            _codec: PhantomData,
         }
     }
 
