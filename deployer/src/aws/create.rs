@@ -69,24 +69,31 @@ pub struct RegionResources {
 
 /// Validates storage options before create allocates AWS resources.
 fn validate_storage_config(config: &Config) -> Result<(), Error> {
-    let monitoring_storage_class =
-        parse_storage_class(MONITORING_NAME, &config.monitoring.storage_class)?;
-    validate_storage_options(
+    let storage_configs = std::iter::once((
         MONITORING_NAME,
-        &monitoring_storage_class,
+        config.monitoring.storage_class.as_str(),
         config.monitoring.storage_size,
         config.monitoring.storage_iops,
         config.monitoring.storage_throughput,
-    )?;
-
-    for instance in &config.instances {
-        let storage_class = parse_storage_class(&instance.name, &instance.storage_class)?;
-        validate_storage_options(
-            &instance.name,
-            &storage_class,
+    ))
+    .chain(config.instances.iter().map(|instance| {
+        (
+            instance.name.as_str(),
+            instance.storage_class.as_str(),
             instance.storage_size,
             instance.storage_iops,
             instance.storage_throughput,
+        )
+    }));
+
+    for (target, storage_class, storage_size, storage_iops, storage_throughput) in storage_configs {
+        let storage_class = parse_storage_class(target, storage_class)?;
+        validate_storage_options(
+            target,
+            &storage_class,
+            storage_size,
+            storage_iops,
+            storage_throughput,
         )?;
     }
     Ok(())
