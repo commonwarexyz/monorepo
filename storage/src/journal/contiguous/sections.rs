@@ -712,7 +712,7 @@ mod tests {
         });
     }
 
-    /// Empty partition → SectionsInit with no sections → Sections with just a tail.
+    /// Empty partition -> SectionsInit with no sections -> Sections with just a tail.
     #[test_traced]
     fn test_sections_init_empty_then_install_tail() {
         let executor = deterministic::Runner::default();
