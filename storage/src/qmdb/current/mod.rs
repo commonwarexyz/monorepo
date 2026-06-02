@@ -613,9 +613,7 @@ pub mod tests {
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
     /// `commit_changes` is true. Returns the db; callers should commit if needed.
-    ///
-    /// Returns a boxed future to prevent stack overflow when monomorphized across many DB variants.
-    async fn apply_random_ops_inner<F, C>(
+    pub async fn apply_random_ops<F, C>(
         num_elements: u64,
         commit_changes: bool,
         rng_seed: u64,
@@ -662,26 +660,6 @@ pub mod tests {
             commit_writes(&mut db, pending).await?;
         }
         Ok(db)
-    }
-
-    pub fn apply_random_ops<F, C>(
-        num_elements: u64,
-        commit_changes: bool,
-        rng_seed: u64,
-        db: C,
-    ) -> std::pin::Pin<Box<dyn Future<Output = Result<C, Error<F>>>>>
-    where
-        F: merkle::Graftable + 'static,
-        C: DbAny<F> + 'static,
-        C::Key: TestKey,
-        <C as DbAny<F>>::Value: TestValue,
-    {
-        Box::pin(apply_random_ops_inner::<F, C>(
-            num_elements,
-            commit_changes,
-            rng_seed,
-            db,
-        ))
     }
 
     /// Run `test_build_random_close_reopen` against a database factory.
@@ -1449,9 +1427,7 @@ pub mod tests {
                 fn [<$f _ $label>]() {
                     let executor = deterministic::Runner::default();
                     executor.start(|context| async move {
-                        // Box the future to prevent stack overflow when
-                        // monomorphized across DB variants.
-                        Box::pin($f(context, open_db_fn!($db, $cfg))).await
+                        $f(context, open_db_fn!($db, $cfg)).await
                     });
                 }
             }
