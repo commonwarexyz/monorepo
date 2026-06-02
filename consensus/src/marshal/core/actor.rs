@@ -880,7 +880,7 @@ where
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
-                response.send_lossy((finalization, block).encode());
+                response.send_lossy((finalization, V::into_inner(block)).encode());
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
@@ -1276,15 +1276,15 @@ where
                     return false;
                 };
 
-                let commitment = finalization.proposal.payload;
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                let Ok(block) = V::ApplicationBlock::read_cfg(&mut value, &self.block_codec_config)
+                else {
                     response.send_lossy(false);
                     return false;
                 };
 
+                let commitment = finalization.proposal.payload;
                 if block.height() != height
-                    || V::commitment(&block) != commitment
+                    || block.digest() != V::commitment_to_inner(commitment)
                     || finalization.epoch() != bounds.epoch()
                 {
                     response.send_lossy(false);
@@ -1316,7 +1316,22 @@ where
                     return false;
                 };
 
+                // `V::check_payload` requires a scoped provider, and `get_scheme_certificate_verifier`
+                // may use an all-epoch provider.
+                let Some(scheme) = self.provider.scoped(notarization.epoch()) else {
+                    debug!(
+                        ?round,
+                        floor = %self.floor.processed_height(),
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
+                    return false;
+                };
                 let commitment = notarization.proposal.payload;
+                if !V::check_payload(scheme.as_ref(), commitment) {
+                    response.send_lossy(false);
+                    return false;
+                }
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
@@ -1433,6 +1448,7 @@ where
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
+                    let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
                     let digest = block.digest();
