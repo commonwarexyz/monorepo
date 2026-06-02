@@ -7,8 +7,8 @@ use commonware_runtime::{
 use commonware_storage::utils::bits_for_indices;
 use commonware_utils::NZU64;
 use criterion::{criterion_group, Criterion};
-use futures::future::try_join_all;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use futures::{stream::FuturesUnordered, StreamExt};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 use std::{hint::black_box, time::Instant};
 
 /// Items pre-loaded into the store.
@@ -16,7 +16,7 @@ const ITEMS: u64 = 250_000;
 
 /// Select random indices for benchmarking.
 pub fn select_indices(count: usize, items: u64) -> Vec<u64> {
-    let mut rng = StdRng::seed_from_u64(42);
+    let mut rng = SmallRng::seed_from_u64(42);
     let mut selected_indices = Vec::with_capacity(count);
     for _ in 0..count {
         selected_indices.push(rng.gen_range(0..items));
@@ -33,11 +33,13 @@ pub async fn read_serial_indices(store: &Ordinal, indices: &[u64]) {
 
 /// Read indices concurrently from an ordinal store.
 pub async fn read_concurrent_indices(store: &Ordinal, indices: &[u64]) {
-    let mut futures = Vec::with_capacity(indices.len());
+    let mut futures = FuturesUnordered::new();
     for idx in indices {
         futures.push(store.get(*idx));
     }
-    black_box(try_join_all(futures).await.unwrap());
+    while let Some(result) = futures.next().await {
+        black_box(result.unwrap().unwrap());
+    }
 }
 
 fn bench_get(c: &mut Criterion) {
