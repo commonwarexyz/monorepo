@@ -3,7 +3,7 @@ use commonware_codec::{EncodeSize, Error, FixedSize, Read, ReadExt, Write};
 use commonware_consensus::{marshal::core::Variant, simplex::types::Finalization};
 use commonware_cryptography::certificate::Scheme;
 
-/// The first byte of a floor discovery wire message.
+/// The first byte of a probe wire message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 pub(crate) enum Tag {
@@ -38,7 +38,7 @@ impl Read for Tag {
     }
 }
 
-/// A message exchanged with peers over the p2p channel during floor discovery.
+/// A message exchanged with peers over the probe p2p channel.
 pub(crate) enum Message<S, V>
 where
     S: Scheme,

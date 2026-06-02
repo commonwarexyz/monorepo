@@ -1,5 +1,5 @@
-use super::serving::Serving;
-use crate::stateful::floor_discovery::{mailbox::Message, wire};
+use super::service::Service;
+use crate::stateful::probe::{mailbox::Message, wire};
 use bytes::Buf;
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Decode, Encode, Error as CodecError, ReadExt};
@@ -26,11 +26,11 @@ use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, sync::Arc};
 use tracing::debug;
 
-/// The discovery phase of [`FloorDiscovery`](super::FloorDiscovery).
+/// The discovery phase of [`Probe`](super::Probe).
 ///
 /// Solicits peers' latest finalizations and selects the highest floor from a peer sample. By
 /// construction it has no marshal and never serves finalizations. Once a marshal is attached
-/// (after the floor has been consumed), it hands off to [`Serving`].
+/// (after the floor has been consumed), it hands off to [`Service`].
 pub(super) struct Discovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
@@ -62,7 +62,7 @@ where
     B: Blocker<PublicKey = P>,
 {
     /// Runs the discovery loop until the actor shuts down or, once a marshal is attached after
-    /// the floor is consumed, hands off to [`Serving`] (running it to completion in place).
+    /// the floor is consumed, hands off to [`Service`] (running it to completion in place).
     pub(super) async fn run(
         mut self,
         sender: &mut impl Sender<PublicKey = P>,
@@ -77,7 +77,7 @@ where
             on_start => {
                 self.floor_subscribers.retain(|s| !s.is_closed());
 
-                // Hand off to serving once a marshal is attached and no floor seeker is left
+                // Hand off to service once a marshal is attached and no floor seeker is left
                 // waiting. Dropping all subscribers cancels discovery; if marshal is attached
                 // after that, the node becomes a source and serves without a cached floor. A
                 // joiner must keep its subscription alive until the floor is consumed.
@@ -158,8 +158,8 @@ where
         }
 
         // Transition: a marshal was attached after the floor was discovered and consumed. Run
-        // the serving phase to completion in place.
-        Serving {
+        // the service phase to completion in place.
+        Service {
             context: self.context,
             mailbox: self.mailbox,
             marshal: marshal.expect("transition requires an attached marshal"),

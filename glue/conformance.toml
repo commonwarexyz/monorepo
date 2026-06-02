@@ -10,10 +10,10 @@ hash = "44c363dc52376203a66269a71e13f7271c1a9beb1f8ee9dd9864a3ce7ae2c281"
 n_cases = 65536
 hash = "7ca1ff124e5835f5be5d9b915233b9df088db121a0f5c3baa54b9ab8daf8bd78"
 
-["commonware_glue::stateful::floor_discovery::test::conformance::CodecConformance<wire::Message<Scheme,Variant>>"]
+["commonware_glue::stateful::probe::test::conformance::CodecConformance<wire::Message<Scheme,Variant>>"]
 n_cases = 65536
 hash = "a1531497bb18034b930404ea638b7f2ac922c41d36f5995c6a3ff8c3f99c18a1"
 
-["commonware_glue::stateful::floor_discovery::test::conformance::CodecConformance<wire::Tag>"]
+["commonware_glue::stateful::probe::test::conformance::CodecConformance<wire::Tag>"]
 n_cases = 65536
 hash = "7cf90e43e614a55614d95269547add3d92c25b31040e8f3cce3761bd74986458"

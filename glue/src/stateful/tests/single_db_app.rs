@@ -9,7 +9,7 @@ use crate::{
             p2p::standard as qmdb_resolver, DatabaseSet, Merkleized as _, SyncEngineConfig,
             Unmerkleized as _,
         },
-        floor_discovery::{Config as FloorDiscoveryConfig, FloorDiscovery},
+        probe::{Config as ProbeConfig, Probe},
         Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
     },
 };
@@ -326,7 +326,7 @@ impl EngineDefinition for SingleDbEngine {
             (3, TEST_QUOTA), // backfill
             (4, TEST_QUOTA), // broadcast
             (5, TEST_QUOTA), // qmdb sync resolver
-            (6, TEST_QUOTA), // floor discovery
+            (6, TEST_QUOTA), // probe
         ]
     }
 
@@ -374,7 +374,7 @@ impl EngineDefinition for SingleDbEngine {
         let backfill_network = channels.next().unwrap();
         let broadcast_network = channels.next().unwrap();
         let qmdb_resolver_network = channels.next().unwrap();
-        let floor_discovery_network = channels.next().unwrap();
+        let probe_network = channels.next().unwrap();
 
         // Marshal resolver
         let resolver_cfg = marshal_resolver::Config {
@@ -437,21 +437,17 @@ impl EngineDefinition for SingleDbEngine {
         let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
         let provider = ConstantProvider::new(scheme.clone());
 
-        let (floor_discovery, floor_discovery_mailbox) =
-            FloorDiscovery::new(FloorDiscoveryConfig {
-                context: context.child("floor_discovery"),
-                provider: provider.clone(),
-                strategy: Sequential,
-                capacity: NZUsize!(100),
-                blocker: oracle.control(public_key.clone()),
-                retry_timeout: NZDuration!(Duration::from_millis(100)),
-            });
-        floor_discovery.start(floor_discovery_network);
+        let (probe, probe_mailbox) = Probe::new(ProbeConfig {
+            context: context.child("probe"),
+            provider: provider.clone(),
+            strategy: Sequential,
+            capacity: NZUsize!(100),
+            blocker: oracle.control(public_key.clone()),
+            retry_timeout: NZDuration!(Duration::from_millis(100)),
+        });
+        probe.start(probe_network);
         let mut state_sync_height = if should_state_sync {
-            let finalization = floor_discovery_mailbox
-                .subscribe()
-                .await
-                .expect("floor discovery stopped");
+            let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
             plan = plan.with_floor(finalization);
             None
         } else {
@@ -538,9 +534,9 @@ impl EngineDefinition for SingleDbEngine {
         // Start marshal actor with monitored reporters.
         marshal_actor.start(marshal_reporters, buffer, resolver);
 
-        // Attach the marshal to floor discovery, transitioning it to serving. A syncing node has
+        // Attach the marshal to probe, entering service. A syncing node has
         // already consumed its floor above; a source attaches without ever soliciting peers.
-        floor_discovery_mailbox.attach(marshal_mailbox.clone());
+        probe_mailbox.attach(marshal_mailbox.clone());
 
         if should_state_sync {
             let finalization = sync_floor.expect("sync floor missing");

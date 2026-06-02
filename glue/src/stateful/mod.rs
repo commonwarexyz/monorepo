@@ -101,7 +101,7 @@ mod actor;
 pub use actor::{Config, Mailbox, Stateful, SyncPlan};
 
 pub mod db;
-pub mod floor_discovery;
+pub mod probe;
 
 #[cfg(test)]
 mod tests;

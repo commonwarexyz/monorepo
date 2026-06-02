@@ -7,7 +7,7 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
-/// A message that can be sent to the [`FloorDiscovery`](super::FloorDiscovery).
+/// A message that can be sent to the [`Probe`](super::Probe).
 pub(crate) enum Message<S, V>
 where
     S: Scheme,
@@ -18,8 +18,8 @@ where
         /// The response channel to send the finalization to.
         response: oneshot::Sender<Finalization<S, V::Commitment>>,
     },
-    /// Attach a marshal mailbox, transitioning the actor from discovery to serving once any
-    /// discovered floor has been consumed. Serving answers peers' `Request` from the
+    /// Attach a marshal mailbox, moving the actor from discovery to service once any
+    /// discovered floor has been consumed. Service answers peers' `Request` from the
     /// attached marshal and never issues outbound requests.
     Attach {
         /// The marshal mailbox to serve the latest finalization from.
@@ -39,7 +39,7 @@ where
     }
 }
 
-/// Handle to the mailbox of the [`FloorDiscovery`](super::FloorDiscovery).
+/// Handle to the mailbox of the [`Probe`](super::Probe).
 #[derive(Clone)]
 pub struct Mailbox<S, V>
 where
@@ -63,7 +63,7 @@ where
     /// While the actor is still discovering, this requests discovery if no floor has been selected
     /// yet. Dropping the receiver cancels this subscription; if all subscribers are dropped before
     /// a floor is selected, discovery may be abandoned. If marshal is later attached, the actor
-    /// transitions to serving without a cached floor and later subscriptions will not restart
+    /// transitions to service without a cached floor and later subscriptions will not restart
     /// discovery.
     ///
     /// Callers that need a floor must keep the receiver alive until it resolves and should attach
@@ -78,7 +78,7 @@ where
 
     /// Attach a marshal mailbox so the actor can serve the latest finalization to peers.
     ///
-    /// This transitions the actor from discovery to serving. It is applied only after any
+    /// This moves the actor from discovery to service. It is applied only after any
     /// discovered floor has been delivered to its subscribers. If no floor was ever requested, or
     /// every pending subscriber was dropped before a floor was selected, the actor serves without a
     /// cached floor.

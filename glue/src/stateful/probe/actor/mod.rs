@@ -11,9 +11,9 @@ use rand_core::CryptoRngCore;
 use std::num::NonZeroUsize;
 
 mod discovery;
-mod serving;
+mod service;
 
-/// Configuration for the [`FloorDiscovery`] actor.
+/// Configuration for the [`Probe`] actor.
 pub struct Config<E, D, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
@@ -40,11 +40,11 @@ where
 /// Discovers a sync floor by adopting the highest finalization from a peer sample.
 ///
 /// The actor is a two-phase state machine. It starts in discovery, waits until a subscriber needs
-/// a floor, then solicits and samples peers' finalizations without serving any of its own. Once a
-/// marshal is attached, it hands off to serving, answering peers' requests from that marshal and
+/// a floor, then solicits and samples peers' finalizations without answering any of its own. Once a
+/// marshal is attached, it hands off to service, answering peers' requests from that marshal and
 /// never issuing outbound requests. A source node that never needed a floor attaches a marshal
-/// without consuming one and transitions straight to serving without soliciting peers.
-pub struct FloorDiscovery<E, S, D, V, T, P, B>
+/// without consuming one and enters service without soliciting peers.
+pub struct Probe<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
@@ -62,7 +62,7 @@ where
     retry_timeout: NonZeroDuration,
 }
 
-impl<E, S, D, V, T, P, B> FloorDiscovery<E, S, D, V, T, P, B>
+impl<E, S, D, V, T, P, B> Probe<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
@@ -72,7 +72,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    /// Create a floor discovery actor and mailbox.
+    /// Create a probe actor and mailbox.
     pub fn new(config: Config<E, D, T, P, B>) -> (Self, Mailbox<S, V>) {
         let (sender, receiver) =
             commonware_actor::mailbox::new(config.context.child("mailbox"), config.capacity);
@@ -90,7 +90,7 @@ where
         )
     }
 
-    /// Start the floor discovery actor.
+    /// Start the probe actor.
     pub fn start(
         mut self,
         net: (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),

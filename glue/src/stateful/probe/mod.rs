@@ -2,20 +2,20 @@
 //!
 //! A node that is starting fresh (or recovering from far behind) needs a recent, trustworthy
 //! finalization, the "floor", as the point to begin state sync from. It cannot trust any
-//! single peer to name that point, so the [`FloorDiscovery`] asks many peers and adopts the
+//! single peer to name that point, so the [`Probe`] asks many peers and adopts the
 //! highest valid finalization from `f + 1` distinct peer replies.
 //!
 //! # Protocol
 //!
 //! ## Solicit
 //!
-//! Once a floor subscriber appears, [`FloorDiscovery`] broadcasts a `Request` to every
+//! Once a floor subscriber appears, [`Probe`] broadcasts a `Request` to every
 //! connected peer:
 //!
 //! ```text
 //!                    +-- Request --> peer 1
 //!                    |
-//!   FloorDiscovery --+-- Request --> peer 2
+//!   Probe -----------+-- Request --> peer 2
 //!                    |
 //!                    +-- Request --> peer 3
 //!                    |
@@ -24,7 +24,7 @@
 //!
 //! A subscription is the request to discover a floor. If all floor subscribers are dropped before
 //! a floor is selected, discovery is cancelled. Attaching marshal after that makes the node a
-//! source: it transitions to serving without a cached floor. Callers that need a floor must keep a
+//! source: it enters service without a cached floor. Callers that need a floor must keep a
 //! subscription alive until it resolves and attach marshal only after consuming that floor.
 //!
 //! ## Collect and select
@@ -36,7 +36,7 @@
 //!
 //! ```text
 //!   peer 1 --Response(view 10)-->\                 replies
-//!   peer 2 --Response(view 12)--> +-> FloorDiscovery {10, 12, 13}
+//!   peer 2 --Response(view 12)--> +-> Probe {10, 12, 13}
 //!   peer 3 --Response(view 13)-->/                        |
 //!                                                             v
 //!                                      sample reached, highest view becomes the floor: 13
@@ -99,7 +99,7 @@
 //! The p2p channel supplies rate limiting and maximum encoded message size enforcement.
 
 mod actor;
-pub use actor::{Config, FloorDiscovery};
+pub use actor::{Config, Probe};
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -108,7 +108,7 @@ mod wire;
 
 #[cfg(test)]
 mod test {
-    use super::{wire, Config, FloorDiscovery, Mailbox};
+    use super::{wire, Config, Mailbox, Probe};
     use bytes::{Buf, BufMut};
     use commonware_actor::Feedback;
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -157,7 +157,7 @@ mod test {
         time::Duration,
     };
 
-    const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_BOOTSTRAP_TEST";
+    const NAMESPACE: &[u8] = b"_COMMONWARE_GLUE_PROBE_TEST";
     const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
     const LINK: Link = Link {
@@ -165,7 +165,7 @@ mod test {
         jitter: Duration::from_millis(1),
         success_rate: 1.0,
     };
-    const BOOTSTRAP_CHANNEL: u64 = 0;
+    const PROBE_CHANNEL: u64 = 0;
     const BACKFILL_CHANNEL: u64 = 1;
 
     type Scheme = MockScheme<ed25519::PublicKey>;
@@ -430,14 +430,14 @@ mod test {
         }
     }
 
-    /// A single node in the harness: its floor-discovery ingress and its marshal mailbox.
+    /// A single node in the harness: its probe ingress and its marshal mailbox.
     struct Node {
-        bootstrap: Mailbox<Scheme, Variant>,
+        probe: Mailbox<Scheme, Variant>,
         marshal: MarshalMailbox<Scheme, Variant>,
-        // A clone of the node's floor-discovery channel sender, used by tests to inject raw
+        // A clone of the node's probe channel sender, used by tests to inject raw
         // bytes that appear to originate from this node.
-        bootstrap_sender: Sender<ed25519::PublicKey, deterministic::Context>,
-        // The floor-discovery actor, started on demand via `start_bootstrappers` once peers have
+        probe_sender: Sender<ed25519::PublicKey, deterministic::Context>,
+        // The probe actor, started on demand via `start_probes` once peers have
         // been seeded with finalizations. `None` once started.
         start: Option<Box<dyn FnOnce() -> Handle<()>>>,
         // Held to keep the spawned actors alive for the duration of the test.
@@ -445,7 +445,7 @@ mod test {
     }
 
     /// A reusable harness of several real (unbuffered) marshal actors, each paired with a
-    /// [`FloorDiscovery`], wired over an all-to-all simulated p2p network.
+    /// [`Probe`], wired over an all-to-all simulated p2p network.
     struct Harness {
         participants: Vec<ed25519::PublicKey>,
         schemes: Vec<Scheme>,
@@ -457,7 +457,7 @@ mod test {
 
     impl Harness {
         /// Spin up `n` nodes over a simulated network. Each node runs a real marshal actor
-        /// (seeded with only a genesis block) and a [`FloorDiscovery`] using `retry_timeout`,
+        /// (seeded with only a genesis block) and a [`Probe`] using `retry_timeout`,
         /// configured with a [`ConstantProvider`] (single scheme, all epochs).
         async fn setup(
             context: &deterministic::Context,
@@ -470,7 +470,7 @@ mod test {
             .await
         }
 
-        /// Like [`Harness::setup`], but `make_provider` builds each node's [`FloorDiscovery`]
+        /// Like [`Harness::setup`], but `make_provider` builds each node's [`Probe`]
         /// certificate provider from that node's scheme. Lets tests supply an epoch-keyed
         /// provider to exercise multi-epoch verification.
         async fn setup_with<D, F>(
@@ -587,14 +587,14 @@ mod test {
                     .await;
                 let marshal_handle = marshal_actor.start_unbuffered(NoopReporter, resolver);
 
-                // FloorDiscovery.
-                let bootstrap_network = control
-                    .register(BOOTSTRAP_CHANNEL, TEST_QUOTA)
+                // Probe.
+                let probe_network = control
+                    .register(PROBE_CHANNEL, TEST_QUOTA)
                     .await
-                    .expect("failed to register bootstrap channel");
-                let bootstrap_sender = bootstrap_network.0.clone();
-                let (bootstrapper, bootstrap_mailbox) = FloorDiscovery::new(Config {
-                    context: node_ctx.child("bootstrapper"),
+                    .expect("failed to register probe channel");
+                let probe_sender = probe_network.0.clone();
+                let (probe, probe_mailbox) = Probe::new(Config {
+                    context: node_ctx.child("probe"),
                     provider: make_provider(&scheme),
                     strategy: Sequential,
                     capacity: NZUsize!(100),
@@ -602,20 +602,20 @@ mod test {
                     retry_timeout,
                 });
                 // Node 0 is the discoverer and is left in discovery for the test to drive. Every
-                // other node is a source: attach its marshal so it transitions to serving without
+                // other node is a source: attach its marshal so it enters service without
                 // soliciting peers.
                 if index != 0 {
-                    bootstrap_mailbox.attach(marshal_mailbox.clone());
+                    probe_mailbox.attach(marshal_mailbox.clone());
                 }
                 // Defer the actor's start so tests can seed peer marshals before node 0 issues
                 // its first request.
                 let start: Box<dyn FnOnce() -> Handle<()>> =
-                    Box::new(move || bootstrapper.start(bootstrap_network));
+                    Box::new(move || probe.start(probe_network));
 
                 nodes.push(Node {
-                    bootstrap: bootstrap_mailbox,
+                    probe: probe_mailbox,
                     marshal: marshal_mailbox,
-                    bootstrap_sender,
+                    probe_sender,
                     start: Some(start),
                     _handles: vec![marshal_handle],
                 });
@@ -630,9 +630,9 @@ mod test {
             }
         }
 
-        /// Starts every node's floor-discovery actor. Call after seeding peer marshals so each
+        /// Starts every node's probe actor. Call after seeding peer marshals so each
         /// actor's first request observes the intended finalizations.
-        fn start_bootstrappers(&mut self) {
+        fn start_probes(&mut self) {
             for node in &mut self.nodes {
                 if let Some(start) = node.start.take() {
                     node._handles.push(start());
@@ -665,10 +665,10 @@ mod test {
             let _ = marshal.report(Activity::Finalization(finalization));
         }
 
-        /// Sends raw `bytes` on the floor-discovery channel from node `from` to node `to`,
-        /// bypassing the wire encoding. Used to deliver malformed messages to a [`FloorDiscovery`].
+        /// Sends raw `bytes` on the probe channel from node `from` to node `to`,
+        /// bypassing the wire encoding. Used to deliver malformed messages to a [`Probe`].
         fn send_raw(&self, from: usize, to: usize, bytes: Vec<u8>) {
-            let mut sender = self.nodes[from].bootstrap_sender.clone();
+            let mut sender = self.nodes[from].probe_sender.clone();
             sender.send(Recipients::One(self.participants[to].clone()), bytes, false);
         }
     }
@@ -765,7 +765,7 @@ mod test {
         }
     }
 
-    /// A sample of peers serving the same finalization lets a subscribing node resolve it as
+    /// A sample of peers with the same finalization lets a subscribing node resolve it as
     /// the floor.
     #[test]
     fn test_resolves_floor_from_sample_peers() {
@@ -776,18 +776,18 @@ mod test {
             assert_eq!(harness.participants.len(), 4);
 
             // Seed a sample (f + 1 = 2) of peers with the same finalization, then start the
-            // bootstrappers so node 0's first request already observes agreement.
+            // probes so node 0's first request already observes agreement.
             let (block, finalization) = harness.finalization(1, 1);
             for index in [1, 2] {
                 harness
                     .inject(index, block.clone(), finalization.clone())
                     .await;
             }
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             // The remaining node should resolve the agreed finalization as its floor.
             let floor = harness.nodes[0]
-                .bootstrap
+                .probe
                 .subscribe()
                 .await
                 .expect("floor resolved");
@@ -803,8 +803,8 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
-            harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
 
             let mut expected = None;
             for index in 1..=3u8 {
@@ -831,9 +831,9 @@ mod test {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(move |context| async move {
             let mut harness = Harness::setup(&context, 4, retry_timeout).await;
-            harness.start_bootstrappers();
+            harness.start_probes();
             let start = context.current();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].probe.subscribe();
 
             // Node 0's first request gathers one reply, which is below the sample size (f + 1 = 2).
             let (_, finalization_f) = harness.finalization(1, 0xF);
@@ -888,8 +888,8 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
-            harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
 
             // Seven participants => f + 1 = 3. Two matching replies are still not enough.
             let (_, finalization) = harness.finalization(1, 1);
@@ -916,7 +916,7 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             context.sleep(Duration::from_millis(100)).await;
 
@@ -935,7 +935,7 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             let mut junk = vec![1u8];
             junk.extend_from_slice(&[0xAB; 32]);
@@ -962,14 +962,14 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             // A finalization signed by a foreign key set: it decodes cleanly under node 0's
             // codec config but fails verification against node 0's scheme.
             let mut rng = test_rng();
             let Fixture {
                 schemes: foreign, ..
-            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_BOOTSTRAP_FOREIGN", 4);
+            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_FOREIGN", 4);
             let (_, finalization) = build_finalization(&foreign, 1, 1);
             harness.send_raw(1, 0, finalization_bytes(finalization));
 
@@ -992,7 +992,7 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_millis(500))).await;
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             // An unrecognized wire tag is rejected by the decoder.
             harness.send_raw(1, 0, vec![0xFF]);
@@ -1023,11 +1023,11 @@ mod test {
                     .inject(index, block.clone(), finalization.clone())
                     .await;
             }
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             // Resolve the floor via a first subscriber.
             let floor = harness.nodes[0]
-                .bootstrap
+                .probe
                 .subscribe()
                 .await
                 .expect("floor resolved");
@@ -1035,7 +1035,7 @@ mod test {
 
             // A subscriber arriving afterwards is served the cached floor immediately.
             let late = harness.nodes[0]
-                .bootstrap
+                .probe
                 .subscribe()
                 .await
                 .expect("late subscriber served");
@@ -1057,10 +1057,10 @@ mod test {
                     .inject(index, block.clone(), finalization.clone())
                     .await;
             }
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             let floor = harness.nodes[0]
-                .bootstrap
+                .probe
                 .subscribe()
                 .await
                 .expect("floor resolved");
@@ -1071,7 +1071,7 @@ mod test {
             let mut rng = test_rng();
             let Fixture {
                 schemes: foreign, ..
-            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_BOOTSTRAP_FOREIGN", 4);
+            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_FOREIGN", 4);
             let (_, invalid) = build_finalization(&foreign, 2, 9);
             harness.send_raw(3, 0, finalization_bytes(invalid));
 
@@ -1096,8 +1096,8 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
-            harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
 
             // Deliver two different valid finalizations from node 1, then the second from node 2.
             // If node 1's second answer were counted, the second finalization would incorrectly
@@ -1137,7 +1137,7 @@ mod test {
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_secs(3600))).await;
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             // Node 1 first sends a valid finalization, then an invalid (foreign) one.
             let (_, valid) = harness.finalization(1, 1);
@@ -1146,7 +1146,7 @@ mod test {
             let mut rng = test_rng();
             let Fixture {
                 schemes: foreign, ..
-            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_BOOTSTRAP_FOREIGN", 4);
+            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_FOREIGN", 4);
             let (_, invalid) = build_finalization(&foreign, 1, 2);
             harness.send_raw(1, 0, finalization_bytes(invalid));
 
@@ -1171,8 +1171,8 @@ mod test {
             // Seven participants => f + 1 = 3.
             let mut harness =
                 Harness::setup(&context, 7, NZDuration!(Duration::from_secs(3600))).await;
-            harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
 
             // Two peers agree on a stale finalization, but the sample also includes a newer
             // valid finalization. The highest reply should win.
@@ -1208,8 +1208,8 @@ mod test {
                     move |_scheme| provider.clone()
                 })
                 .await;
-            harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
 
             // Two peers report the same epoch-1 finalization, signed by the epoch-1 committee.
             let (_, finalization) = build_finalization_at(&epoch_one, Epoch::new(1), 1, 7);
@@ -1222,7 +1222,7 @@ mod test {
         });
     }
 
-    /// An all-epoch verifier may be unable to enumerate participants; floor discovery must
+    /// An all-epoch verifier may be unable to enumerate participants; probe must
     /// verify with it but size peer samples from the epoch-scoped committee.
     #[test]
     fn test_sample_size_uses_scoped_scheme_with_participantless_all_verifier() {
@@ -1266,12 +1266,12 @@ mod test {
                 }
             }
 
-            let bootstrap_network = oracle
+            let probe_network = oracle
                 .control(participants[0].clone())
-                .register(BOOTSTRAP_CHANNEL, TEST_QUOTA)
+                .register(PROBE_CHANNEL, TEST_QUOTA)
                 .await
-                .expect("failed to register bootstrap channel");
-            let (bootstrapper, bootstrap_mailbox) = FloorDiscovery::<
+                .expect("failed to register probe channel");
+            let (probe, probe_mailbox) = Probe::<
                 _,
                 MaybeEnumerableScheme,
                 ParticipantlessAllProvider,
@@ -1280,24 +1280,24 @@ mod test {
                 ed25519::PublicKey,
                 _,
             >::new(Config {
-                context: context.child("bootstrapper"),
+                context: context.child("probe"),
                 provider,
                 strategy: Sequential,
                 capacity: NZUsize!(100),
                 blocker: oracle.control(participants[0].clone()),
                 retry_timeout: NZDuration!(Duration::from_secs(3600)),
             });
-            let _bootstrapper = bootstrapper.start(bootstrap_network);
-            let mut subscription = bootstrap_mailbox.subscribe();
+            let _probe = probe.start(probe_network);
+            let mut subscription = probe_mailbox.subscribe();
 
             let mut peer_channels = Vec::new();
             for public_key in participants.iter().take(3).skip(1) {
                 peer_channels.push(
                     oracle
                         .control(public_key.clone())
-                        .register(BOOTSTRAP_CHANNEL, TEST_QUOTA)
+                        .register(PROBE_CHANNEL, TEST_QUOTA)
                         .await
-                        .expect("failed to register peer bootstrap channel"),
+                        .expect("failed to register peer probe channel"),
                 );
             }
             let (_, finalization) = build_finalization_at(&schemes, Epoch::zero(), 1, 1);
@@ -1335,7 +1335,7 @@ mod test {
                     move |_scheme| provider.clone()
                 })
                 .await;
-            harness.start_bootstrappers();
+            harness.start_probes();
 
             // A finalization for the unknown epoch 5: dropped before verification, so the sender
             // is not blocked.
@@ -1352,7 +1352,7 @@ mod test {
                 )),
                 "an unknown-epoch finalization must be ignored, not blocked"
             );
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            let mut subscription = harness.nodes[0].probe.subscribe();
             context.sleep(Duration::from_millis(50)).await;
             assert!(
                 matches!(
@@ -1381,8 +1381,8 @@ mod test {
                 .await;
             provider.insert(Epoch::new(1), harness.schemes[0].clone());
             provider.insert(Epoch::new(2), harness.schemes[0].clone());
-            harness.start_bootstrappers();
-            let mut subscription = harness.nodes[0].bootstrap.subscribe();
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
 
             // Peer 1 reports an epoch-1 finalization; it verifies and is buffered below the
             // sample size.

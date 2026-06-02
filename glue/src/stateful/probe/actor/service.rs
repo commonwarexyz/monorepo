@@ -1,4 +1,4 @@
-use crate::stateful::floor_discovery::{mailbox::Message, wire};
+use crate::stateful::probe::{mailbox::Message, wire};
 use commonware_actor::mailbox::Receiver as ActorReceiver;
 use commonware_codec::{Encode, ReadExt as _};
 use commonware_consensus::{
@@ -17,12 +17,12 @@ use futures::future::{self, Either};
 use rand_core::CryptoRngCore;
 use tracing::debug;
 
-/// The serving phase of [`FloorDiscovery`](super::FloorDiscovery).
+/// The service phase of [`Probe`](super::Probe).
 ///
 /// Answers peers' `Request` with the latest finalization from the attached marshal. By
 /// construction it never issues outbound requests. It is reached only after discovery has
 /// consumed its floor and a marshal has been attached.
-pub(super) struct Serving<E, S, V, P, B>
+pub(super) struct Service<E, S, V, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
@@ -37,7 +37,7 @@ where
     pub(super) floor: Option<Finalization<S, V::Commitment>>,
 }
 
-impl<E, S, V, P, B> Serving<E, S, V, P, B>
+impl<E, S, V, P, B> Service<E, S, V, P, B>
 where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
@@ -45,7 +45,7 @@ where
     P: PublicKey,
     B: Blocker<PublicKey = P>,
 {
-    /// Runs the serving loop until the actor shuts down.
+    /// Runs the service loop until the actor shuts down.
     pub(super) async fn run(
         mut self,
         sender: &mut impl Sender<PublicKey = P>,
@@ -69,13 +69,13 @@ where
                 continue;
             } => match message {
                 // If a floor was discovered, serve it to any late subscriber. A source node that
-                // started serving directly has none, so its subscribers never resolve.
+                // entered service directly has none, so its subscribers never resolve.
                 Message::Subscribe { response } => {
                     if let Some(ref floor) = self.floor {
                         response.send_lossy(floor.clone());
                     }
                 }
-                // Already serving; an additional marshal attachment is ignored.
+                // Already in service; an additional marshal attachment is ignored.
                 Message::Attach { .. } => {}
             },
             Ok((peer, mut message)) = receiver.recv() else {
