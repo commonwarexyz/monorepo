@@ -1042,6 +1042,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
+        // A journal sized at `u64::MAX` can never accept an append (the successor size
+        // overflows), so reject it before staging any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+
         // Stage the reset intent durably. Lower the recovery watermark first so external
         // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
         // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
@@ -1221,6 +1227,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
+
+        // Reject the append before writing anything if it would push the size past `u64::MAX`.
+        // This keeps the in-loop `inner.size += batch_count` and `section + 1` arithmetic safe.
+        inner
+            .size
+            .checked_add(items_count as u64)
+            .ok_or(Error::SizeOverflow)?;
+
         let first_dirty_section = inner.size / self.items_per_blob;
         Self::mark_dirty_from(&mut inner, first_dirty_section);
         let mut written = 0;
@@ -2310,6 +2324,54 @@ mod tests {
             assert_eq!(size, 5);
             assert!(repair.is_none());
             inner.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_init_at_max_size_rejected() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+
+            // A journal at `u64::MAX` can never accept an append, so it is rejected at init.
+            assert!(matches!(
+                Journal::<_, Digest>::init_at_size(context.child("max"), cfg.clone(), u64::MAX)
+                    .await,
+                Err(Error::SizeOverflow)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_append_size_overflow() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(5));
+
+            // Initialize one item shy of the maximum size.
+            let journal = Journal::<_, Digest>::init_at_size(
+                context.child("near_max"),
+                cfg.clone(),
+                u64::MAX - 1,
+            )
+            .await
+            .expect("failed to initialize journal at size");
+
+            // The first append fills the last representable position.
+            assert_eq!(
+                journal.append(&test_digest(0)).await.expect("first append"),
+                u64::MAX - 1
+            );
+            assert_eq!(journal.size().await, u64::MAX);
+
+            // The next append would overflow the size; it must return a recoverable error
+            // rather than panicking.
+            assert!(matches!(
+                journal.append(&test_digest(1)).await,
+                Err(Error::SizeOverflow)
+            ));
+
+            journal.destroy().await.unwrap();
         });
     }
 

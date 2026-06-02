@@ -757,6 +757,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
+        // Reject the append before writing anything (to either the data or offsets journal) if
+        // it would push the size past `u64::MAX`.
+        inner
+            .size
+            .checked_add(items_count as u64)
+            .ok_or(Error::SizeOverflow)?;
+
         let mut written = 0;
         while written < items_count {
             let section = position_to_section(inner.size, self.items_per_section);
@@ -1469,6 +1476,58 @@ mod tests {
             for (pos, item) in items.iter().enumerate() {
                 assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_init_at_max_size_rejected() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "init-at-max".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // The internal offsets journal rejects a maximal size, so init_at_size propagates it.
+            assert!(matches!(
+                Journal::<_, u64>::init_at_size(context.child("max"), cfg, u64::MAX).await,
+                Err(Error::SizeOverflow)
+            ));
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_append_size_overflow() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "append-size-overflow".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Initialize one item shy of the maximum size.
+            let journal =
+                Journal::<_, u64>::init_at_size(context.child("near_max"), cfg, u64::MAX - 1)
+                    .await
+                    .unwrap();
+
+            // The first append fills the last representable position.
+            assert_eq!(journal.append(&7).await.unwrap(), u64::MAX - 1);
+            assert_eq!(journal.size().await, u64::MAX);
+
+            // The next append would overflow the size; it must return a recoverable error
+            // rather than panicking.
+            assert!(matches!(journal.append(&8).await, Err(Error::SizeOverflow)));
 
             journal.destroy().await.unwrap();
         });

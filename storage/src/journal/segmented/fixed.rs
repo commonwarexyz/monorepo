@@ -782,6 +782,40 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_segmented_fixed_rewind_max_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+            let mut journal = Journal::init(context.child("storage"), cfg.clone())
+                .await
+                .expect("failed to init");
+
+            // Append to the maximal section. `section + 1` has no representable successor.
+            journal
+                .append(u64::MAX, &test_digest(0))
+                .await
+                .expect("failed to append");
+            journal.sync_all().await.expect("failed to sync");
+
+            // Rewinding the maximal section removes no sections above it and must not panic.
+            let size = journal.size(u64::MAX).await.expect("failed to get size");
+            journal
+                .rewind(u64::MAX, size)
+                .await
+                .expect("failed to rewind");
+
+            // The section is intact and readable.
+            assert_eq!(
+                journal.size(u64::MAX).await.expect("failed to get size"),
+                size
+            );
+            assert_eq!(journal.get(u64::MAX, 0).await.unwrap(), test_digest(0));
+
+            journal.destroy().await.expect("failed to destroy");
+        });
+    }
+
+    #[test_traced]
     fn test_segmented_fixed_rewind_many_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
