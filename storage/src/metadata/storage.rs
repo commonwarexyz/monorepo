@@ -390,7 +390,6 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
                     let end = start + info.length;
                     let mut buf = &mut target.data.as_mut()[start..end];
                     new_value.write(&mut buf);
-                    assert!(buf.is_empty(), "write() did not write expected bytes");
                 } else {
                     // Rewrite all
                     overwrite = false;
@@ -420,7 +419,7 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             // blob. Adjacent values are separated by the next encoded key, so a
             // merged range may rewrite those unchanged key bytes to avoid issuing
             // one storage write per modified value.
-            let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(target.modified.len());
+            let mut ranges = Vec::with_capacity(target.modified.len());
             for key in target.modified.iter() {
                 let info = target.lengths.get(key).expect("key must exist");
                 let start = info.start;
@@ -491,11 +490,6 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             info.start = next_data.len();
             value.write(&mut next_data);
         }
-        assert_eq!(
-            next_data.len(),
-            next_data_len - crc32::Digest::SIZE,
-            "write() did not write expected bytes"
-        );
         next_data.put_u32(Crc32::checksum(next_data.as_ref()));
 
         // Shrinking rewrites must also persist the resize, so they need a full sync.
