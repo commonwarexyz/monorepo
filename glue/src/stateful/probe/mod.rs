@@ -63,8 +63,12 @@
 //!
 //! # Why the sample is `f + 1`
 //!
-//! Assume at most `f` of the `n` participants are faulty. In this protocol, `f` makes no
-//! distinction between Byzantine and crashed nodes: a peer that does not answer and a peer that
+//! The `f` used here comes from the epoch-scoped committee for each accepted response
+//! finalization, not from the initially registered peer set. That lets probe tolerate peer churn
+//! after startup without lowering the sample below the epoch's fault bound.
+//!
+//! Assume at most `f` of the `n` participants in that epoch are faulty. In this protocol, `f` makes
+//! no distinction between Byzantine and crashed nodes: a peer that does not answer and a peer that
 //! answers adversarially both count against the same fault budget.
 //!
 //! A finalization is self-certifying: it carries a quorum certificate, so any one that verifies
@@ -84,6 +88,15 @@
 //! honest replies. If they report something higher, it must still be a valid finalization, so it is
 //! a real finalized block rather than a rollback.
 //!
+//! If fewer than `f + 1` registered peers can answer for that epoch, probe cannot resolve that
+//! request round and will retry. This is a liveness tradeoff, not a safety one: using the epoch's
+//! `f + 1` threshold lets probe tolerate peer churn while preserving the assumption that every
+//! completed sample includes at least one honest response from the relevant historical committee.
+//!
+//! [`Config::minimum_epoch`] bounds that historical search. A caller that initializes peers from a
+//! known epoch can set it to that lower bound; responses from earlier epochs are ignored. Probe
+//! still sizes each accepted sample from that finalization's epoch committee.
+//!
 //! ```text
 //!   any f + 1 sample:
 //!
@@ -97,9 +110,10 @@
 //! # Resource Bounds
 //!
 //! The actor retains at most one finalization candidate per peer per request round. Additional
-//! valid finalizations from the same peer are verified and then ignored, preserving correctness
-//! when network delivery lags across request rounds without allowing one peer to inflate a sample.
-//! The p2p channel supplies rate limiting and maximum encoded message size enforcement.
+//! messages from the same peer are ignored before validation, preserving correctness when network
+//! delivery lags across request rounds without wasting certificate work or allowing one peer to
+//! inflate a sample. The p2p channel supplies rate limiting and maximum encoded message size
+//! enforcement.
 
 mod actor;
 pub use actor::{Config, Probe};
@@ -467,7 +481,7 @@ mod test {
             n: u32,
             retry_timeout: NonZeroDuration,
         ) -> Self {
-            Self::setup_with(context, n, retry_timeout, |scheme| {
+            Self::setup_with(context, n, retry_timeout, Epoch::zero(), |scheme| {
                 ConstantProvider::new(scheme.clone())
             })
             .await
@@ -480,6 +494,7 @@ mod test {
             context: &deterministic::Context,
             n: u32,
             retry_timeout: NonZeroDuration,
+            minimum_epoch: Epoch,
             make_provider: F,
         ) -> Self
         where
@@ -602,6 +617,7 @@ mod test {
                     strategy: Sequential,
                     capacity: NZUsize!(100),
                     blocker: oracle.control(public_key.clone()),
+                    minimum_epoch,
                     retry_timeout,
                 });
                 // Node 0 is the discoverer and is left in discovery for the test to drive. Every
@@ -1207,10 +1223,16 @@ mod test {
             let provider = epoch_provider([(Epoch::new(1), epoch_one[0].clone())]);
 
             let mut harness =
-                Harness::setup_with(&context, 4, NZDuration!(Duration::from_secs(3600)), {
-                    let provider = provider.clone();
-                    move |_scheme| provider.clone()
-                })
+                Harness::setup_with(
+                    &context,
+                    4,
+                    NZDuration!(Duration::from_secs(3600)),
+                    Epoch::zero(),
+                    {
+                        let provider = provider.clone();
+                        move |_scheme| provider.clone()
+                    },
+                )
                 .await;
             harness.start_probes();
             let mut subscription = harness.nodes[0].probe.subscribe();
@@ -1223,6 +1245,55 @@ mod test {
             context.sleep(Duration::from_millis(100)).await;
             let floor = subscription.try_recv().expect("floor resolved");
             assert_eq!(floor, finalization);
+        });
+    }
+
+    /// Finalizations below the configured minimum epoch are ignored without blocking and do not
+    /// prevent the same peers from contributing accepted finalizations later in the round.
+    #[test]
+    fn test_ignores_finalization_below_minimum_epoch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let provider = EpochProvider::default();
+            let mut harness = Harness::setup_with(
+                &context,
+                4,
+                NZDuration!(Duration::from_secs(3600)),
+                Epoch::new(1),
+                {
+                    let provider = provider.clone();
+                    move |_scheme| provider.clone()
+                },
+            )
+            .await;
+            provider.insert(Epoch::zero(), harness.schemes[0].clone());
+            provider.insert(Epoch::new(1), harness.schemes[0].clone());
+            harness.start_probes();
+            let mut subscription = harness.nodes[0].probe.subscribe();
+
+            // These finalizations are valid and decodable, but below the configured search floor.
+            let (_, old) = build_finalization_at(&harness.schemes, Epoch::zero(), 1, 1);
+            harness.send_raw(1, 0, finalization_bytes(old.clone()));
+            harness.send_raw(2, 0, finalization_bytes(old));
+            context.sleep(Duration::from_millis(50)).await;
+            assert!(
+                matches!(
+                    subscription.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "below-minimum finalizations must not resolve the floor"
+            );
+
+            // The same peers can still contribute once they answer with an accepted epoch.
+            let (_, accepted) = build_finalization_at(&harness.schemes, Epoch::new(1), 2, 2);
+            harness.send_raw(1, 0, finalization_bytes(accepted.clone()));
+            harness.send_raw(2, 0, finalization_bytes(accepted.clone()));
+            context.sleep(Duration::from_millis(100)).await;
+
+            let floor = subscription.try_recv().expect("floor resolved");
+            assert_eq!(floor, accepted);
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(blocked.is_empty(), "no peer should be blocked");
         });
     }
 
@@ -1289,6 +1360,7 @@ mod test {
                 strategy: Sequential,
                 capacity: NZUsize!(100),
                 blocker: oracle.control(participants[0].clone()),
+                minimum_epoch: Epoch::zero(),
                 retry_timeout: NZDuration!(Duration::from_secs(3600)),
             });
             let _probe = probe.start(probe_network);
@@ -1334,10 +1406,16 @@ mod test {
             let provider = epoch_provider([(Epoch::new(1), epoch_one[0].clone())]);
 
             let mut harness =
-                Harness::setup_with(&context, 4, NZDuration!(Duration::from_secs(3600)), {
-                    let provider = provider.clone();
-                    move |_scheme| provider.clone()
-                })
+                Harness::setup_with(
+                    &context,
+                    4,
+                    NZDuration!(Duration::from_secs(3600)),
+                    Epoch::zero(),
+                    {
+                        let provider = provider.clone();
+                        move |_scheme| provider.clone()
+                    },
+                )
                 .await;
             harness.start_probes();
 
@@ -1378,10 +1456,16 @@ mod test {
             let provider = EpochProvider::default();
 
             let mut harness =
-                Harness::setup_with(&context, 4, NZDuration!(Duration::from_secs(3600)), {
-                    let provider = provider.clone();
-                    move |_scheme| provider.clone()
-                })
+                Harness::setup_with(
+                    &context,
+                    4,
+                    NZDuration!(Duration::from_secs(3600)),
+                    Epoch::zero(),
+                    {
+                        let provider = provider.clone();
+                        move |_scheme| provider.clone()
+                    },
+                )
                 .await;
             provider.insert(Epoch::new(1), harness.schemes[0].clone());
             provider.insert(Epoch::new(2), harness.schemes[0].clone());

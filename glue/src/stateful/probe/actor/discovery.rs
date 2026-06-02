@@ -46,6 +46,7 @@ where
     pub(super) provider: D,
     pub(super) strategy: T,
     pub(super) blocker: B,
+    pub(super) minimum_epoch: Epoch,
     pub(super) retry_timeout: NonZeroDuration,
     pub(super) floor: Option<Finalization<S, V::Commitment>>,
     pub(super) floor_subscribers: Vec<oneshot::Sender<Finalization<S, V::Commitment>>>,
@@ -188,6 +189,9 @@ where
             return Ok(None);
         }
         let proposal = Proposal::<V::Commitment>::read(&mut message)?;
+        if proposal.epoch() < self.minimum_epoch {
+            return Ok(None);
+        }
         let Some(scheme) = self.certificate_verifier(proposal.epoch()) else {
             return Ok(None);
         };

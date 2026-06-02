@@ -443,6 +443,7 @@ impl EngineDefinition for SingleDbEngine {
             strategy: Sequential,
             capacity: NZUsize!(100),
             blocker: oracle.control(public_key.clone()),
+            minimum_epoch: Epoch::zero(),
             retry_timeout: NZDuration!(Duration::from_millis(100)),
         });
         probe.start(probe_network);

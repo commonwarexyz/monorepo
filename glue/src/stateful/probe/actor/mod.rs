@@ -32,6 +32,8 @@ where
     pub capacity: NonZeroUsize,
     /// Blocker used to block peers that send invalid finalizations.
     pub blocker: B,
+    /// Finalizations below this epoch are ignored when discovering a floor.
+    pub minimum_epoch: Epoch,
     /// How long to wait for enough finalization replies before clearing the pending
     /// responses and re-requesting.
     pub retry_timeout: NonZeroDuration,
@@ -59,6 +61,7 @@ where
     provider: D,
     strategy: T,
     blocker: B,
+    minimum_epoch: Epoch,
     retry_timeout: NonZeroDuration,
 }
 
@@ -84,6 +87,7 @@ where
                 provider: config.provider,
                 strategy: config.strategy,
                 blocker: config.blocker,
+                minimum_epoch: config.minimum_epoch,
                 retry_timeout: config.retry_timeout,
             },
             mailbox,
@@ -108,6 +112,7 @@ where
             provider: self.provider,
             strategy: self.strategy,
             blocker: self.blocker,
+            minimum_epoch: self.minimum_epoch,
             retry_timeout: self.retry_timeout,
             floor: None,
             floor_subscribers: Vec::new(),
