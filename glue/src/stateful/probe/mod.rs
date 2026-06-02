@@ -1222,18 +1222,17 @@ mod test {
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_FD_EPOCH_ONE", 4);
             let provider = epoch_provider([(Epoch::new(1), epoch_one[0].clone())]);
 
-            let mut harness =
-                Harness::setup_with(
-                    &context,
-                    4,
-                    NZDuration!(Duration::from_secs(3600)),
-                    Epoch::zero(),
-                    {
-                        let provider = provider.clone();
-                        move |_scheme| provider.clone()
-                    },
-                )
-                .await;
+            let mut harness = Harness::setup_with(
+                &context,
+                4,
+                NZDuration!(Duration::from_secs(3600)),
+                Epoch::zero(),
+                {
+                    let provider = provider.clone();
+                    move |_scheme| provider.clone()
+                },
+            )
+            .await;
             harness.start_probes();
             let mut subscription = harness.nodes[0].probe.subscribe();
 
@@ -1405,18 +1404,17 @@ mod test {
             } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_FD_EPOCH_ONE", 4);
             let provider = epoch_provider([(Epoch::new(1), epoch_one[0].clone())]);
 
-            let mut harness =
-                Harness::setup_with(
-                    &context,
-                    4,
-                    NZDuration!(Duration::from_secs(3600)),
-                    Epoch::zero(),
-                    {
-                        let provider = provider.clone();
-                        move |_scheme| provider.clone()
-                    },
-                )
-                .await;
+            let mut harness = Harness::setup_with(
+                &context,
+                4,
+                NZDuration!(Duration::from_secs(3600)),
+                Epoch::zero(),
+                {
+                    let provider = provider.clone();
+                    move |_scheme| provider.clone()
+                },
+            )
+            .await;
             harness.start_probes();
 
             // A finalization for the unknown epoch 5: dropped before verification, so the sender
@@ -1455,18 +1453,17 @@ mod test {
         runner.start(|context| async move {
             let provider = EpochProvider::default();
 
-            let mut harness =
-                Harness::setup_with(
-                    &context,
-                    4,
-                    NZDuration!(Duration::from_secs(3600)),
-                    Epoch::zero(),
-                    {
-                        let provider = provider.clone();
-                        move |_scheme| provider.clone()
-                    },
-                )
-                .await;
+            let mut harness = Harness::setup_with(
+                &context,
+                4,
+                NZDuration!(Duration::from_secs(3600)),
+                Epoch::zero(),
+                {
+                    let provider = provider.clone();
+                    move |_scheme| provider.clone()
+                },
+            )
+            .await;
             provider.insert(Epoch::new(1), harness.schemes[0].clone());
             provider.insert(Epoch::new(2), harness.schemes[0].clone());
             harness.start_probes();
