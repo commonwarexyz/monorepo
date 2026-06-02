@@ -1282,6 +1282,14 @@ where
                     return false;
                 };
 
+                // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
+                // is guaranteed to be certified (assuming the certificate verifies). Because of this,
+                // we can skip broader payload checks and just check that the application block matches
+                // the commitment in the finalization proposal.
+                //
+                // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
+                // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
+                // the requested block is certified.
                 let commitment = finalization.proposal.payload;
                 if block.height() != height
                     || block.digest() != V::commitment_to_inner(commitment)
