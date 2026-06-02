@@ -1019,8 +1019,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // After trimming empty trailing sections, a zero item count means the data journal is
         // empty: either no sections remain, or one empty section remains for repair below.
-        let data_empty = data.is_empty() || items_in_last_section == 0;
-        if data_empty {
+        if items_in_last_section == 0 {
             let offsets_bounds = {
                 let offsets_reader = offsets.reader().await;
                 offsets_reader.bounds()
@@ -1046,7 +1045,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             // 1. We completely pruned the data journal but crashed before pruning
             //    the offsets journal.
             // 2. The data journal was never opened.
-            if !offsets_bounds.is_empty() && offsets_bounds.start < size {
+            if !offsets_bounds.is_empty() {
                 // Offsets has unpruned entries but data is gone - clear to match empty state.
                 // We use clear_to_size (not prune) to ensure bounds.start == bounds.end,
                 // even when size is mid-section.
@@ -1069,6 +1068,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 let offsets_reader = offsets.reader().await;
                 offsets_reader.bounds()
             };
+
+            // Offsets journal ending before the oldest retained data section represents an
+            // impossible state under normal crash/prune sequences, indicating external corruption.
             if offsets_bounds.end < data_oldest_pos {
                 return Err(Error::Corruption(format!(
                     "offsets journal size {} is behind data oldest position {}",
@@ -1077,14 +1079,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
             let offsets_start_section = offsets_bounds.start / items_per_section;
             match offsets_start_section.cmp(&data_first_section) {
-                Ordering::Less if offsets_bounds.is_empty() => {
-                    // Offsets empty in an earlier section means the offsets partition was lost
-                    // or re-created. Normal prune-crash leaves offsets non-empty.
-                    return Err(Error::Corruption(format!(
-                        "offsets empty at section {offsets_start_section}, \
-                         data starts at section {data_first_section}"
-                    )));
-                }
                 Ordering::Less => {
                     warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
                     offsets.prune(data_oldest_pos).await?;
@@ -1144,45 +1138,39 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             recovery_watermark
         };
 
-        let (data_size, data_sync_start) = match Self::rebuild_offsets_from_anchor(
+        let mut data_sync_start = recovery_start;
+        let mut data_size = Self::rebuild_offsets_from_anchor(
             data,
             offsets,
             items_per_section,
             offsets_bounds.start,
             recovery_start,
         )
-        .await?
-        {
-            Some(size) => (size, recovery_start),
-            None if recovery_start != offsets_bounds.start => {
-                warn!(
-                    recovery_watermark = recovery_start,
-                    pruning_boundary = offsets_bounds.start,
-                    "crash repair: data journal shorter than offsets recovery watermark, rebuilding from pruning boundary"
-                );
-                Self::rebuild_offsets_from_anchor(
-                    data,
-                    offsets,
-                    items_per_section,
-                    offsets_bounds.start,
-                    offsets_bounds.start,
-                )
-                .await?
-                .map(|size| (size, offsets_bounds.start))
-                .ok_or_else(|| {
-                    Error::Corruption(format!(
-                        "data journal shorter than pruning boundary {}",
-                        offsets_bounds.start
-                    ))
-                })?
-            }
-            None => {
-                return Err(Error::Corruption(format!(
-                    "data journal shorter than pruning boundary {}",
-                    offsets_bounds.start
-                )))
-            }
-        };
+        .await?;
+
+        if data_size.is_none() && recovery_start != offsets_bounds.start {
+            warn!(
+                recovery_watermark = recovery_start,
+                pruning_boundary = offsets_bounds.start,
+                "crash repair: data journal shorter than offsets recovery watermark, rebuilding from pruning boundary"
+            );
+            data_sync_start = offsets_bounds.start;
+            data_size = Self::rebuild_offsets_from_anchor(
+                data,
+                offsets,
+                items_per_section,
+                offsets_bounds.start,
+                offsets_bounds.start,
+            )
+            .await?;
+        }
+
+        let data_size = data_size.ok_or_else(|| {
+            Error::Corruption(format!(
+                "data journal shorter than pruning boundary {}",
+                offsets_bounds.start
+            ))
+        })?;
 
         // Final invariant checks
         let pruning_boundary = {
@@ -1250,26 +1238,20 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let stream = data.replay(start_section, 0, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
 
-            let mut skipped = 0;
-            while skipped < skip {
+            for _ in 0..skip {
                 let Some(result) = stream.next().await else {
                     return Ok(None);
                 };
-                let (section, _offset, _size, _item) = result?;
-                let position = first_position + skipped;
-                let expected_section = position_to_section(position, items_per_section);
-                if section != expected_section {
-                    if section > expected_section {
+                let (section, ..) = result?;
+                if section != start_section {
+                    if section > start_section {
                         return Ok(None);
                     }
-                    // section < expected_section: data section has more items than
-                    // items_per_section allows.
+                    // section < start_section: replay-order or manager invariant violation.
                     return Err(Error::Corruption(format!(
-                        "data section {section} over capacity at logical position {position}, \
-                         expected section {expected_section}"
+                        "data section {section} out of order, expected section {start_section}"
                     )));
                 }
-                skipped += 1;
             }
 
             let mut size = anchor;
