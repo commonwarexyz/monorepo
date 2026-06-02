@@ -212,9 +212,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// * If offsets.bounds().start < data.bounds().start: Prune offsets to match
 ///   (This can happen if we crash after pruning data journal but before pruning offsets journal)
 ///
-/// Note that we don't recover from the case where offsets.bounds().start >
-/// data.bounds().start. This should never occur because we always prune the data journal
-/// before the offsets journal.
+/// Offsets may start after the data journal's section-aligned start when both are in the same
+/// section, as in a mid-section `init_at_size`. Offsets starting in a later section imply
+/// corruption because we always prune the data journal before the offsets journal.
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
@@ -580,9 +580,9 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// requested range.
     ///
     /// Behavior by existing on-disk state:
-    /// - Fresh (no data): returns an empty journal.
-    /// - Stale (all data strictly before `range.start`): destroys existing data and returns an
-    ///   empty journal.
+    /// - Fresh (no data): returns an empty journal, resetting to `range.start` if needed.
+    /// - Stale (all data strictly before `range.start`): resets to `range.start` using the
+    ///   crash-safe clear path and returns an empty journal.
     /// - Overlap within [`range.start`, `range.end`]:
     ///   - Prunes toward `range.start` (section-aligned, so some items before
     ///     `range.start` may be retained)
@@ -618,7 +618,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let size = journal.size().await;
 
-        // No existing data - initialize at the start of the sync range if needed
+        // No existing data - reset to sync range start if needed
         if size == 0 {
             if range.start == 0 {
                 debug!("no existing journal data, returning empty journal");
@@ -626,10 +626,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             } else {
                 debug!(
                     range.start,
-                    "no existing journal data, initializing at sync range start"
+                    "no existing journal data, resetting to sync range start"
                 );
-                journal.destroy().await?;
-                return Self::init_at_size(context, cfg, range.start).await;
+                journal.clear_to_size(range.start).await?;
+                return Ok(journal);
             }
         }
 
@@ -646,15 +646,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Err(Error::ItemOutOfRange(size));
         }
 
-        // If all existing data is before our sync range, destroy and recreate fresh
+        // If all existing data is before our sync range, reset to range start
         if size <= range.start {
-            // All data is stale (ends at or before range.start)
             debug!(
                 size,
-                range.start, "existing journal data is stale, re-initializing at start position"
+                range.start, "existing journal data is stale, resetting to start position"
             );
-            journal.destroy().await?;
-            return Self::init_at_size(context, cfg, range.start).await;
+            journal.clear_to_size(range.start).await?;
+            return Ok(journal);
         }
 
         // Prune to lower bound if needed
@@ -931,6 +930,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Remove any underlying blobs created by the journal.
     ///
     /// This destroys both the data journal and the offsets journal.
+    ///
+    /// # Crash Safety
+    ///
+    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
+    /// reopening the same partitions may observe partially removed state. Use `clear_to_size` for a
+    /// recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
         let inner = self.inner.into_inner();
         inner.data.destroy().await?;

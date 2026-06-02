@@ -1272,6 +1272,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Remove any persisted data created by the journal.
+    ///
+    /// # Crash Safety
+    ///
+    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
+    /// reopening the same partition may observe partially removed state. Use `clear_to_size` for a
+    /// recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy inner journal
         let inner = self.inner.into_inner();
