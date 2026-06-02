@@ -128,7 +128,9 @@ mod test {
         Block as ConsensusBlock, CertifiableBlock, Heightable, Reporter,
     };
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Provider},
+        certificate::{
+            mocks::Fixture, Attestation, ConstantProvider, Provider, Scheme as CertificateScheme,
+        },
         ed25519,
         sha256::Digest as Sha256Digest,
         Digest as _, Digestible, Signer as _,
@@ -138,7 +140,7 @@ mod test {
         simulated::{Config as SimConfig, Link, Network, Oracle, Sender},
         Recipients, Sender as _,
     };
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Sequential, Strategy as ParallelStrategy};
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, telemetry::traces::collector::TraceStorage, Clock,
         Handle, Metrics, Quota, Runner as _, Supervisor,
@@ -283,6 +285,148 @@ mod test {
 
         fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
             self.0.lock().get(&scope).cloned()
+        }
+    }
+
+    /// Wraps the mock scheme so `all()` can verify certificates without exposing participants.
+    #[derive(Clone, Debug)]
+    struct MaybeEnumerableScheme {
+        inner: Scheme,
+        enumerable: bool,
+    }
+
+    impl MaybeEnumerableScheme {
+        const fn new(inner: Scheme, enumerable: bool) -> Self {
+            Self { inner, enumerable }
+        }
+
+        fn wrap_attestation(attestation: Attestation<Scheme>) -> Attestation<Self> {
+            Attestation {
+                signer: attestation.signer,
+                signature: attestation.signature,
+            }
+        }
+
+        fn unwrap_attestation(attestation: Attestation<Self>) -> Attestation<Scheme> {
+            Attestation {
+                signer: attestation.signer,
+                signature: attestation.signature,
+            }
+        }
+    }
+
+    impl CertificateScheme for MaybeEnumerableScheme {
+        type Subject<'a, D: commonware_cryptography::Digest> =
+            commonware_consensus::simplex::types::Subject<'a, D>;
+        type PublicKey = ed25519::PublicKey;
+        type Signature = <Scheme as CertificateScheme>::Signature;
+        type Certificate = <Scheme as CertificateScheme>::Certificate;
+
+        fn me(&self) -> Option<commonware_utils::Participant> {
+            self.inner.me()
+        }
+
+        fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
+            assert!(
+                self.enumerable,
+                "all-epoch verifier has no participant metadata"
+            );
+            self.inner.participants()
+        }
+
+        fn sign<D: commonware_cryptography::Digest>(
+            &self,
+            subject: Self::Subject<'_, D>,
+        ) -> Option<Attestation<Self>> {
+            self.inner.sign(subject).map(Self::wrap_attestation)
+        }
+
+        fn verify_attestation<R, D>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            attestation: &Attestation<Self>,
+            strategy: &impl ParallelStrategy,
+        ) -> bool
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+        {
+            let attestation = Attestation::<Scheme> {
+                signer: attestation.signer,
+                signature: attestation.signature.clone(),
+            };
+            self.inner
+                .verify_attestation(rng, subject, &attestation, strategy)
+        }
+
+        fn assemble<I, M>(
+            &self,
+            attestations: I,
+            strategy: &impl ParallelStrategy,
+        ) -> Option<Self::Certificate>
+        where
+            I: IntoIterator<Item = Attestation<Self>>,
+            I::IntoIter: Send,
+            M: commonware_utils::Faults,
+        {
+            self.inner.assemble::<_, M>(
+                attestations.into_iter().map(Self::unwrap_attestation),
+                strategy,
+            )
+        }
+
+        fn verify_certificate<R, D, M>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            certificate: &Self::Certificate,
+            strategy: &impl ParallelStrategy,
+        ) -> bool
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+            M: commonware_utils::Faults,
+        {
+            self.inner
+                .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
+        }
+
+        fn is_attributable() -> bool {
+            Scheme::is_attributable()
+        }
+
+        fn is_batchable() -> bool {
+            Scheme::is_batchable()
+        }
+
+        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            self.inner.certificate_codec_config()
+        }
+
+        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
+        {
+            Scheme::certificate_codec_config_unbounded()
+        }
+    }
+
+    /// Provides a participant-less all-epoch verifier plus an epoch-scoped committee.
+    #[derive(Clone)]
+    struct ParticipantlessAllProvider {
+        all: Arc<MaybeEnumerableScheme>,
+        scoped: Arc<MaybeEnumerableScheme>,
+    }
+
+    impl Provider for ParticipantlessAllProvider {
+        type Scope = Epoch;
+        type Scheme = MaybeEnumerableScheme;
+
+        fn scoped(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {
+            Some(self.scoped.clone())
+        }
+
+        fn all(&self) -> Option<Arc<MaybeEnumerableScheme>> {
+            Some(self.all.clone())
         }
     }
 
@@ -542,12 +686,15 @@ mod test {
     /// `[digest_byte; 32]`, signed by `schemes`. Verifiable only against the matching verifier;
     /// signing with a foreign scheme set yields a structurally valid but unverifiable
     /// finalization.
-    fn build_finalization_at(
-        schemes: &[Scheme],
+    fn build_finalization_at<S>(
+        schemes: &[S],
         epoch: Epoch,
         height: u64,
         digest_byte: u8,
-    ) -> (Block, Finalization<Scheme, Sha256Digest>) {
+    ) -> (Block, Finalization<S, Sha256Digest>)
+    where
+        S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest>,
+    {
         let block = Block::new(height, digest_byte);
         let round = Round::new(epoch, View::new(height));
         let proposal = Proposal {
@@ -575,8 +722,11 @@ mod test {
     }
 
     /// Encodes a finalization as the bytes of a [`wire::Message::Response`].
-    fn finalization_bytes(finalization: Finalization<Scheme, Sha256Digest>) -> Vec<u8> {
-        wire::Message::<Scheme, Variant>::Response(finalization)
+    fn finalization_bytes<S>(finalization: Finalization<S, Sha256Digest>) -> Vec<u8>
+    where
+        S: commonware_consensus::simplex::scheme::Scheme<Sha256Digest>,
+    {
+        wire::Message::<S, Variant>::Response(finalization)
             .encode()
             .to_vec()
     }
@@ -1065,6 +1215,100 @@ mod test {
             let (_, finalization) = build_finalization_at(&epoch_one, Epoch::new(1), 1, 7);
             harness.send_raw(1, 0, finalization_bytes(finalization.clone()));
             harness.send_raw(2, 0, finalization_bytes(finalization.clone()));
+
+            context.sleep(Duration::from_millis(100)).await;
+            let floor = subscription.try_recv().expect("floor resolved");
+            assert_eq!(floor, finalization);
+        });
+    }
+
+    /// An all-epoch verifier may be unable to enumerate participants; floor discovery must
+    /// verify with it but size peer samples from the epoch-scoped committee.
+    #[test]
+    fn test_sample_size_uses_scoped_scheme_with_participantless_all_verifier() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut rng = test_rng();
+            let Fixture {
+                participants,
+                schemes,
+                verifier,
+                ..
+            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_FD_ALL_VERIFIER", 4);
+            let schemes: Vec<_> = schemes
+                .into_iter()
+                .map(|scheme| MaybeEnumerableScheme::new(scheme, true))
+                .collect();
+            let provider = ParticipantlessAllProvider {
+                all: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
+                scoped: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
+            };
+
+            let (network, oracle) = Network::new_with_peers(
+                context.child("network"),
+                SimConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+                participants.clone(),
+            )
+            .await;
+            let _network = network.start();
+            for a in &participants {
+                for b in &participants {
+                    if a != b {
+                        oracle
+                            .add_link(a.clone(), b.clone(), LINK)
+                            .await
+                            .expect("failed to add link");
+                    }
+                }
+            }
+
+            let bootstrap_network = oracle
+                .control(participants[0].clone())
+                .register(BOOTSTRAP_CHANNEL, TEST_QUOTA)
+                .await
+                .expect("failed to register bootstrap channel");
+            let (bootstrapper, bootstrap_mailbox) = FloorDiscovery::<
+                _,
+                MaybeEnumerableScheme,
+                ParticipantlessAllProvider,
+                Variant,
+                _,
+                ed25519::PublicKey,
+                _,
+            >::new(Config {
+                context: context.child("bootstrapper"),
+                provider,
+                strategy: Sequential,
+                capacity: NZUsize!(100),
+                blocker: oracle.control(participants[0].clone()),
+                retry_timeout: NZDuration!(Duration::from_secs(3600)),
+            });
+            let _bootstrapper = bootstrapper.start(bootstrap_network);
+            let mut subscription = bootstrap_mailbox.subscribe();
+
+            let mut peer_channels = Vec::new();
+            for public_key in participants.iter().take(3).skip(1) {
+                peer_channels.push(
+                    oracle
+                        .control(public_key.clone())
+                        .register(BOOTSTRAP_CHANNEL, TEST_QUOTA)
+                        .await
+                        .expect("failed to register peer bootstrap channel"),
+                );
+            }
+            let (_, finalization) = build_finalization_at(&schemes, Epoch::zero(), 1, 1);
+            for (sender, _) in &peer_channels {
+                let mut sender = sender.clone();
+                sender.send(
+                    Recipients::One(participants[0].clone()),
+                    finalization_bytes(finalization.clone()),
+                    false,
+                );
+            }
 
             context.sleep(Duration::from_millis(100)).await;
             let floor = subscription.try_recv().expect("floor resolved");

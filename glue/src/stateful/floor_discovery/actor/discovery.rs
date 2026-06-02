@@ -181,7 +181,7 @@ where
             return Ok(None);
         }
         let proposal = Proposal::<V::Commitment>::read(&mut message)?;
-        let Some(scheme) = self.scheme(proposal.epoch()) else {
+        let Some(scheme) = self.certificate_verifier(proposal.epoch()) else {
             return Ok(None);
         };
         S::Certificate::decode_cfg(&mut message, &scheme.certificate_codec_config()).map(
@@ -205,7 +205,7 @@ where
     ) -> Option<(P, Finalization<S, V::Commitment>)> {
         // Verify against the certificate scheme for the finalization's epoch. If no scheme is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let scheme = self.scheme(finalization.epoch())?;
+        let scheme = self.certificate_verifier(finalization.epoch())?;
         if !finalization.verify(
             self.context.as_present_mut(),
             scheme.as_ref(),
@@ -270,15 +270,16 @@ where
         );
     }
 
-    /// Returns the certificate scheme to verify finalizations at `epoch`, preferring a global
+    /// Returns a scheme suitable for verifying certificates at `epoch`, preferring a global
     /// verifier and falling back to the epoch-scoped scheme.
-    fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
+    fn certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
         self.provider.all().or_else(|| self.provider.scoped(epoch))
     }
 
     /// Returns the number of distinct peer replies (`f + 1`) required for `epoch`.
     fn sample_size(&self, epoch: Epoch) -> Option<usize> {
-        self.scheme(epoch)
+        self.provider
+            .scoped(epoch)
             .map(|scheme| N3f1::max_faults(scheme.participants().len()) as usize + 1)
     }
 }
