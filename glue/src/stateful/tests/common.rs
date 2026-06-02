@@ -1,20 +1,14 @@
 use crate::simulate::processed::ProcessedHeight;
 use commonware_consensus::{
     marshal::{self, core::Variant, Identifier as MarshalIdentifier},
-    simplex::{mocks::scheme::Scheme as MockScheme, types::Finalization},
+    simplex::mocks::scheme::Scheme as MockScheme,
     types::Height,
-    Heightable,
 };
 use commonware_cryptography::{ed25519, sha256, Digestible};
-use commonware_runtime::{buffer::paged::CacheRef, Clock, Quota};
+use commonware_runtime::{buffer::paged::CacheRef, Quota};
 use commonware_storage::archive::immutable;
-use commonware_utils::{sync::Mutex, NZUsize, NZU16, NZU64};
-use std::{
-    collections::{BTreeMap, HashMap},
-    num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize},
-    sync::Arc,
-    time::Duration,
-};
+use commonware_utils::{NZUsize, NZU16, NZU64};
+use std::num::{NonZeroU16, NonZeroU32, NonZeroU64, NonZeroUsize};
 
 pub(super) const EPOCH_LENGTH: NonZeroU64 = NZU64!(u64::MAX);
 pub(super) const NAMESPACE: &[u8] = b"stateful_e2e_test";
@@ -98,89 +92,6 @@ where
     pub(crate) const fn state_sync_entries(&self) -> u64 {
         self.state_sync_entries
     }
-}
-
-pub(super) type MarshalMailboxOf<V> = marshal::core::Mailbox<MockScheme<ed25519::PublicKey>, V>;
-
-/// Poll peers for a majority-agreed sync floor.
-pub(super) async fn fetch_majority_sync_floor<V>(
-    mailboxes: &Arc<Mutex<BTreeMap<ed25519::PublicKey, MarshalMailboxOf<V>>>>,
-    context: &impl Clock,
-    me: &ed25519::PublicKey,
-) -> Option<(
-    Finalization<MockScheme<ed25519::PublicKey>, V::Commitment>,
-    Height,
-)>
-where
-    V: Variant,
-    V::ApplicationBlock: Digestible<Digest = sha256::Digest>,
-{
-    for _ in 0..20 {
-        let peers_mailboxes: Vec<MarshalMailboxOf<V>> = {
-            let guard = mailboxes.lock();
-            guard
-                .iter()
-                .filter(|(peer, _)| *peer != me)
-                .map(|(_, mailbox)| mailbox.clone())
-                .collect()
-        };
-
-        // Collect latest heights from all peers.
-        let mut peers: Vec<(MarshalMailboxOf<V>, Height)> = Vec::new();
-        for mailbox in peers_mailboxes {
-            if let Some(height) = mailbox
-                .get_block(MarshalIdentifier::Latest)
-                .await
-                .map(|b| b.height())
-            {
-                peers.push((mailbox, height));
-            }
-        }
-        if peers.is_empty() {
-            context.sleep(Duration::from_millis(100)).await;
-            continue;
-        }
-
-        // Find the highest height that a majority of peers have reached.
-        let required = peers.len() / 2 + 1;
-        let mut heights: Vec<Height> = peers.iter().map(|(_, h)| *h).collect();
-        heights.sort();
-        let quorum_height = heights[heights.len() - required];
-
-        // Count digests at quorum height and return the first finalization with majority agreement.
-        let mut counts: HashMap<sha256::Digest, (usize, MarshalMailboxOf<V>)> = HashMap::new();
-        for (mailbox, h) in &peers {
-            if *h < quorum_height {
-                continue;
-            }
-            if let Some(digest) = mailbox
-                .get_block(MarshalIdentifier::Height(quorum_height))
-                .await
-                .map(|b| b.digest())
-            {
-                counts
-                    .entry(digest)
-                    .and_modify(|(c, _)| *c += 1)
-                    .or_insert((1, mailbox.clone()));
-            }
-        }
-        for (digest, (count, mailbox)) in counts {
-            if count >= required {
-                let finalization = mailbox
-                    .get_finalization(quorum_height)
-                    .await
-                    .expect("sync floor finalization must be available");
-                assert_eq!(
-                    V::commitment_to_inner(finalization.proposal.payload),
-                    digest
-                );
-                return Some((finalization, quorum_height));
-            }
-        }
-
-        context.sleep(Duration::from_millis(100)).await;
-    }
-    None
 }
 
 impl<V> ProcessedHeight for MockValidatorState<V>

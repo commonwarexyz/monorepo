@@ -463,7 +463,7 @@ where
     PlanBuilder::new(engine)
         .seeds(0..5)
         .crash(Crash::Random {
-            frequency: Duration::from_secs(2),
+            frequency: Duration::from_millis(1500),
             downtime: Duration::from_secs(1),
             count: 1,
         })
@@ -483,8 +483,8 @@ where
     PlanBuilder::new(engine)
         .seeds(0..5)
         .crash(Crash::Random {
-            frequency: Duration::from_secs(2),
-            downtime: Duration::from_millis(500),
+            frequency: Duration::from_millis(1500),
+            downtime: Duration::from_secs(1),
             count: 3,
         })
         .exit_condition(ProcessedHeightAtLeast::new(50))
@@ -505,7 +505,7 @@ where
     PlanBuilder::new(engine)
         .seeds(0..5)
         .crash(Crash::Random {
-            frequency: Duration::from_secs(2),
+            frequency: Duration::from_millis(1750),
             downtime: Duration::from_millis(500),
             count: total,
         })

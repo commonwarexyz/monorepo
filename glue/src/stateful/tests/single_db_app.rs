@@ -9,6 +9,7 @@ use crate::{
             p2p::standard as qmdb_resolver, DatabaseSet, Merkleized as _, SyncEngineConfig,
             Unmerkleized as _,
         },
+        probe::{Config as ProbeConfig, Probe},
         Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
     },
 };
@@ -17,7 +18,7 @@ use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as
 use commonware_consensus::{
     marshal::{
         self,
-        core::Actor as MarshalActor,
+        core::{Actor as MarshalActor, CommitmentFallback},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
     },
@@ -57,7 +58,7 @@ use commonware_utils::{
     non_empty_range,
     range::NonEmptyRange,
     sync::{AsyncRwLock, Mutex},
-    test_rng, NZUsize, NZU64,
+    test_rng, NZDuration, NZUsize, NZU64,
 };
 use futures::{Stream, StreamExt};
 use rand::Rng;
@@ -68,7 +69,6 @@ type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
 pub(crate) type SingleDatabaseSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
-type MarshalMailbox = MarshalMailboxOf<Standard<Block>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -262,7 +262,6 @@ pub(crate) struct SingleDbEngine {
     schemes: Vec<MockScheme<ed25519::PublicKey>>,
     enable_state_sync: bool,
     sync_config: SyncEngineConfig,
-    marshal_mailboxes: Arc<Mutex<BTreeMap<ed25519::PublicKey, MarshalMailbox>>>,
     sync_entries: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
     sync_heights: Arc<Mutex<BTreeMap<ed25519::PublicKey, u64>>>,
 }
@@ -287,7 +286,6 @@ impl SingleDbEngine {
                 update_channel_size: NZUsize!(256),
                 max_retained_roots: 8,
             },
-            marshal_mailboxes: Arc::new(Mutex::new(BTreeMap::new())),
             sync_entries: Arc::new(Mutex::new(BTreeMap::new())),
             sync_heights: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -328,6 +326,7 @@ impl EngineDefinition for SingleDbEngine {
             (3, TEST_QUOTA), // backfill
             (4, TEST_QUOTA), // broadcast
             (5, TEST_QUOTA), // qmdb sync resolver
+            (6, TEST_QUOTA), // probe
         ]
     }
 
@@ -335,6 +334,7 @@ impl EngineDefinition for SingleDbEngine {
         let InitContext {
             context,
             index,
+            delayed,
             public_key,
             oracle,
             channels,
@@ -366,7 +366,7 @@ impl EngineDefinition for SingleDbEngine {
             translator: TwoCap,
         };
 
-        // Destructure the 6 channels.
+        // Destructure the 7 channels.
         let mut channels = channels.into_iter();
         let vote_network = channels.next().unwrap();
         let certificate_network = channels.next().unwrap();
@@ -374,6 +374,7 @@ impl EngineDefinition for SingleDbEngine {
         let backfill_network = channels.next().unwrap();
         let broadcast_network = channels.next().unwrap();
         let qmdb_resolver_network = channels.next().unwrap();
+        let probe_network = channels.next().unwrap();
 
         // Marshal resolver
         let resolver_cfg = marshal_resolver::Config {
@@ -433,31 +434,31 @@ impl EngineDefinition for SingleDbEngine {
 
         let stateful_startup_context = context.child("stateful_startup");
         let mut plan = SyncPlan::init(&stateful_startup_context, partition_prefix.clone()).await;
-        let state_sync_height = if self.enable_state_sync && plan.may_state_sync() {
-            match fetch_majority_sync_floor(&self.marshal_mailboxes, &context, public_key).await {
-                Some((finalization, height)) => {
-                    *self
-                        .sync_entries
-                        .lock()
-                        .entry(public_key.clone())
-                        .or_insert(0) += 1;
-                    self.sync_heights
-                        .lock()
-                        .insert(public_key.clone(), height.get());
-                    plan = plan.with_floor(finalization);
-                    Some(height.get())
-                }
-                None => None,
-            }
+        let should_state_sync = plan.should_state_sync(self.enable_state_sync && delayed);
+        let provider = ConstantProvider::new(scheme.clone());
+
+        let (probe, probe_mailbox) = Probe::new(ProbeConfig {
+            context: context.child("probe"),
+            provider: provider.clone(),
+            strategy: Sequential,
+            capacity: NZUsize!(100),
+            blocker: oracle.control(public_key.clone()),
+            minimum_epoch: Epoch::zero(),
+            retry_timeout: NZDuration!(Duration::from_millis(100)),
+        });
+        probe.start(probe_network);
+        let mut state_sync_height = if should_state_sync {
+            let finalization = probe_mailbox.subscribe().await.expect("probe stopped");
+            plan = plan.with_floor(finalization);
+            None
         } else {
             self.sync_heights.lock().get(public_key).copied()
         };
 
         // Marshal actor
-        let provider = ConstantProvider::new(scheme.clone());
         let max_pending_acks = NZUsize!(1);
         let marshal_config = marshal::Config {
-            provider,
+            provider: provider.clone(),
             epocher: FixedEpocher::new(EPOCH_LENGTH),
             start: plan.marshal_start(genesis_block.clone()),
             partition_prefix: partition_prefix.clone(),
@@ -481,9 +482,7 @@ impl EngineDefinition for SingleDbEngine {
                 marshal_config,
             )
             .await;
-        self.marshal_mailboxes
-            .lock()
-            .insert(public_key.clone(), marshal_mailbox.clone());
+        let sync_floor = plan.floor().cloned();
 
         // QMDB state-sync resolver.
         let (qmdb_resolver_actor, qmdb_sync_resolver) =
@@ -535,6 +534,28 @@ impl EngineDefinition for SingleDbEngine {
 
         // Start marshal actor with monitored reporters.
         marshal_actor.start(marshal_reporters, buffer, resolver);
+
+        // Attach the marshal to probe, entering service. A syncing node has
+        // already consumed its floor above; a source attaches without ever soliciting peers.
+        probe_mailbox.attach(marshal_mailbox.clone());
+
+        if should_state_sync {
+            let finalization = sync_floor.expect("sync floor missing");
+            let block = marshal_mailbox
+                .subscribe_by_commitment(finalization.proposal.payload, CommitmentFallback::Wait)
+                .await
+                .expect("sync floor block must be available");
+            let height = block.height();
+            *self
+                .sync_entries
+                .lock()
+                .entry(public_key.clone())
+                .or_insert(0) += 1;
+            self.sync_heights
+                .lock()
+                .insert(public_key.clone(), height.get());
+            state_sync_height = Some(height.get());
+        }
 
         // Initialize stateful from marshal's processed frontier.
         stateful_actor.start();

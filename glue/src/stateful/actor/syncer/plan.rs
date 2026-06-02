@@ -120,6 +120,15 @@ where
         self.sync_metadata.in_progress()
     }
 
+    /// Returns whether this startup should run peer state sync.
+    ///
+    /// A caller can request peer state sync for a fresh node. An interrupted
+    /// state sync always requires peer state sync, even if the caller did not
+    /// explicitly request it.
+    pub fn should_state_sync(&self, requested: bool) -> bool {
+        self.may_state_sync() && (requested || self.requires_state_sync_floor())
+    }
+
     /// Consumes this plan and returns its durable state-sync metadata handle.
     pub(crate) fn into_sync_metadata(self) -> StateSyncMetadata<E, V::Commitment> {
         self.sync_metadata
@@ -145,6 +154,8 @@ mod tests {
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(plan.may_state_sync());
+            assert!(plan.should_state_sync(true));
+            assert!(!plan.should_state_sync(false));
             assert_eq!(plan.sync_height(), None);
             drop(plan);
 
@@ -156,6 +167,7 @@ mod tests {
             let plan =
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(!plan.may_state_sync());
+            assert!(!plan.should_state_sync(true));
             assert_eq!(plan.sync_height(), Some(Height::new(7)));
             assert!(plan.floor().is_none());
         });
@@ -215,6 +227,7 @@ mod tests {
                 SyncPlan::<_, TestScheme, TestVariant>::init(&context, partition_prefix).await;
             assert!(plan.may_state_sync());
             assert!(plan.requires_state_sync_floor());
+            assert!(plan.should_state_sync(false));
             plan.sync_metadata.begin_sync(stored).await;
             plan.sync_metadata
                 .begin_sync(FloorMarker::new(Height::new(9), Sha256::fill(9)))

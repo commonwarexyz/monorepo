@@ -33,9 +33,8 @@
 //! Applications load a [`SyncPlan`] before constructing marshal and [`Stateful`].
 //! The plan reads the durable state sync state and keeps that metadata handle
 //! until [`Stateful`] consumes it, avoiding multiple opens of the same metadata
-//! partition during startup. Callers gate floor selection on
-//! [`SyncPlan::may_state_sync`] and, if state sync is desired or
-//! [`SyncPlan::requires_state_sync_floor`] is true, attach a finalized floor via
+//! partition during startup. Callers use [`SyncPlan::should_state_sync`] to
+//! decide whether to discover and attach a finalized floor via
 //! [`SyncPlan::with_floor`]. The same plan then drives marshal (via
 //! [`SyncPlan::marshal_start`]) and stateful (via [`Config::plan`]), so both
 //! actors are guaranteed to agree on the startup decision. Once the durable
@@ -57,9 +56,9 @@
 //! - **State sync** (floor attached): Run a one-time QMDB state sync from
 //!   marshal's configured floor block, populating each database via
 //!   [`db::StateSyncSet::sync`]. For each finalized block while state sync
-//!   is live, the actor synchronously asks bootstrap to observe that block's
+//!   is live, the actor synchronously asks the syncer to observe that block's
 //!   sync targets. If the live session accepts the block, the actor
-//!   acknowledges it immediately. Once bootstrap freezes databases at
+//!   acknowledges it immediately. Once the syncer freezes databases at
 //!   `database_anchor`, the actor enters normal processing. If a finalized block
 //!   above `database_anchor` arrives first, the actor processes it during handoff.
 //!   Durable metadata is marked in-progress before any database mutation and is
@@ -102,6 +101,7 @@ mod actor;
 pub use actor::{Config, Mailbox, Stateful, SyncPlan};
 
 pub mod db;
+pub mod probe;
 
 #[cfg(test)]
 mod tests;
