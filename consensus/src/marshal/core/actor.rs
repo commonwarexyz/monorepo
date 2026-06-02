@@ -1276,7 +1276,8 @@ where
                     return false;
                 };
 
-                let Ok(block) = V::ApplicationBlock::read_cfg(&mut value, &self.block_codec_config)
+                let Ok(block) =
+                    V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
                 else {
                     response.send_lossy(false);
                     return false;
