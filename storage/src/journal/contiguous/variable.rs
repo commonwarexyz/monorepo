@@ -216,9 +216,11 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// ## 2. Offsets Recovery Watermark
 ///
 /// The offsets journal's recovery watermark records a preferred point for replaying data to rebuild
-/// offset entries after a crash. If that point falls outside the recovered offsets bounds, init
-/// falls back to the offsets start. Replay after the anchor stops at the first short data section
-/// and truncates newer sections so the recovered journal remains a contiguous prefix.
+/// offset entries after a crash. Fixed-journal recovery rejects watermarks beyond the recovered
+/// offsets size as corruption. If the watermark is otherwise unusable, such as being below the
+/// recovered offsets start or beyond the retained data prefix, init falls back to the offsets start.
+/// Replay after the anchor stops at the first short data section and truncates newer sections so the
+/// recovered journal remains a contiguous prefix.
 pub struct Journal<E: Context, V: Codec> {
     /// Inner state for data journal metadata.
     ///
@@ -2793,48 +2795,6 @@ mod tests {
             assert_eq!(variable.read(25).await.unwrap(), 2500);
 
             variable.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_variable_recovery_offsets_watermark_outside_bounds_rebuilds_from_start() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "recovery-watermark-outside-bounds".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..15u64 {
-                journal.append(&(i * 100)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // Simulate stale metadata that points past the recovered offsets bounds.
-            journal
-                .test_set_offsets_recovery_watermark(30)
-                .await
-                .unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds().await, 0..15);
-            assert_eq!(journal.test_offsets_size().await, 15);
-            for i in 0..15u64 {
-                assert_eq!(journal.read(i).await.unwrap(), i * 100);
-            }
-
-            journal.destroy().await.unwrap();
         });
     }
 
