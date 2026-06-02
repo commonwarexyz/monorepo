@@ -851,18 +851,18 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             Some(oldest_section) => {
                 // Metadata ahead of blob state should never arise: prune removes blobs before
                 // sync persists metadata, and clear_to_size uses CLEAR_TARGET_KEY.
-                return Err(Error::Corruption(format!(
+                Err(Error::Corruption(format!(
                     "pruning metadata references section {meta_oldest_section} \
                      but oldest blob is section {oldest_section}"
-                )));
+                )))
             }
             None => {
                 // Mid-section pruning metadata with no blobs should never arise:
                 // complete_clear_to_size handles CLEAR_TARGET_KEY before we get here,
                 // and no other operation removes all blobs without updating metadata.
-                return Err(Error::Corruption(format!(
+                Err(Error::Corruption(format!(
                     "pruning metadata references section {meta_oldest_section} but no blobs exist"
-                )));
+                )))
             }
         }
     }
