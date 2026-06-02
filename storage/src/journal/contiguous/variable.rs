@@ -1022,6 +1022,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 "crash repair: removing empty trailing data section"
             );
             data.rewind(previous_section, previous_size).await?;
+            // `rewind` shrinks the predecessor to its last valid item boundary but does not fsync
+            // that resize, and this repair is not dirty-tracked. Make it durable now so a later
+            // `sync()` is not required to re-truncate the predecessor on the next startup.
+            data.sync(previous_section).await?;
         };
 
         // After trimming empty trailing sections, a zero item count means the data journal is
