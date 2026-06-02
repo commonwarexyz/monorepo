@@ -63,11 +63,11 @@ runs:
         key="${key//\//-}"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
     - name: Setup rust cache
-      uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+      uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
         save-if: ${{ github.ref == 'refs/heads/main' }}
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
         cache-workspace-crates: true
         cache-directories: ${{ env.CARGO_TARGET_DIR }}
-        cache-bin: false
+        cache-bin: true
