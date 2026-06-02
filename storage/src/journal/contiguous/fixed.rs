@@ -55,14 +55,17 @@
 //!
 //! # Recovery
 //!
-//! Recovery derives fixed-journal size from retained blob lengths:
-//! - Once RECOVERY_WATERMARK_KEY exists, recovery walks retained blob lengths from oldest to
-//!   newest. A short newest section is the natural tail; a short earlier section is treated as the
-//!   end of the contiguous prefix, and newer sections are truncated. If the persisted watermark
-//!   exceeds the recovered size, recovery returns a corruption error.
-//! - Legacy journals without RECOVERY_WATERMARK_KEY rely on the old rule that section rollover
-//!   synced the previous section. Valid legacy journals recover from the newest retained blob once,
-//!   then persist the watermark before returning from `init`.
+//! Sections are filled sequentially. Recovery walks the section range from oldest to newest and
+//! compares each section's item count to its logical capacity:
+//!
+//! - A short or missing non-newest section indicates a gap in durable data; recovery stops there
+//!   and truncates newer sections.
+//! - The newest section may be short, since it is the normal append frontier. Recovery includes
+//!   its items.
+//!
+//! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
+//! exceeds the recovered size, recovery returns a corruption error. Both the pruning boundary
+//! and watermark are persisted before `init` returns.
 //!
 //! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
 //! every item that may have become durable through `commit` or storage behavior.
@@ -133,11 +136,7 @@ fn first_in_section(
     let start = section
         .checked_mul(items_per_blob)
         .ok_or(Error::OffsetOverflow)?;
-    if pruning_boundary > start {
-        Ok(pruning_boundary)
-    } else {
-        Ok(start)
-    }
+    Ok(pruning_boundary.max(start))
 }
 
 /// Maximum number of items a section's blob can physically hold. This is `items_per_blob` unless
@@ -152,12 +151,8 @@ fn section_capacity(
     let start = section
         .checked_mul(items_per_blob)
         .ok_or(Error::OffsetOverflow)?;
-    let skipped = first_in_section(pruning_boundary, section, items_per_blob)?
-        .checked_sub(start)
-        .ok_or(Error::OffsetOverflow)?;
-    items_per_blob
-        .checked_sub(skipped)
-        .ok_or(Error::OffsetOverflow)
+    let skipped = pruning_boundary.saturating_sub(start).min(items_per_blob);
+    Ok(items_per_blob - skipped)
 }
 
 /// Configuration for `Journal` storage.
@@ -784,74 +779,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         meta_pruning_boundary: Option<u64>,
         meta_recovery_watermark: Option<u64>,
     ) -> Result<(u64, u64, u64, Option<RecoveryRepair>), Error> {
-        let blob_boundary = match inner.oldest_section() {
-            Some(oldest) => oldest
-                .checked_mul(items_per_blob)
-                .ok_or(Error::OffsetOverflow)?,
-            None => 0,
-        };
+        let pruning_boundary = Self::recover_pruning_boundary(
+            meta_pruning_boundary,
+            inner.oldest_section(),
+            items_per_blob,
+        )?;
 
-        // PRUNING_BOUNDARY_KEY is only stored when the boundary falls mid-section.
-        //
-        // If metadata names the current oldest section, we trust it. This is safe because prune
-        // persists metadata after blob state, so a crash before the metadata update means the newer
-        // boundary was never fully committed.
-        let mut pruning_metadata_stale = false;
-        let pruning_boundary = match meta_pruning_boundary {
-            Some(meta_pruning_boundary)
-                if !meta_pruning_boundary.is_multiple_of(items_per_blob) =>
-            {
-                let meta_oldest_section = meta_pruning_boundary / items_per_blob;
-                match inner.oldest_section() {
-                    None => {
-                        // Mid-section pruning metadata with no blobs should never arise:
-                        // complete_clear_to_size handles CLEAR_TARGET_KEY before we get here,
-                        // and no other operation removes all blobs without updating metadata.
-                        return Err(Error::Corruption(format!(
-                            "pruning metadata references section {meta_oldest_section} but no blobs exist"
-                        )));
-                    }
-                    Some(oldest_section) if meta_oldest_section < oldest_section => {
-                        warn!(
-                            meta_oldest_section,
-                            oldest_section,
-                            "crash repair: pruning metadata stale, computing from blobs"
-                        );
-                        pruning_metadata_stale = true;
-                        blob_boundary
-                    }
-                    Some(oldest_section) if meta_oldest_section > oldest_section => {
-                        // Metadata ahead of blob state should never arise: prune removes
-                        // blobs before sync persists metadata, and clear_to_size updates
-                        // both atomically via CLEAR_TARGET_KEY.
-                        return Err(Error::Corruption(format!(
-                            "pruning metadata references section {meta_oldest_section} \
-                             but oldest blob is section {oldest_section}"
-                        )));
-                    }
-                    Some(_) => meta_pruning_boundary,
-                }
-            }
-            _ => blob_boundary,
-        };
-
-        // Check oldest section for over-capacity corruption before recovery mode dispatch.
-        Self::validate_oldest_section(inner, items_per_blob, pruning_boundary).await?;
-
-        // Compute journal size and optional repair.
-        let (size, repair) = match meta_recovery_watermark {
-            Some(_) => {
-                Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await?
-            }
-            None if !pruning_metadata_stale => {
-                // No stale pruning metadata and no recovery watermark implies a legacy format.
-                Self::recover_legacy_size(inner, items_per_blob, pruning_boundary).await?
-            }
-            None => {
-                // Pruning metadata was stale, and there is no recovery watermark to preserve.
-                Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await?
-            }
-        };
+        let (size, repair) =
+            Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await?;
 
         let recovery_watermark = match meta_recovery_watermark {
             Some(watermark) if watermark > size => {
@@ -878,26 +813,58 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((pruning_boundary, size, recovery_watermark, repair))
     }
 
-    /// Check that the oldest section does not exceed its logical capacity.
-    async fn validate_oldest_section(
-        inner: &SegmentedJournal<E, A>,
+    /// Recover the pruning boundary from metadata if it still matches the oldest retained section.
+    ///
+    /// Missing or section-aligned metadata means the blob boundary is authoritative. Mid-section
+    /// metadata is trusted only when it belongs to the current oldest section.
+    fn recover_pruning_boundary(
+        meta_pruning_boundary: Option<u64>,
+        oldest_section: Option<u64>,
         items_per_blob: u64,
-        pruning_boundary: u64,
-    ) -> Result<(), Error> {
-        let Some(oldest) = inner.oldest_section() else {
-            return Ok(());
+    ) -> Result<u64, Error> {
+        let blob_boundary = match oldest_section {
+            Some(oldest) => oldest
+                .checked_mul(items_per_blob)
+                .ok_or(Error::OffsetOverflow)?,
+            None => 0,
         };
 
-        let oldest_len = inner.section_len(oldest).await?;
-        let expected = section_capacity(pruning_boundary, oldest, items_per_blob)?;
-
-        if oldest_len > expected {
-            return Err(Error::Corruption(format!(
-                "oldest section {oldest} has too many items: expected at most {expected}, got {oldest_len}"
-            )));
+        let Some(meta_pruning_boundary) = meta_pruning_boundary else {
+            return Ok(blob_boundary);
+        };
+        if meta_pruning_boundary.is_multiple_of(items_per_blob) {
+            return Ok(blob_boundary);
         }
 
-        Ok(())
+        let meta_oldest_section = meta_pruning_boundary / items_per_blob;
+        match oldest_section {
+            Some(oldest_section) if meta_oldest_section == oldest_section => {
+                Ok(meta_pruning_boundary)
+            }
+            Some(oldest_section) if meta_oldest_section < oldest_section => {
+                warn!(
+                    meta_oldest_section,
+                    oldest_section, "crash repair: pruning metadata stale, computing from blobs"
+                );
+                Ok(blob_boundary)
+            }
+            Some(oldest_section) => {
+                // Metadata ahead of blob state should never arise: prune removes blobs before
+                // sync persists metadata, and clear_to_size uses CLEAR_TARGET_KEY.
+                return Err(Error::Corruption(format!(
+                    "pruning metadata references section {meta_oldest_section} \
+                     but oldest blob is section {oldest_section}"
+                )));
+            }
+            None => {
+                // Mid-section pruning metadata with no blobs should never arise:
+                // complete_clear_to_size handles CLEAR_TARGET_KEY before we get here,
+                // and no other operation removes all blobs without updating metadata.
+                return Err(Error::Corruption(format!(
+                    "pruning metadata references section {meta_oldest_section} but no blobs exist"
+                )));
+            }
+        }
     }
 
     async fn section_len_within_capacity(
@@ -916,46 +883,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok((len, capacity))
     }
 
-    /// Recover a legacy journal that has no RECOVERY_WATERMARK_KEY.
-    ///
-    /// Before the watermark key existed, writers synced each section before rolling over to the
-    /// next one. That lets valid legacy journals recover from the newest retained blob without
-    /// walking all retained sections. If the oldest non-tail section is already short, the legacy
-    /// invariant is violated; the caller rejects this as corruption.
-    async fn recover_legacy_size(
-        inner: &mut SegmentedJournal<E, A>,
-        items_per_blob: u64,
-        pruning_boundary: u64,
-    ) -> Result<(u64, Option<RecoveryRepair>), Error> {
-        let Some(newest) = inner.newest_section() else {
-            return Ok((pruning_boundary, None));
-        };
-        let Some(oldest) = inner.oldest_section() else {
-            return Ok((pruning_boundary, None));
-        };
-
-        let (oldest_len, oldest_capacity) =
-            Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, oldest)
-                .await?;
-        if oldest != newest && oldest_len < oldest_capacity {
-            // This cannot be a valid legacy state under the old rollover-sync rule; the caller
-            // rejects the resulting repair as corruption.
-            return Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await;
-        }
-
-        let (tail_len, _) =
-            Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, newest)
-                .await?;
-        let size = first_in_section(pruning_boundary, newest, items_per_blob)?
-            .checked_add(tail_len)
-            .ok_or(Error::OffsetOverflow)?;
-        Ok((size, None))
-    }
-
-    /// Recover by walking section lengths until the first short non-tail section.
-    ///
-    /// This is the normal current-format crash-repair path. Legacy recovery uses it only when the
-    /// old rollover invariant is already violated or pruning metadata was stale.
+    /// Recover logical size by walking section lengths from oldest to newest, truncating at the
+    /// first short or missing non-tail section.
     async fn recover_by_walking_lengths(
         inner: &mut SegmentedJournal<E, A>,
         items_per_blob: u64,
@@ -968,30 +897,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return Ok((pruning_boundary, None));
         };
 
-        // The oldest section's capacity was already checked before recovery mode dispatch.
-        let oldest_len = inner.section_len(oldest).await?;
-        let expected_oldest = section_capacity(pruning_boundary, oldest, items_per_blob)?;
-        let mut size = pruning_boundary
-            .checked_add(oldest_len)
-            .ok_or(Error::OffsetOverflow)?;
-
-        if oldest == newest {
-            return Ok((size, None));
-        }
-
-        if oldest_len < expected_oldest {
-            return Ok((
-                size,
-                Some(RecoveryRepair {
-                    section: oldest,
-                    byte_offset: oldest_len
-                        .checked_mul(Self::CHUNK_SIZE_U64)
-                        .ok_or(Error::OffsetOverflow)?,
-                }),
-            ));
-        }
-
-        for section in oldest + 1..=newest {
+        let mut size = pruning_boundary;
+        for section in oldest..=newest {
             let (len, capacity) =
                 Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
                     .await?;
@@ -2439,11 +2346,14 @@ mod tests {
             journal.sync().await.unwrap();
             assert_eq!(journal.bounds().await, 3..15);
 
-            // Set PRUNING_BOUNDARY_KEY to 8 (section 1), then remove section 1's blob so section
-            // 0 is the oldest. Metadata now references section 1 which is ahead of the oldest blob.
+            // Set PRUNING_BOUNDARY_KEY to 8 (section 1) and lower the watermark so it won't
+            // independently trigger the watermark > size corruption check. Then remove section 1's
+            // blob so section 0 is the oldest. The pruning metadata now references a section ahead
+            // of the oldest blob, which is the corruption we're testing.
             {
                 let mut inner = journal.inner.write().await;
                 inner.metadata.put(PRUNING_BOUNDARY_KEY, 8u64.into());
+                inner.metadata.put(RECOVERY_WATERMARK_KEY, 3u64.into());
                 inner.metadata.sync().await.unwrap();
             }
             drop(journal);
