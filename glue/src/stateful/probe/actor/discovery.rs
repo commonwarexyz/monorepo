@@ -121,6 +121,17 @@ where
                 debug!("network receiver closed, shutting down");
                 return;
             } => {
+                // Once a floor has been selected, ignore further finalizations.
+                if self.floor.is_some() {
+                    continue;
+                }
+
+                // A peer can only contribute once per request round. Skip duplicates before
+                // decoding or verifying to avoid useless certificate work.
+                if finalizations.contains_key(&peer) {
+                    continue;
+                }
+
                 let finalization = match self.decode_finalization(message) {
                     Ok(Some(finalization)) => finalization,
                     Ok(None) => continue,
@@ -135,10 +146,6 @@ where
                     }
                 };
 
-                // Once a floor has been selected, ignore further finalizations.
-                if self.floor.is_some() {
-                    continue;
-                }
                 let Some((peer, finalization)) = self.verify_finalization(peer, finalization)
                 else {
                     continue;

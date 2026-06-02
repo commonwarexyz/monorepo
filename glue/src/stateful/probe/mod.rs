@@ -42,8 +42,9 @@
 //!                                      sample reached, highest view becomes the floor: 13
 //! ```
 //!
-//! A peer that sends an undecodable or unverifiable finalization is blocked. A peer that sends a
-//! second valid finalization in a round is ignored, never overwriting its first answer.
+//! A peer that sends an undecodable or unverifiable first finalization in a request round is
+//! blocked. After a peer has already contributed a verified response for that round, later
+//! messages from that peer are ignored before validation.
 //!
 //! ## Retry
 //!
@@ -74,12 +75,14 @@
 //! finalization to drag a joining node's floor far behind the real tip of the chain, forcing it
 //! to re-sync a huge range or to settle on a stale view.
 //!
-//! Under simplex's synchrony assumptions, `2f + 1` honest nodes are expected to be in the same view.
-//! Waiting for `f + 1` replies guarantees at least one honest response in the sample: at most `f`
-//! responders can be Byzantine, and crashed nodes do not respond. The selected finalization is
-//! therefore at least as recent as that honest response. Byzantine peers can still replay old
-//! certificates, but old certificates lose to newer honest replies. If they report something higher,
-//! it must still be a valid finalization, so it is a real finalized block rather than a rollback.
+//! Under [`simplex`](commonware_consensus::simplex)'s synchrony assumptions, after one honest node
+//! advances to a new view, other honest nodes may remain in the previous view until that transition
+//! is delivered within the network-delay bound (`delta`). Waiting for `f + 1` replies guarantees at
+//! least one honest response in the sample: at most `f` responders can be Byzantine, and crashed
+//! nodes do not respond. The selected finalization is therefore at least as recent as that honest
+//! response. Byzantine peers can still replay old certificates, but old certificates lose to newer
+//! honest replies. If they report something higher, it must still be a valid finalization, so it is
+//! a real finalized block rather than a rollback.
 //!
 //! ```text
 //!   any f + 1 sample:
@@ -1088,8 +1091,8 @@ mod test {
         });
     }
 
-    /// A second valid finalization from a peer already counted this round is ignored (not
-    /// blocked, since it verifies) and does not let a single peer inflate the sample.
+    /// A second finalization from a peer already counted this round is ignored and does not let a
+    /// single peer inflate the sample.
     #[test]
     fn test_duplicate_finalization_from_peer_is_ignored() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1110,7 +1113,7 @@ mod test {
 
             context.sleep(Duration::from_millis(100)).await;
 
-            // The duplicate is ignored (not blocked), and one peer cannot inflate the sample.
+            // The duplicate is ignored, and one peer cannot inflate the sample.
             let blocked = harness.oracle.blocked().await.unwrap();
             assert!(
                 !blocked.contains(&(
@@ -1129,15 +1132,16 @@ mod test {
         });
     }
 
-    /// Duplicates are still verified: a peer that follows a valid finalization with an invalid
-    /// one is blocked, even though the duplicate would otherwise be ignored.
+    /// Duplicates are skipped before validation: a peer that follows a valid finalization with an
+    /// invalid one is not blocked because it cannot affect the sample.
     #[test]
-    fn test_invalid_duplicate_finalization_blocks_peer() {
+    fn test_invalid_duplicate_finalization_is_ignored() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|context| async move {
             let mut harness =
                 Harness::setup(&context, 4, NZDuration!(Duration::from_secs(3600))).await;
             harness.start_probes();
+            let _subscription = harness.nodes[0].probe.subscribe();
 
             // Node 1 first sends a valid finalization, then an invalid (foreign) one.
             let (_, valid) = harness.finalization(1, 1);
@@ -1154,11 +1158,11 @@ mod test {
 
             let blocked = harness.oracle.blocked().await.unwrap();
             assert!(
-                blocked.contains(&(
+                !blocked.contains(&(
                     harness.participants[0].clone(),
                     harness.participants[1].clone(),
                 )),
-                "an invalid finalization must be blocked even when it duplicates a peer"
+                "an invalid duplicate finalization must be ignored, not blocked"
             );
         });
     }
