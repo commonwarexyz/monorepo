@@ -1,6 +1,5 @@
-# Storage/qmdb tests build very large async state machines (many awaited generic sub-futures,
-# monomorphized across DB variants) and the deterministic runtime polls them inline on libtest's
-# per-test thread. Give test threads ample stack so they don't overflow on platforms with small
-# defaults (e.g. Windows). See the qmdb tests under storage/src/qmdb/.
+# Some qmdb tests build very large async state machines that the deterministic runtime polls inline
+# on libtest's per-test thread. Raise the per-test stack so they don't overflow where the default is
+# small (e.g. Windows).
 [env]
 RUST_MIN_STACK = "16777216"  # 16 MiB
