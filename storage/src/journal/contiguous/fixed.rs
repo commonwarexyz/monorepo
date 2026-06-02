@@ -655,39 +655,30 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         );
     }
 
-    /// Update pruning-boundary and recovery-watermark entries in metadata's in-memory state.
+    /// Stage pruning-boundary and recovery-watermark entries into `metadata`'s in-memory state.
     ///
-    /// Call `inner.metadata.sync()` separately to persist the updated entries.
-    fn update_metadata_entries(
-        inner: &mut Inner<E, A>,
+    /// Only writes when a value actually changes. The caller is responsible for syncing.
+    fn stage_metadata_entries(
+        metadata: &mut Metadata<E, u64, VecU64>,
         items_per_blob: u64,
         pruning_boundary: u64,
         recovery_watermark: u64,
     ) {
-        let current_pruning = inner
-            .metadata
-            .get(&PRUNING_BOUNDARY_KEY)
-            .copied()
-            .map(u64::from);
+        let current_pruning = metadata.get(&PRUNING_BOUNDARY_KEY).copied().map(u64::from);
         if !pruning_boundary.is_multiple_of(items_per_blob) {
             if current_pruning != Some(pruning_boundary) {
-                inner
-                    .metadata
-                    .put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
+                metadata.put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
             }
         } else if current_pruning.is_some() {
-            inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
+            metadata.remove(&PRUNING_BOUNDARY_KEY);
         }
 
-        let current_watermark = inner
-            .metadata
+        let current_watermark = metadata
             .get(&RECOVERY_WATERMARK_KEY)
             .copied()
             .map(u64::from);
         if current_watermark != Some(recovery_watermark) {
-            inner
-                .metadata
-                .put(RECOVERY_WATERMARK_KEY, recovery_watermark.into());
+            metadata.put(RECOVERY_WATERMARK_KEY, recovery_watermark.into());
         }
     }
 
@@ -984,21 +975,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         pruning_boundary: u64,
         recovery_watermark: u64,
     ) -> Result<(), Error> {
-        let current_pruning = metadata.get(&PRUNING_BOUNDARY_KEY).copied().map(u64::from);
-        if !pruning_boundary.is_multiple_of(items_per_blob) {
-            if current_pruning != Some(pruning_boundary) {
-                metadata.put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
-            }
-        } else if current_pruning.is_some() {
-            metadata.remove(&PRUNING_BOUNDARY_KEY);
-        }
-        let current_watermark = metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from);
-        if current_watermark != Some(recovery_watermark) {
-            metadata.put(RECOVERY_WATERMARK_KEY, recovery_watermark.into());
-        }
+        Self::stage_metadata_entries(
+            metadata,
+            items_per_blob,
+            pruning_boundary,
+            recovery_watermark,
+        );
         metadata.sync().await?;
         Ok(())
     }
@@ -1400,7 +1382,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         inner.dirty_from_section = None;
         let pruning_boundary = inner.pruning_boundary;
         let size = inner.size;
-        Self::update_metadata_entries(&mut inner, self.items_per_blob, pruning_boundary, size);
+        Self::stage_metadata_entries(
+            &mut inner.metadata,
+            self.items_per_blob,
+            pruning_boundary,
+            size,
+        );
         drop(inner);
 
         let inner = self.inner.read().await;
