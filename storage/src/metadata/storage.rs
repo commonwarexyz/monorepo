@@ -361,6 +361,14 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         // Get target blob (the one we will modify)
         let target_cursor = 1 - cursor;
 
+        // When key order is stable, each blob's modified set tracks the value
+        // deltas it has not yet received. If the target has none, the current
+        // cursor already points at a durable copy of the latest state and
+        // writing another version would only rotate blobs.
+        if key_order_changed < past_version && state.blobs[target_cursor].modified.is_empty() {
+            return Ok(());
+        }
+
         // Update the state.
         state.cursor = target_cursor;
         state.next_version = next_next_version;
@@ -368,8 +376,9 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         // Get a mutable reference to the target blob.
         let target = &mut state.blobs[target_cursor];
 
-        // Determine if we can overwrite existing data in place, updating the in-memory mirror for
-        // equal-size values as we go.
+        // Determine if we can overwrite existing data in place, updating the
+        // in-memory mirror for equal-size values as we go. If any value changes
+        // encoded length, subsequent offsets shift and the blob must be rebuilt.
         let mut overwrite = true;
         if key_order_changed < past_version {
             for key in target.modified.iter() {
@@ -406,14 +415,27 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
             // Freeze the mirror so async writes can hold zero-copy slices, then recover the
             // mutable mirror after all writes complete.
             let data = std::mem::take(&mut target.data).freeze();
-            let writes = target
-                .modified
-                .iter()
-                .map(|key| {
-                    let info = target.lengths.get(key).expect("key must exist");
-                    let range = info.start..info.start + info.length;
-                    target.blob.write_at(range.start as u64, data.slice(range))
-                })
+
+            // Modified keys are ordered by key, which is also their order in the
+            // blob. Adjacent values are separated by the next encoded key, so a
+            // merged range may rewrite those unchanged key bytes to avoid issuing
+            // one storage write per modified value.
+            let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(target.modified.len());
+            for key in target.modified.iter() {
+                let info = target.lengths.get(key).expect("key must exist");
+                let start = info.start;
+                let end = info.start + info.length;
+                if let Some((_, range_end)) = ranges.last_mut() {
+                    if start >= *range_end && start - *range_end == key.encode_size() {
+                        *range_end = end;
+                        continue;
+                    }
+                }
+                ranges.push((start, end));
+            }
+            let writes = ranges
+                .into_iter()
+                .map(|(start, end)| target.blob.write_at(start as u64, data.slice(start..end)))
                 .chain([
                     target.blob.write_at(0, data.slice(0..u64::SIZE)),
                     target.blob.write_at(
