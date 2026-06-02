@@ -1325,6 +1325,15 @@ where
                     return false;
                 };
 
+                // Wrong-round data must be rejected before the scoped-provider lookup below.
+                // That lookup may miss for pruned epochs even when `all()` was sufficient to
+                // decode the certificate, and missing scoped state is treated as stale rather
+                // than peer-faulting.
+                if notarization.round() != round {
+                    response.send_lossy(false);
+                    return false;
+                }
+
                 // `V::check_payload` requires a scoped provider, and `get_scheme_certificate_verifier`
                 // may use an all-epoch provider.
                 let Some(scheme) = self.provider.scoped(notarization.epoch()) else {
@@ -1347,9 +1356,7 @@ where
                     return false;
                 };
 
-                if notarization.round() != round
-                    || V::commitment(&block) != notarization.proposal.payload
-                {
+                if V::commitment(&block) != notarization.proposal.payload {
                     response.send_lossy(false);
                     return false;
                 }
