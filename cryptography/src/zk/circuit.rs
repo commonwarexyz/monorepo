@@ -120,6 +120,12 @@ impl<F> Clone for Context<'_, F> {
 impl<F> Copy for Context<'_, F> {}
 
 impl<'ctx, F> Context<'ctx, F> {
+    fn allocate_constant(self, combine: impl Fn(&[F]) -> F) -> CircuitIdx {
+        let mut circuit = self.inner.circuit.lock();
+        let combined = combine(&circuit.constants);
+        circuit.next_constant(combined)
+    }
+
     fn allocate(
         self,
         init: impl for<'a> FnOnce(Values<'a, F>) -> Option<F>,
@@ -301,6 +307,16 @@ impl<'ctx, F: Clone> Var<'ctx, F> {
             }
             (VarInner::Circuit { ctx, idx: a }, &VarInner::Circuit { idx: b, .. }) => (ctx, a, b),
         };
+        if let (CircuitIdx::Constant(a_idx), CircuitIdx::Constant(b_idx)) = (a_idx, b_idx) {
+            return Self {
+                inner: VarInner::Circuit {
+                    ctx,
+                    idx: ctx.allocate_constant(|constants| {
+                        combine(&constants[a_idx as usize], &constants[b_idx as usize])
+                    }),
+                },
+            };
+        }
         let new_idx = ctx.node(node(a_idx, b_idx), move |v| combine(&v[a_idx], &v[b_idx]));
         Self {
             inner: VarInner::Circuit { ctx, idx: new_idx },
@@ -329,6 +345,15 @@ impl<'ctx, F: Additive + Ring> Neg for Var<'ctx, F> {
         match self.inner {
             VarInner::Native(a) => Self {
                 inner: VarInner::Native(-a),
+            },
+            VarInner::Circuit {
+                ctx,
+                idx: CircuitIdx::Constant(idx),
+            } => Self {
+                inner: VarInner::Circuit {
+                    ctx,
+                    idx: ctx.allocate_constant(|constants| -constants[idx as usize].clone()),
+                },
             },
             VarInner::Circuit { ctx, idx } => {
                 let minus_one = Var::constant(ctx, -F::one()).circuit_idx();
