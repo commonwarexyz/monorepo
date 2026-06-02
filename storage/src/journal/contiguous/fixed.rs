@@ -1529,8 +1529,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// * This operation is not guaranteed to survive restarts until `commit()` or `sync()` is
     ///   called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
-    ///   in the event of failure since blobs are always removed from newest to oldest.
+    /// * This operation is not atomic. Its on-disk updates are ordered (sections removed
+    ///   newest-to-oldest) so that restart recovery always rebuilds a contiguous retained prefix.
     pub async fn rewind(&self, size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
