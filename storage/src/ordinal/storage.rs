@@ -157,6 +157,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
+        let mut pending = BTreeSet::new();
         for (section, (blob, size)) in &blobs {
             // Skip if bits are provided and the section is not in the bits
             if let Some(bits) = &bits {
@@ -204,6 +205,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                     if record.is_valid() {
                         items += 1;
                         intervals.insert(index);
+                        pending.insert(*section);
                         continue;
                     }
                 };
@@ -244,7 +246,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             config,
             blobs,
             intervals,
-            pending: AsyncMutex::new(BTreeSet::new()),
+            pending: AsyncMutex::new(pending),
             puts,
             gets,
             has,

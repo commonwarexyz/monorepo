@@ -522,6 +522,57 @@ mod tests {
         });
     }
 
+    #[test_traced]
+    fn test_archive_reopen_syncs_adopted_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(1),
+                value_write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+
+            {
+                let mut archive = Archive::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize archive");
+                archive
+                    .put(7, test_key("key-7"), 7)
+                    .await
+                    .expect("Failed to put data");
+                archive.sync().await.expect("Failed to sync archive");
+            }
+
+            let mut archive = Archive::<_, _, FixedBytes<64>, i32>::init(
+                context.child("second"),
+                cfg,
+            )
+            .await
+            .expect("Failed to reopen archive");
+            let value = archive
+                .get(Identifier::Index(7))
+                .await
+                .expect("Failed to get data");
+            assert_eq!(value, Some(7));
+
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            assert!(
+                archive.sync().await.is_err(),
+                "replayed archive sections must remain pending until synced"
+            );
+        });
+    }
+
     fn test_archive_keys_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

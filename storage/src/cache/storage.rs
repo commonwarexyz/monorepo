@@ -102,19 +102,23 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         // Initialize keys and run corruption check
         let mut indices = BTreeMap::new();
         let mut intervals = RMap::new();
+        let mut pending = BTreeSet::new();
         {
             debug!("initializing cache");
             let stream = journal.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
                 // Extract key from record
-                let (_, offset, _, data) = result?;
+                let (section, offset, _, data) = result?;
 
                 // Store index
                 indices.insert(data.index, offset);
 
                 // Store index in intervals
                 intervals.insert(data.index);
+
+                // Replayed records are visible but may still need a durability barrier.
+                pending.insert(section);
             }
             debug!(items = indices.len(), "cache initialized");
         }
@@ -130,7 +134,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
         Ok(Self {
             items_per_blob: cfg.items_per_blob.get(),
             journal,
-            pending: BTreeSet::new(),
+            pending,
             oldest_allowed: None,
             indices,
             intervals,

@@ -658,11 +658,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             .await?;
 
         // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable) = match (table_len, checkpoint) {
+        let (checkpoint, resizable, modified_sections) = match (table_len, checkpoint) {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
+                (
+                    Checkpoint::init(config.table_initial_size),
+                    0,
+                    BTreeSet::new(),
+                )
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -673,7 +677,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
+                (
+                    Checkpoint::init(config.table_initial_size),
+                    0,
+                    BTreeSet::new(),
+                )
             }
 
             // Existing table with checkpoint
@@ -719,7 +727,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     table.sync().await?;
                 }
 
-                (checkpoint, resizable)
+                (checkpoint, resizable, BTreeSet::new())
             }
 
             // Existing table without checkpoint
@@ -752,6 +760,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                         table_size,
                     },
                     resizable,
+                    oversized.sections().collect(),
                 )
             }
         };
@@ -781,7 +790,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
-            modified_sections: BTreeSet::new(),
+            modified_sections,
             resizable,
             resize_progress: None,
             puts,
@@ -1303,6 +1312,54 @@ mod tests {
             .await
             .unwrap();
             drop(freezer);
+        });
+    }
+
+    #[test_traced]
+    fn test_init_without_checkpoint_marks_recovered_sections_modified() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 256,
+                table_resize_frequency: u8::MAX,
+                table_resize_chunk_size: 16,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                for index in 0..64 {
+                    freezer
+                        .put(test_key(&format!("key-{index}")), index)
+                        .await
+                        .unwrap();
+                }
+                freezer.sync().await.unwrap();
+            }
+
+            let mut freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg)
+                    .await
+                    .unwrap();
+            assert!(
+                !freezer.modified_sections.is_empty(),
+                "recovered oversized sections must be synced before publishing a checkpoint"
+            );
+
+            freezer.sync().await.unwrap();
+            assert!(freezer.modified_sections.is_empty());
         });
     }
 }

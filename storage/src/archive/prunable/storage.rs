@@ -175,12 +175,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let mut extra_indices: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut keys = Index::new(context.child("index"), cfg.translator.clone());
         let mut intervals = RMap::new();
+        let mut pending = BTreeSet::new();
         {
             debug!("initializing archive from index journal");
             let stream = oversized.replay(0, 0, cfg.replay_buffer).await?;
             pin_mut!(stream);
             while let Some(result) = stream.next().await {
-                let (_section, position, entry) = result?;
+                let (section, position, entry) = result?;
 
                 // Store index location (position in index journal)
                 match indices.entry(entry.index) {
@@ -197,6 +198,9 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
                 // Store index in intervals
                 intervals.insert(entry.index);
+
+                // Replayed records are visible but may still need a durability barrier.
+                pending.insert(section);
             }
             debug!("archive initialized");
         }
@@ -217,7 +221,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
             oversized,
-            pending: BTreeSet::new(),
+            pending,
             oldest_allowed: None,
             indices,
             extra_indices,

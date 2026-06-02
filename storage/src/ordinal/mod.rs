@@ -243,6 +243,49 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_reopen_syncs_adopted_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let value = FixedBytes::new([42u8; 32]);
+
+            {
+                let mut store =
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                        .await
+                        .expect("Failed to initialize store");
+                store
+                    .put(0, value.clone())
+                    .await
+                    .expect("Failed to put data");
+                store.sync().await.expect("Failed to sync data");
+            }
+
+            let store = Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to reopen store");
+            assert_eq!(
+                store.get(0).await.expect("Failed to get data"),
+                Some(value)
+            );
+
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            assert!(
+                store.sync().await.is_err(),
+                "reopened visible records must remain pending until synced"
+            );
+        });
+    }
+
+    #[test_traced]
     fn test_multiple_indices() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
