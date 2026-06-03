@@ -393,6 +393,15 @@ impl crate::Runner for Runner {
             &mut runtime_registry.sub_registry("storage_buffer_pool"),
         );
 
+        // Make any storage a prior process left in the page cache crash-durable before we open it,
+        // so the data read during init is durable.
+        if let Err(e) = crate::storage::sync_fs(&self.cfg.storage_directory) {
+            panic!(
+                "failed to sync storage filesystem at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
+        }
+
         // Initialize storage
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-storage")] {
@@ -421,15 +430,6 @@ impl crate::Runner for Runner {
                     &mut runtime_registry,
                 );
             }
-        }
-
-        // Make any storage a prior process left in the page cache crash-durable before user code
-        // reads.
-        if let Err(e) = crate::storage::sync_fs(&self.cfg.storage_directory) {
-            panic!(
-                "failed to sync storage filesystem at startup ({}): {e}",
-                self.cfg.storage_directory.display()
-            );
         }
 
         // Initialize network
