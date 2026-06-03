@@ -13,7 +13,7 @@ use commonware_consensus::{
     Epochable,
 };
 use commonware_cryptography::{
-    certificate::{Provider, Scoped},
+    certificate::{Provider, Verifier},
     PublicKey,
 };
 use commonware_macros::select_loop;
@@ -217,14 +217,8 @@ where
         // Verify against the certificate scheme for the finalization's epoch. If no scheme is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
         let scoped = self.provider.scoped(finalization.epoch())?;
-        let verified = match scoped {
-            Scoped::Certificate(verifier) => {
-                finalization.verify(self.context.as_present_mut(), verifier.as_ref(), &self.strategy)
-            }
-            Scoped::Scheme(scheme) => {
-                finalization.verify(self.context.as_present_mut(), scheme.as_ref(), &self.strategy)
-            }
-        };
+        let verified =
+            finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy);
         if !verified {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
             return None;

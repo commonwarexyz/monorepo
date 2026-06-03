@@ -146,7 +146,7 @@ mod test {
     };
     use commonware_cryptography::{
         certificate::{
-            self, mocks::Fixture, Attestation, VerifierOnly, Verifier, ConstantProvider,
+            self, mocks::Fixture, Attestation, Verifier, ConstantProvider,
             Provider, Scoped,
         },
         ed25519,
@@ -433,7 +433,7 @@ mod test {
     /// Provides a participant-less all-epoch verifier plus an epoch-scoped committee.
     #[derive(Clone)]
     struct ParticipantlessAllProvider {
-        all: Arc<VerifierOnly<MaybeEnumerableScheme>>,
+        all: Arc<MaybeEnumerableScheme>,
         scoped: Arc<MaybeEnumerableScheme>,
     }
 
@@ -1317,10 +1317,7 @@ mod test {
                 .map(|scheme| MaybeEnumerableScheme::new(scheme, true))
                 .collect();
             let provider = ParticipantlessAllProvider {
-                all: Arc::new(VerifierOnly::new(MaybeEnumerableScheme::new(
-                    verifier.clone(),
-                    false,
-                ))),
+                all: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
                 scoped: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
             };
 

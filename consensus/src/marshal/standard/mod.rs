@@ -73,7 +73,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         certificate::{
-            VerifierOnly, Verifier as _, ConstantProvider, Provider, Scoped,
+            Verifier as _, ConstantProvider, Provider, Scoped,
             mocks::Fixture,
         },
         ed25519::PublicKey,
@@ -118,13 +118,13 @@ mod tests {
 
     #[derive(Clone)]
     struct VerifierOnlyProvider {
-        scheme: Arc<VerifierOnly<S>>,
+        scheme: Arc<S>,
     }
 
     impl VerifierOnlyProvider {
         fn new(scheme: S) -> Self {
             Self {
-                scheme: Arc::new(VerifierOnly::new(scheme)),
+                scheme: Arc::new(scheme),
             }
         }
     }

@@ -658,14 +658,8 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Node<P, S, D> {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        let verified = match scoped {
-            certificate::Scoped::Certificate(verifier) => {
-                verifier.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy)
-            }
-            certificate::Scoped::Scheme(scheme) => {
-                scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy)
-            }
-        };
+        let verified =
+            scoped.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy);
         if !verified {
             return Err(Error::InvalidCertificate);
         }

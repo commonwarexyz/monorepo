@@ -26,7 +26,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Verifier, Provider, Scoped},
+    certificate::{Verifier, Provider},
     Digestible,
 };
 use commonware_macros::select_loop;
@@ -1011,14 +1011,7 @@ where
         let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
             panic!("floor finalization epoch unavailable");
         };
-        let verified = match scoped {
-            Scoped::Certificate(verifier) => {
-                finalization.verify(self.context.as_mut(), verifier.as_ref(), &self.strategy)
-            }
-            Scoped::Scheme(scheme) => {
-                finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
-            }
-        };
+        let verified = finalization.verify(self.context.as_mut(), &scoped, &self.strategy);
         assert!(
             verified,
             "floor finalization must verify"
@@ -1407,20 +1400,8 @@ where
                 continue;
             };
             let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-            let results = match scoped {
-                Scoped::Certificate(verifier) => verify_certificates(
-                    self.context.as_mut(),
-                    verifier.as_ref(),
-                    &group,
-                    &self.strategy,
-                ),
-                Scoped::Scheme(scheme) => verify_certificates(
-                    self.context.as_mut(),
-                    scheme.as_ref(),
-                    &group,
-                    &self.strategy,
-                ),
-            };
+            let results =
+                verify_certificates(self.context.as_mut(), &scoped, &group, &self.strategy);
             for (j, &idx) in indices.iter().enumerate() {
                 verified[idx] = results[j];
             }
