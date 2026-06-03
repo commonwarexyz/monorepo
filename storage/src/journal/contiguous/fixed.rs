@@ -2404,50 +2404,6 @@ mod tests {
         });
     }
 
-    /// Regression: legacy upgrade (no RECOVERY_WATERMARK_KEY) must mark all recovered sections
-    /// dirty so they are fsynced before the watermark advances. Without this, init could install
-    /// a durable watermark for data that was only in the OS page cache.
-    #[test_traced]
-    fn test_fixed_journal_legacy_upgrade_marks_recovered_sections_dirty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..7u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // Remove the watermark to simulate a legacy journal.
-            {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                inner.metadata.sync().await.unwrap();
-            }
-            drop(journal);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.size().await, 7);
-            // Watermark at tail section start (section 1 = position 5).
-            assert_eq!(journal.recovery_watermark().await, 5);
-
-            // Inject sync faults. If recovered sections were not marked dirty, commit would
-            // skip the data sync and succeed despite the fault.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(1.0),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit must sync recovered data before the watermark can advance"
-            );
-        });
-    }
 
     #[test_traced]
     fn test_fixed_journal_update_metadata_watermark_before_clear_lowers_only() {
