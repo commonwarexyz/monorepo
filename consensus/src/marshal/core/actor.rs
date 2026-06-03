@@ -1011,8 +1011,10 @@ where
         let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
             panic!("floor finalization epoch unavailable");
         };
-        let verified = finalization.verify(self.context.as_mut(), &scoped, &self.strategy);
-        assert!(verified, "floor finalization must verify");
+        assert!(
+            finalization.verify(self.context.as_mut(), &scoped, &self.strategy),
+            "floor finalization must verify"
+        );
 
         let commitment = finalization.proposal.payload;
         let digest = V::commitment_to_inner(commitment);
