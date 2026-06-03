@@ -79,11 +79,24 @@
 //! Shards-mailbox coverage is therefore exclusively via
 //! `PublishViaVariant`.
 //!
+//! # Auxiliary query coverage
+//!
+//! `GetBlock`, `Subscribe`, `SetFloor`, and `Prune` issue read, floor, or
+//! prune-below-floor mailbox traffic. Reads are pure. Subscriptions keep their
+//! receiver parked so the actor observes them. `SetFloor` is constrained to the
+//! next processable height while the current delivery segment has no real block
+//! deliveries, which lets the shadow model represent both local and pending
+//! floor-anchor application without accepting delivery gaps. `Prune` is clamped
+//! to the processed floor so it only removes already-delivered data.
+//!
 //! # Known scope limitations
 //!
 //! - Single-validator only: peer-to-peer shard *dissemination* and
 //!   *reconstruction-from-peer-shards* are not exercised. Multi-validator
 //!   coding is covered by the [`super::multi_node`] model.
+//! - Floor jumps that skip undispatched heights are intentionally not modeled
+//!   in this single-node harness. They require a richer delivery shadow that
+//!   tracks sync-start changes independently from restart segments.
 //!
 //! # Layout
 //!

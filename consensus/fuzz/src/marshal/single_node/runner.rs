@@ -11,12 +11,16 @@ use super::{
     variant::VariantPublish,
 };
 use commonware_consensus::{
-    marshal::mocks::{
-        application::Application,
-        harness::{
-            setup_network_with_participants, TestHarness, ValidatorHandle, NAMESPACE,
-            NUM_VALIDATORS, QUORUM,
+    marshal::{
+        core::{CommitmentFallback, DigestFallback},
+        mocks::{
+            application::Application,
+            harness::{
+                setup_network_with_participants, TestHarness, ValidatorHandle, NAMESPACE,
+                NUM_VALIDATORS, QUORUM,
+            },
         },
+        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
@@ -65,6 +69,27 @@ fn parent_view(height: Height) -> View {
 
 fn block_index(idx: u8) -> usize {
     (idx as u64 % NUM_BLOCKS) as usize
+}
+
+fn apply_pending_floor(
+    pending_floor: &mut Option<u64>,
+    height: Height,
+    durable_available: &mut HashSet<u64>,
+    finalized_anchors: &mut HashSet<u64>,
+    processed_height: &mut u64,
+    segment_starts: &mut [u64],
+) {
+    let h = height.get();
+    if *pending_floor != Some(h) {
+        return;
+    }
+    durable_available.insert(h);
+    finalized_anchors.insert(h);
+    *processed_height = h.saturating_sub(1);
+    if let Some(start) = segment_starts.last_mut() {
+        *start = h;
+    }
+    *pending_floor = None;
 }
 
 /// Run the marshal fuzz driver against `H` (StandardHarness or CodingHarness).
@@ -173,6 +198,8 @@ where
         // ack handles are tied to the dead actor.
         let mut stale_to_skip: usize = 0;
         let mut restart_counter: usize = 0;
+        let mut pending_floor: Option<u64> = None;
+        let mut subscriptions = Vec::new();
 
         for event in input.events.iter().copied() {
             // Set inside the ReportFinalization arm when marshal's
@@ -187,6 +214,14 @@ where
                     let height = H::height(block);
                     H::propose(&mut handle, round_for_height(height), block).await;
                     durable_available.insert(height.get());
+                    apply_pending_floor(
+                        &mut pending_floor,
+                        height,
+                        &mut durable_available,
+                        &mut finalized_anchors,
+                        &mut processed_height,
+                        &mut segment_starts,
+                    );
                 }
                 MarshalEvent::Verify { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
@@ -194,6 +229,14 @@ where
                     let mut peers: [ValidatorHandle<H>; 0] = [];
                     H::verify(&mut handle, round_for_height(height), block, &mut peers).await;
                     durable_available.insert(height.get());
+                    apply_pending_floor(
+                        &mut pending_floor,
+                        height,
+                        &mut durable_available,
+                        &mut finalized_anchors,
+                        &mut processed_height,
+                        &mut segment_starts,
+                    );
                 }
                 MarshalEvent::Certify { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
@@ -203,6 +246,14 @@ where
                         "marshal certified() returned false: actor died mid-fuzz",
                     );
                     durable_available.insert(height.get());
+                    apply_pending_floor(
+                        &mut pending_floor,
+                        height,
+                        &mut durable_available,
+                        &mut finalized_anchors,
+                        &mut processed_height,
+                        &mut segment_starts,
+                    );
                 }
                 MarshalEvent::ReportFinalization { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
@@ -226,7 +277,17 @@ where
                     let h = height.get();
                     let block_available =
                         durable_available.contains(&h) || variant_available.contains(&h);
-                    if block_available && h > processed_height {
+                    if block_available && pending_floor == Some(h) {
+                        apply_pending_floor(
+                            &mut pending_floor,
+                            height,
+                            &mut durable_available,
+                            &mut finalized_anchors,
+                            &mut processed_height,
+                            &mut segment_starts,
+                        );
+                        repair_wake = true;
+                    } else if block_available && h > processed_height {
                         finalized_anchors.insert(h);
                         durable_available.insert(h);
                         repair_wake = true;
@@ -252,10 +313,95 @@ where
                     // block.
                     let h = height.get();
                     if (durable_available.contains(&h) || variant_available.contains(&h))
+                        && pending_floor == Some(h)
+                    {
+                        apply_pending_floor(
+                            &mut pending_floor,
+                            height,
+                            &mut durable_available,
+                            &mut finalized_anchors,
+                            &mut processed_height,
+                            &mut segment_starts,
+                        );
+                        repair_wake = true;
+                    }
+                    if (durable_available.contains(&h) || variant_available.contains(&h))
                         && h > processed_height
                     {
                         durable_available.insert(h);
                     }
+                }
+                MarshalEvent::GetBlock { block_idx } => {
+                    // Pure read of the finalized archive by height.
+                    let block = &canonical[block_index(block_idx)];
+                    let _ = handle
+                        .mailbox
+                        .get_block(Identifier::Height(H::height(block)))
+                        .await;
+                }
+                MarshalEvent::Subscribe {
+                    block_idx,
+                    by_commitment,
+                } => {
+                    // When the block is missing locally this drives the fallback
+                    // fetch + subscriber registration path. Keep the receiver alive
+                    // so the mailbox policy does not discard the request before the
+                    // actor can observe it.
+                    let block = &canonical[block_index(block_idx)];
+                    let height = H::height(block);
+                    let round = round_for_height(height);
+                    if by_commitment {
+                        subscriptions.push(handle.mailbox.subscribe_by_commitment(
+                            H::commitment(block),
+                            CommitmentFallback::FetchByCommitment { height },
+                        ));
+                    } else {
+                        subscriptions.push(handle.mailbox.subscribe_by_digest(
+                            H::digest(block),
+                            DigestFallback::FetchByRound { round },
+                        ));
+                    }
+                }
+                MarshalEvent::SetFloor { block_idx } => {
+                    let block = &canonical[block_index(block_idx)];
+                    let height = H::height(block);
+                    let h = height.get();
+                    let pending_acks = application.pending_ack_heights();
+                    let only_genesis_pending = pending_acks.iter().all(|h| h.get() == 0);
+                    let current_segment_empty =
+                        delivery_log.len() == *segment_bounds.last().unwrap();
+                    if pending_floor.is_none()
+                        && h == processed_height + 1
+                        && current_segment_empty
+                        && only_genesis_pending
+                    {
+                        let proposal = Proposal::new(
+                            round_for_height(height),
+                            parent_view(height),
+                            H::commitment(block),
+                        );
+                        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                        handle.mailbox.set_floor(finalization);
+                        stale_to_skip += pending_acks.len();
+                        pending_floor = Some(h);
+                        if durable_available.contains(&h) || variant_available.contains(&h) {
+                            apply_pending_floor(
+                                &mut pending_floor,
+                                height,
+                                &mut durable_available,
+                                &mut finalized_anchors,
+                                &mut processed_height,
+                                &mut segment_starts,
+                            );
+                        }
+                    }
+                }
+                MarshalEvent::Prune { block_idx } => {
+                    // Above-floor pruning is ignored. At-or-below-floor pruning
+                    // removes only already-delivered data, so it leaves the
+                    // delivery shadow unchanged.
+                    let target = block_index(block_idx) as u64 + 1;
+                    handle.mailbox.prune(Height::new(target));
                 }
                 MarshalEvent::PublishViaVariant { block_idx } => {
                     let block = &canonical[block_index(block_idx)];
@@ -376,6 +522,7 @@ where
                     // setup.height reflects. Pending deliveries that
                     // never got acked do NOT advance this floor.
                     processed_height = setup.height.map_or(0, |h| h.get());
+                    pending_floor = None;
                 }
                 MarshalEvent::Idle => {}
             }
@@ -388,7 +535,7 @@ where
             // delivered heights are promoted into durable_available
             // because marshal moves them into the finalized archive
             // on delivery.
-            if repair_wake || matches!(event, MarshalEvent::Restart) {
+            if pending_floor.is_none() && (repair_wake || matches!(event, MarshalEvent::Restart)) {
                 let mut best: u64 = 0;
                 for &anchor in finalized_anchors.iter() {
                     let mut chain_complete = true;
