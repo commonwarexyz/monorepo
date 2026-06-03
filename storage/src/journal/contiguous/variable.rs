@@ -586,7 +586,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// - Overlap within [`range.start`, `range.end`]:
     ///   - Prunes toward `range.start` (section-aligned, so some items before
     ///     `range.start` may be retained)
-    /// - Unexpected data beyond `range.end`: returns [crate::qmdb::Error::UnexpectedData].
+    /// - Data beyond `range.end`: returns [Error::ItemOutOfRange].
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -597,7 +597,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
     /// # Errors
-    /// Returns [crate::qmdb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    /// Returns [Error::ItemOutOfRange] if existing data extends beyond `range.end`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_sync(
         context: E,
@@ -4743,7 +4743,7 @@ mod tests {
     }
 
     /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
+    /// This tests that ItemOutOfRange is returned when existing data goes beyond the upper bound.
     #[test_traced]
     fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
