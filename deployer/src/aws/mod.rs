@@ -598,13 +598,13 @@ pub struct Host {
     pub ip: IpAddr,
 }
 
-/// Monitoring instance IP addresses.
+/// Instance IP addresses.
 #[derive(Serialize, Deserialize, Clone)]
-pub struct MonitoringIps {
-    /// Public IP address of the monitoring instance.
+pub struct Ips {
+    /// Public IP address of the instance.
     pub public: IpAddr,
 
-    /// Private IP address of the monitoring instance.
+    /// Private IP address of the instance.
     pub private: IpAddr,
 }
 
@@ -612,7 +612,7 @@ pub struct MonitoringIps {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Hosts {
     /// Public and private IP addresses of the monitoring instance.
-    pub monitoring: MonitoringIps,
+    pub monitoring: Ips,
 
     /// Hosts deployed across all regions
     pub hosts: Vec<Host>,
