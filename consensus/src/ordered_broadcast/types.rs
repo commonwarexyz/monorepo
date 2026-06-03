@@ -657,9 +657,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Node<P, S, D> {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        let verified =
-            scoped.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy);
-        if !verified {
+        if !scoped.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy) {
             return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))
