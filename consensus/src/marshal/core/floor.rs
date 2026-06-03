@@ -3,7 +3,7 @@ use crate::{
     simplex::types::Finalization,
     types::{Height, Round},
 };
-use commonware_cryptography::{certificate::Scheme as CertificateScheme, Digest};
+use commonware_cryptography::{certificate, Digest};
 use commonware_resolver::{Resolver, TargetedResolver};
 use commonware_utils::vec::NonEmptyVec;
 
@@ -42,12 +42,12 @@ impl FetchAdmission {
 }
 
 /// The processed floor plus any pending floor update awaiting its anchor block.
-pub(super) struct Floor<S: CertificateScheme, C: Digest> {
+pub(super) struct Floor<S: certificate::Scheme, C: Digest> {
     processed: ProcessedFloor,
     pending: Option<Finalization<S, C>>,
 }
 
-impl<S: CertificateScheme, C: Digest> Floor<S, C> {
+impl<S: certificate::Scheme, C: Digest> Floor<S, C> {
     pub(super) const fn resolved(height: Option<Height>, round: Round) -> Self {
         Self {
             processed: ProcessedFloor { height, round },

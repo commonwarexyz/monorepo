@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Scheme, Subject},
+    certificate::{self, Attestation, Subject},
     Digest,
 };
 use commonware_parallel::Strategy;
@@ -162,7 +162,7 @@ where
 /// Acknowledgment (ack) represents a validator's vote on an item.
 /// Multiple acks can be recovered into a certificate for consensus.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack<S: Scheme, D: Digest> {
+pub struct Ack<S: certificate::Scheme, D: Digest> {
     /// The item being acknowledged
     pub item: Item<D>,
     /// The epoch in which this acknowledgment was created
@@ -171,7 +171,7 @@ pub struct Ack<S: Scheme, D: Digest> {
     pub attestation: Attestation<S>,
 }
 
-impl<S: Scheme, D: Digest> Ack<S, D> {
+impl<S: certificate::Scheme, D: Digest> Ack<S, D> {
     /// Verifies the attestation on this acknowledgment.
     ///
     /// Returns `true` if the attestation is valid for the given namespace and public key.
@@ -204,7 +204,7 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Ack<S, D> {
+impl<S: certificate::Scheme, D: Digest> Write for Ack<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
         self.epoch.write(writer);
@@ -212,7 +212,7 @@ impl<S: Scheme, D: Digest> Write for Ack<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Ack<S, D> {
+impl<S: certificate::Scheme, D: Digest> Read for Ack<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -227,14 +227,14 @@ impl<S: Scheme, D: Digest> Read for Ack<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for Ack<S, D> {
+impl<S: certificate::Scheme, D: Digest> EncodeSize for Ack<S, D> {
     fn encode_size(&self) -> usize {
         self.item.encode_size() + self.epoch.encode_size() + self.attestation.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<S, D>
+impl<S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<S, D>
 where
     S::Signature: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
@@ -254,7 +254,7 @@ where
 /// Message exchanged between peers containing an acknowledgment and tip information.
 /// This combines a validator's vote with their view of consensus progress.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TipAck<S: Scheme, D: Digest> {
+pub struct TipAck<S: certificate::Scheme, D: Digest> {
     /// The peer's local view of the tip (the lowest height that is not yet confirmed).
     pub tip: Height,
 
@@ -262,14 +262,14 @@ pub struct TipAck<S: Scheme, D: Digest> {
     pub ack: Ack<S, D>,
 }
 
-impl<S: Scheme, D: Digest> Write for TipAck<S, D> {
+impl<S: certificate::Scheme, D: Digest> Write for TipAck<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.tip.write(writer);
         self.ack.write(writer);
     }
 }
 
-impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
+impl<S: certificate::Scheme, D: Digest> Read for TipAck<S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -279,14 +279,14 @@ impl<S: Scheme, D: Digest> Read for TipAck<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for TipAck<S, D> {
+impl<S: certificate::Scheme, D: Digest> EncodeSize for TipAck<S, D> {
     fn encode_size(&self) -> usize {
         self.tip.encode_size() + self.ack.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for TipAck<S, D>
+impl<S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for TipAck<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
     Ack<S, D>: for<'a> arbitrary::Arbitrary<'a>,
@@ -300,14 +300,14 @@ where
 
 /// A recovered certificate for some [Item].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Certificate<S: Scheme, D: Digest> {
+pub struct Certificate<S: certificate::Scheme, D: Digest> {
     /// The item that was recovered.
     pub item: Item<D>,
     /// The recovered certificate.
     pub certificate: S::Certificate,
 }
 
-impl<S: Scheme, D: Digest> Certificate<S, D> {
+impl<S: certificate::Scheme, D: Digest> Certificate<S, D> {
     pub fn from_acks<'a, I>(scheme: &S, acks: I, strategy: &impl Strategy) -> Option<Self>
     where
         S: scheme::Scheme<D>,
@@ -334,14 +334,14 @@ impl<S: Scheme, D: Digest> Certificate<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
+impl<S: certificate::Scheme, D: Digest> Write for Certificate<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.item.write(writer);
         self.certificate.write(writer);
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
+impl<S: certificate::Scheme, D: Digest> Read for Certificate<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -351,14 +351,14 @@ impl<S: Scheme, D: Digest> Read for Certificate<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for Certificate<S, D> {
+impl<S: certificate::Scheme, D: Digest> EncodeSize for Certificate<S, D> {
     fn encode_size(&self) -> usize {
         self.item.encode_size() + self.certificate.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certificate<S, D>
+impl<S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certificate<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
@@ -374,7 +374,7 @@ where
 /// aggregation. Also used to journal events that are needed to initialize the aggregation engine
 /// when the node restarts.
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<S: Scheme, D: Digest> {
+pub enum Activity<S: certificate::Scheme, D: Digest> {
     /// Received an ack from a participant.
     Ack(Ack<S, D>),
 
@@ -385,7 +385,7 @@ pub enum Activity<S: Scheme, D: Digest> {
     Tip(Height),
 }
 
-impl<S: Scheme, D: Digest> Write for Activity<S, D> {
+impl<S: certificate::Scheme, D: Digest> Write for Activity<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::Ack(ack) => {
@@ -404,7 +404,7 @@ impl<S: Scheme, D: Digest> Write for Activity<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> Read for Activity<S, D> {
+impl<S: certificate::Scheme, D: Digest> Read for Activity<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -420,7 +420,7 @@ impl<S: Scheme, D: Digest> Read for Activity<S, D> {
     }
 }
 
-impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
+impl<S: certificate::Scheme, D: Digest> EncodeSize for Activity<S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Ack(ack) => ack.encode_size(),
@@ -431,7 +431,7 @@ impl<S: Scheme, D: Digest> EncodeSize for Activity<S, D> {
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<S, D>
+impl<S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
     Ack<S, D>: for<'a> arbitrary::Arbitrary<'a>,

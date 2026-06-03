@@ -3,11 +3,11 @@ use crate::simplex::{
     scheme::Scheme,
     types::{Finalization, Notarization},
 };
-use commonware_cryptography::certificate::Scheme as CertificateScheme;
+use commonware_cryptography::certificate;
 use commonware_utils::channel::oneshot;
 
 /// A parsed-but-unverified resolver delivery awaiting batch certificate verification.
-pub(super) enum PendingVerification<S: CertificateScheme, V: Variant>
+pub(super) enum PendingVerification<S: certificate::Scheme, V: Variant>
 where
     S: Scheme<V::Commitment>,
 {
@@ -23,7 +23,7 @@ where
     },
 }
 
-impl<S: CertificateScheme, V: Variant> PendingVerification<S, V>
+impl<S: certificate::Scheme, V: Variant> PendingVerification<S, V>
 where
     S: Scheme<V::Commitment>,
 {

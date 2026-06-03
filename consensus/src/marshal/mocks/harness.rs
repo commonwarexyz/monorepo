@@ -29,7 +29,7 @@ use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, CertificateVerifier as _, ConstantProvider, Provider},
+    certificate::{mocks::Fixture, Verifier as _, ConstantProvider, Provider},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,

@@ -73,7 +73,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         certificate::{
-            CertificateOnly, CertificateVerifier as _, ConstantProvider, Provider, Scoped,
+            CertificateOnly, Verifier as _, ConstantProvider, Provider, Scoped,
             mocks::Fixture,
         },
         ed25519::PublicKey,

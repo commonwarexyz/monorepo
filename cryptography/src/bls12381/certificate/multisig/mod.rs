@@ -474,7 +474,7 @@ macro_rules! impl_certificate_bls12381_multisig {
         impl<
             P: $crate::PublicKey,
             V: $crate::bls12381::primitives::variant::Variant,
-        > $crate::certificate::CertificateVerifier for Scheme<P, V> {
+        > $crate::certificate::Verifier for Scheme<P, V> {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
             type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
@@ -607,7 +607,7 @@ mod tests {
             ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
-        certificate::{Attestation, CertificateVerifier as _, Scheme as _},
+        certificate::{Attestation, Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
         Signer as _,

@@ -401,7 +401,7 @@ macro_rules! impl_certificate_secp256r1 {
             }
         }
 
-        impl<P: $crate::PublicKey> $crate::certificate::CertificateVerifier for Scheme<P> {
+        impl<P: $crate::PublicKey> $crate::certificate::Verifier for Scheme<P> {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
             type Certificate = $crate::secp256r1::certificate::Certificate;
@@ -535,7 +535,7 @@ macro_rules! impl_certificate_secp256r1 {
 mod tests {
     use super::*;
     use crate::{
-        certificate::{CertificateVerifier as _, Scheme as _},
+        certificate::{Scheme as _, Verifier as _},
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;

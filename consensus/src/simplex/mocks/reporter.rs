@@ -15,7 +15,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{
-    certificate::{CertificateVerifier, Scheme},
+    certificate::{Verifier, Scheme},
     Digest,
 };
 use commonware_parallel::Sequential;
@@ -37,7 +37,7 @@ use std::{
 
 // Records which validators have participated in a given view/payload pair.
 type Participation<P, D> = HashMap<View, HashMap<D, HashSet<P>>>;
-type Faults<S, D> = HashMap<<S as CertificateVerifier>::PublicKey, HashMap<View, HashSet<Activity<S, D>>>>;
+type Faults<S, D> = HashMap<<S as Verifier>::PublicKey, HashMap<View, HashSet<Activity<S, D>>>>;
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]

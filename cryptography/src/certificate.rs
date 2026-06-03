@@ -1,6 +1,6 @@
 //! Cryptographic primitives for generating and verifying certificates.
 //!
-//! This module provides the [`CertificateVerifier`] and [`Scheme`] traits and implementations for
+//! This module provides the [`Verifier`] and [`Scheme`] traits and implementations for
 //! producing signatures, validating them (individually or in batches), assembling certificates, and
 //! verifying recovered certificates.
 //!
@@ -184,9 +184,9 @@ pub trait Subject: Clone + Debug + Send + Sync {
 
 /// Cryptographic surface for recovered certificate verification.
 ///
-/// A `CertificateVerifier` verifies recovered certificates, but does not expose participant
+/// A `Verifier` verifies recovered certificates, but does not expose participant
 /// metadata or signing operations.
-pub trait CertificateVerifier: Clone + Debug + Send + Sync + 'static {
+pub trait Verifier: Clone + Debug + Send + Sync + 'static {
     /// Subject type for certificate verification.
     type Subject<'a, D: Digest>: Subject;
 
@@ -318,7 +318,7 @@ pub trait CertificateVerifier: Clone + Debug + Send + Sync + 'static {
 /// A `Scheme` produces attestations, validates them (individually or in batches), assembles
 /// certificates, and verifies recovered certificates. Implementations may override the
 /// provided defaults to take advantage of scheme-specific batching strategies.
-pub trait Scheme: CertificateVerifier {
+pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
     type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
 
@@ -571,18 +571,18 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
 
 /// A certificate verifier that intentionally hides scheme-only operations.
 #[derive(Clone, Debug)]
-pub struct CertificateOnly<V: CertificateVerifier> {
+pub struct CertificateOnly<V: Verifier> {
     verifier: V,
 }
 
-impl<V: CertificateVerifier> CertificateOnly<V> {
+impl<V: Verifier> CertificateOnly<V> {
     /// Creates a verifier wrapper.
     pub const fn new(verifier: V) -> Self {
         Self { verifier }
     }
 }
 
-impl<V: CertificateVerifier> CertificateVerifier for CertificateOnly<V> {
+impl<V: Verifier> Verifier for CertificateOnly<V> {
     type Subject<'a, D: Digest> = V::Subject<'a, D>;
     type PublicKey = V::PublicKey;
     type Certificate = V::Certificate;
@@ -728,7 +728,7 @@ mod tests {
     fn make_certificate(
         schemes: &[Ed25519Scheme],
         message: &'static [u8],
-    ) -> <Ed25519Scheme as CertificateVerifier>::Certificate {
+    ) -> <Ed25519Scheme as Verifier>::Certificate {
         let attestations: Vec<_> = schemes
             .iter()
             .filter_map(|s| s.sign::<Sha256Digest>(TestSubject { message }))

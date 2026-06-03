@@ -26,7 +26,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{CertificateVerifier, Provider, Scoped},
+    certificate::{Verifier, Provider, Scoped},
     Digestible,
 };
 use commonware_macros::select_loop;
@@ -303,9 +303,9 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver))
     }
@@ -320,12 +320,12 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
     {
         self.start(
             application,
-            NoBuffer::<<P::Scheme as CertificateVerifier>::PublicKey>::new(),
+            NoBuffer::<<P::Scheme as Verifier>::PublicKey>::new(),
             resolver,
         )
     }
@@ -340,9 +340,9 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
@@ -509,11 +509,11 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
     {
         if message.response_closed() {
@@ -782,7 +782,7 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let mut needs_sync = false;
@@ -995,7 +995,7 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let round = finalization.round();
@@ -1547,7 +1547,7 @@ where
     fn certificate_codec_config(
         &self,
         epoch: Epoch,
-    ) -> Option<<<P::Scheme as CertificateVerifier>::Certificate as Read>::Cfg> {
+    ) -> Option<<<P::Scheme as Verifier>::Certificate as Read>::Cfg> {
         self.provider
             .scoped(epoch)
             .map(|scoped| scoped.certificate_codec_config())

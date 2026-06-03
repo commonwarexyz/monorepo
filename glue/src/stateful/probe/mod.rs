@@ -146,8 +146,8 @@ mod test {
     };
     use commonware_cryptography::{
         certificate::{
-            mocks::Fixture, Attestation, CertificateOnly, CertificateVerifier, ConstantProvider,
-            Provider, Scheme as CertificateScheme, Scoped,
+            self, mocks::Fixture, Attestation, CertificateOnly, Verifier, ConstantProvider,
+            Provider, Scoped,
         },
         ed25519,
         sha256::Digest as Sha256Digest,
@@ -332,11 +332,11 @@ mod test {
         }
     }
 
-    impl CertificateVerifier for MaybeEnumerableScheme {
+    impl Verifier for MaybeEnumerableScheme {
         type Subject<'a, D: commonware_cryptography::Digest> =
             commonware_consensus::simplex::types::Subject<'a, D>;
         type PublicKey = ed25519::PublicKey;
-        type Certificate = <Scheme as CertificateVerifier>::Certificate;
+        type Certificate = <Scheme as Verifier>::Certificate;
 
         fn verify_certificate<R, D, M>(
             &self,
@@ -368,8 +368,8 @@ mod test {
         }
     }
 
-    impl CertificateScheme for MaybeEnumerableScheme {
-        type Signature = <Scheme as CertificateScheme>::Signature;
+    impl certificate::Scheme for MaybeEnumerableScheme {
+        type Signature = <Scheme as certificate::Scheme>::Signature;
 
         fn me(&self) -> Option<commonware_utils::Participant> {
             self.inner.me()

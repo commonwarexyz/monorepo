@@ -588,7 +588,7 @@ macro_rules! impl_certificate_bls12381_threshold {
         impl<
             P: $crate::PublicKey,
             V: $crate::bls12381::primitives::variant::Variant,
-        > $crate::certificate::CertificateVerifier for Scheme<P, V> {
+        > $crate::certificate::Verifier for Scheme<P, V> {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
             type Certificate = $crate::bls12381::certificate::threshold::Certificate<V>;
@@ -725,7 +725,7 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{CertificateVerifier as _, Scheme as _},
+        certificate::{Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
         Signer as _,

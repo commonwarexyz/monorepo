@@ -4,7 +4,7 @@ use crate::{
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
-    certificate::{CertificateVerifier, Provider},
+    certificate::{Verifier, Provider},
     Digest,
 };
 use commonware_p2p::Blocker;
@@ -20,7 +20,7 @@ pub struct Config<
     A: Automaton<Context = Height, Digest = D>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    B: Blocker<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+    B: Blocker<PublicKey = <P::Scheme as Verifier>::PublicKey>,
     T: Strategy,
 > {
     /// Tracks the current state of consensus (to determine which participants should

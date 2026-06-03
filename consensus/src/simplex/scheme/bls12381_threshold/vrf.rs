@@ -549,7 +549,7 @@ fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Byte
     }
 }
 
-impl<P: PublicKey, V: Variant> certificate::CertificateVerifier for Scheme<P, V> {
+impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
     type Certificate = Certificate<V>;
@@ -886,7 +886,7 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{mocks::Fixture, CertificateVerifier as _, Scheme as _},
+        certificate::{mocks::Fixture, Verifier as _, Scheme as _},
         ed25519,
         ed25519::certificate::mocks::participants as ed25519_participants,
         sha256::Digest as Sha256Digest,

@@ -560,7 +560,7 @@ macro_rules! impl_certificate_mock {
                 const ATTRIBUTABLE: bool,
                 const BATCHABLE: bool,
                 const ALLOW_INVALID: bool,
-            > $crate::certificate::CertificateVerifier for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            > $crate::certificate::Verifier for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
@@ -710,7 +710,7 @@ macro_rules! impl_certificate_mock {
 mod tests {
     use super::{Certificates, Shared, Signatures};
     use crate::{
-        certificate::{Attestation, CertificateVerifier as _, Lazy, Scheme as _},
+        certificate::{Attestation, Verifier as _, Lazy, Scheme as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };

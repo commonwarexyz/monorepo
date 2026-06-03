@@ -480,7 +480,7 @@ macro_rules! impl_certificate_ed25519 {
             }
         }
 
-        impl $crate::certificate::CertificateVerifier for Scheme {
+        impl $crate::certificate::Verifier for Scheme {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = $crate::ed25519::PublicKey;
             type Certificate = $crate::ed25519::certificate::Certificate;
@@ -605,7 +605,7 @@ macro_rules! impl_certificate_ed25519 {
 mod tests {
     use super::*;
     use crate::{
-        certificate::{CertificateVerifier as _, Scheme as _},
+        certificate::{Scheme as _, Verifier as _},
         sha256::Digest as Sha256Digest,
     };
     use bytes::Bytes;

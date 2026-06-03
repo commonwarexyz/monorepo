@@ -56,7 +56,7 @@ impl<S> Scheme<S> {
 
     fn corrupt_signature<D>(
         inner: &S,
-        subject: <S as commonware_cryptography::certificate::CertificateVerifier>::Subject<'_, D>,
+        subject: <S as commonware_cryptography::certificate::Verifier>::Subject<'_, D>,
         signer: Participant,
         signature: &<S as commonware_cryptography::certificate::Scheme>::Signature,
     ) -> Lazy<<S as commonware_cryptography::certificate::Scheme>::Signature>
@@ -118,7 +118,7 @@ where
     fn build(
         self,
         participants: &commonware_utils::ordered::Set<
-            <Scheme<S> as commonware_cryptography::certificate::CertificateVerifier>::PublicKey,
+            <Scheme<S> as commonware_cryptography::certificate::Verifier>::PublicKey,
         >,
     ) -> Self::Elector {
         Elector {
@@ -137,14 +137,14 @@ where
         &self,
         round: Round,
         certificate: Option<
-            &<Scheme<S> as commonware_cryptography::certificate::CertificateVerifier>::Certificate,
+            &<Scheme<S> as commonware_cryptography::certificate::Verifier>::Certificate,
         >,
     ) -> Participant {
         self.inner.elect(round, certificate)
     }
 }
 
-impl<S> commonware_cryptography::certificate::CertificateVerifier for Scheme<S>
+impl<S> commonware_cryptography::certificate::Verifier for Scheme<S>
 where
     S: commonware_cryptography::certificate::Scheme,
 {
