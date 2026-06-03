@@ -2062,13 +2062,12 @@ mod tests {
         });
     }
 
-    /// Test that a crash partway through a multi-section sync leaves a contiguous durable prefix
-    /// that recovery preserves.
+    /// Test that a multi-section append whose tail is never synced recovers exactly the durable
+    /// full-section prefix.
     ///
-    /// `flush_dirty_sections` syncs dirty sections, and all mutating operations serialize on
-    /// `op_lock` so no concurrent sync can interleave. This reproduces a crash after sections 0 and
-    /// 1 were synced but before section 2, then asserts recovery keeps exactly the contiguous
-    /// prefix 0..20.
+    /// The rollover-fsync invariant makes each section durable as it fills, so sections 0 and 1
+    /// survive a crash even though the partially-filled tail (section 2) was never synced. Recovery
+    /// keeps exactly the contiguous prefix 0..20.
     #[test_traced]
     fn test_fixed_recovery_partial_sync_loop_keeps_contiguous_prefix() {
         let executor = deterministic::Runner::default();
@@ -2078,23 +2077,15 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Fill sections 0 and 1 and partially fill section 2 (positions 20..25). Nothing is
-            // synced yet, so only the created section blobs are durable, all still empty.
+            // Fill sections 0 and 1 (each fsynced at rollover) and partially fill section 2
+            // (positions 20..24), which is never synced.
             for i in 0..25u64 {
                 journal.append(&test_digest(i)).await.unwrap();
-            }
-
-            // Sync sections 0 and 1 but not section 2, simulating a crash after part of a
-            // multi-section sync became durable.
-            {
-                let inner = journal.inner.write().await;
-                inner.journal.sync(0).await.unwrap();
-                inner.journal.sync(1).await.unwrap();
             }
             drop(journal);
 
             // The durable data is exactly the contiguous prefix: sections 0 and 1 hold items and
-            // section 2 is an empty trailing blob.
+            // section 2 is an empty trailing blob (its buffered items were dropped without a sync).
             let names = scan_partition(&context, &blob_partition(&cfg)).await;
             assert_eq!(names.len(), 3);
             for (section, name) in names.iter().enumerate() {

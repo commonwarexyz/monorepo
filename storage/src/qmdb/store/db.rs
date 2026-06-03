@@ -985,7 +985,7 @@ mod test {
             let value0 = vec![0, 1, 2];
             let value1 = vec![3, 4, 5, 6];
 
-            // Commit and sync an initial update so restart recovery has an older watermark.
+            // Commit and sync an initial update to establish a durable baseline.
             apply_entries(&mut db, [(key0, Some(value0.clone()))]).await;
             db.commit().await.unwrap();
             db.sync().await.unwrap();

@@ -512,12 +512,12 @@ mod tests {
                     .await
                     .unwrap();
 
-                // Establish a synced baseline so the recovery watermark is behind the next commit.
+                // Establish a synced baseline before the next commit.
                 queue.append(b"synced".to_vec()).await.unwrap();
                 queue.commit().await.unwrap();
                 queue.sync().await.unwrap();
 
-                // Commit later data without syncing; reopen must replay it from the old watermark.
+                // Commit later data without syncing; reopen must replay it from the data journal.
                 queue.append(b"committed-a".to_vec()).await.unwrap();
                 queue.append(b"committed-b".to_vec()).await.unwrap();
                 queue.commit().await.unwrap();

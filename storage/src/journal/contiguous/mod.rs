@@ -18,12 +18,12 @@ mod tests;
 
 /// A reader guard that holds a consistent view of the journal.
 ///
-/// While this guard exists, the reader's logical bounds remain stable, and any position within
-/// `bounds()` remains readable through this guard.
-///
-/// Implementations may still make physical storage progress, such as unlinking backing blobs from
-/// future namespace lookups, but they must not invalidate reads within the captured bounds or
-/// change the bounds visible through this reader.
+/// While this guard exists, operations that may modify the bounds (such as `append`, `prune`, and
+/// `rewind`) will block until the guard is dropped. This keeps bounds stable, so any position
+/// within `bounds()` is guaranteed readable.
+//
+// TODO(<https://github.com/commonwarexyz/monorepo/issues/3084>): Relax locking to allow `append`
+// since it doesn't invalidate reads within the cached bounds.
 pub trait Reader: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
