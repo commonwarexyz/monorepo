@@ -70,9 +70,7 @@ pub struct Engine<
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     T: Strategy,
-> where
-    P::Verifier: scheme::CertificateVerifier<C::PublicKey, D>,
-{
+> {
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -211,8 +209,6 @@ impl<
         M: Monitor<Index = Epoch>,
         T: Strategy,
     > Engine<E, C, S, P, D, A, R, Z, M, T>
-where
-    P::Verifier: scheme::CertificateVerifier<C::PublicKey, D>,
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {

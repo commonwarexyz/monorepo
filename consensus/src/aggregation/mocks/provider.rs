@@ -42,9 +42,8 @@ impl<S: Scheme> Provider<S> {
 impl<S: Scheme> certificate::Provider for Provider<S> {
     type Scope = Epoch;
     type Scheme = S;
-    type Verifier = S;
 
-    fn scoped(&self, epoch: Epoch) -> Option<Scoped<S, Self::Verifier>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
         let schemes = self.schemes.lock();
         schemes.get(&epoch).cloned().map(Scoped::Scheme)
     }

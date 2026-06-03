@@ -635,7 +635,6 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     where
         R: CryptoRngCore,
         Pr: Provider<Scope = Epoch, Scheme = S>,
-        Pr::Verifier: scheme::CertificateVerifier<P, D>,
         S: scheme::Scheme<P, D>,
     {
         // Verify chunk signature

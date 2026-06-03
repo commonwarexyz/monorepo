@@ -106,12 +106,11 @@ pub struct EmptyProvider;
 impl Provider for EmptyProvider {
     type Scope = Epoch;
     type Scheme = S;
-    type Verifier = S;
 
     fn scoped(
         &self,
         _scope: Epoch,
-    ) -> Option<commonware_cryptography::certificate::Scoped<S, Self::Verifier>> {
+    ) -> Option<commonware_cryptography::certificate::Scoped<S>> {
         None
     }
 }

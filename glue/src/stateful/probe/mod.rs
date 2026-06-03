@@ -299,9 +299,8 @@ mod test {
     impl Provider for EpochProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
-        type Verifier = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<Scoped<Scheme, Self::Verifier>> {
+        fn scoped(&self, scope: Epoch) -> Option<Scoped<Scheme>> {
             self.0.lock().get(&scope).cloned().map(Scoped::Scheme)
         }
     }
@@ -441,9 +440,8 @@ mod test {
     impl Provider for ParticipantlessAllProvider {
         type Scope = Epoch;
         type Scheme = MaybeEnumerableScheme;
-        type Verifier = CertificateOnly<MaybeEnumerableScheme>;
 
-        fn scoped(&self, _: Epoch) -> Option<Scoped<MaybeEnumerableScheme, Self::Verifier>> {
+        fn scoped(&self, _: Epoch) -> Option<Scoped<MaybeEnumerableScheme>> {
             Some(Scoped::Certificate(self.all.clone()))
         }
 
@@ -504,7 +502,6 @@ mod test {
         ) -> Self
         where
             D: Provider<Scope = Epoch, Scheme = Scheme>,
-            D::Verifier: commonware_consensus::simplex::scheme::CertificateVerifier<Sha256Digest>,
             F: Fn(&Scheme) -> D,
         {
             let mut rng = test_rng();

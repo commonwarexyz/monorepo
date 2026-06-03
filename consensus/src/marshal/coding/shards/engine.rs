@@ -1771,9 +1771,8 @@ mod tests {
     impl Provider for MultiEpochProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
-        type Verifier = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme, Self::Verifier>> {
+        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme>> {
             self.schemes
                 .get(&scope)
                 .cloned()
@@ -1801,9 +1800,8 @@ mod tests {
     impl Provider for ChurningProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
-        type Verifier = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme, Self::Verifier>> {
+        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme>> {
             if scope != Epoch::zero() {
                 return None;
             }

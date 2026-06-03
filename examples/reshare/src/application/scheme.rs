@@ -63,9 +63,8 @@ impl<S: Scheme, C: Signer> Provider<S, C> {
 impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
     type Scope = Epoch;
     type Scheme = S;
-    type Verifier = CertificateOnly<S>;
 
-    fn scoped(&self, epoch: Epoch) -> Option<Scoped<S, Self::Verifier>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
         if let Some(verifier) = &self.certificate_verifier {
             return Some(Scoped::Certificate(verifier.clone()));
         }

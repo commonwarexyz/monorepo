@@ -79,7 +79,6 @@ where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
-    P::Verifier: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
         Commitment = V::Commitment,
@@ -145,7 +144,6 @@ where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
-    P::Verifier: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
         Commitment = V::Commitment,

@@ -132,9 +132,8 @@ mod tests {
     impl Provider for AllOnlyProvider {
         type Scope = Epoch;
         type Scheme = S;
-        type Verifier = CertificateOnly<S>;
 
-        fn scoped(&self, _: Epoch) -> Option<Scoped<S, Self::Verifier>> {
+        fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
             Some(Scoped::Certificate(self.scheme.clone()))
         }
     }
@@ -2896,7 +2895,6 @@ mod tests {
     where
         R: Reporter<Activity = Update<B>>,
         P: Provider<Scope = Epoch, Scheme = S>,
-        P::Verifier: crate::simplex::scheme::CertificateVerifier<D>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
         let config = Config {

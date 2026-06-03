@@ -400,27 +400,19 @@ pub trait Scheme: CertificateVerifier {
 
 /// Certificate provider result for a scope.
 #[derive(Clone, Debug)]
-pub enum Scoped<S, V>
+pub enum Scoped<S>
 where
     S: Scheme,
-    V: CertificateVerifier<
-        Certificate = <S as CertificateVerifier>::Certificate,
-        PublicKey = <S as CertificateVerifier>::PublicKey,
-    >,
 {
     /// A certificate-only verifier.
-    Certificate(Arc<V>),
+    Certificate(Arc<CertificateOnly<S>>),
     /// A full signing scheme.
     Scheme(Arc<S>),
 }
 
-impl<S, V> Scoped<S, V>
+impl<S> Scoped<S>
 where
     S: Scheme,
-    V: CertificateVerifier<
-        Certificate = <S as CertificateVerifier>::Certificate,
-        PublicKey = <S as CertificateVerifier>::PublicKey,
-    >,
 {
     /// Returns the full signing scheme, if available.
     pub fn into_scheme(self) -> Option<Arc<S>> {
@@ -448,14 +440,9 @@ pub trait Provider: Clone + Send + Sync + 'static {
     type Scope: Clone + Send + Sync + 'static;
     /// The signing scheme to provide.
     type Scheme: Scheme;
-    /// A verifier that can validate certificates without exposing scheme-only operations.
-    type Verifier: CertificateVerifier<
-        Certificate = <Self::Scheme as CertificateVerifier>::Certificate,
-        PublicKey = <Self::Scheme as CertificateVerifier>::PublicKey,
-    >;
 
     /// Return the certificate or signing scheme that corresponds to `scope`.
-    fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme, Self::Verifier>>;
+    fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme>>;
 
     /// Return the full signing scheme that corresponds to `scope`, if available.
     fn scheme(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>> {
@@ -576,9 +563,8 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
 {
     type Scope = Sc;
     type Scheme = S;
-    type Verifier = S;
 
-    fn scoped(&self, _: Sc) -> Option<Scoped<S, Self::Verifier>> {
+    fn scoped(&self, _: Sc) -> Option<Scoped<S>> {
         Some(Scoped::Scheme(self.scheme.clone()))
     }
 }
