@@ -1,7 +1,7 @@
 //! Utility functions for interacting with EC2 instances
 
 use crate::aws::Error;
-use std::path::Path;
+use std::{path::Path, process::Stdio};
 use tokio::{
     fs::File,
     io::AsyncWriteExt,
@@ -61,6 +61,29 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
         }
         warn!(ip, stderr = ?String::from_utf8_lossy(&output.stderr), stdout = ?String::from_utf8_lossy(&output.stdout), "SSH command failed");
         sleep(RETRY_INTERVAL).await;
+    }
+    Err(Error::SshFailed)
+}
+
+/// Opens an interactive SSH session to a remote instance
+pub async fn ssh_attach(key_file: &str, ip: &str) -> Result<(), Error> {
+    let status = Command::new("ssh")
+        .arg("-i")
+        .arg(key_file)
+        .arg("-o")
+        .arg("IdentitiesOnly=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=600")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg(format!("ubuntu@{ip}"))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await?;
+    if status.success() {
+        return Ok(());
     }
     Err(Error::SshFailed)
 }

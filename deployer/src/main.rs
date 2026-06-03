@@ -143,7 +143,17 @@ async fn main() -> std::process::ExitCode {
                                 .help("Path to local binary with debug symbols for symbolication")
                                 .value_parser(clap::value_parser!(PathBuf)),
                         ),
-                ),
+                )
+                .subcommand(
+                    Command::new(aws::ATTACH_CMD)
+                        .about("Open an SSH session to a deployed instance.")
+                        .arg(
+                            Arg::new("ip")
+                                .required(true)
+                                .help("Public IP address of instance to attach to")
+                                .value_parser(clap::value_parser!(String)),
+                        ),
+                )
         )
         .get_matches();
 
@@ -215,6 +225,14 @@ async fn main() -> std::process::ExitCode {
                 let binary = matches.get_one::<PathBuf>("binary").unwrap();
                 if let Err(e) = aws::profile(config_path, instance, duration, binary).await {
                     error!(error=?e, "failed to profile instance");
+                } else {
+                    return std::process::ExitCode::SUCCESS;
+                }
+            }
+            Some((aws::ATTACH_CMD, matches)) => {
+                let ip = matches.get_one::<String>("ip").unwrap();
+                if let Err(e) = aws::attach(ip).await {
+                    error!(error=?e, "failed to attach to instance");
                 } else {
                     return std::process::ExitCode::SUCCESS;
                 }
