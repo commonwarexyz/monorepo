@@ -68,9 +68,8 @@ const MAX_WRITE_BUF: usize = 2048;
 /// Buffer size used for internal verification replays.
 const VERIFY_REPLAY_BUF: usize = 1024;
 
-/// Maximum number of operations per fuzz input. Bounds the number of crash cycles and the per-cycle
-/// verification/replay work so executions stay fast (total cost is ~O(cycles * size), both capped
-/// here).
+/// Maximum number of operations per fuzz input. Caps the crash-cycle count and per-cycle
+/// verification work so executions stay fast.
 const MAX_OPERATIONS: usize = 128;
 
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
@@ -99,8 +98,7 @@ fn bounded_rate(u: &mut Unstructured<'_>) -> arbitrary::Result<f64> {
     Ok(f64::from(percent) / 100.0)
 }
 
-/// A bounded-length operation sequence, so input size (hence cycle count and verification cost)
-/// stays capped regardless of how much data the fuzzer provides.
+/// Op sequence capped at `MAX_OPERATIONS`; a derived `Vec` would instead grow with input length.
 fn bounded_operations(u: &mut Unstructured<'_>) -> arbitrary::Result<Vec<JournalOperation>> {
     let num_ops = u.int_in_range(0..=MAX_OPERATIONS)?;
     (0..num_ops)
