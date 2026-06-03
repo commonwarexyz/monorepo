@@ -8,6 +8,7 @@ use crate::{
         ancestry::BlockProvider,
         core::{Buffer, CommitmentFallback, Mailbox, Variant},
     },
+    simplex::scheme::Scheme as SimplexScheme,
     types::Round,
     Block,
 };
@@ -48,6 +49,13 @@ where
         block.parent()
     }
 
+    fn check_payload<S>(_scheme: &S, _payload: Self::Commitment) -> bool
+    where
+        S: SimplexScheme<Self::Commitment>,
+    {
+        true
+    }
+
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         _expected: Self::Commitment,
@@ -56,6 +64,13 @@ where
     }
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
+        block
+    }
+
+    fn from_application_block(
+        block: Self::ApplicationBlock,
+        _payload: Self::Commitment,
+    ) -> Self::Block {
         block
     }
 }

@@ -483,6 +483,82 @@ mod tests {
     }
 
     #[test_traced("WARN")]
+    fn test_coding_notarized_delivery_rejects_dishonest_payload_config() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let honest_config = coding_config_for_participants(NUM_VALIDATORS as u16);
+            let dishonest_config = coding_config_for_participants((NUM_VALIDATORS + 3) as u16);
+            assert_ne!(honest_config, dishonest_config);
+
+            let buffer = RecordingCodingBuffer::default();
+            let (marshal, resolver, _actor_handle) = start_coding_actor_with_recording(
+                context.child("actor_stack"),
+                "coding-dishonest-payload-config",
+                provider,
+                buffer,
+            )
+            .await;
+            let resolver_tx = resolver
+                .sender
+                .clone()
+                .expect("recording resolver should keep its sender");
+
+            let genesis = genesis_block();
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let height = Height::new(1);
+            let candidate_ctx = CodingCtx {
+                round,
+                leader: participants[0].clone(),
+                parent: (
+                    View::zero(),
+                    genesis_coding_commitment::<Sha256, _>(&genesis),
+                ),
+            };
+            let candidate = make_coding_block(candidate_ctx, genesis.digest(), height, 100);
+            let dishonest_block: TestCodedBlock =
+                CodedBlock::new(candidate.clone(), dishonest_config, &Sequential);
+            let proposal = Proposal {
+                round,
+                parent: View::zero(),
+                payload: dishonest_block.commitment(),
+            };
+            let notarization = CodingHarness::make_notarization(proposal, &schemes, QUORUM);
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver_tx
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Notarized { round },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
+                    },
+                    value: (notarization, dishonest_block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                !response_rx.await.unwrap(),
+                "notarized delivery should reject a dishonest coding config"
+            );
+
+            context.sleep(Duration::from_millis(100)).await;
+            assert!(
+                marshal.get_block(height).await.is_none(),
+                "dishonest deliveries must not store a finalized block"
+            );
+            assert!(
+                marshal.get_finalization(height).await.is_none(),
+                "dishonest deliveries must not archive a finalization"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
     fn test_coding_block_provider_parent_fetches_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
