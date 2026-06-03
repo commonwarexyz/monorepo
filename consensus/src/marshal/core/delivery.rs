@@ -18,7 +18,7 @@ where
     },
     Finalized {
         finalization: Finalization<S, V::Commitment>,
-        block: V::Block,
+        block: V::ApplicationBlock,
         response: oneshot::Sender<bool>,
     },
 }
