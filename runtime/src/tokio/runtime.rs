@@ -424,7 +424,7 @@ impl crate::Runner for Runner {
         }
 
         // Make any storage a prior process left in the page cache crash-durable before user code
-        // reads. See `sync_storage_filesystem` for the per-platform guarantee.
+        // reads.
         if let Err(e) = sync_storage_filesystem(&self.cfg.storage_directory) {
             panic!(
                 "failed to sync storage filesystem at startup ({}): {e}",
@@ -508,7 +508,7 @@ impl crate::Runner for Runner {
 }
 
 /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote but
-/// did not `fsync` are crash-durable before any storage structure reads them during `init`.
+/// did not `fsync` are crash-durable before any storage structure reads.
 ///
 /// Per-platform guarantee:
 /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable; the recovered
@@ -541,8 +541,6 @@ fn sync_storage_filesystem(dir: &std::path::Path) -> std::io::Result<()> {
             );
             Ok(())
         } else if #[cfg(unix)] {
-            // No `syncfs` on macOS/BSD. `sync` flushes dirty buffers system-wide but is not
-            // crash-durable on macOS, so this is best-effort only (see the function docs).
             // SAFETY: `sync` takes no arguments and cannot fail.
             unsafe { libc::sync() };
             tracing::debug!(
@@ -551,7 +549,6 @@ fn sync_storage_filesystem(dir: &std::path::Path) -> std::io::Result<()> {
             );
             Ok(())
         } else {
-            // Windows / wasm: no usable whole-filesystem durable flush.
             tracing::debug!(
                 storage_directory = %dir.display(),
                 "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
