@@ -508,7 +508,7 @@ macro_rules! impl_certificate_ed25519 {
                 strategy: &impl commonware_parallel::Strategy,
             ) -> bool
             where
-                R: rand::Rng + rand::CryptoRng,
+                R: rand_core::CryptoRngCore,
                 D: $crate::Digest,
                 I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
                 M: commonware_utils::Faults,
