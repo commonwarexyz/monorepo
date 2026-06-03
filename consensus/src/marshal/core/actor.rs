@@ -1276,6 +1276,8 @@ where
                     return false;
                 }
 
+                // Decode the block carried with the finalization. Below, it is checked against
+                // the requested height and the finalization payload.
                 let Ok(block) =
                     V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
                 else {
@@ -1329,6 +1331,8 @@ where
                     return false;
                 }
 
+                // Use the notarization payload to derive the block decode config. Below, the
+                // decoded block is checked against the same payload.
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
