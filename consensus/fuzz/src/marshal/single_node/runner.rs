@@ -11,12 +11,16 @@ use super::{
     variant::VariantPublish,
 };
 use commonware_consensus::{
-    marshal::mocks::{
-        application::Application,
-        harness::{
-            setup_network_with_participants, TestHarness, ValidatorHandle, NAMESPACE,
-            NUM_VALIDATORS, QUORUM,
+    marshal::{
+        core::{CommitmentFallback, DigestFallback},
+        mocks::{
+            application::Application,
+            harness::{
+                setup_network_with_participants, TestHarness, ValidatorHandle, NAMESPACE,
+                NUM_VALIDATORS, QUORUM,
+            },
         },
+        Identifier,
     },
     simplex::{
         scheme::bls12381_threshold::vrf as bls12381_threshold_vrf,
@@ -173,6 +177,7 @@ where
         // ack handles are tied to the dead actor.
         let mut stale_to_skip: usize = 0;
         let mut restart_counter: usize = 0;
+        let mut subscriptions = Vec::new();
 
         for event in input.events.iter().copied() {
             // Set inside the ReportFinalization arm when marshal's
@@ -256,6 +261,46 @@ where
                     {
                         durable_available.insert(h);
                     }
+                }
+                MarshalEvent::GetBlock { block_idx } => {
+                    // Pure read of the finalized archive by height.
+                    let block = &canonical[block_index(block_idx)];
+                    let _ = handle
+                        .mailbox
+                        .get_block(Identifier::Height(H::height(block)))
+                        .await;
+                }
+                MarshalEvent::Subscribe {
+                    block_idx,
+                    by_commitment,
+                } => {
+                    // When the block is missing locally this drives the fallback
+                    // fetch + subscriber registration path. Keep the receiver alive
+                    // so the mailbox policy does not discard the request before the
+                    // actor can observe it.
+                    let block = &canonical[block_index(block_idx)];
+                    let round = round_for_height(H::height(block));
+                    if by_commitment {
+                        subscriptions.push(handle.mailbox.subscribe_by_commitment(
+                            H::commitment(block),
+                            CommitmentFallback::FetchByRound { round },
+                        ));
+                    } else {
+                        subscriptions.push(handle.mailbox.subscribe_by_digest(
+                            H::digest(block),
+                            DigestFallback::FetchByRound { round },
+                        ));
+                    }
+                }
+                MarshalEvent::Prune { block_idx } => {
+                    // Prune is ignored above the floor, so clamp to the
+                    // processed floor to exercise prune_finalized_archives.
+                    // Pruning below the floor removes only already-delivered
+                    // data, so it leaves the delivery shadow unchanged.
+                    let target = block_index(block_idx) as u64 + 1;
+                    handle
+                        .mailbox
+                        .prune(Height::new(target.min(processed_height)));
                 }
                 MarshalEvent::PublishViaVariant { block_idx } => {
                     let block = &canonical[block_index(block_idx)];

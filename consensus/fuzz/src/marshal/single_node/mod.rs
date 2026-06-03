@@ -79,11 +79,23 @@
 //! Shards-mailbox coverage is therefore exclusively via
 //! `PublishViaVariant`.
 //!
+//! # Auxiliary query coverage
+//!
+//! `GetBlock`, `Subscribe`, and `Prune` issue read or prune-below-floor
+//! mailbox traffic. They do not affect delivery observations: the reads are
+//! pure, the subscriptions are fire-and-forget (the receiver is dropped so no
+//! waiter gates dispatch), and `Prune` is clamped to the processed floor so it
+//! only removes already-delivered data.
+//!
 //! # Known scope limitations
 //!
 //! - Single-validator only: peer-to-peer shard *dissemination* and
 //!   *reconstruction-from-peer-shards* are not exercised. Multi-validator
 //!   coding is covered by the [`super::multi_node`] model.
+//! - `SetFloor`'s anchor-application path is not driven here: in single-node
+//!   it can only advance the floor (clearing pending acks and jumping the
+//!   dispatch start) or wedge dispatch behind an unresolvable fetch, neither
+//!   representable in the delivery shadow without risking false violations.
 //!
 //! # Layout
 //!

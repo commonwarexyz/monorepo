@@ -392,3 +392,10 @@ path = "fuzz_targets/marshal_liveness_coding.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "aggregation_decode"
+path = "fuzz_targets/aggregation_decode.rs"
+test = false
+doc = false
+bench = false

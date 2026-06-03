@@ -18,6 +18,14 @@ pub enum MarshalEvent {
     ReportFinalization { block_idx: u8 },
     /// Report a notarization for a block.
     ReportNotarization { block_idx: u8 },
+    /// Best-effort local read of a finalized block by height (pure query).
+    GetBlock { block_idx: u8 },
+    /// Subscribe to a block by digest or commitment with a round-fetch
+    /// fallback, exercising the missing-block subscription path.
+    Subscribe { block_idx: u8, by_commitment: bool },
+    /// Request pruning finalized archives below a height (only effective at
+    /// or below the current floor).
+    Prune { block_idx: u8 },
     /// Publish a block through the variant's local buffer (buffered
     /// broadcast engine for Standard, shards engine for Coding) without
     /// going through marshal's mailbox.
