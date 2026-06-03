@@ -113,32 +113,6 @@ mod tests {
         assert_provider::<Mailbox<S, Standard<B>>>();
     }
 
-    #[derive(Clone)]
-    struct AllOnlyProvider {
-        scheme: Arc<S>,
-    }
-
-    impl AllOnlyProvider {
-        fn new(scheme: S) -> Self {
-            Self {
-                scheme: Arc::new(scheme),
-            }
-        }
-    }
-
-    impl Provider for AllOnlyProvider {
-        type Scope = Epoch;
-        type Scheme = S;
-
-        fn scoped(&self, _: Epoch) -> Option<Arc<S>> {
-            None
-        }
-
-        fn all(&self) -> Option<Arc<S>> {
-            Some(self.scheme.clone())
-        }
-    }
-
     #[test_traced("WARN")]
     fn test_standard_block_provider_parent_fetches_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -4679,7 +4653,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_rejects_wrong_round_without_scoped_provider() {
+    fn test_standard_notarized_delivery_rejects_wrong_round() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -4697,8 +4671,8 @@ mod tests {
 
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "notarized-delivery-wrong-round-all-only",
-                AllOnlyProvider::new(schemes[0].clone()),
+                "notarized-delivery-wrong-round",
+                ConstantProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
