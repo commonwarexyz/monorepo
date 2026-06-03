@@ -191,6 +191,14 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Return true if a merkleized batch matches a committed sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
 
+    /// Return true if two committed sync targets represent the same committed state.
+    ///
+    /// This defaults to exact target equality. Database implementations may relax fields
+    /// that describe local retention boundaries rather than committed state identity.
+    fn committed_target_equivalent(actual: &Self::SyncTarget, expected: &Self::SyncTarget) -> bool {
+        actual == expected
+    }
+
     /// Apply a merkleized batch's changeset to the underlying database.
     ///
     /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
@@ -262,6 +270,12 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
 
     /// Return true if merkleized batches match the committed sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
+
+    /// Return true if two committed sync target sets represent the same committed state.
+    fn committed_targets_equivalent(
+        actual: &Self::SyncTargets,
+        expected: &Self::SyncTargets,
+    ) -> bool;
 
     /// Apply each merkleized batch's changeset to its underlying database.
     ///
@@ -456,6 +470,13 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
         T::matches_sync_target(batches, targets)
     }
 
+    fn committed_targets_equivalent(
+        actual: &Self::SyncTargets,
+        expected: &Self::SyncTargets,
+    ) -> bool {
+        T::committed_target_equivalent(actual, expected)
+    }
+
     async fn finalize(&self, batches: Self::Merkleized) {
         let mut database = self.write().await;
         finalize_or_panic(&mut *database, batches, None).await;
@@ -468,7 +489,8 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
         let mut database = self.write().await;
-        if T::sync_target(&*database).await == target {
+        let current = T::sync_target(&*database).await;
+        if T::committed_target_equivalent(&current, &target) {
             return;
         }
         rewind_or_panic(&mut *database, target, None).await;
@@ -577,8 +599,9 @@ where
 
         let (db_result, (converged_anchor, converged_target)) = join!(sync, coordinator);
         let database = db_result?;
+        let synced_target = T::sync_target(&database).await;
         assert!(
-            T::sync_target(&database).await == converged_target,
+            T::committed_target_equivalent(&synced_target, &converged_target),
             "state sync database target does not match the coordinator target",
         );
         Ok((Self::new(AsyncRwLock::new(database)), converged_anchor))
@@ -681,6 +704,13 @@ macro_rules! impl_database_set {
                 $($T::matches_sync_target(&batches.$idx, &targets.$idx))&&+
             }
 
+            fn committed_targets_equivalent(
+                actual: &Self::SyncTargets,
+                expected: &Self::SyncTargets,
+            ) -> bool {
+                $($T::committed_target_equivalent(&actual.$idx, &expected.$idx))&&+
+            }
+
             async fn finalize(&self, batches: Self::Merkleized) {
                 join!($(
                     async {
@@ -703,7 +733,8 @@ macro_rules! impl_database_set {
                 join!($(
                     async {
                         let mut database = self.$idx.write().await;
-                        if $T::sync_target(&*database).await == targets.$idx {
+                        let current = $T::sync_target(&*database).await;
+                        if $T::committed_target_equivalent(&current, &targets.$idx) {
                             return;
                         }
                         rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
@@ -1062,7 +1093,11 @@ macro_rules! impl_state_sync_set {
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
-                if <Self as DatabaseSet<E>>::committed_targets(&synced).await != converged_targets {
+                let synced_targets = <Self as DatabaseSet<E>>::committed_targets(&synced).await;
+                if !<Self as DatabaseSet<E>>::committed_targets_equivalent(
+                    &synced_targets,
+                    &converged_targets,
+                ) {
                     return Err(
                         "state sync database targets do not match the coordinator target set"
                             .into(),

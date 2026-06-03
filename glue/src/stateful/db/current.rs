@@ -11,7 +11,7 @@ use crate::stateful::db::{
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, Read as CodecRead};
-use commonware_cryptography::Hasher;
+use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
@@ -46,6 +46,17 @@ use std::{ops::Deref, sync::Arc};
 
 type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
     Arc<AsyncRwLock<Db<F, E, C, I, H, U, N, S>>>;
+
+fn current_committed_target_equivalent<F, D>(
+    actual: &CurrentSyncTarget<F, D>,
+    expected: &CurrentSyncTarget<F, D>,
+) -> bool
+where
+    F: Graftable,
+    D: Digest,
+{
+    actual.root == expected.root && actual.range.end() == expected.range.end()
+}
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -381,6 +392,10 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
+    fn committed_target_equivalent(actual: &Self::SyncTarget, expected: &Self::SyncTarget) -> bool {
+        current_committed_target_equivalent(actual, expected)
+    }
+
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
         self.sync().await?;
@@ -400,8 +415,8 @@ where
         self.sync().await?;
 
         let rewound_target = self.sync_target().await;
-        assert_eq!(
-            rewound_target, target,
+        assert!(
+            Self::committed_target_equivalent(&rewound_target, &target),
             "rewound database target mismatch after rewind",
         );
         Ok(())
@@ -472,6 +487,10 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
+    fn committed_target_equivalent(actual: &Self::SyncTarget, expected: &Self::SyncTarget) -> bool {
+        current_committed_target_equivalent(actual, expected)
+    }
+
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
         self.sync().await?;
@@ -491,8 +510,8 @@ where
         self.sync().await?;
 
         let rewound_target = self.sync_target().await;
-        assert_eq!(
-            rewound_target, target,
+        assert!(
+            Self::committed_target_equivalent(&rewound_target, &target),
             "rewound database target mismatch after rewind",
         );
         Ok(())
@@ -640,6 +659,10 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
+    fn committed_target_equivalent(actual: &Self::SyncTarget, expected: &Self::SyncTarget) -> bool {
+        current_committed_target_equivalent(actual, expected)
+    }
+
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
         self.sync().await?;
@@ -659,8 +682,8 @@ where
         self.sync().await?;
 
         let rewound_target = self.sync_target().await;
-        assert_eq!(
-            rewound_target, target,
+        assert!(
+            Self::committed_target_equivalent(&rewound_target, &target),
             "rewound database target mismatch after rewind",
         );
         Ok(())
@@ -736,6 +759,10 @@ where
             && *target.range.end() == Location::<F>::new(batch.bounds().total_size)
     }
 
+    fn committed_target_equivalent(actual: &Self::SyncTarget, expected: &Self::SyncTarget) -> bool {
+        current_committed_target_equivalent(actual, expected)
+    }
+
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
         self.sync().await?;
@@ -755,8 +782,8 @@ where
         self.sync().await?;
 
         let rewound_target = self.sync_target().await;
-        assert_eq!(
-            rewound_target, target,
+        assert!(
+            Self::committed_target_equivalent(&rewound_target, &target),
             "rewound database target mismatch after rewind",
         );
         Ok(())
@@ -1000,7 +1027,7 @@ mod tests {
         merkle::{full::Config as MerkleConfig, mmr},
         qmdb::current::{
             ordered::{fixed as ordered_fixed, variable as ordered_variable},
-            unordered::fixed,
+            unordered::{fixed, variable as unordered_variable},
         },
         translator::TwoCap,
     };
@@ -1329,12 +1356,14 @@ mod tests {
             let db = Arc::new(AsyncRwLock::new(db));
 
             let key = Sha256::hash(b"key");
+            let key2 = Sha256::hash(b"key2");
             let value = Sha256::hash(b"value");
             let metadata = Sha256::hash(b"metadata");
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
                 .write(key, Some(value))
+                .write(key2, Some(value))
                 .with_metadata(metadata);
             let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
                 .await
@@ -1355,11 +1384,29 @@ mod tests {
                 &valid_target,
             ));
 
+            let mut wrong_start = valid_target.clone();
+            wrong_start.range = non_empty_range!(
+                mmr::Location::new(*valid_target.range.start() + 1),
+                mmr::Location::new(*valid_target.range.end())
+            );
+            assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
+                &merkleized,
+                &wrong_start,
+            ));
+            assert!(<FixedDb as ManagedDb<_>>::committed_target_equivalent(
+                &wrong_start,
+                &valid_target,
+            ));
+
             let mut wrong_root = valid_target.clone();
             wrong_root.root = Sha256::hash(b"wrong ops root");
             assert!(!<FixedDb as ManagedDb<_>>::matches_sync_target(
                 &merkleized,
                 &wrong_root,
+            ));
+            assert!(!<FixedDb as ManagedDb<_>>::committed_target_equivalent(
+                &wrong_root,
+                &valid_target,
             ));
 
             let mut wrong_range = valid_target.clone();
@@ -1371,6 +1418,223 @@ mod tests {
                 &merkleized,
                 &wrong_range,
             ));
+            assert!(!<FixedDb as ManagedDb<_>>::committed_target_equivalent(
+                &wrong_range,
+                &valid_target,
+            ));
         });
+    }
+
+    // Smallest valid chunk size for a 32-byte digest (N=32 → 256 bits/chunk) so pruning
+    // advances the sync boundary after a few hundred commits in these tests.
+    type PruneFixedDb = fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        Sequential,
+    >;
+    type PruneVariableDb = unordered_variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        Sequential,
+    >;
+    type PruneOrderedFixedDb = ordered_fixed::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        Sequential,
+    >;
+    type PruneOrderedVariableDb = ordered_variable::Db<
+        mmr::Family,
+        deterministic::Context,
+        Digest,
+        Digest,
+        Sha256,
+        TwoCap,
+        32,
+        Sequential,
+    >;
+
+    // For `current` QMDB, a committed target's `range.start` is the local `sync_boundary()`
+    // (a retention/pruning lower bound) while `root` + `range.end` identify committed state.
+    // After pruning advances the local floor, reconciling the database back to a target with
+    // an earlier retained `range.start` (e.g. the start a block stamped from
+    // `MerkleizedBatch::sync_boundary` before pruning) is valid and must not panic, even
+    // though the live recomputed `range.start` is now higher. On upstream `main` this panics
+    // with "rewound database target mismatch after rewind"; with the relaxed equivalence it
+    // succeeds.
+    macro_rules! current_prune_rewind_drift_test {
+        ($name:ident, $db:ty, $config:ident, $suffix:literal) => {
+            #[test]
+            fn $name() {
+                deterministic::Runner::default().start(|context| async move {
+                    let config = $config($suffix, &context);
+                    let db = <$db as ManagedDb<_>>::init(context.child("db"), config)
+                        .await
+                        .unwrap();
+                    let db = Arc::new(AsyncRwLock::new(db));
+
+                    // Commit and prune until the live sync boundary advances past 0,
+                    // simulating a node that has pruned past its earliest retained start.
+                    let mut round: u64 = 0;
+                    loop {
+                        let key = Sha256::hash(format!("key-{round}").as_bytes());
+                        let value = Sha256::hash(format!("value-{round}").as_bytes());
+                        let metadata = Sha256::hash(format!("metadata-{round}").as_bytes());
+                        let batch = <$db as ManagedDb<_>>::new_batch(&db)
+                            .await
+                            .write(key, Some(value))
+                            .with_metadata(metadata);
+                        let merkleized = crate::stateful::db::Unmerkleized::merkleize(batch)
+                            .await
+                            .unwrap();
+                        let advanced = {
+                            let mut guard = db.write().await;
+                            <$db as ManagedDb<_>>::finalize(&mut *guard, merkleized)
+                                .await
+                                .unwrap();
+                            let boundary = guard.sync_boundary();
+                            guard.prune(boundary).await.unwrap();
+                            *guard.sync_boundary() > 0
+                        };
+                        if advanced {
+                            break;
+                        }
+                        round += 1;
+                        assert!(round < 4096, "sync_boundary never advanced past 0");
+                    }
+
+                    // Live committed target: root + [advanced_start, end).
+                    let live_target = {
+                        let guard = db.read().await;
+                        <$db as ManagedDb<_>>::sync_target(&*guard).await
+                    };
+                    assert!(
+                        *live_target.range.start() > 0,
+                        "test precondition: pruning advanced the sync boundary",
+                    );
+
+                    // The marshal-floor/block target: same root + end, but an earlier retained
+                    // start (0), as stamped before the local floor advanced.
+                    let floor_target = CurrentSyncTarget::new(
+                        live_target.root,
+                        non_empty_range!(
+                            mmr::Location::new(0),
+                            mmr::Location::new(*live_target.range.end())
+                        ),
+                    );
+                    assert_ne!(*floor_target.range.start(), *live_target.range.start());
+
+                    // Reconcile to the floor target. Panics on upstream main; succeeds here.
+                    {
+                        let mut guard = db.write().await;
+                        <$db as ManagedDb<_>>::rewind_to_target(&mut *guard, floor_target.clone())
+                            .await
+                            .unwrap();
+                    }
+
+                    let rewound = {
+                        let guard = db.read().await;
+                        <$db as ManagedDb<_>>::sync_target(&*guard).await
+                    };
+                    assert_eq!(rewound.root, floor_target.root, "root identifies committed state");
+                    assert_eq!(
+                        *rewound.range.end(),
+                        *floor_target.range.end(),
+                        "range.end identifies committed state",
+                    );
+                    assert!(
+                        *rewound.range.start() >= *live_target.range.start(),
+                        "range.start reflects the local advanced pruning floor, not the floor target's earlier start",
+                    );
+                });
+            }
+        };
+    }
+
+    current_prune_rewind_drift_test!(
+        unordered_fixed_current_db_rewind_accepts_advanced_start,
+        PruneFixedDb,
+        fixed_config,
+        "prune-rewind-unordered-fixed"
+    );
+    current_prune_rewind_drift_test!(
+        unordered_variable_current_db_rewind_accepts_advanced_start,
+        PruneVariableDb,
+        variable_config,
+        "prune-rewind-unordered-variable"
+    );
+    current_prune_rewind_drift_test!(
+        ordered_fixed_current_db_rewind_accepts_advanced_start,
+        PruneOrderedFixedDb,
+        fixed_config,
+        "prune-rewind-ordered-fixed"
+    );
+    current_prune_rewind_drift_test!(
+        ordered_variable_current_db_rewind_accepts_advanced_start,
+        PruneOrderedVariableDb,
+        variable_config,
+        "prune-rewind-ordered-variable"
+    );
+
+    // `DatabaseSet::committed_targets_equivalent` is the predicate the tuple state-sync
+    // convergence check uses. Like the single-DB `committed_target_equivalent`, it must
+    // ignore the per-`current`-DB `range.start` (a local retention boundary) while still
+    // distinguishing committed state via `root` + `range.end`.
+    #[test]
+    fn current_db_set_committed_targets_equivalent_ignores_range_start() {
+        type Set = (Arc<AsyncRwLock<FixedDb>>, Arc<AsyncRwLock<OrderedFixedDb>>);
+        let root = Sha256::hash(b"ops-root");
+        let target = |start: u64, end: u64| {
+            CurrentSyncTarget::new(
+                root,
+                non_empty_range!(mmr::Location::new(start), mmr::Location::new(end)),
+            )
+        };
+
+        let actual = (target(256, 514), target(256, 514));
+
+        // Earlier retained `range.start` on both members: still the same committed state.
+        let earlier_start = (target(0, 514), target(0, 514));
+        assert!(<Set as crate::stateful::db::DatabaseSet<
+            deterministic::Context,
+        >>::committed_targets_equivalent(
+            &actual, &earlier_start,
+        ));
+
+        // Different `range.end` on one member: different committed state.
+        let wrong_end = (target(256, 515), target(256, 514));
+        assert!(!<Set as crate::stateful::db::DatabaseSet<
+            deterministic::Context,
+        >>::committed_targets_equivalent(
+            &actual, &wrong_end,
+        ));
+
+        // Different `root` on one member: different committed state.
+        let wrong_root = (
+            CurrentSyncTarget::new(
+                Sha256::hash(b"other-root"),
+                non_empty_range!(mmr::Location::new(256), mmr::Location::new(514)),
+            ),
+            target(256, 514),
+        );
+        assert!(!<Set as crate::stateful::db::DatabaseSet<
+            deterministic::Context,
+        >>::committed_targets_equivalent(
+            &actual, &wrong_root,
+        ));
     }
 }
