@@ -4754,9 +4754,7 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization {
-                            round,
-                        }),
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
                     },
                     value: (notarization, block).encode(),
                     response,
