@@ -281,7 +281,8 @@ mod test {
         }
     }
 
-    /// A certificate-scheme provider keyed by epoch, with no certificate-only fallback.
+    /// A certificate-scheme provider keyed by epoch, with no all-epoch verifier, so every lookup
+    /// resolves to the epoch's signing scheme.
     #[derive(Clone, Default)]
     struct EpochProvider(Arc<Mutex<BTreeMap<Epoch, Arc<Scheme>>>>);
 
@@ -304,7 +305,7 @@ mod test {
         }
     }
 
-    /// Wraps the mock scheme so certificate-only lookup can verify certificates without exposing participants.
+    /// Wraps the mock scheme so it can verify certificates without exposing participants.
     #[derive(Clone, Debug)]
     struct MaybeEnumerableScheme {
         inner: Scheme,
@@ -377,7 +378,7 @@ mod test {
         fn participants(&self) -> &commonware_utils::ordered::Set<Self::PublicKey> {
             assert!(
                 self.enumerable,
-                "all-epoch verifier has no participant metadata"
+                "verify-only scheme has no participant metadata"
             );
             self.inner.participants()
         }
@@ -429,11 +430,11 @@ mod test {
         }
     }
 
-    /// Provides a participant-less all-epoch verifier plus an epoch-scoped committee.
+    /// Serves a participant-less verifier from `scoped` and a full committee from `scheme`.
     #[derive(Clone)]
     struct ParticipantlessAllProvider {
-        all: Arc<MaybeEnumerableScheme>,
-        scoped: Arc<MaybeEnumerableScheme>,
+        verifier: Arc<MaybeEnumerableScheme>,
+        committee: Arc<MaybeEnumerableScheme>,
     }
 
     impl Provider for ParticipantlessAllProvider {
@@ -441,11 +442,11 @@ mod test {
         type Scheme = MaybeEnumerableScheme;
 
         fn scoped(&self, _: Epoch) -> Option<Scoped<MaybeEnumerableScheme>> {
-            Some(Scoped::verifier(self.all.clone()))
+            Some(Scoped::verifier(self.verifier.clone()))
         }
 
         fn scheme(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {
-            Some(self.scoped.clone())
+            Some(self.committee.clone())
         }
     }
 
@@ -1298,8 +1299,8 @@ mod test {
         });
     }
 
-    /// An all-epoch verifier may be unable to enumerate participants; probe must
-    /// verify with it but size peer samples from the epoch-scoped committee.
+    /// An all-epoch verifier may be unable to enumerate participants. Probe must verify with it
+    /// but size peer samples from the epoch-scoped committee.
     #[test]
     fn test_sample_size_uses_scoped_scheme_with_participantless_all_verifier() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1316,8 +1317,8 @@ mod test {
                 .map(|scheme| MaybeEnumerableScheme::new(scheme, true))
                 .collect();
             let provider = ParticipantlessAllProvider {
-                all: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
-                scoped: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
+                verifier: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
+                committee: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
             };
 
             let (network, oracle) = Network::new_with_peers(
