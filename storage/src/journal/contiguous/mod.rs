@@ -141,7 +141,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Returns an error if the underlying storage operation fails or if the item cannot
     /// be encoded.
     fn append(
-        &mut self,
+        &self,
         item: &Self::Item,
     ) -> impl std::future::Future<Output = Result<u64, Error>> + Send;
 
@@ -152,7 +152,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// Returns [Error::EmptyAppend] if items is empty.
     fn append_many<'a>(
-        &'a mut self,
+        &'a self,
         items: Many<'a, Self::Item>,
     ) -> impl std::future::Future<Output = Result<u64, Error>> + Send + 'a
     where

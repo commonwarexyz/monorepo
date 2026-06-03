@@ -147,7 +147,7 @@ where
     Operation<F, V>: EncodeShared,
 {
     pub(crate) async fn init_from_journal(
-        mut journal: authenticated::Journal<F, E, C, H, S>,
+        journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
     ) -> Result<Self, Error<F>> {
         let metrics = Metrics::new(context);

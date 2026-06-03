@@ -154,7 +154,7 @@ where
     S: Strategy,
     Operation<F, U>: Committable + CodecShared,
 {
-    let mut log = J::init::<F, H, S>(
+    let log = J::init::<F, H, S>(
         context.child("log"),
         cfg.merkle_config,
         cfg.journal_config,
