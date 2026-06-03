@@ -430,11 +430,11 @@ mod test {
         }
     }
 
-    /// Serves a participant-less verifier from `scoped` and a full committee from `scheme`.
+    /// Serves a participant-less verifier from `scoped` and the full signing scheme from `scheme`.
     #[derive(Clone)]
     struct ParticipantlessAllProvider {
         verifier: Arc<MaybeEnumerableScheme>,
-        committee: Arc<MaybeEnumerableScheme>,
+        scheme: Arc<MaybeEnumerableScheme>,
     }
 
     impl Provider for ParticipantlessAllProvider {
@@ -446,7 +446,7 @@ mod test {
         }
 
         fn scheme(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {
-            Some(self.committee.clone())
+            Some(self.scheme.clone())
         }
     }
 
@@ -1318,7 +1318,7 @@ mod test {
                 .collect();
             let provider = ParticipantlessAllProvider {
                 verifier: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
-                committee: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
+                scheme: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
             };
 
             let (network, oracle) = Network::new_with_peers(
