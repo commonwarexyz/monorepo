@@ -16,9 +16,9 @@
 //!   3. Append and query under fault injection (the cycle's `ops`).
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
 //!
-//! The op list is split at `Crash` markers, one `ops` list per cycle. Repeating on the same journal
-//! is the point: watermark, pruning-metadata, and section-layout bugs tend to surface only after
-//! several recover-mutate-crash rounds, not on the first crash.
+//! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
+//! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
+//! recover-then-mutate-then-recover sequence to appear, not just a single crash.
 //!
 //! # Expected
 //!
@@ -128,7 +128,7 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
-    /// Flush pending data without advancing the recovery watermark.
+    /// Commit the journal.
     Commit,
     /// Rewind the journal to a smaller size.
     Rewind { size: u64 },
@@ -860,8 +860,8 @@ where
         );
     }
 
-    // Final fault-free phase: verify recovery, then prove a synced round-trip survives an actual
-    // reopen (not just a read from the live handle), and clean up.
+    // Final fault-free phase: verify the last recovery, then append, sync, drop, and reopen a
+    // sentinel to prove the synced state survives restart.
     deterministic::Runner::from(checkpoint).start(move |ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let mut journal = J::init(
