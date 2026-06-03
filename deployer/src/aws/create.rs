@@ -6,8 +6,9 @@ use crate::aws::{
     s3::{self, *},
     services::*,
     utils::*,
-    Architecture, Config, Error, Host, Hosts, InstanceConfig, Metadata, CREATED_FILE_NAME,
-    LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
+    Architecture, Config, Error, Host, Hosts, InstanceConfig, Metadata, MonitoringIps,
+    CREATED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION,
+    PROFILES_PORT, TRACES_PORT,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use futures::{
@@ -905,7 +906,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Generate hosts.yaml and upload once (shared by all instances)
     let hosts = Hosts {
-        monitoring: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
+        monitoring: MonitoringIps {
+            public: monitoring_ip.clone().parse::<IpAddr>().unwrap(),
+            private: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
+        },
         hosts: deployments
             .iter()
             .map(|d| Host {

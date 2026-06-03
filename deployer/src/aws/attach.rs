@@ -2,7 +2,7 @@
 
 use crate::aws::{
     deployer_directory, utils::ssh_attach, Error, Hosts, Metadata, CREATED_FILE_NAME,
-    DESTROYED_FILE_NAME, METADATA_FILE_NAME,
+    DESTROYED_FILE_NAME, METADATA_FILE_NAME, MONITORING_REGION,
 };
 use std::{
     fs::{self, File},
@@ -113,6 +113,14 @@ fn find_match(metadata: &Metadata, ip: &str) -> Option<InstanceMatch> {
 }
 
 fn find_host_match(tag: &str, hosts: Hosts, ip: &str) -> Option<InstanceMatch> {
+    if hosts.monitoring.public.to_string() == ip {
+        return Some(InstanceMatch {
+            tag: tag.to_string(),
+            region: MONITORING_REGION.to_string(),
+            ip: ip.to_string(),
+        });
+    }
+
     hosts
         .hosts
         .into_iter()
@@ -127,7 +135,7 @@ fn find_host_match(tag: &str, hosts: Hosts, ip: &str) -> Option<InstanceMatch> {
 #[cfg(test)]
 mod tests {
     use super::{find_host_match, normalize_ip, InstanceMatch};
-    use crate::aws::{Host, Hosts};
+    use crate::aws::{Host, Hosts, MonitoringIps, MONITORING_REGION};
     use std::net::IpAddr;
 
     fn instance(tag: &str, region: &str, ip: &str) -> InstanceMatch {
@@ -155,7 +163,10 @@ mod tests {
     #[test]
     fn test_find_host_match() {
         let hosts = Hosts {
-            monitoring: "10.0.0.1".parse::<IpAddr>().unwrap(),
+            monitoring: MonitoringIps {
+                public: "2.2.2.2".parse::<IpAddr>().unwrap(),
+                private: "10.0.0.1".parse::<IpAddr>().unwrap(),
+            },
             hosts: vec![Host {
                 name: "node".to_string(),
                 region: "us-east-1".to_string(),
@@ -165,5 +176,19 @@ mod tests {
         let selected = find_host_match("tag", hosts, "1.1.1.1").expect("match missing");
         assert_eq!(selected.tag, "tag");
         assert_eq!(selected.region, "us-east-1");
+    }
+
+    #[test]
+    fn test_find_monitoring_match() {
+        let hosts = Hosts {
+            monitoring: MonitoringIps {
+                public: "2.2.2.2".parse::<IpAddr>().unwrap(),
+                private: "10.0.0.1".parse::<IpAddr>().unwrap(),
+            },
+            hosts: Vec::new(),
+        };
+        let selected = find_host_match("tag", hosts, "2.2.2.2").expect("match missing");
+        assert_eq!(selected.tag, "tag");
+        assert_eq!(selected.region, MONITORING_REGION);
     }
 }
