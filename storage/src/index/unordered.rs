@@ -4,7 +4,7 @@
 
 use crate::{
     index::{
-        storage::{insert_front, Cursor as CursorImpl, ImmutableCursor, IndexEntry, Record},
+        storage::{insert_front, iter_chain, Cursor as CursorImpl, IndexEntry, Record},
         Cursor as CursorTrait, Unordered,
     },
     translator::Translator,
@@ -88,11 +88,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         V: 'a,
     {
         let k = self.translator.transform(key);
-        self.map
-            .get(&k)
-            .map(|record| ImmutableCursor::new(record))
-            .into_iter()
-            .flatten()
+        self.map.get(&k).into_iter().flat_map(iter_chain)
     }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
