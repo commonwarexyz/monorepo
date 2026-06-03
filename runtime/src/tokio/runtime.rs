@@ -535,7 +535,7 @@ fn sync_storage_filesystem(dir: &std::path::Path) -> std::io::Result<()> {
             if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
                 return Err(std::io::Error::last_os_error());
             }
-            tracing::info!(
+            tracing::debug!(
                 storage_directory = %dir.display(),
                 "made storage filesystem durable at startup (syncfs)"
             );
