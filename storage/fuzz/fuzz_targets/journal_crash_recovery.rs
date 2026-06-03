@@ -1,38 +1,37 @@
 #![no_main]
 
-//! Fuzz target for crash recovery of the contiguous journals (fixed and variable).
+//! Fuzz target contiguous journal crash recovery.
 //!
 //! A journal is an append-only log of items. Appends are buffered; `sync` and `commit` push data
 //! to storage, and an unclean shutdown loses anything not yet durable. On the next `init()` the
-//! journal must rebuild a consistent state from whatever survived. This target stresses that
-//! rebuild under storage faults.
+//! journal must rebuild a consistent state from whatever survived. This target tests recovering
+//! after storage faults.
 //!
 //! # Cycles
 //!
-//! One fuzz input drives a single journal through a series of *cycles*. A cycle is one
-//! crash-and-recover round:
-//!   1. `init()` recovers the journal left behind by the previous cycle's crash.
-//!   2. Check the recovered journal against the `Expected` carried over from that crash.
+//! One fuzz input drives a single journal through a series of *cycles*, each one crash-and-recover
+//! round:
+//!   1. `init()` recovers the journal left by the previous cycle's crash.
+//!   2. Check it against the `Expected` carried from that crash.
 //!   3. Append and query under fault injection (the cycle's `ops`).
-//!   4. Drop the journal without a clean shutdown. That is the crash: unsynced data is lost.
+//!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
 //!
-//! The fuzzer's operation list is split at `Crash` markers, giving one `ops` list per cycle.
-//! Repeating this on the same journal is the point: bugs in the recovery watermark, pruning
-//! metadata, or section layout tend to surface only after a journal has been recovered, mutated,
-//! and crashed several times over, not on the first crash.
+//! The op list is split at `Crash` markers, one `ops` list per cycle. Repeating on the same journal
+//! is the point: watermark, pruning-metadata, and section-layout bugs tend to surface only after
+//! several recover-mutate-crash rounds, not on the first crash.
 //!
 //! # Expected
 //!
-//! A crash can land anywhere in a range of outcomes, so `Expected` tracks conservative bounds (a
-//! guaranteed-durable prefix plus size/pruning ceilings) rather than an exact state.
-//! `assert_matches_expected` checks recovery lands within them; `observe` then reads the now-known
-//! state back as the next cycle's starting point.
+//! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
+//! guaranteed-durable prefix plus size/pruning ceilings), not an exact state.
+//! `assert_matches_expected` checks recovery falls within them; `observe` then snapshots it as the
+//! next cycle's start.
 //!
 //! # Faults
 //!
 //! The operation phase runs under write/sync/resize fault injection. The torn-write modes
-//! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation off partway, leaving the
-//! half-finished bytes a real crash would leave behind for recovery to sort out.
+//! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation short, leaving the
+//! half-finished bytes a real crash would.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
@@ -113,14 +112,14 @@ enum JournalType {
     Variable,
 }
 
-/// Operations applied to the journal within a cycle.
+/// Operations that can be performed on the journal.
 #[derive(Arbitrary, Debug, Clone)]
 enum JournalOperation {
     /// Append a single item to the journal.
     Append { value: [u8; ITEM_SIZE] },
     /// Read an item at a specific position.
     Read { pos: u64 },
-    /// Sync the journal to storage (durability checkpoint).
+    /// Sync the journal to storage.
     Sync,
     /// Flush pending data without advancing the recovery watermark, so recovery walks blob lengths.
     Commit,
@@ -269,8 +268,7 @@ impl Expected {
     }
 }
 
-/// Abstracts over fixed and variable journals. `read` and `replay` return their items so content
-/// can be verified after recovery.
+/// Trait abstracting over fixed and variable journals for the fuzz test.
 trait FuzzJournal: Sized {
     type Config;
 
@@ -291,7 +289,6 @@ trait FuzzJournal: Sized {
     fn rewind(&mut self, size: u64) -> impl Future<Output = Result<(), Error>> + Send;
     fn prune(&mut self, min_pos: u64) -> impl Future<Output = Result<bool, Error>> + Send;
 
-    /// Replay from `start_pos`, returning all `(position, item)` pairs.
     fn replay(
         &self,
         buffer: NonZeroUsize,
@@ -340,7 +337,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::size(self).await
     }
 
-    // `async fn` can't add the `+ Send` bound here (RPITIT).
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
         async { self.reader().await.bounds() }
@@ -350,7 +347,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::append(self, &item).await
     }
 
-    // `async fn` can't add the `+ Send` bound here (RPITIT).
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send {
         async move { self.reader().await.read(pos).await }
@@ -372,7 +369,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         FixedJournal::prune(self, min_pos).await
     }
 
-    // `async fn` can't add the `+ Send` bound here (RPITIT).
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn replay(
         &self,
@@ -413,7 +410,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::size(self).await
     }
 
-    // `async fn` can't add the `+ Send` bound here (RPITIT).
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
         async { self.reader().await.bounds() }
@@ -423,7 +420,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::append(self, &item).await
     }
 
-    // `async fn` can't add the `+ Send` bound here (RPITIT).
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send {
         async move { self.reader().await.read(pos).await }
@@ -431,10 +428,6 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
 
     async fn sync(&mut self) -> Result<(), Error> {
         VariableJournal::sync(self).await
-    }
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        VariableJournal::commit(self).await
     }
 
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
@@ -445,7 +438,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         VariableJournal::prune(self, min_pos).await
     }
 
-    // `async fn` can't add the `+ Send` bound here (RPITIT).
+    // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn replay(
         &self,
@@ -453,6 +446,10 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
         start_pos: u64,
     ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send {
         async move { collect_replay(self.reader().await, buffer, start_pos).await }
+    }
+
+    async fn commit(&mut self) -> Result<(), Error> {
+        VariableJournal::commit(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
@@ -796,11 +793,11 @@ async fn run_ops<J: FuzzJournal>(
     }
 }
 
-/// Run one crash cycle: recover, check against `incoming`, run the ops under faults, then crash
+/// Run one crash cycle: recover, check against `expected`, run the ops under faults, then crash
 /// (drop). Returns the `Expected` and checkpoint for the next cycle.
 fn run_cycle<J: FuzzJournal + Send + 'static>(
     runner: deterministic::Runner,
-    incoming: Expected,
+    expected: Expected,
     ops: Vec<JournalOperation>,
     partition: String,
     params: Params,
@@ -816,7 +813,7 @@ where
             .await
             .expect("recovery should succeed without panic");
         // The recovered state must match what the previous cycle left durable.
-        assert_matches_expected(&journal, &incoming).await;
+        assert_matches_expected(&journal, &expected).await;
 
         let mut expected = observe(&journal).await;
         assert_round_trip(&mut journal, &mut expected).await;
