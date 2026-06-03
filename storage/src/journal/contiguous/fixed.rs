@@ -2404,7 +2404,6 @@ mod tests {
         });
     }
 
-
     #[test_traced]
     fn test_fixed_journal_update_metadata_watermark_before_clear_lowers_only() {
         let executor = deterministic::Runner::default();
