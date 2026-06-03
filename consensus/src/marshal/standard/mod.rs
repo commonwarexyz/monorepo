@@ -113,6 +113,32 @@ mod tests {
         assert_provider::<Mailbox<S, Standard<B>>>();
     }
 
+    #[derive(Clone)]
+    struct AllOnlyProvider {
+        scheme: Arc<S>,
+    }
+
+    impl AllOnlyProvider {
+        fn new(scheme: S) -> Self {
+            Self {
+                scheme: Arc::new(scheme),
+            }
+        }
+    }
+
+    impl Provider for AllOnlyProvider {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, _: Epoch) -> Option<Arc<S>> {
+            None
+        }
+
+        fn all(&self) -> Option<Arc<S>> {
+            Some(self.scheme.clone())
+        }
+    }
+
     #[test_traced("WARN")]
     fn test_standard_block_provider_parent_fetches_by_commitment() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -4697,6 +4723,48 @@ mod tests {
             assert!(
                 !response_rx.await.expect("delivery response missing"),
                 "wrong-round notarized delivery must not satisfy the request"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_notarized_delivery_acknowledges_stale_without_scoped_provider() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "notarized-delivery-stale-all-only",
+                AllOnlyProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Notarized { round },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization {
+                            round,
+                        }),
+                    },
+                    value: (notarization, block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "stale notarized delivery should acknowledge without blaming the peer"
             );
         });
     }
