@@ -879,10 +879,29 @@ mod tests {
             &cert,
             &Sequential,
         ));
+        let pairs = [(subject, &cert)];
+        assert!(as_verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            &mut rng,
+            pairs.iter().copied(),
+            &Sequential,
+        ));
+        assert_eq!(
+            <Scoped<Ed25519Scheme> as Verifier>::is_batchable(),
+            <Ed25519Scheme as Verifier>::is_batchable(),
+        );
+        assert_eq!(
+            as_verifier.certificate_codec_config(),
+            schemes[0].certificate_codec_config(),
+        );
+        let _ = <Scoped<Ed25519Scheme> as Verifier>::certificate_codec_config_unbounded();
 
         // A verify-only scope never yields its scheme; a full scope always does.
         assert!(as_verifier.into_scheme().is_none());
         assert!(as_scheme.into_scheme().is_some());
+
+        let provider = ConstantProvider::<_, ()>::new(schemes[0].clone());
+        assert!(provider.scoped(()).is_some());
+        assert!(provider.scheme(()).is_some());
     }
 
     #[cfg(feature = "arbitrary")]
