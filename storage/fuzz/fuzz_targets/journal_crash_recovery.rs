@@ -128,7 +128,7 @@ enum JournalOperation {
     Read { pos: u64 },
     /// Sync the journal to storage.
     Sync,
-    /// Flush pending data without advancing the recovery watermark, so recovery walks blob lengths.
+    /// Flush pending data without advancing the recovery watermark.
     Commit,
     /// Rewind the journal to a smaller size.
     Rewind { size: u64 },
@@ -269,7 +269,7 @@ impl Expected {
         self.max_prune = boundary;
     }
 
-    /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not for certain.
+    /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not certain.
     fn prune_failed(&mut self, ceiling: u64) {
         self.max_prune = self.max_prune.max(ceiling);
     }
