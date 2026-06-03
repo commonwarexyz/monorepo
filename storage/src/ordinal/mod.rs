@@ -242,6 +242,109 @@ mod tests {
         });
     }
 
+    // Recovery durability invariant: records replayed on reopen are readable but not yet known
+    // crash-durable, so they stay pending until synced instead of being treated as durable. To
+    // check that, we inject sync faults after a clean write+sync+reopen: `sync()` has to error
+    // because those sections still need syncing. If recovery dropped them, it would no-op and pass.
+    #[test_traced]
+    fn test_reopen_syncs_recovered_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+            let value = FixedBytes::new([42u8; 32]);
+
+            {
+                let mut store =
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                        .await
+                        .expect("Failed to initialize store");
+                store
+                    .put(0, value.clone())
+                    .await
+                    .expect("Failed to put data");
+                store.sync().await.expect("Failed to sync data");
+            }
+
+            let store = Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to reopen store");
+            assert_eq!(store.get(0).await.expect("Failed to get data"), Some(value));
+
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            assert!(
+                store.sync().await.is_err(),
+                "reopened visible records must remain pending until synced"
+            );
+        });
+    }
+
+    // A slot whose record is invalid is excluded from the recovered index, but that decision still
+    // rests on the bytes recovery read. If those bytes are visible-but-unsynced, the section must
+    // be synced too -- not only sections that recovered a valid record. Here the section's only
+    // record is corrupted, so nothing else marks it; after reopen, a forced-failing sync() must
+    // still error because that section is owed a sync.
+    #[test_traced]
+    fn test_reopen_syncs_invalid_only_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-ordinal".into(),
+                items_per_blob: NZU64!(5),
+                write_buffer: NZUsize!(1),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+            };
+
+            {
+                let mut store =
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                        .await
+                        .expect("Failed to initialize store");
+                store
+                    .put(0, FixedBytes::new([7u8; 32]))
+                    .await
+                    .expect("Failed to put data");
+                store.sync().await.expect("Failed to sync data");
+            }
+
+            // Corrupt index 0's CRC so it reads as invalid and drops out of the index on reopen.
+            // It is the only record in section 0, so no valid record will mark the section.
+            {
+                let (blob, _) = context
+                    .open(&cfg.partition, &0u64.to_be_bytes())
+                    .await
+                    .expect("Failed to open blob");
+                blob.write_at_sync(32, vec![0xFF])
+                    .await
+                    .expect("Failed to corrupt CRC");
+            }
+
+            let store = Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to reopen store");
+            assert!(
+                !store.has(0),
+                "corrupted record must not be present after recovery"
+            );
+
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            assert!(
+                store.sync().await.is_err(),
+                "a section read during recovery must be synced even when its only record is invalid"
+            );
+        });
+    }
+
     #[test_traced]
     fn test_multiple_indices() {
         // Initialize the deterministic context

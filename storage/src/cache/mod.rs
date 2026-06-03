@@ -248,6 +248,49 @@ mod tests {
         });
     }
 
+    // Recovery durability invariant: records replayed on reopen are readable but not yet known
+    // crash-durable, so they stay pending until synced instead of being treated as durable. To
+    // check that, we inject sync faults after a clean write+sync+reopen: `sync()` has to error
+    // because those sections still need syncing. If recovery dropped them, it would no-op and pass.
+    #[test_traced]
+    fn test_cache_reopen_syncs_recovered_records() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                codec_config: (),
+                compression: None,
+                write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_blob: NZU64!(DEFAULT_ITEMS_PER_BLOB),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            };
+
+            {
+                let mut cache = Cache::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to initialize cache");
+                cache.put(7, 7i32).await.expect("Failed to put data");
+                cache.sync().await.expect("Failed to sync cache");
+            }
+
+            let mut cache = Cache::<_, i32>::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to reopen cache");
+            assert_eq!(cache.first(), Some(7));
+            assert_eq!(cache.get(7).await.expect("Failed to get data"), Some(7));
+
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            assert!(
+                cache.sync().await.is_err(),
+                "replayed cache sections must remain pending until synced"
+            );
+        });
+    }
+
     fn test_cache_restart(num_items: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

@@ -48,6 +48,14 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     }
 
     /// A storage structure with capabilities to persist and recover state across restarts.
+    ///
+    /// # Recovery durability invariant
+    ///
+    /// On reopen, a structure may rebuild in-memory state from bytes that are visible through the
+    /// page cache yet not crash-durable (a write is durable only once a later sync returns). It MUST
+    /// sync every recovered section before returning success from [Self::sync]/[Self::commit] or
+    /// persisting any durable artifact derived from those bytes. It must not rewind or discard the
+    /// recovered data: [Self::commit] may have made data durable beyond the recovery watermark.
     pub trait Persistable {
         /// The error type returned when there is a failure from the underlying storage system.
         type Error;

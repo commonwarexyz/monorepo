@@ -338,6 +338,11 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
             .await
     }
 
+    /// Returns an iterator over all index sections.
+    pub(crate) fn sections(&self) -> impl Iterator<Item = u64> + '_ {
+        self.index.sections()
+    }
+
     /// Sync both journals for given section.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         try_join(self.index.sync(section), self.values.sync(section))

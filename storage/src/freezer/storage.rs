@@ -415,7 +415,7 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     current_section: u64,
     next_epoch: u64,
 
-    // Sections with pending table updates to be synced
+    // Oversized sections that must be synced before the next checkpoint is published
     modified_sections: BTreeSet<u64>,
     resizable: u32,
     resize_progress: Option<u32>,
@@ -658,11 +658,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             .await?;
 
         // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable) = match (table_len, checkpoint) {
+        let (checkpoint, resizable, modified_sections) = match (table_len, checkpoint) {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
+                (
+                    Checkpoint::init(config.table_initial_size),
+                    0,
+                    BTreeSet::new(),
+                )
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -673,7 +677,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
+                (
+                    Checkpoint::init(config.table_initial_size),
+                    0,
+                    BTreeSet::new(),
+                )
             }
 
             // Existing table with checkpoint
@@ -719,14 +727,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     table.sync().await?;
                 }
 
-                (checkpoint, resizable)
+                (checkpoint, resizable, BTreeSet::new())
             }
 
             // Existing table without checkpoint
             (_, None) => {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
-                let (modified, max_epoch, max_section, resizable) = Self::recover_table(
+                let (_, max_epoch, max_section, resizable) = Self::recover_table(
                     &context,
                     &table,
                     table_size,
@@ -736,10 +744,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 )
                 .await?;
 
-                // Sync table if needed
-                if modified {
-                    table.sync().await?;
-                }
+                // Don't sync the table here: it indexes the oversized journal, and the
+                // just-recovered oversized sections aren't durable yet, so persisting the table now
+                // could leave a durable entry pointing at bytes a crash drops. Deferring is safe --
+                // recover_table's cleanup is redone on every reopen, and the first `sync` syncs the
+                // oversized sections
+                // (tracked below) before the table. (The `(_, Some(checkpoint))` arm can sync the
+                // table during init: the checkpoint already guarantees its data was durable.)
 
                 // Get sizes from oversized (crash recovery already ran during init)
                 let oversized_size = oversized.size(max_section).await?;
@@ -752,6 +763,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                         table_size,
                     },
                     resizable,
+                    oversized.sections().collect(),
                 )
             }
         };
@@ -781,7 +793,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
-            modified_sections: BTreeSet::new(),
+            modified_sections,
             resizable,
             resize_progress: None,
             puts,
@@ -1064,7 +1076,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     //
     // TODO:(<https://github.com/commonwarexyz/monorepo/issues/2910>): Make this non &mut.
     pub async fn sync(&mut self) -> Result<Checkpoint, Error> {
-        // Sync all modified sections for oversized journal
+        // Sync the recovered oversized sections before computing and returning the checkpoint
+        // below, so the caller never persists a checkpoint that references un-synced data.
         let syncs: Vec<_> = self
             .modified_sections
             .iter()
@@ -1303,6 +1316,191 @@ mod tests {
             .await
             .unwrap();
             drop(freezer);
+        });
+    }
+
+    // On a checkpoint-less reopen the oversized journal's sections are marked pending -- they're
+    // readable but not yet known crash-durable. The first sync makes them durable and clears the
+    // set.
+    #[test_traced]
+    fn test_init_without_checkpoint_marks_recovered_sections_modified() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 256,
+                table_resize_frequency: u8::MAX,
+                table_resize_chunk_size: 16,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                for index in 0..64 {
+                    freezer
+                        .put(test_key(&format!("key-{index}")), index)
+                        .await
+                        .unwrap();
+                }
+                freezer.sync().await.unwrap();
+            }
+
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert!(
+                !freezer.modified_sections.is_empty(),
+                "recovered oversized sections must be synced before publishing a checkpoint"
+            );
+
+            freezer.sync().await.unwrap();
+            assert!(freezer.modified_sections.is_empty());
+        });
+    }
+
+    // Same checkpoint-less reopen, then fail every sync. sync() must error rather than return a
+    // checkpoint: publishing one while the recovered sections are still un-synced would point it
+    // at data a crash could drop.
+    #[test_traced]
+    fn test_init_without_checkpoint_blocks_checkpoint_until_recovered_sections_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 256,
+                table_resize_frequency: u8::MAX,
+                table_resize_chunk_size: 16,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                for index in 0..64 {
+                    freezer
+                        .put(test_key(&format!("key-{index}")), index)
+                        .await
+                        .unwrap();
+                }
+                freezer.sync().await.unwrap();
+            }
+
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+
+            // sync() syncs the recovered oversized sections before producing a Checkpoint. With
+            // syncs forced to fail, that must surface as an error: the caller must never receive
+            // (and persist) a checkpoint that references un-synced recovered data.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            assert!(
+                freezer.sync().await.is_err(),
+                "checkpoint must not be produced until recovered sections are durable"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_init_without_checkpoint_does_not_sync_table_during_init() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 256,
+                table_resize_frequency: u8::MAX,
+                table_resize_chunk_size: 16,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            // Write a durable baseline: values land in the oversized journal and entries in the
+            // table. `close` syncs everything, so the oversized journal reopens clean (its
+            // recovery performs no sync of its own).
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                for index in 0..64 {
+                    freezer
+                        .put(test_key(&format!("key-{index}")), index)
+                        .await
+                        .unwrap();
+                }
+                freezer.close().await.unwrap();
+            }
+
+            // Corrupt a table entry so recovery has to rewrite it on reopen. That's the case where
+            // a stray table sync during init would happen, which is what we want to rule out under
+            // the sync faults below. Flipping a byte un-empties the slot and breaks its checksum,
+            // so recovery cleans it whichever keys hashed there.
+            {
+                let (blob, size) = context.open(&cfg.table_partition, b"table").await.unwrap();
+                // Needs an existing (non-empty) table so reopen takes the `(_, None)` arm.
+                assert!(
+                    size > 0,
+                    "table must exist so reopen takes the existing-table path"
+                );
+                let mut entries = blob.read_at(0, Entry::FULL_SIZE).await.unwrap().coalesce();
+                entries.as_mut()[Entry::SIZE - 4] ^= 0xFF;
+                // Sanity-check the corruption landed: the slot must be non-empty and invalid, or
+                // recovery won't rewrite it and the reopen below wouldn't exercise anything.
+                let (slot0, _) =
+                    Freezer::<Context, FixedBytes<64>, i32>::parse_entries(entries.as_ref())
+                        .unwrap();
+                assert!(!slot0.is_empty() && !slot0.is_valid());
+                blob.write_at_sync(0, entries).await.unwrap();
+            }
+
+            // Fail every sync, then reopen without a checkpoint. The table indexes the oversized
+            // journal, whose recovered sections aren't durable yet, so init must not sync the table
+            // here -- and in fact does no syncing at all, so it succeeds despite the faults.
+            *context.storage_fault_config().write() = deterministic::FaultConfig {
+                sync_rate: Some(1.0),
+                ..Default::default()
+            };
+            let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg)
+                .await
+                .expect(
+                    "init must not sync the table while recovered oversized sections are unsynced",
+                );
+
+            // The recovered section is still tracked (just the one, holding the 64 values), and the
+            // first sync enforces it: with syncs failing, sync() must error rather than publish a
+            // checkpoint over un-synced data.
+            assert_eq!(freezer.modified_sections.len(), 1);
+            assert!(freezer.sync().await.is_err());
         });
     }
 }
