@@ -45,7 +45,12 @@ impl Arbitrary<'_> for MarshalFuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
         let mut events = Vec::with_capacity(event_count);
-        for _ in 0..event_count {
+        if u.len() >= 2 && u.arbitrary::<bool>()? {
+            events.push(MarshalEvent::PublishViaVariant {
+                block_idx: u.arbitrary()?,
+            });
+        }
+        for _ in events.len()..event_count {
             events.push(MarshalEvent::arbitrary(u)?);
         }
         let remaining = u.len().min(crate::MAX_RAW_BYTES);

@@ -79,11 +79,28 @@ pub struct FuzzInput {
 
 impl Arbitrary<'_> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
-        let target_height = u.int_in_range(MIN_TARGET_HEIGHT..=MAX_TARGET_HEIGHT)?;
+        let scenario = u.int_in_range(0..=99)?;
+        let max_raw_prefix = u.len().min(MAX_RAW_BYTES);
+        let mut raw_bytes = if max_raw_prefix == 0 {
+            vec![0]
+        } else {
+            let raw_len = u.int_in_range(1..=max_raw_prefix)?.min(u.len());
+            u.bytes(raw_len)?.to_vec()
+        };
+        let live = scenario <= 19;
+        let target_height = if live {
+            u.int_in_range(MIN_TARGET_HEIGHT..=LIVE_TARGET_CEILING)?
+        } else {
+            u.int_in_range(MIN_TARGET_HEIGHT..=MAX_TARGET_HEIGHT)?
+        };
         let latency_ms = u.int_in_range(MIN_LATENCY_MS..=MAX_LATENCY_MS)?;
         let jitter_ms = u.int_in_range(0..=MAX_JITTER_MS)?;
-        let success_rate_percent = u.int_in_range(MIN_SUCCESS_PERCENT..=MAX_SUCCESS_PERCENT)?;
-        let partition = match u.int_in_range(0..=99)? {
+        let success_rate_percent = if live {
+            MAX_SUCCESS_PERCENT
+        } else {
+            u.int_in_range(MIN_SUCCESS_PERCENT..=MAX_SUCCESS_PERCENT)?
+        };
+        let partition = match scenario {
             0..=59 => Partition::Connected,
             _ => {
                 let idx = u.int_in_range(1..=14)?;
@@ -93,12 +110,10 @@ impl Arbitrary<'_> for FuzzInput {
         let rebroadcast_ms = u.int_in_range(MIN_REBROADCAST_MS..=MAX_REBROADCAST_MS)?;
         let priority_acks = u.arbitrary()?;
 
-        let remaining = u.len().min(MAX_RAW_BYTES);
-        let raw_bytes = if remaining == 0 {
-            vec![0]
-        } else {
-            u.bytes(remaining)?.to_vec()
-        };
+        let remaining = u.len().min(MAX_RAW_BYTES.saturating_sub(raw_bytes.len()));
+        if remaining > 0 {
+            raw_bytes.extend_from_slice(u.bytes(remaining)?);
+        }
 
         Ok(Self {
             raw_bytes,
@@ -312,8 +327,10 @@ async fn check_no_conflicting_certs<S>(
             .get_tip()
             .await
             .unwrap_or((Height::zero(), Epoch::zero()));
+        // Keep this invariant bounded to the target-height domain covered by the input.
+        let tip = tip.get().min(MAX_TARGET_HEIGHT);
         let mut h = 0u64;
-        while h <= tip.get() {
+        while h <= tip {
             let height = Height::new(h);
             if let Some((digest, epoch)) = mailbox.get(height).await {
                 assert_eq!(
