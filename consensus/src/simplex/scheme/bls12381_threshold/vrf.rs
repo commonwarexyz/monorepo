@@ -607,10 +607,15 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
                 return false;
             };
 
+            // Prepare vote message with context-specific namespace
             let vote_namespace = context.namespace(namespace);
             let vote_message = context.message();
             entries.push((vote_namespace, vote_message, cert.vote_signature));
 
+            // Seed signatures are per-round, so multiple certificates for the same round
+            // (e.g., notarization and finalization) share the same seed. We only include
+            // each unique seed once in the aggregate, but verify all certificates for a
+            // round have matching seeds.
             let seed_message = seed_message_from_subject(&context);
             if let Some(previous) = seeds.get(&seed_message) {
                 if *previous != cert.seed_signature {
@@ -622,6 +627,8 @@ impl<P: PublicKey, V: Variant> certificate::Verifier for Scheme<P, V> {
             }
         }
 
+        // We care about the correctness of each signature, so we use batch verification rather
+        // than computing the aggregate signature and verifying it.
         let entries_refs: Vec<_> = entries
             .iter()
             .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))
