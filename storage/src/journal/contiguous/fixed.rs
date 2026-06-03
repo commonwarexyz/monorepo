@@ -723,16 +723,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         )
         .await?;
 
-        // Bytes beyond the persisted recovery watermark may be readable after reopen without
-        // being crash-durable, so the next commit/sync must force a data sync before advancing it.
-        let dirty_from_section =
-            (recovery_watermark < size).then_some(recovery_watermark / items_per_blob);
         let mut inner = Inner {
             journal,
             size,
             metadata,
             pruning_boundary,
-            dirty_from_section,
+            dirty_from_section: None,
         };
 
         // Metadata must be persisted before the rewind repair: the rewind cannot reduce the
@@ -1476,44 +1472,6 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
-    }
-
-    #[test_traced]
-    fn test_fixed_init_marks_suffix_past_recovery_watermark_dirty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut cfg = test_cfg(&context, NZU64!(10));
-            cfg.partition = "init-adopted-fixed".into();
-
-            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            journal.append(&1).await.unwrap();
-            journal.append(&2).await.unwrap();
-            journal.sync().await.unwrap();
-            // Simulate the state left by a crash after item 2 became visible to recovery, but
-            // before the persisted recovery watermark advanced past item 1.
-            journal.test_set_recovery_watermark(1).await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.size().await, 2);
-
-            // Regression: init used to recover size 2 while marking no data sections dirty.
-            // commit() would then skip section syncs and succeed even though the recovered suffix
-            // had not been durably adopted. With the fix, item 2's section is dirty, so the forced
-            // sync failure below must surface.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(1.0),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit() must sync recovered data beyond the persisted recovery watermark"
-            );
-        });
     }
 
     async fn scan_partition(context: &Context, partition: &str) -> Vec<Vec<u8>> {

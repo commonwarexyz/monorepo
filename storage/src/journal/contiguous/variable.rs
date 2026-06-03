@@ -432,26 +432,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         );
     }
 
-    /// Sync data sections backing rebuilt offsets before the offsets are made durable.
-    async fn sync_data_range(
-        data: &variable::Journal<E, V>,
-        start_position: u64,
-        end_position: u64,
-        items_per_section: u64,
-    ) -> Result<(), Error> {
-        if start_position >= end_position {
-            return Ok(());
-        }
-
-        let start_section = position_to_section(start_position, items_per_section);
-        let end_section = position_to_section(end_position - 1, items_per_section);
-        let start_section = data
-            .oldest_section()
-            .map_or(start_section, |oldest| start_section.max(oldest));
-        try_join_all((start_section..=end_section).map(|section| data.sync(section))).await?;
-        Ok(())
-    }
-
     /// Initialize a contiguous variable journal.
     ///
     /// # Crash Recovery
@@ -1141,7 +1121,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             recovery_watermark
         };
 
-        let (data_size, data_sync_start) = match Self::rebuild_offsets_from_anchor(
+        let data_size = match Self::rebuild_offsets_from_anchor(
             data,
             offsets,
             items_per_section,
@@ -1150,7 +1130,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         )
         .await?
         {
-            Some(size) => (size, recovery_start),
+            Some(size) => size,
             None if recovery_start != offsets_bounds.start => {
                 warn!(
                     recovery_watermark = recovery_start,
@@ -1165,7 +1145,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     offsets_bounds.start,
                 )
                 .await?
-                .map(|size| (size, offsets_bounds.start))
                 .expect("rebuild from pruning boundary should succeed after pruning alignment")
             }
             None => {
@@ -1198,9 +1177,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets_bounds.start
         };
 
-        // Rebuilt offsets are about to become durable. First make the data they point at durable
-        // too; on real filesystems, init may have adopted bytes that were readable but not synced.
-        Self::sync_data_range(data, data_sync_start, data_size, items_per_section).await?;
         offsets.sync().await?;
         Ok((pruning_boundary, data_size))
     }
@@ -1450,7 +1426,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::tests::{partition_sync_fault, run_contiguous_tests};
+    use crate::journal::contiguous::tests::run_contiguous_tests;
     use commonware_macros::test_traced;
     use commonware_runtime::{
         buffer::paged::{Append, CacheRef},
@@ -1466,48 +1442,6 @@ mod tests {
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
-
-    #[test_traced]
-    fn test_variable_init_syncs_adopted_data_before_offsets_watermark_advance() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "init-adopted-variable".into(),
-                items_per_section: NZU64!(10),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-
-            let journal = Journal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            journal.append(&FixedBytes::new([1; 32])).await.unwrap();
-            journal.append(&FixedBytes::new([2; 32])).await.unwrap();
-            journal.sync().await.unwrap();
-            // Simulate the state left by a crash after item 2's data became visible to recovery,
-            // but before the offsets journal's recovery watermark advanced past item 1.
-            journal
-                .test_set_offsets_recovery_watermark(1)
-                .await
-                .unwrap();
-            drop(journal);
-
-            // Regression: init used to rebuild and sync offsets through item 2 without first
-            // syncing the adopted data range they point at. A sync fault scoped only to the data
-            // partition would therefore be missed. With the fix, init must sync data before the
-            // rebuilt offsets become durable, so this reopen fails.
-            let data_partition = format!("{}{}", cfg.partition, DATA_SUFFIX);
-            let context = partition_sync_fault::Context::new(context, data_partition);
-            assert!(
-                Journal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
-                    .await
-                    .is_err(),
-                "init must sync adopted data before advancing rebuilt offsets"
-            );
-        });
-    }
 
     #[test_traced]
     fn test_variable_append_many_compressed() {
