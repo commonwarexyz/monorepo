@@ -40,35 +40,32 @@
 //!
 //! # Metadata
 //!
-//! Metadata contains the following keys:
+//! Metadata contains a single key:
 //! - PRUNING_BOUNDARY_KEY: Stores the pruning boundary as a u64 when it's mid-section (not a
-//!   multiple of items_per_blob). Absent from legacy journals or when the boundary is
-//!   section-aligned, since it can be derived from the oldest blob.
-//! - RECOVERY_WATERMARK_KEY: Stores a lower bound on the last logical size at which the fixed
-//!   journal's entries and metadata were synced as a coherent recovery checkpoint by an external
-//!   consumer. The key is durably written during initialization for any journal last opened before
-//!   this key was introduced.
+//!   multiple of items_per_blob). Absent when the boundary is section-aligned, since it can be
+//!   derived from the oldest blob.
 //!
-//! RECOVERY_WATERMARK_KEY is mainly useful when this journal is used as an index for a layered
-//! journal, such as the variable journal's offsets. Standalone fixed journals do not need it to
-//! recover their own size; they recover from retained blob lengths.
+//! While a clear/reset is in progress, CLEAR_TARGET_KEY records the target so recovery can finish
+//! an interrupted reset.
+//!
+//! # Durability invariant
+//!
+//! When an append fills a section it is fsynced before the next section receives writes, so every
+//! section except the current tail is durably persisted at all times. This costs one sync syscall
+//! per blob transition.
 //!
 //! # Recovery
 //!
-//! Sections are filled sequentially. Recovery walks the section range from oldest to newest and
-//! compares each section's item count to its logical capacity:
+//! Sections are filled sequentially and, by the invariant above, every non-tail section is full
+//! and durable. Recovery therefore computes the logical size arithmetically: it sums the oldest
+//! section's length, the full capacity of any middle sections, and the (possibly short) tail
+//! section's length. Only the oldest section is validated against its capacity; the newest section
+//! may be short because it is the normal append frontier. The underlying segmented journal repairs
+//! any trailing partial item in the tail before recovery runs.
 //!
-//! - A short or missing non-newest section indicates a gap in durable data; recovery stops there
-//!   and truncates newer sections.
-//! - The newest section may be short, since it is the normal append frontier. Recovery includes
-//!   its items.
-//!
-//! The recovered size is the logical end of this contiguous prefix. If the persisted watermark
-//! exceeds the recovered size, recovery returns a corruption error. Both the pruning boundary
-//! and watermark are persisted before `init` returns.
-//!
-//! The recovery watermark is therefore an external recovery checkpoint, not a complete record of
-//! every item that may have become durable through `commit` or storage behavior.
+//! A journal written by a build that did not maintain the rollover-fsync invariant may contain a
+//! short non-tail middle section; recovery trusts middle sections to be full and would overcount
+//! such data rather than detect it. This is acceptable for ALPHA storage with no migration path.
 //!
 //! # Consistency
 //!
@@ -102,7 +99,7 @@ use commonware_utils::{
     sequence::VecU64,
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
 };
-use futures::{future::try_join_all, stream::Stream, StreamExt};
+use futures::{stream::Stream, StreamExt};
 use std::{
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
@@ -122,9 +119,6 @@ const PRUNING_BOUNDARY_KEY: u64 = 1;
 /// This key is synced before destructive reset work starts. If recovery sees it, recovery
 /// completes the reset to the recorded target before normal bounds recovery.
 pub(super) const CLEAR_TARGET_KEY: u64 = 2;
-
-/// Metadata key for storing the recovery watermark.
-const RECOVERY_WATERMARK_KEY: u64 = 3;
 
 /// Return the first retained logical position in `section`.
 #[inline]
@@ -186,27 +180,13 @@ struct Inner<E: Context, A: CodecFixedShared> {
     /// Total number of items appended (not affected by pruning).
     size: u64,
 
-    /// Stores the recovery watermark and, when the pruning boundary is mid-section, the exact
-    /// pruning boundary. Also stores an in-progress `CLEAR_TARGET_KEY` while a clear/reset is
-    /// running.
-    ///
-    /// Metadata that advances the pruning boundary or recovery watermark is persisted only after
-    /// the blob state it describes is durable. A lower recovery watermark is always safe to persist
-    /// because it only expands the suffix external consumers may replay. Recovery rejects pruning
-    /// metadata ahead of blob state and watermarks beyond the recovered size as corruption.
+    /// Stores the exact pruning boundary when it is mid-section, and an in-progress
+    /// `CLEAR_TARGET_KEY` while a clear/reset is running. Pruning-boundary metadata is persisted
+    /// only after the blob state it describes is durable.
     metadata: Metadata<E, u64, VecU64>,
 
     /// The position before which all items have been pruned.
     pruning_boundary: u64,
-
-    /// The earliest section modified since the last successful `commit()` or `sync()`.
-    dirty_from_section: Option<u64>,
-}
-
-/// A deferred blob truncation to apply after metadata is persisted during init.
-struct RecoveryRepair {
-    section: u64,
-    byte_offset: u64,
 }
 
 impl<E: Context, A: CodecFixedShared> Inner<E, A> {
@@ -495,104 +475,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry in bytes (as u64).
     pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
 
-    /// Mark all sections from `section` onward as dirty.
-    fn mark_dirty_from(inner: &mut Inner<E, A>, section: u64) {
-        inner.dirty_from_section = Some(
-            inner
-                .dirty_from_section
-                .map_or(section, |existing| existing.min(section)),
-        );
-    }
-
-    /// Update pruning-boundary and recovery-watermark entries in metadata's in-memory state.
-    ///
-    /// Call `inner.metadata.sync()` separately to persist the updated entries.
-    fn update_metadata_entries(
-        inner: &mut Inner<E, A>,
-        items_per_blob: u64,
-        pruning_boundary: u64,
-        recovery_watermark: u64,
-    ) {
-        let current_pruning = inner
-            .metadata
-            .get(&PRUNING_BOUNDARY_KEY)
-            .copied()
-            .map(u64::from);
-        if !pruning_boundary.is_multiple_of(items_per_blob) {
-            if current_pruning != Some(pruning_boundary) {
-                inner
-                    .metadata
-                    .put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
-            }
-        } else if current_pruning.is_some() {
-            inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
-        }
-
-        let current_watermark = inner
-            .metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from);
-        if current_watermark != Some(recovery_watermark) {
-            inner
-                .metadata
-                .put(RECOVERY_WATERMARK_KEY, recovery_watermark.into());
-        }
-    }
-
-    /// Update and persist pruning-boundary and recovery-watermark metadata entries.
-    async fn persist_metadata_entries(
-        inner: &mut Inner<E, A>,
-        items_per_blob: u64,
-        pruning_boundary: u64,
-        recovery_watermark: u64,
-    ) -> Result<(), Error> {
-        Self::update_metadata_entries(inner, items_per_blob, pruning_boundary, recovery_watermark);
-        inner.metadata.sync().await.map_err(Into::into)
-    }
-
-    /// Stage a recovery watermark no greater than `limit`.
-    ///
-    /// This is used before blob state moves backward so external consumers never see a persisted
-    /// recovery checkpoint beyond the rewind/clear target.
-    fn lower_recovery_watermark(inner: &mut Inner<E, A>, limit: u64) -> bool {
-        let Some(current) = inner
-            .metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from)
-        else {
-            return false;
-        };
-        if current <= limit {
-            return false;
-        }
-        inner.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
-        true
-    }
-
-    /// Stage a recovery-watermark entry no greater than `limit` in raw metadata.
-    ///
-    /// This is used by `init_at_size` before it clears existing blobs, before an `Inner` exists.
-    #[commonware_macros::stability(ALPHA)]
-    pub(super) fn update_metadata_watermark_before_clear(
-        metadata: &mut Metadata<E, u64, VecU64>,
-        limit: u64,
-    ) -> bool {
-        let Some(current_watermark) = metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from)
-        else {
-            return false;
-        };
-        if current_watermark <= limit {
-            return false;
-        }
-        metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
-        true
-    }
-
     /// Open the metadata partition for `cfg`.
     pub(super) async fn open_metadata(
         context: E,
@@ -668,7 +550,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         journal.clear().await?;
         journal.ensure_section_exists(size / items_per_blob).await?;
         Self::stage_pruning_boundary_metadata(metadata, items_per_blob, size);
-        metadata.put(RECOVERY_WATERMARK_KEY, size.into());
         metadata.remove(&CLEAR_TARGET_KEY);
         metadata.sync().await.map_err(Into::into)
     }
@@ -700,9 +581,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let mut journal = SegmentedJournal::init(context.child("blobs"), segmented_cfg).await?;
 
-        // Complete any interrupted clear before recovering bounds. `complete_clear_to_size` also
-        // resets the recovery watermark to the clear target, so the subsequent bounds recovery
-        // sees fully consistent metadata.
+        // Complete any interrupted clear before recovering bounds, so the subsequent bounds
+        // recovery sees fully consistent metadata.
         if let Some(clear_target) = metadata.get(&CLEAR_TARGET_KEY).copied().map(u64::from) {
             warn!(clear_target, "crash repair: completing interrupted clear");
             Self::complete_clear_to_size(&mut journal, &mut metadata, items_per_blob, clear_target)
@@ -710,50 +590,25 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
 
         let meta_pruning_boundary = metadata.get(&PRUNING_BOUNDARY_KEY).copied().map(u64::from);
-        let meta_recovery_watermark = metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from);
 
-        let (pruning_boundary, size, recovery_watermark, repair) = Self::recover_bounds(
-            &mut journal,
-            items_per_blob,
-            meta_pruning_boundary,
-            meta_recovery_watermark,
-        )
-        .await?;
+        let (pruning_boundary, size, needs_metadata_update) =
+            Self::recover_bounds(&journal, items_per_blob, meta_pruning_boundary).await?;
 
-        // Bytes beyond the persisted recovery watermark may be readable after reopen without
-        // being crash-durable, so the next commit/sync must force a data sync before advancing it.
-        let dirty_from_section =
-            (recovery_watermark < size).then_some(recovery_watermark / items_per_blob);
+        // Persist the pruning-boundary metadata only if recovery fell back to blob state.
+        if needs_metadata_update {
+            Self::stage_pruning_boundary_metadata(&mut metadata, items_per_blob, pruning_boundary);
+            metadata.sync().await?;
+        }
+
         let mut inner = Inner {
             journal,
             size,
             metadata,
             pruning_boundary,
-            dirty_from_section,
         };
 
-        // Metadata must be persisted before the rewind repair: the rewind cannot reduce the
-        // recoverable size below what recover_bounds computed, so the watermark persisted here will
-        // remain valid even if a crash interrupts the rewind.
-        Self::persist_metadata_entries(
-            &mut inner,
-            items_per_blob,
-            pruning_boundary,
-            recovery_watermark,
-        )
-        .await?;
-
-        if let Some(repair) = repair {
-            inner
-                .journal
-                .rewind(repair.section, repair.byte_offset)
-                .await?;
-            inner.journal.sync(repair.section).await?;
-        }
-
+        // Invariant: the tail blob must exist, even if empty, so size can be reconstructed on
+        // reopen even after pruning all items.
         let tail_section = size / items_per_blob;
         inner.journal.ensure_section_exists(tail_section).await?;
 
@@ -768,159 +623,96 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         })
     }
 
-    /// Recover `(pruning_boundary, size, recovery_watermark, repair)` from metadata and blob state.
+    /// Recover `(pruning_boundary, size, needs_metadata_update)` from metadata and blob state.
     ///
-    /// Pruning metadata that lags blob state is repaired from the blob boundary; pruning metadata
-    /// ahead of blob state or a watermark beyond the recovered size is corruption. The caller
-    /// persists metadata before applying the returned repair (see comment at the call site).
+    /// The rollover-fsync invariant guarantees every non-tail section is full and durable, so size
+    /// is computed arithmetically and only the oldest section is validated. Mid-section pruning
+    /// metadata is trusted when it names the current oldest section; otherwise it is stale (or
+    /// unnecessary) and the section-aligned blob boundary is authoritative.
     async fn recover_bounds(
-        inner: &mut SegmentedJournal<E, A>,
+        inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
         meta_pruning_boundary: Option<u64>,
-        meta_recovery_watermark: Option<u64>,
-    ) -> Result<(u64, u64, u64, Option<RecoveryRepair>), Error> {
-        let pruning_boundary = Self::recover_pruning_boundary(
-            meta_pruning_boundary,
-            inner.oldest_section(),
-            items_per_blob,
-        )?;
-
-        let (size, repair) =
-            Self::recover_by_walking_lengths(inner, items_per_blob, pruning_boundary).await?;
-
-        let recovery_watermark = match meta_recovery_watermark {
-            Some(watermark) if watermark > size => {
-                // The dual-CRC page mechanism prevents losing previously-synced data, and
-                // clear_to_size updates the watermark atomically via CLEAR_TARGET_KEY. A
-                // watermark beyond the recoverable size indicates external corruption.
-                return Err(Error::Corruption(format!(
-                    "recovery watermark {watermark} exceeds recoverable size {size}"
-                )));
-            }
-            Some(watermark) => watermark,
-            None if repair.is_some() => {
-                // A legacy journal with a short non-tail section violates the old rollover-sync
-                // invariant (each section was fsynced before the next received writes).
-                return Err(Error::Corruption(
-                    "legacy journal has a short non-tail section".into(),
-                ));
-            }
-            // Legacy journals have no watermark. Under the old rollover-sync invariant, all
-            // non-tail sections are durable; only the tail may have unfsynced data.
-            None => first_in_section(pruning_boundary, size / items_per_blob, items_per_blob)?,
-        };
-
-        Ok((pruning_boundary, size, recovery_watermark, repair))
-    }
-
-    /// Recover the pruning boundary from metadata if it still matches the oldest retained section.
-    ///
-    /// Missing or section-aligned metadata means the blob boundary is authoritative. Mid-section
-    /// metadata is trusted only when it belongs to the current oldest section.
-    fn recover_pruning_boundary(
-        meta_pruning_boundary: Option<u64>,
-        oldest_section: Option<u64>,
-        items_per_blob: u64,
-    ) -> Result<u64, Error> {
-        let blob_boundary = match oldest_section {
+    ) -> Result<(u64, u64, bool), Error> {
+        // Blob-based boundary is always section-aligned.
+        let blob_boundary = match inner.oldest_section() {
             Some(oldest) => oldest
                 .checked_mul(items_per_blob)
                 .ok_or(Error::OffsetOverflow)?,
             None => 0,
         };
 
-        let Some(meta_pruning_boundary) = meta_pruning_boundary else {
-            return Ok(blob_boundary);
+        // PRUNING_BOUNDARY_KEY is only stored when the boundary falls mid-section.
+        let (pruning_boundary, needs_update) = match meta_pruning_boundary {
+            Some(meta_pruning_boundary)
+                if !meta_pruning_boundary.is_multiple_of(items_per_blob) =>
+            {
+                let meta_oldest_section = meta_pruning_boundary / items_per_blob;
+                match inner.oldest_section() {
+                    Some(oldest_section) if meta_oldest_section == oldest_section => {
+                        (meta_pruning_boundary, false)
+                    }
+                    _ => {
+                        warn!(
+                            meta_oldest_section,
+                            "crash repair: pruning metadata stale, computing from blobs"
+                        );
+                        (blob_boundary, true)
+                    }
+                }
+            }
+            // Section-aligned metadata is unnecessary; absent metadata means section-aligned.
+            Some(_) => (blob_boundary, true),
+            None => (blob_boundary, false),
         };
-        if meta_pruning_boundary.is_multiple_of(items_per_blob) {
-            return Ok(blob_boundary);
-        }
 
-        let meta_oldest_section = meta_pruning_boundary / items_per_blob;
-        match oldest_section {
-            Some(oldest_section) if meta_oldest_section == oldest_section => {
-                Ok(meta_pruning_boundary)
-            }
-            Some(oldest_section) if meta_oldest_section < oldest_section => {
-                warn!(
-                    meta_oldest_section,
-                    oldest_section, "crash repair: pruning metadata stale, computing from blobs"
-                );
-                Ok(blob_boundary)
-            }
-            Some(oldest_section) => {
-                // Metadata ahead of blob state should never arise: prune removes blobs before
-                // sync persists metadata, and clear_to_size uses CLEAR_TARGET_KEY.
-                Err(Error::Corruption(format!(
-                    "pruning metadata references section {meta_oldest_section} \
-                     but oldest blob is section {oldest_section}"
-                )))
-            }
-            None => {
-                // Mid-section pruning metadata with no blobs should never arise:
-                // complete_clear_to_size handles CLEAR_TARGET_KEY before we get here,
-                // and no other operation removes all blobs without updating metadata.
-                Err(Error::Corruption(format!(
-                    "pruning metadata references section {meta_oldest_section} but no blobs exist"
-                )))
-            }
-        }
+        Self::validate_oldest_section(inner, items_per_blob, pruning_boundary).await?;
+        let size = Self::compute_size(inner, items_per_blob, pruning_boundary).await?;
+        Ok((pruning_boundary, size, needs_update))
     }
 
-    async fn section_len_within_capacity(
+    /// Validate that the oldest non-tail section is full relative to its logical capacity. Under
+    /// the rollover-fsync invariant a short non-tail section cannot result from a valid crash.
+    async fn validate_oldest_section(
         inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
-        section: u64,
-    ) -> Result<(u64, u64), Error> {
-        let len = inner.section_len(section).await?;
-        let capacity = section_capacity(pruning_boundary, section, items_per_blob)?;
-        if len > capacity {
+    ) -> Result<(), Error> {
+        let (Some(oldest), Some(newest)) = (inner.oldest_section(), inner.newest_section()) else {
+            return Ok(());
+        };
+        if oldest == newest {
+            // Only the tail section remains; it may be partial.
+            return Ok(());
+        }
+        let oldest_len = inner.section_len(oldest).await?;
+        let expected = section_capacity(pruning_boundary, oldest, items_per_blob)?;
+        if oldest_len != expected {
             return Err(Error::Corruption(format!(
-                "section {section} has too many items: expected at most {capacity}, got {len}"
+                "oldest section {oldest} has wrong size: expected {expected} items, got {oldest_len}"
             )));
         }
-        Ok((len, capacity))
+        Ok(())
     }
 
-    /// Recover logical size by walking section lengths from oldest to newest, truncating at the
-    /// first short or missing non-tail section.
-    async fn recover_by_walking_lengths(
-        inner: &mut SegmentedJournal<E, A>,
+    /// Compute the logical size from retained section lengths. Middle sections are trusted full per
+    /// the rollover-fsync invariant; only the oldest and newest sections are measured.
+    async fn compute_size(
+        inner: &SegmentedJournal<E, A>,
         items_per_blob: u64,
         pruning_boundary: u64,
-    ) -> Result<(u64, Option<RecoveryRepair>), Error> {
-        let oldest = inner.oldest_section();
-        let newest = inner.newest_section();
-
-        let (Some(oldest), Some(newest)) = (oldest, newest) else {
-            return Ok((pruning_boundary, None));
+    ) -> Result<u64, Error> {
+        let (Some(oldest), Some(newest)) = (inner.oldest_section(), inner.newest_section()) else {
+            return Ok(pruning_boundary);
         };
-
-        let mut size = pruning_boundary;
-        for section in oldest..=newest {
-            let (len, capacity) =
-                Self::section_len_within_capacity(inner, items_per_blob, pruning_boundary, section)
-                    .await?;
-
-            size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
-            if len < capacity {
-                if section == newest {
-                    return Ok((size, None));
-                }
-                return Ok((
-                    size,
-                    Some(RecoveryRepair {
-                        section,
-                        byte_offset: len
-                            .checked_mul(Self::CHUNK_SIZE_U64)
-                            .ok_or(Error::OffsetOverflow)?,
-                    }),
-                ));
-            }
+        if oldest == newest {
+            let tail_len = inner.section_len(newest).await?;
+            return Ok(pruning_boundary + tail_len);
         }
-
-        Ok((size, None))
+        let oldest_len = inner.section_len(oldest).await?;
+        let tail_len = inner.section_len(newest).await?;
+        let middle_items = (newest - oldest - 1) * items_per_blob;
+        Ok(pruning_boundary + oldest_len + middle_items + tail_len)
     }
 
     /// Initialize a new `Journal` instance in a pruned state at a given size.
@@ -971,12 +763,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
-        // Stage the reset intent durably. Lower the recovery watermark first so external
-        // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
-        // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
-        // recovering bounds.
+        // Stage the reset intent durably. `init_with_metadata` will detect CLEAR_TARGET_KEY and
+        // complete the clear via complete_clear_to_size before recovering bounds.
         let mut metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
-        Self::update_metadata_watermark_before_clear(&mut metadata, size);
         metadata.put(CLEAR_TARGET_KEY, size.into());
         metadata.sync().await?;
         clear_dependents().await?;
@@ -1013,64 +802,58 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         (section, pos_in_section)
     }
 
-    /// Flush dirty sections to storage under the read lock, allowing concurrent reads.
-    ///
-    /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
-    /// data, so committed sections are never at risk, and recovery truncates at the first short or
-    /// missing section, so a crash that leaves a gap still recovers a contiguous prefix no shorter
-    /// than the last completed commit.
-    async fn flush_dirty_sections(&self) -> Result<(), Error> {
-        let inner = self.inner.read().await;
-        if let Some(start_section) = inner.dirty_from_section {
-            let tail_section = inner.size / self.items_per_blob;
-            let start_section = inner
-                .journal
-                .oldest_section()
-                .map(|oldest| start_section.max(oldest))
-                // With no retained blobs, any earlier dirty section was cleared or pruned.
-                // Syncing the tail section is harmless when it does not exist.
-                .unwrap_or(tail_section);
-            try_join_all((start_section..=tail_section).map(|section| inner.journal.sync(section)))
-                .await?;
-        }
-        Ok(())
-    }
-
-    /// Durably persists the current state of the structure.
-    ///
-    /// Does not advance the recovery watermark, so external consumers may need to replay entries
-    /// beyond the previous `sync()`. Use `sync()` to advance the watermark and to ensure that a
-    /// crash after this call doesn't require any recovery.
+    /// Durably persist the current state. Equivalent to [Self::sync].
     pub async fn commit(&self) -> Result<(), Error> {
-        let _timer = self.metrics.commit_timer();
-        self.metrics.record_commit();
-        let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_sections().await?;
-
-        let mut inner = self.inner.write().await;
-        inner.dirty_from_section = None;
-        Ok(())
+        self.sync().await
     }
 
-    /// Durably persist the current state of the structure, ensuring no recovery is required in the
-    /// event of a crash following this call.
+    /// Durably persist the current state, ensuring no recovery is required after a crash.
     ///
-    /// Advances the recovery watermark to the current size.
+    /// Every non-tail section is already durable (synced when it filled at rollover); this fsyncs
+    /// the tail section and persists the mid-section pruning boundary when it changed.
     pub async fn sync(&self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_sections().await?;
 
+        // Sync the tail section. It may not exist yet if the previous section just filled; syncing
+        // a non-existent section is a no-op.
+        {
+            let inner = self.inner.read().await;
+            let tail_section = inner.size / self.items_per_blob;
+            inner.journal.sync(tail_section).await?;
+        }
+
+        // Persist the mid-section pruning boundary only when it changed. Section-aligned boundaries
+        // are derived from the oldest blob and need no metadata.
         let mut inner = self.inner.write().await;
-        inner.dirty_from_section = None;
         let pruning_boundary = inner.pruning_boundary;
-        let size = inner.size;
-        Self::update_metadata_entries(&mut inner, self.items_per_blob, pruning_boundary, size);
+        let current = inner
+            .metadata
+            .get(&PRUNING_BOUNDARY_KEY)
+            .copied()
+            .map(u64::from);
+        let changed = if !pruning_boundary.is_multiple_of(self.items_per_blob) {
+            if current == Some(pruning_boundary) {
+                false
+            } else {
+                inner
+                    .metadata
+                    .put(PRUNING_BOUNDARY_KEY, pruning_boundary.into());
+                true
+            }
+        } else if current.is_some() {
+            inner.metadata.remove(&PRUNING_BOUNDARY_KEY);
+            true
+        } else {
+            false
+        };
         drop(inner);
 
-        let inner = self.inner.read().await;
-        inner.metadata.sync().await?;
+        if changed {
+            let inner = self.inner.read().await;
+            inner.metadata.sync().await?;
+        }
 
         Ok(())
     }
@@ -1082,17 +865,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             items_per_blob: self.items_per_blob,
             metrics: &self.metrics,
         }
-    }
-
-    /// Return the recovery watermark.
-    pub(crate) async fn recovery_watermark(&self) -> u64 {
-        let inner = self.inner.read().await;
-        inner
-            .metadata
-            .get(&RECOVERY_WATERMARK_KEY)
-            .copied()
-            .map(u64::from)
-            .expect("recovery watermark must exist after init")
     }
 
     /// Return the total number of items in the journal, irrespective of pruning. The next value
@@ -1150,8 +922,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
-        let first_dirty_section = inner.size / self.items_per_blob;
-        Self::mark_dirty_from(&mut inner, first_dirty_section);
         let mut written = 0;
         while written < items_count {
             let (section, pos_in_section) = self.position_to_section(inner.size);
@@ -1168,6 +938,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             written += batch_count;
 
             if inner.size.is_multiple_of(self.items_per_blob) {
+                // Sync the filled section before the next to uphold the durability invariant.
+                // Drop the write guard during sync so readers proceed; op_lock serializes writers.
+                drop(inner);
+                {
+                    let reader = self.inner.read().await;
+                    reader.journal.sync(section).await?;
+                }
+                inner = self.inner.write().await;
                 inner.journal.ensure_section_exists(section + 1).await?;
             }
         }
@@ -1207,18 +985,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .checked_mul(Self::CHUNK_SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
 
-        let should_sync_metadata = Self::lower_recovery_watermark(&mut inner, size);
-        drop(inner);
-
-        if should_sync_metadata {
-            let inner = self.inner.read().await;
-            inner.metadata.sync().await?;
-        }
-
-        let mut inner = self.inner.write().await;
         inner.journal.rewind(section, byte_offset).await?;
         inner.size = size;
-        Self::mark_dirty_from(&mut inner, section);
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_blob);
 
@@ -1261,9 +1029,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             // Pruning boundary only moves forward
             assert!(inner.pruning_boundary < new_oldest * self.items_per_blob);
             inner.pruning_boundary = new_oldest * self.items_per_blob;
-            if let Some(dirty_from) = inner.dirty_from_section {
-                inner.dirty_from_section = Some(dirty_from.max(new_oldest));
-            }
             self.metrics
                 .update(inner.size, inner.pruning_boundary, self.items_per_blob);
         }
@@ -1296,9 +1061,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
 
-        // Lower the watermark in-memory and stage the clear intent in the same metadata sync, so
-        // external consumers never see a persisted recovery checkpoint beyond `new_size`.
-        Self::lower_recovery_watermark(&mut inner, new_size);
+        // Stage the clear intent durably so a crash mid-clear is completed by the next init.
         inner.metadata.put(CLEAR_TARGET_KEY, new_size.into());
         inner.metadata.sync().await?;
 
@@ -1309,7 +1072,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         inner.size = new_size;
         inner.pruning_boundary = new_size;
-        inner.dirty_from_section = None;
 
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_blob);
@@ -1318,16 +1080,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Durably stage a clear to `new_size` without completing it.
     ///
-    /// This lowers the recovery watermark and persists `CLEAR_TARGET_KEY`, leaving a recoverable
-    /// intent so a caller can clear dependent sibling state before calling `clear_to_size` to
-    /// finish. If a crash interrupts the sequence, the next `init` completes the staged clear.
-    /// The follow-up `clear_to_size` re-stages the same target idempotently.
+    /// This persists `CLEAR_TARGET_KEY`, leaving a recoverable intent so a caller can clear
+    /// dependent sibling state before calling `clear_to_size` to finish. If a crash interrupts the
+    /// sequence, the next `init` completes the staged clear. The follow-up `clear_to_size` re-stages
+    /// the same target idempotently.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(&self, new_size: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
 
-        Self::lower_recovery_watermark(&mut inner, new_size);
         inner.metadata.put(CLEAR_TARGET_KEY, new_size.into());
         inner.metadata.sync().await.map_err(Into::into)
     }
@@ -1356,14 +1117,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub(crate) async fn test_newest_section(&self) -> Option<u64> {
         let inner = self.inner.read().await;
         inner.journal.newest_section()
-    }
-
-    /// Test helper: Set and persist the recovery watermark directly.
-    #[cfg(test)]
-    pub(crate) async fn test_set_recovery_watermark(&self, watermark: u64) -> Result<(), Error> {
-        let mut inner = self.inner.write().await;
-        inner.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
-        inner.metadata.sync().await.map_err(Into::into)
     }
 }
 
@@ -1446,7 +1199,6 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
@@ -1476,44 +1228,6 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
-    }
-
-    #[test_traced]
-    fn test_fixed_init_marks_suffix_past_recovery_watermark_dirty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut cfg = test_cfg(&context, NZU64!(10));
-            cfg.partition = "init-adopted-fixed".into();
-
-            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            journal.append(&1).await.unwrap();
-            journal.append(&2).await.unwrap();
-            journal.sync().await.unwrap();
-            // Simulate the state left by a crash after item 2 became visible to recovery, but
-            // before the persisted recovery watermark advanced past item 1.
-            journal.test_set_recovery_watermark(1).await.unwrap();
-            drop(journal);
-
-            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.size().await, 2);
-
-            // Regression: init used to recover size 2 while marking no data sections dirty.
-            // commit() would then skip section syncs and succeed even though the recovered suffix
-            // had not been durably adopted. With the fix, item 2's section is dirty, so the forced
-            // sync failure below must surface.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(1.0),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit() must sync recovered data beyond the persisted recovery watermark"
-            );
-        });
     }
 
     async fn scan_partition(context: &Context, partition: &str) -> Vec<Vec<u8>> {
@@ -1903,32 +1617,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_replay_with_missing_historical_blob() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0u64..5 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Delete a middle blob (external corruption). The watermark (5) now exceeds the
-            // recoverable contiguous prefix, which is corruption.
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
-                .await
-                .unwrap();
-
-            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_journal_partial_replay() {
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(7);
         // 53 % 7 = 4, which will trigger a non-trivial seek in the starting blob to reach the
@@ -1995,103 +1683,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rejects_corrupted_tail_blob() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(3));
-            let journal = Journal::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..5 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Truncate the tail blob by 1 byte (external corruption). The watermark (5) now
-            // exceeds the recoverable size, which is corruption.
-            let (blob, size) = context
-                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
-                .await
-                .unwrap();
-            blob.resize(size - 1).await.unwrap();
-            blob.sync().await.unwrap();
-
-            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    /// Simulate a crash after recovery persists metadata but before the rewind repair completes.
-    /// The stale sections beyond the repair point still exist. The next init must succeed: it
-    /// re-derives the same size from blob lengths, and the persisted watermark is still within
-    /// the recovered size.
-    #[test_traced]
-    fn test_fixed_journal_crash_during_recovery_repair() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Fill 3 sections (0..15), sync everything.
-            for i in 0..15u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            assert_eq!(journal.recovery_watermark().await, 15);
-
-            // Shorten section 1 to simulate a short non-tail section. Recovery will compute
-            // size=9 (section 0 full + 4 items in section 1) and generate a repair.
-            {
-                let mut inner = journal.inner.write().await;
-                inner
-                    .journal
-                    .rewind_section(1, 4 * Digest::SIZE as u64)
-                    .await
-                    .unwrap();
-                inner.journal.sync(1).await.unwrap();
-            }
-
-            // Persist the recovered metadata (watermark=9) as init_with_metadata does before
-            // applying the rewind repair. This simulates a crash after metadata sync but before
-            // the repair removes stale sections.
-            {
-                let mut inner = journal.inner.write().await;
-                Journal::<_, Digest>::update_metadata_entries(
-                    &mut inner,
-                    cfg.items_per_blob.get(),
-                    0,
-                    9,
-                );
-                inner.metadata.sync().await.unwrap();
-            }
-            drop(journal);
-
-            // Sections 2 (and the empty tail at 3) still exist. Init must succeed and the
-            // rewind must remove the stale sections.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("init should succeed after crash during recovery repair");
-            assert_eq!(journal.bounds().await, 0..9);
-            assert_eq!(journal.recovery_watermark().await, 9);
-            assert_eq!(journal.read(8).await.unwrap(), test_digest(8));
-            assert!(matches!(
-                journal.read(9).await,
-                Err(Error::ItemOutOfRange(9))
-            ));
-            assert_eq!(
-                journal.test_newest_section().await,
-                Some(1),
-                "stale sections beyond the repair point should be removed"
-            );
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_journal_recover_accepts_clean_short_tail() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2115,11 +1706,8 @@ mod tests {
             inner.sync(0).await.unwrap();
             inner.sync(1).await.unwrap();
 
-            let (size, repair) = Journal::<_, Digest>::recover_by_walking_lengths(&mut inner, 5, 0)
-                .await
-                .unwrap();
+            let size = Journal::<_, Digest>::compute_size(&inner, 5, 0).await.unwrap();
             assert_eq!(size, 7);
-            assert!(repair.is_none());
             inner.destroy().await.unwrap();
         });
     }
@@ -2146,388 +1734,14 @@ mod tests {
             inner.sync(0).await.unwrap();
             inner.sync(1).await.unwrap();
 
-            let (size, repair) = Journal::<_, Digest>::recover_by_walking_lengths(&mut inner, 5, 0)
-                .await
-                .unwrap();
+            let size = Journal::<_, Digest>::compute_size(&inner, 5, 0).await.unwrap();
             assert_eq!(size, 5);
-            assert!(repair.is_none());
             inner.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_recover_fallback_truncates_after_short_oldest_section() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .expect("failed to initialize journal at size");
-
-            for i in 0..8u64 {
-                journal
-                    .append(&test_digest(100 + i))
-                    .await
-                    .expect("failed to append data");
-            }
-            journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds().await, 7..15);
-
-            {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 6u64.into());
-                inner
-                    .metadata
-                    .sync()
-                    .await
-                    .expect("failed to sync lower recovery watermark");
-            }
-            drop(journal);
-
-            let (blob, size) = context
-                .open(&blob_partition(&cfg), &1u64.to_be_bytes())
-                .await
-                .expect("failed to open oldest blob");
-            blob.resize(size - 1).await.expect("failed to corrupt blob");
-            blob.sync().await.expect("failed to sync blob");
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 7..9);
-            assert_eq!(journal.read(7).await.unwrap(), test_digest(100));
-            assert_eq!(journal.read(8).await.unwrap(), test_digest(101));
-            assert!(matches!(
-                journal.read(9).await,
-                Err(Error::ItemOutOfRange(9))
-            ));
-            assert_eq!(journal.test_oldest_section().await, Some(1));
-            assert_eq!(journal.inner.read().await.journal.newest_section(), Some(1));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_stale_pruning_metadata_preserves_watermark() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .expect("failed to initialize journal at size");
-
-            for i in 0..10u64 {
-                journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds().await, 7..17);
-
-            {
-                let mut inner = journal.inner.write().await;
-                inner
-                    .journal
-                    .rewind_section(2, 2 * Digest::SIZE as u64)
-                    .await
-                    .expect("failed to shorten anchored section");
-                inner
-                    .journal
-                    .sync(2)
-                    .await
-                    .expect("failed to sync shortened anchored section");
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 12u64.into());
-                inner
-                    .metadata
-                    .sync()
-                    .await
-                    .expect("failed to sync recovery watermark");
-            }
-            drop(journal);
-
-            // Remove the metadata's oldest section so PRUNING_BOUNDARY_KEY=7 is stale. The
-            // watermark is preserved because length-based recovery ends at the same point.
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
-                .await
-                .expect("failed to remove stale oldest section");
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 10..12);
-            assert_eq!(journal.recovery_watermark().await, 12);
-            assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
-            assert_eq!(journal.read(11).await.unwrap(), test_digest(4));
-            assert!(matches!(
-                journal.read(12).await,
-                Err(Error::ItemOutOfRange(12))
-            ));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_stale_pruning_metadata_without_watermark_walks_lengths() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .expect("failed to initialize journal at size");
-
-            for i in 0..10u64 {
-                journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            journal.sync().await.expect("failed to sync journal");
-            assert_eq!(journal.bounds().await, 7..17);
-
-            {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                inner
-                    .metadata
-                    .sync()
-                    .await
-                    .expect("failed to remove recovery watermark");
-            }
-            drop(journal);
-
-            // Remove the metadata's oldest section so PRUNING_BOUNDARY_KEY=7 is stale. Without a
-            // recovery watermark, recovery must still walk lengths from the recovered blob boundary.
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
-                .await
-                .expect("failed to remove stale oldest section");
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 10..17);
-            // No watermark: watermark at the tail section start, not size.
-            assert_eq!(journal.recovery_watermark().await, 15);
-            assert_eq!(journal.read(10).await.unwrap(), test_digest(3));
-            assert_eq!(journal.read(16).await.unwrap(), test_digest(9));
-
-            // After sync, watermark advances to the full recovered size.
-            journal.sync().await.expect("failed to sync");
-            assert_eq!(journal.recovery_watermark().await, 17);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Pruning metadata ahead of the oldest blob is not a reachable crash state: prune removes
-    /// blobs before sync persists metadata, and clear_to_size uses CLEAR_TARGET_KEY for atomicity.
-    /// Verify it is rejected as corruption.
-    #[test_traced]
-    fn test_fixed_journal_pruning_metadata_ahead_of_blobs_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 3)
-                    .await
-                    .unwrap();
-
-            // Append 12 items (positions 3..15) spanning sections 0, 1, 2.
-            for i in 0..12u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            assert_eq!(journal.bounds().await, 3..15);
-
-            // Set PRUNING_BOUNDARY_KEY to 8 (section 1) and lower the watermark so it won't
-            // independently trigger the watermark > size corruption check. Then remove section 1's
-            // blob so section 0 is the oldest. The pruning metadata now references a section ahead
-            // of the oldest blob, which is the corruption we're testing.
-            {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.put(PRUNING_BOUNDARY_KEY, 8u64.into());
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 3u64.into());
-                inner.metadata.sync().await.unwrap();
-            }
-            drop(journal);
-
-            context
-                .remove(&blob_partition(&cfg), Some(&1u64.to_be_bytes()))
-                .await
-                .unwrap();
-
-            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
         });
     }
 
     /// Mid-section pruning metadata with no blobs is not a reachable crash state (see comment in
     /// `recover_bounds`). Verify it is rejected as corruption rather than silently recovering empty.
-    #[test_traced]
-    fn test_fixed_journal_pruning_metadata_with_no_blobs_is_corruption() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal =
-                Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
-                    .await
-                    .unwrap();
-
-            for i in 0..3u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Remove all blobs but leave metadata (with PRUNING_BOUNDARY_KEY=7) intact.
-            for name in scan_partition(&context, &blob_partition(&cfg)).await {
-                context
-                    .remove(&blob_partition(&cfg), Some(&name))
-                    .await
-                    .unwrap();
-            }
-
-            let result = Journal::<_, Digest>::init(context.child("second"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_legacy_recovery_installs_watermark() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-
-            for i in 0..12u64 {
-                journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            journal.sync().await.expect("failed to sync journal");
-
-            {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                inner
-                    .metadata
-                    .sync()
-                    .await
-                    .expect("failed to remove recovery watermark");
-            }
-            drop(journal);
-
-            // Legacy recovery sets watermark to the tail section start, not size, so the tail
-            // is marked dirty and fsynced before the watermark advances.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover legacy journal");
-            assert_eq!(journal.bounds().await, 0..12);
-            assert_eq!(journal.recovery_watermark().await, 10);
-
-            // After sync, the watermark advances to the full size.
-            journal
-                .sync()
-                .await
-                .expect("failed to sync after legacy recovery");
-            assert_eq!(journal.recovery_watermark().await, 12);
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    /// Regression: legacy upgrade (no RECOVERY_WATERMARK_KEY) must mark all recovered sections
-    /// dirty so they are fsynced before the watermark advances. Without this, init could install
-    /// a durable watermark for data that was only in the OS page cache.
-    #[test_traced]
-    fn test_fixed_journal_legacy_upgrade_marks_recovered_sections_dirty() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            for i in 0..7u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // Remove the watermark to simulate a legacy journal.
-            {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.remove(&RECOVERY_WATERMARK_KEY);
-                inner.metadata.sync().await.unwrap();
-            }
-            drop(journal);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.size().await, 7);
-            // Watermark at tail section start (section 1 = position 5).
-            assert_eq!(journal.recovery_watermark().await, 5);
-
-            // Inject sync faults. If recovered sections were not marked dirty, commit would
-            // skip the data sync and succeed despite the fault.
-            *context.storage_fault_config().write() = deterministic::FaultConfig {
-                sync_rate: Some(1.0),
-                ..Default::default()
-            };
-            assert!(
-                journal.commit().await.is_err(),
-                "commit must sync recovered data before the watermark can advance"
-            );
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_update_metadata_watermark_before_clear_lowers_only() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let mut metadata =
-                Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
-                    .await
-                    .expect("failed to initialize metadata");
-            metadata.put(RECOVERY_WATERMARK_KEY, 7u64.into());
-
-            let changed =
-                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 9);
-            assert!(!changed);
-            let persisted_watermark = metadata
-                .get(&RECOVERY_WATERMARK_KEY)
-                .copied()
-                .map(u64::from)
-                .expect("missing recovery watermark");
-            assert_eq!(persisted_watermark, 7);
-
-            let changed =
-                Journal::<_, Digest>::update_metadata_watermark_before_clear(&mut metadata, 5);
-            assert!(changed);
-            let persisted_watermark = metadata
-                .get(&RECOVERY_WATERMARK_KEY)
-                .copied()
-                .map(u64::from)
-                .expect("missing recovery watermark");
-            assert_eq!(persisted_watermark, 5);
-        });
-    }
-
     #[test_traced]
     fn test_fixed_journal_prune_to_blob_boundary_removes_pruning_metadata() {
         let executor = deterministic::Runner::default();
@@ -2799,85 +2013,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rewind_persists_lower_watermark() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-
-            for i in 0..12u64 {
-                journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            journal.sync().await.expect("failed to sync journal");
-            journal.rewind(7).await.expect("failed to rewind journal");
-            drop(journal);
-
-            let meta_cfg = MetadataConfig {
-                partition: format!("{}-metadata", cfg.partition),
-                codec_config: (),
-            };
-            let metadata = Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
-                .await
-                .expect("failed to reopen metadata");
-            let persisted_watermark = metadata
-                .get(&RECOVERY_WATERMARK_KEY)
-                .copied()
-                .map(u64::from)
-                .expect("missing recovery watermark after rewind");
-            assert_eq!(persisted_watermark, 7);
-            drop(metadata);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_recover_after_watermark_lowered_before_rewind() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .expect("failed to initialize journal");
-
-            for i in 0..12u64 {
-                journal
-                    .append(&test_digest(i))
-                    .await
-                    .expect("failed to append data");
-            }
-            journal.sync().await.expect("failed to sync journal");
-
-            {
-                let mut inner = journal.inner.write().await;
-                inner.metadata.put(RECOVERY_WATERMARK_KEY, 7u64.into());
-                inner
-                    .metadata
-                    .sync()
-                    .await
-                    .expect("failed to lower recovery watermark");
-            }
-            drop(journal);
-
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .expect("failed to recover journal");
-            assert_eq!(journal.bounds().await, 0..12);
-            assert_eq!(journal.recovery_watermark().await, 7);
-            assert_eq!(journal.read(11).await.unwrap(), test_digest(11));
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
     fn test_fixed_journal_rewind_append_commit_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2908,7 +2043,6 @@ mod tests {
                 .await
                 .expect("failed to re-initialize journal");
             assert_eq!(journal.bounds().await, 0..10);
-            assert_eq!(journal.recovery_watermark().await, 7);
             for i in 0..7u64 {
                 assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
             }
@@ -2920,92 +2054,6 @@ mod tests {
                 Err(Error::ItemOutOfRange(10))
             ));
 
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_recovery_handles_multiple_empty_data_tail_sections() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(1));
-            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Persist a prefix, then append across multiple section boundaries without syncing. The
-            // unsynced item bytes are lost on drop, but their section blobs remain visible.
-            assert_eq!(journal.append(&test_digest(10)).await.unwrap(), 0);
-            journal.sync().await.unwrap();
-            assert_eq!(journal.append(&test_digest(20)).await.unwrap(), 1);
-            assert_eq!(journal.append(&test_digest(30)).await.unwrap(), 2);
-            drop(journal);
-
-            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
-            assert!(
-                blobs.len() > 2,
-                "expected multiple empty trailing sections, got {}",
-                blobs.len()
-            );
-
-            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds().await, 0..1);
-            assert_eq!(journal.read(0).await.unwrap(), test_digest(10));
-            drop(journal);
-
-            // Recovery should remove the empty trailing sections, leaving only the durable prefix's
-            // section and the recreated tail.
-            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
-            assert_eq!(blobs.len(), 2);
-
-            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 1);
-            assert_eq!(journal.read(1).await.unwrap(), test_digest(42));
-            journal.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_recovery_handles_empty_data_with_no_durable_items() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(1));
-            let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Append across multiple section boundaries without ever syncing. No item bytes become
-            // durable, so recovery sees multiple empty sections and no durable data.
-            assert_eq!(journal.append(&test_digest(10)).await.unwrap(), 0);
-            assert_eq!(journal.append(&test_digest(20)).await.unwrap(), 1);
-            drop(journal);
-
-            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
-            assert!(
-                blobs.len() > 1,
-                "expected multiple empty sections, got {}",
-                blobs.len()
-            );
-
-            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds().await, 0..0);
-            drop(journal);
-
-            // Recovery should remove the extra empty sections, leaving only the recreated tail.
-            let blobs = scan_partition(&context, &blob_partition(&cfg)).await;
-            assert_eq!(blobs.len(), 1);
-
-            let journal = Journal::<_, Digest>::init(context.child("recovered"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.append(&test_digest(42)).await.unwrap(), 0);
-            assert_eq!(journal.read(0).await.unwrap(), test_digest(42));
             journal.destroy().await.unwrap();
         });
     }
@@ -3075,85 +2123,12 @@ mod tests {
         });
     }
 
-    /// Test that a durable section above the sync watermark, sitting beyond an empty intermediate
-    /// section, is rolled back to the contiguous boundary during recovery.
-    ///
-    /// Since #3790 removed the append-time sync when crossing blob boundaries, a process crash can
-    /// leave a later section incidentally durable while an earlier section stayed buffered and was
-    /// lost, producing a physical gap. Length-based recovery walks sections from oldest and
-    /// truncates at the first short non-tail section, so the post-gap section is discarded and only
-    /// the synced prefix survives.
-    #[test_traced]
-    fn test_fixed_recovery_rolls_back_durable_section_after_gap() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-
-            // Durably commit section 0 (positions 0..10), advancing the recovery watermark to 10.
-            for i in 0..10u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-
-            // Append section 1 and part of section 2 without committing. Manually sync only section
-            // 2 to mimic its writes surviving a crash, while section 1 stays buffered and is lost.
-            for i in 10..28u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            {
-                let inner = journal.inner.write().await;
-                inner.journal.sync(2).await.unwrap();
-            }
-            drop(journal);
-
-            // Durable state: section 0 (10 items), section 1 (empty gap), section 2 (8 items).
-            let names = scan_partition(&context, &blob_partition(&cfg)).await;
-            assert_eq!(names.len(), 3);
-            let mut sizes = Vec::new();
-            for name in &names {
-                let (_blob, size) = context.open(&blob_partition(&cfg), name).await.unwrap();
-                sizes.push(size);
-            }
-            assert!(sizes[0] > 0, "section 0 should be durable");
-            assert_eq!(sizes[1], 0, "section 1 should be the gap");
-            assert!(sizes[2] > 0, "section 2 should be incidentally durable");
-
-            // Recovery rolls back to the watermark boundary: only the synced prefix survives and the
-            // gapped section 2 is truncated away.
-            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
-            assert_eq!(journal.bounds().await, 0..10);
-            for i in 0..10u64 {
-                assert_eq!(journal.read(i).await.unwrap(), test_digest(i));
-            }
-            assert!(matches!(
-                journal.read(10).await,
-                Err(Error::ItemOutOfRange(10))
-            ));
-
-            // The orphaned section 2 is gone; the truncated section 1 remains as the recovered tail.
-            let names = scan_partition(&context, &blob_partition(&cfg)).await;
-            assert_eq!(names.len(), 2);
-
-            // Appends resume cleanly from the recovered boundary.
-            assert_eq!(journal.append(&test_digest(999)).await.unwrap(), 10);
-            assert_eq!(journal.read(10).await.unwrap(), test_digest(999));
-
-            journal.destroy().await.unwrap();
-        });
-    }
-
     /// Test recovery when the oldest section is empty but a newer section still holds durable items.
     ///
-    /// This is the fixed-journal analog of the variable-journal empty-oldest-section gap bug. A
-    /// contiguous journal can only populate a later section after filling the earlier one, so an
-    /// empty oldest section with a populated newer section is an orphaned gap. Length-based recovery
-    /// walks from the oldest section, finds it short (empty), and truncates everything from there,
-    /// aligning the journal to empty without panicking.
+    /// A contiguous journal can only populate a later section after filling the earlier one, so an
+    /// empty oldest section with a populated newer section is an orphaned gap that cannot arise from
+    /// a valid crash under the rollover-fsync invariant. Recovery validates the oldest section's
+    /// length against its capacity and rejects this state as corruption.
     #[test_traced]
     fn test_fixed_recovery_empty_oldest_section_orphaned_newer_section() {
         let executor = deterministic::Runner::default();
@@ -3170,8 +2145,8 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Empty the oldest section (external corruption). The watermark (20) now exceeds the
-            // recoverable size (0), which is corruption.
+            // Empty the oldest section (external corruption). Its length no longer matches its
+            // capacity, which recovery rejects as corruption.
             let (section0, size0) = context
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
@@ -3766,8 +2741,9 @@ mod tests {
 
     #[test_traced]
     fn test_fixed_journal_missing_metadata_with_short_section_is_corruption() {
-        // Clearing all metadata leaves no watermark. Recovery falls back to the blob boundary
-        // and finds a short non-tail section, violating the legacy rollover-sync invariant.
+        // Clearing all metadata drops the mid-section pruning boundary. Recovery falls back to the
+        // section-aligned blob boundary, which makes the oldest retained section look short,
+        // violating the rollover-fsync invariant and surfacing as corruption.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(5));
@@ -4176,62 +3152,6 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_fixed_journal_rejects_watermark_with_aligned_empty_tail() {
-        // Watermark beyond the recovered size with an aligned pruning boundary.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..10u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Remove all blobs and create a single empty section 1, leaving
-            // recovery_watermark=10 in metadata.
-            let blob_part = blob_partition(&cfg);
-            context.remove(&blob_part, None).await.unwrap();
-            let (blob, _) = context.open(&blob_part, &1u64.to_be_bytes()).await.unwrap();
-            blob.sync().await.unwrap();
-
-            let result = Journal::<_, Digest>::init(context.child("crash"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
-    fn test_fixed_journal_rejects_far_watermark_with_aligned_empty_tail() {
-        // Same as above but the watermark is multiple sections past the empty tail.
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
-
-            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            for i in 0..10u64 {
-                journal.append(&test_digest(i)).await.unwrap();
-            }
-            journal.sync().await.unwrap();
-            drop(journal);
-
-            // Remove all blobs and create a single empty section 0, leaving
-            // recovery_watermark=10 in metadata.
-            let blob_part = blob_partition(&cfg);
-            context.remove(&blob_part, None).await.unwrap();
-            let (blob, _) = context.open(&blob_part, &0u64.to_be_bytes()).await.unwrap();
-            blob.sync().await.unwrap();
-
-            let result = Journal::<_, Digest>::init(context.child("crash"), cfg.clone()).await;
-            assert!(matches!(result, Err(Error::Corruption(_))));
-        });
-    }
-
-    #[test_traced]
     fn test_read_many_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -4376,7 +3296,6 @@ mod tests {
             let items: Vec<_> = (0..5).map(test_digest).collect();
             journal.append_many(Many::Flat(&items)).await.unwrap();
             journal.append(&test_digest(5)).await.unwrap();
-            journal.commit().await.unwrap();
             journal.sync().await.unwrap();
             journal.reader().await.read(0).await.unwrap();
             journal.reader().await.try_read_sync(0).unwrap();
@@ -4396,13 +3315,11 @@ mod tests {
                 "fixed_metrics_read_many_calls_total 1",
                 "fixed_metrics_try_read_sync_hits_total 1",
                 "fixed_metrics_items_read_total 5",
-                "fixed_metrics_commit_calls_total 1",
                 "fixed_metrics_sync_calls_total 1",
                 "fixed_metrics_append_duration_count 1",
                 "fixed_metrics_append_many_duration_count 1",
                 "fixed_metrics_read_duration_count 1",
                 "fixed_metrics_read_many_duration_count 1",
-                "fixed_metrics_commit_duration_count 1",
                 "fixed_metrics_sync_duration_count 1",
                 "fixed_metrics_cache_hits_total",
                 "fixed_metrics_cache_misses_total",
