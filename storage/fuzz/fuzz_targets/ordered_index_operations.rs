@@ -107,7 +107,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 IndexOperation::Prune { key, prune_value } => {
-                    index.prune(key, |v| *v == *prune_value);
+                    index.retain(key, |v| *v != *prune_value);
                 }
 
                 IndexOperation::InsertAndPrune {
@@ -115,7 +115,7 @@ fn fuzz(input: FuzzInput) {
                     value,
                     prune_value,
                 } => {
-                    index.insert_and_prune(key, *value, |v| *v == *prune_value);
+                    index.insert_and_retain(key, *value, |v| *v != *prune_value);
                 }
 
                 IndexOperation::InsertLargeKey { value } => {
@@ -133,7 +133,7 @@ fn fuzz(input: FuzzInput) {
 
                 IndexOperation::PruneAll { key } => {
                     // Remove all values for a key
-                    index.prune(key, |_| true);
+                    index.retain(key, |_| false);
                 }
 
                 IndexOperation::CursorIterate { key } => {
@@ -162,8 +162,10 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 IndexOperation::CursorInsert { key, value } => {
-                    // Just use regular insert - simpler and avoids borrow issues
-                    index.insert(key, *value);
+                    if let Some(mut cursor) = index.get_mut_or_insert(key, *value) {
+                        cursor.next();
+                        cursor.insert(*value);
+                    }
                 }
             }
         }

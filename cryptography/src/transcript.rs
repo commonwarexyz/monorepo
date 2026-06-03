@@ -6,7 +6,7 @@
 use crate::{BatchVerifier, Signer, Verifier};
 use blake3::BLOCK_LEN;
 use bytes::Buf;
-use commonware_codec::{varint::UInt, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{varint::UInt, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::Random;
 use commonware_utils::{Array, Span};
 use core::{fmt::Display, ops::Deref};
@@ -325,7 +325,7 @@ impl Summary {
 /// This is the primary way to compare two transcripts for equality.
 /// You can think of this as a hash over the transcript, providing a commitment
 /// to the data it recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, FixedArray)]
 pub struct Summary {
     hash: blake3::Hash,
 }
@@ -383,6 +383,7 @@ impl Display for Summary {
 }
 
 impl Span for Summary {}
+
 impl Array for Summary {}
 
 impl crate::Digest for Summary {

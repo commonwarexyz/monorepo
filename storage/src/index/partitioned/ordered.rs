@@ -15,11 +15,11 @@ use commonware_runtime::Metrics;
 /// (untranslated) key are used to determine the partition, and the translator is used by the
 /// partition-specific indices on the key after stripping this prefix. The value of `P` should be
 /// small, typically 1 or 2. Anything larger than 3 will fail to compile.
-pub struct Index<T: Translator, V: Eq + Send + Sync, const P: usize> {
+pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     partitions: Vec<OrderedIndex<T, V>>,
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         let partition_count = 1 << (P * 8);
@@ -67,15 +67,13 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> Index<T, V, P> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> super::super::Factory<T>
-    for Index<T, V, P>
-{
+impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory<T> for Index<T, V, P> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
     type Cursor<'a>
         = <OrderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
@@ -113,21 +111,15 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Inde
         partition.insert(sub_key, value);
     }
 
-    fn insert_and_prune(
+    fn insert_and_retain(
         &mut self,
         key: &[u8],
         value: Self::Value,
-        predicate: impl Fn(&Self::Value) -> bool,
+        should_retain: impl Fn(&Self::Value) -> bool,
     ) {
         let (partition, sub_key) = self.get_partition_mut(key);
 
-        partition.insert_and_prune(sub_key, value, predicate);
-    }
-
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&Self::Value) -> bool) {
-        let (partition, sub_key) = self.get_partition_mut(key);
-
-        partition.prune(sub_key, predicate);
+        partition.insert_and_retain(sub_key, value, should_retain);
     }
 
     fn remove(&mut self, key: &[u8]) {
@@ -170,7 +162,7 @@ impl<T: Translator, V: Eq + Send + Sync, const P: usize> UnorderedTrait for Inde
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync, const P: usize> OrderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> OrderedTrait for Index<T, V, P> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
@@ -308,10 +300,10 @@ mod tests {
             }
 
             let first_translated_key = index.first_translated_key().unwrap().next().unwrap();
-            assert_eq!(*first_translated_key, 0);
+            assert_eq!(*first_translated_key, u64::MAX);
 
             let last_translated_key = index.last_translated_key().unwrap().next().unwrap();
-            assert_eq!(*last_translated_key, (255u64 << 8) | 255);
+            assert_eq!(*last_translated_key, u64::MAX);
 
             let last = [255u8, 255u8];
             let (mut iter, wrapped) = index.next_translated_key(&last).unwrap();
@@ -324,17 +316,17 @@ mod tests {
                     if !(b1 == 255 && b2 == 255) {
                         let (mut iter, _) = index.next_translated_key(&key).unwrap();
                         let next = *iter.next().unwrap();
-                        assert_eq!(next, ((b1 as u64) << 8 | b2 as u64) + 1);
-                        let next = *iter.next().unwrap();
                         assert_eq!(next, u64::MAX);
+                        let next = *iter.next().unwrap();
+                        assert_eq!(next, ((b1 as u64) << 8 | b2 as u64) + 1);
                         assert!(iter.next().is_none());
                     }
                     if !(b1 == 0 && b2 == 0) {
                         let (mut iter, _) = index.prev_translated_key(&key).unwrap();
                         let prev = *iter.next().unwrap();
-                        assert_eq!(prev, ((b1 as u64) << 8 | b2 as u64) - 1);
-                        let prev = *iter.next().unwrap();
                         assert_eq!(prev, u64::MAX);
+                        let prev = *iter.next().unwrap();
+                        assert_eq!(prev, ((b1 as u64) << 8 | b2 as u64) - 1);
                         assert!(iter.next().is_none());
                     }
                 }
@@ -373,15 +365,15 @@ mod tests {
             // Next translated key to 0x0b02 is 1c.
             let (mut iter, wrapped) = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), None);
 
             // Next translated key to 0x1b is 1c.
             let (mut iter, wrapped) = index.next_translated_key(&hex!("0x1b010203")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), None);
 
             // Next translated key to 0x2a is 2d.
@@ -417,8 +409,8 @@ mod tests {
             // Previous translated key is 1c.
             let (mut iter, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), Some(&22));
+            assert_eq!(iter.next(), Some(&21));
             assert_eq!(iter.next(), None);
 
             // Previous translated key is 2d.

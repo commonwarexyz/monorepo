@@ -12,7 +12,7 @@
 //! mechanisms, though it is required that the digest can be extracted from the commitment
 //! for lookup purposes.
 
-use crate::{types::Round, Block};
+use crate::{simplex::scheme::Scheme, types::Round, Block};
 use commonware_codec::{Codec, Read};
 use commonware_cryptography::{Digest, Digestible, PublicKey};
 use commonware_p2p::Recipients;
@@ -60,6 +60,11 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// Returns the parent commitment referenced by `block`.
     fn parent_commitment(block: &Self::Block) -> Self::Commitment;
 
+    /// Validates a certificate payload against the active consensus scheme.
+    fn check_payload<S>(scheme: &S, payload: Self::Commitment) -> bool
+    where
+        S: Scheme<Self::Commitment>;
+
     /// Returns the codec configuration used to decode [`Self::Block`] received over the wire.
     ///
     /// The returned configuration may bind `expected_commitment` so that decoding rejects
@@ -74,6 +79,12 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// This conversion cannot use `Into` due to orphan rules when `Block` wraps
     /// `ApplicationBlock` (e.g., `CodedBlock<B, C, H> -> B`).
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock;
+
+    /// Reconstructs a working block from an application block and trusted payload.
+    fn from_application_block(
+        block: Self::ApplicationBlock,
+        payload: Self::Commitment,
+    ) -> Self::Block;
 }
 
 /// A buffer for block storage and retrieval, abstracting over different

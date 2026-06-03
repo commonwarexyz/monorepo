@@ -880,7 +880,7 @@ where
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
-                response.send_lossy((finalization, block).encode());
+                response.send_lossy((finalization, V::into_inner(block)).encode());
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
@@ -1276,15 +1276,24 @@ where
                     return false;
                 };
 
-                let commitment = finalization.proposal.payload;
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                let Ok(block) =
+                    V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
+                else {
                     response.send_lossy(false);
                     return false;
                 };
 
+                // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
+                // is guaranteed to be certified (assuming the certificate verifies). Because of this,
+                // we can skip broader payload checks and just check that the application block matches
+                // the commitment in the finalization proposal.
+                //
+                // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
+                // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
+                // the requested block is certified.
+                let commitment = finalization.proposal.payload;
                 if block.height() != height
-                    || V::commitment(&block) != commitment
+                    || block.digest() != V::commitment_to_inner(commitment)
                     || finalization.epoch() != bounds.epoch()
                 {
                     response.send_lossy(false);
@@ -1316,16 +1325,38 @@ where
                     return false;
                 };
 
+                // Wrong-round data must be rejected before the scoped-provider lookup below.
+                // That lookup may miss for pruned epochs even when `all()` was sufficient to
+                // decode the certificate, and missing scoped state is treated as stale rather
+                // than peer-faulting.
+                if notarization.round() != round {
+                    response.send_lossy(false);
+                    return false;
+                }
+
+                // `V::check_payload` requires a scoped provider, and `get_scheme_certificate_verifier`
+                // may use an all-epoch provider.
+                let Some(scheme) = self.provider.scoped(notarization.epoch()) else {
+                    debug!(
+                        ?round,
+                        floor = %self.floor.processed_height(),
+                        "ignoring stale delivery"
+                    );
+                    response.send_lossy(true);
+                    return false;
+                };
                 let commitment = notarization.proposal.payload;
+                if !V::check_payload(scheme.as_ref(), commitment) {
+                    response.send_lossy(false);
+                    return false;
+                }
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;
                 };
 
-                if notarization.round() != round
-                    || V::commitment(&block) != notarization.proposal.payload
-                {
+                if V::commitment(&block) != notarization.proposal.payload {
                     response.send_lossy(false);
                     return false;
                 }
@@ -1433,6 +1464,7 @@ where
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
+                    let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
                     let digest = block.digest();

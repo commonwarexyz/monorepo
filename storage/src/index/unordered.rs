@@ -4,7 +4,7 @@
 
 use crate::{
     index::{
-        storage::{iter_chain, Cursor as CursorImpl, IndexEntry, Record},
+        storage::{insert_front, iter_chain, Cursor as CursorImpl, IndexEntry, Record},
         Cursor as CursorTrait, Unordered,
     },
     translator::Translator,
@@ -24,10 +24,7 @@ use std::collections::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Send + Sync, V: Eq + Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
-    fn get(&self) -> &V {
-        &self.get().value
-    }
+impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
     fn get_mut(&mut self) -> &mut Record<V> {
         self.get_mut()
     }
@@ -36,53 +33,12 @@ impl<K: Send + Sync, V: Eq + Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K,
     }
 }
 
-/// A cursor for the unordered [Index] that wraps the shared implementation.
-pub struct Cursor<'a, K: Send + Sync, V: Eq + Send + Sync> {
-    inner: CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>,
-}
-
-impl<'a, K: Send + Sync, V: Eq + Send + Sync> Cursor<'a, K, V> {
-    const fn new(
-        entry: OccupiedEntry<'a, K, Record<V>>,
-        keys: &'a Gauge,
-        items: &'a Gauge,
-        pruned: &'a Counter,
-    ) -> Self {
-        Self {
-            inner: CursorImpl::<'a, V, OccupiedEntry<'a, K, Record<V>>>::new(
-                entry, keys, items, pruned,
-            ),
-        }
-    }
-}
-
-impl<K: Send + Sync, V: Eq + Send + Sync> CursorTrait for Cursor<'_, K, V> {
-    type Value = V;
-
-    fn next(&mut self) -> Option<&V> {
-        self.inner.next()
-    }
-
-    fn insert(&mut self, value: V) {
-        self.inner.insert(value)
-    }
-
-    fn delete(&mut self) {
-        self.inner.delete()
-    }
-
-    fn update(&mut self, value: V) {
-        self.inner.update(value)
-    }
-
-    fn prune(&mut self, predicate: &impl Fn(&V) -> bool) {
-        self.inner.prune(predicate)
-    }
-}
+/// A [crate::index::Cursor] over the values associated with a translated key.
+pub type Cursor<'a, K, V> = CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>;
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
-pub struct Index<T: Translator, V: Eq + Send + Sync> {
+pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: HashMap<T::Key, Record<V>, T>,
 
@@ -91,7 +47,7 @@ pub struct Index<T: Translator, V: Eq + Send + Sync> {
     pruned: Counter,
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
+impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -114,13 +70,13 @@ impl<T: Translator, V: Eq + Send + Sync> Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> super::Factory<T> for Index<T, V> {
+impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
     fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
@@ -167,11 +123,9 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     fn insert(&mut self, key: &[u8], v: V) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-                cursor.next();
-                cursor.insert(v);
+            Entry::Occupied(mut entry) => {
+                insert_front(entry.get_mut(), v);
+                self.items.inc();
             }
             Entry::Vacant(entry) => {
                 Self::create(&self.keys, &self.items, entry, v);
@@ -179,45 +133,43 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
         }
     }
 
-    fn insert_and_prune(&mut self, key: &[u8], value: V, predicate: impl Fn(&V) -> bool) {
+    fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
-                // Get entry
                 let mut cursor =
                     Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
 
-                cursor.prune(&predicate);
+                // Drop anything that should not be retained.
+                cursor.retain(&should_retain);
 
-                // Add our new value (if not prunable).
-                if !predicate(&value) {
+                // Add the new value only if it should be retained.
+                if should_retain(&value) {
                     cursor.insert(value);
                 }
             }
             Entry::Vacant(entry) => {
-                Self::create(&self.keys, &self.items, entry, value);
+                // Create the entry only if the value should be retained.
+                if should_retain(&value) {
+                    Self::create(&self.keys, &self.items, entry, value);
+                }
             }
-        }
-    }
-
-    fn prune(&mut self, key: &[u8], predicate: impl Fn(&V) -> bool) {
-        let k = self.translator.transform(key);
-        match self.map.entry(k) {
-            Entry::Occupied(entry) => {
-                // Get cursor
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
-
-                cursor.prune(&predicate);
-            }
-            Entry::Vacant(_) => {}
         }
     }
 
     fn remove(&mut self, key: &[u8]) {
-        // To ensure metrics are accurate, we iterate over all conflicting values and remove them
-        // one-by-one (rather than just removing the entire entry).
-        self.prune(key, |_| true);
+        let k = self.translator.transform(key);
+        if let Some(mut record) = self.map.remove(&k) {
+            // To ensure metrics are accurate, account for all conflicting values in the chain.
+            self.keys.dec();
+            self.items.dec();
+            self.pruned.inc();
+            while let Some(next) = record.next.take() {
+                self.items.dec();
+                self.pruned.inc();
+                record = *next;
+            }
+        }
     }
 
     #[cfg(test)]
@@ -236,7 +188,7 @@ impl<T: Translator, V: Eq + Send + Sync> Unordered for Index<T, V> {
     }
 }
 
-impl<T: Translator, V: Eq + Send + Sync> Drop for Index<T, V> {
+impl<T: Translator, V: Send + Sync> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {

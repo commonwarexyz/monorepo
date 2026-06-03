@@ -90,6 +90,8 @@
 //! (e.g., `10.<region-index>.<az-index>.0/24`), linked to a shared route table with an internet gateway.
 //! Each instance is placed in an AZ that supports its instance type, distributed round-robin across
 //! eligible AZs, with automatic fallback to other AZs on capacity errors.
+//! Instances that set the same `availability_zone_group` and region are launched in one
+//! mutually-supported AZ.
 //!
 //! ### VPC Peering
 //!
@@ -251,6 +253,8 @@
 //!   instance_type: t4g.small  # ARM64 (Graviton)
 //!   storage_size: 10
 //!   storage_class: gp2
+//!   # storage_iops: 3000  # Required for io1/io2, optional for gp3.
+//!   # storage_throughput: 125  # Optional for gp3.
 //!   dashboard: /path/to/dashboard.json
 //! instances:
 //!   - name: node1
@@ -258,6 +262,8 @@
 //!     instance_type: t4g.small  # ARM64 (Graviton)
 //!     storage_size: 10
 //!     storage_class: gp2
+//!     # storage_iops: 3000
+//!     # storage_throughput: 125
 //!     binary: /path/to/binary-arm64
 //!     config: /path/to/config.conf
 //!     profiling: true
@@ -266,6 +272,8 @@
 //!     instance_type: t3.small  # x86_64 (Intel/AMD)
 //!     storage_size: 10
 //!     storage_class: gp2
+//!     # storage_iops: 3000
+//!     # storage_throughput: 125
 //!     binary: /path/to/binary-x86
 //!     config: /path/to/config2.conf
 //!     profiling: false
@@ -477,6 +485,32 @@ cfg_if::cfg_if! {
             CreationAttempted,
             #[error("invalid instance name: {0}")]
             InvalidInstanceName(String),
+            #[error("invalid storage class for {target}: {storage_class}")]
+            InvalidStorageClass {
+                target: String,
+                storage_class: String,
+            },
+            #[error("storage_iops is required for {target} when storage_class is {storage_class}")]
+            MissingStorageIops {
+                target: String,
+                storage_class: String,
+            },
+            #[error("storage_iops for {target} is invalid for storage_class {storage_class}: {storage_iops}")]
+            InvalidStorageIops {
+                target: String,
+                storage_class: String,
+                storage_iops: i32,
+            },
+            #[error("storage_throughput is only supported for {target} when storage_class is gp3: {storage_class}")]
+            UnsupportedStorageThroughput {
+                target: String,
+                storage_class: String,
+            },
+            #[error("storage_throughput for {target} must be between 125 and 2000 MiB/s: {storage_throughput}")]
+            InvalidStorageThroughput {
+                target: String,
+                storage_throughput: i32,
+            },
             #[error("reqwest error: {0}")]
             Reqwest(#[from] reqwest::Error),
             #[error("SSH failed")]
@@ -517,6 +551,12 @@ cfg_if::cfg_if! {
             UnsupportedInstanceType(String),
             #[error("no subnets available")]
             NoSubnetsAvailable,
+            #[error("availability zone group '{group}' in region '{region}' has no mutually-supported AZ for instance types {instance_types:?}")]
+            AvailabilityZoneGroupUnsupported {
+                region: String,
+                group: String,
+                instance_types: Vec<String>,
+            },
             #[error("metadata not found for deployment: {0}")]
             MetadataNotFound(String),
             #[error("must specify either --config or --tag")]
@@ -585,6 +625,13 @@ pub struct InstanceConfig {
     /// AWS region where the instance is deployed
     pub region: String,
 
+    /// Optional group whose instances in the same region must launch in the same availability zone.
+    ///
+    /// The same group name may be reused in different regions, but each region is resolved
+    /// independently and the group will not span regions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability_zone_group: Option<String>,
+
     /// Instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64)
     pub instance_type: String,
 
@@ -593,6 +640,14 @@ pub struct InstanceConfig {
 
     /// Storage class (e.g., "gp2")
     pub storage_class: String,
+
+    /// Provisioned IOPS for volumes that support it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_iops: Option<i32>,
+
+    /// Provisioned throughput in MiB/s for volumes that support it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_throughput: Option<i32>,
 
     /// Path to the binary to deploy
     pub binary: String,
@@ -615,6 +670,14 @@ pub struct MonitoringConfig {
 
     /// Storage class (e.g., "gp2")
     pub storage_class: String,
+
+    /// Provisioned IOPS for volumes that support it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_iops: Option<i32>,
+
+    /// Provisioned throughput in MiB/s for volumes that support it
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_throughput: Option<i32>,
 
     /// Path to a custom dashboard file that is automatically
     /// uploaded to grafana

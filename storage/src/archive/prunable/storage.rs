@@ -338,7 +338,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
         // Insert and prune any useless keys
         self.keys
-            .insert_and_prune(&key, index, |v| *v < oldest_allowed);
+            .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
 
         // Add section to pending
         self.pending.insert(section);

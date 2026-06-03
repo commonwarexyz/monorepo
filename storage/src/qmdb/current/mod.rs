@@ -315,7 +315,7 @@
 //! partial.
 //!
 //! The canonical root is returned by [Db](db::Db)`::`[root()](db::Db::root). The ops root is
-//! returned by the `sync::Database` trait's `ops_root()` method, since the sync engine verifies batches
+//! returned by the `sync::Database` trait's `root()` method, since the sync engine verifies batches
 //! against the ops root, not the canonical root.
 //!
 //! For state sync, the sync engine targets the ops root and verifies each batch against it. Callers
@@ -356,7 +356,7 @@ pub mod grafting;
 
 pub mod ordered;
 pub mod proof;
-pub mod sync;
+pub(crate) mod sync;
 pub mod unordered;
 
 use self::db::Metrics;
@@ -525,12 +525,14 @@ pub mod tests {
     };
     use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
     use core::future::Future;
+    use ordered::tests::test_build_small_close_reopen as test_ordered_build_small_close_reopen;
     use rand::{rngs::StdRng, RngCore, SeedableRng};
     use std::{
         num::{NonZeroU16, NonZeroUsize},
         sync::Arc,
     };
     use tracing::warn;
+    use unordered::tests::test_build_small_close_reopen as test_unordered_build_small_close_reopen;
 
     type Error<F> = crate::qmdb::Error<F>;
     type Location<F> = merkle::Location<F>;
@@ -686,7 +688,7 @@ pub mod tests {
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
-    pub fn test_build_random_close_reopen<M, C, F, Fut>(mut open_db: F)
+    pub async fn test_build_random_close_reopen<M, C, F, Fut>(mut context: Context, mut open_db: F)
     where
         M: merkle::Graftable + 'static,
         C: DbAny<M> + 'static,
@@ -697,9 +699,9 @@ pub mod tests {
     {
         const ELEMENTS: u64 = 1000;
 
-        let executor = deterministic::Runner::default();
+        // Run on the provided runner.
         let mut open_db_clone = open_db.clone();
-        let state1 = executor.start(|mut context| async move {
+        let state1 = {
             let partition = "build-random".to_string();
             let rng_seed = context.next_u64();
             let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
@@ -720,9 +722,9 @@ pub mod tests {
 
             db.destroy().await.unwrap();
             context.auditor().state()
-        });
+        };
 
-        // Run again to verify determinism
+        // Run again on a fresh runner to verify determinism.
         let executor = deterministic::Runner::default();
         let state2 = executor.start(|mut context| async move {
             let partition = "build-random".to_string();
@@ -747,11 +749,52 @@ pub mod tests {
         assert_eq!(state1, state2);
     }
 
+    /// Run `test_commit_after_sync_recovery` against a database factory.
+    pub async fn test_commit_after_sync_recovery<M, C, F, Fut>(context: Context, mut open_db: F)
+    where
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
+        C::Key: TestKey,
+        <C as DbAny<M>>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut + Clone,
+        Fut: Future<Output = C>,
+    {
+        let mut open_db_clone = open_db.clone();
+        let partition = "commit-after-sync".to_string();
+        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let key0 = <<C as DbAny<M>>::Key as TestKey>::from_seed(0);
+        let key1 = <<C as DbAny<M>>::Key as TestKey>::from_seed(1);
+        let value0 = <C as DbAny<M>>::Value::from_seed(100);
+        let value1 = <C as DbAny<M>>::Value::from_seed(200);
+
+        // Establish a synced baseline so metadata and journal recovery start from it.
+        commit_writes::<M, C>(&mut db, [(key0, Some(value0.clone()))])
+            .await
+            .unwrap();
+        db.sync().await.unwrap();
+
+        // Commit a later batch without syncing metadata; reopen must rebuild it from the log.
+        commit_writes::<M, C>(&mut db, [(key1, Some(value1.clone()))])
+            .await
+            .unwrap();
+        let committed_root = db.root();
+        let committed_size = db.size().await;
+        drop(db);
+
+        let db: C = open_db(context.child("second"), partition).await;
+        assert_eq!(db.root(), committed_root);
+        assert_eq!(db.size().await, committed_size);
+        assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+
+        db.destroy().await.unwrap();
+    }
+
     /// Run `test_simulate_write_failures` against a database factory.
     ///
     /// This test builds a random database and simulates recovery from different types of
     /// failure scenarios.
-    pub fn test_simulate_write_failures<M, C, F, Fut>(mut open_db: F)
+    pub async fn test_simulate_write_failures<M, C, F, Fut>(mut context: Context, mut open_db: F)
     where
         M: merkle::Graftable + 'static,
         C: DbAny<M> + 'static,
@@ -762,84 +805,80 @@ pub mod tests {
     {
         const ELEMENTS: u64 = 1000;
 
-        let executor = deterministic::Runner::default();
-        // Box the future to prevent stack overflow when monomorphized across DB variants.
-        executor.start(|mut context| {
-            Box::pin(async move {
-                let partition = "build-random-fail-commit".to_string();
-                let rng_seed = context.next_u64();
-                let mut db: C = open_db(context.child("first"), partition.clone()).await;
-                db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-                    .await
-                    .unwrap();
-                commit_writes(&mut db, []).await.unwrap();
-                let committed_root = db.root();
-                let committed_op_count = db.bounds().await.end;
-                db.prune(db.sync_boundary().await).await.unwrap();
+        let partition = "build-random-fail-commit".to_string();
+        let rng_seed = context.next_u64();
+        let mut db: C = open_db(context.child("first"), partition.clone()).await;
+        db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+            .await
+            .unwrap();
+        commit_writes(&mut db, []).await.unwrap();
+        let committed_root = db.root();
+        let committed_op_count = db.bounds().await.end;
+        db.prune(db.sync_boundary().await).await.unwrap();
 
-                // Perform more random operations without committing any of them.
-                let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
-                    .await
-                    .unwrap();
+        // Perform more random operations without committing any of them.
+        let db = apply_random_ops::<M, C>(ELEMENTS, false, rng_seed + 1, db)
+            .await
+            .unwrap();
 
-                // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
-                // state of the DB should be as of the last commit.
-                drop(db);
-                let db: C = open_db(
-                    context.child("scenario").with_attribute("index", 1),
-                    partition.clone(),
-                )
-                .await;
-                assert_eq!(db.root(), committed_root);
-                assert_eq!(db.bounds().await.end, committed_op_count);
+        // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
+        // state of the DB should be as of the last commit.
+        drop(db);
+        let db: C = open_db(
+            context.child("scenario").with_attribute("index", 1),
+            partition.clone(),
+        )
+        .await;
+        assert_eq!(db.root(), committed_root);
+        assert_eq!(db.bounds().await.end, committed_op_count);
 
-                // Re-apply the exact same operations, this time committed.
-                let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
-                    .await
-                    .unwrap();
+        // Re-apply the exact same operations, this time committed.
+        let db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
+            .await
+            .unwrap();
 
-                // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
-                // before sync/prune is called. We do this by dropping the db without calling
-                // sync or prune.
-                let committed_op_count = db.bounds().await.end;
-                drop(db);
+        // SCENARIO #2: Simulate a crash that happens after the any db has been committed, but
+        // before sync/prune is called. We do this by dropping the db without calling
+        // sync or prune.
+        let committed_op_count = db.bounds().await.end;
+        drop(db);
 
-                // We should be able to recover, so the root should differ from the previous commit, and
-                // the op count should be greater than before.
-                let db: C = open_db(
-                    context.child("scenario").with_attribute("index", 2),
-                    partition.clone(),
-                )
-                .await;
-                let scenario_2_root = db.root();
+        // We should be able to recover, so the root should differ from the previous commit, and
+        // the op count should be greater than before.
+        let db: C = open_db(
+            context.child("scenario").with_attribute("index", 2),
+            partition.clone(),
+        )
+        .await;
+        let scenario_2_root = db.root();
 
-                // To confirm the second committed hash is correct we'll re-build the DB in a new
-                // partition, but without any failures. They should have the exact same state.
-                let fresh_partition = "build-random-fail-commit-fresh".to_string();
-                let mut db: C = open_db(context.child("fresh"), fresh_partition.clone()).await;
-                db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-                    .await
-                    .unwrap();
-                commit_writes(&mut db, []).await.unwrap();
-                db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
-                    .await
-                    .unwrap();
-                db.prune(db.sync_boundary().await).await.unwrap();
-                // State from scenario #2 should match that of a successful commit.
-                assert_eq!(db.bounds().await.end, committed_op_count);
-                assert_eq!(db.root(), scenario_2_root);
+        // To confirm the second committed hash is correct we'll re-build the DB in a new
+        // partition, but without any failures. They should have the exact same state.
+        let fresh_partition = "build-random-fail-commit-fresh".to_string();
+        let mut db: C = open_db(context.child("fresh"), fresh_partition.clone()).await;
+        db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+            .await
+            .unwrap();
+        commit_writes(&mut db, []).await.unwrap();
+        db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed + 1, db)
+            .await
+            .unwrap();
+        db.prune(db.sync_boundary().await).await.unwrap();
+        // State from scenario #2 should match that of a successful commit.
+        assert_eq!(db.bounds().await.end, committed_op_count);
+        assert_eq!(db.root(), scenario_2_root);
 
-                db.destroy().await.unwrap();
-            })
-        });
+        db.destroy().await.unwrap();
     }
 
     /// Run `test_different_pruning_delays_same_root` against a database factory.
     ///
     /// This test verifies that pruning operations do not affect the root hash - two databases
     /// with identical operations but different pruning schedules should have the same root.
-    pub fn test_different_pruning_delays_same_root<M, C, F, Fut>(mut open_db: F)
-    where
+    pub async fn test_different_pruning_delays_same_root<M, C, F, Fut>(
+        context: Context,
+        mut open_db: F,
+    ) where
         M: merkle::Graftable,
         C: DbAny<M>,
         C::Key: TestKey,
@@ -849,62 +888,59 @@ pub mod tests {
     {
         const NUM_OPERATIONS: u64 = 1000;
 
-        let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
-        executor.start(|context| async move {
-            // Create two databases that are identical other than how they are pruned.
-            let mut db_no_pruning: C =
-                open_db_clone(context.child("no_pruning"), "no-pruning-test".into()).await;
-            let mut db_pruning: C = open_db(context.child("pruning"), "pruning-test".into()).await;
+        // Create two databases that are identical other than how they are pruned.
+        let mut db_no_pruning: C =
+            open_db_clone(context.child("no_pruning"), "no-pruning-test".into()).await;
+        let mut db_pruning: C = open_db(context.child("pruning"), "pruning-test".into()).await;
 
-            // Apply identical operations to both databases, but only prune one.
-            // Accumulate writes between commits.
-            let mut pending_no_pruning: WriteVec<M, C> = Vec::new();
-            let mut pending_pruning: WriteVec<M, C> = Vec::new();
-            for i in 0..NUM_OPERATIONS {
-                let key: C::Key = TestKey::from_seed(i);
-                let value: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
+        // Apply identical operations to both databases, but only prune one.
+        // Accumulate writes between commits.
+        let mut pending_no_pruning: WriteVec<M, C> = Vec::new();
+        let mut pending_pruning: WriteVec<M, C> = Vec::new();
+        for i in 0..NUM_OPERATIONS {
+            let key: C::Key = TestKey::from_seed(i);
+            let value: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
 
-                pending_no_pruning.push((key, Some(value.clone())));
-                pending_pruning.push((key, Some(value)));
+            pending_no_pruning.push((key, Some(value.clone())));
+            pending_pruning.push((key, Some(value)));
 
-                // Commit periodically
-                if i % 50 == 49 {
-                    commit_writes(&mut db_no_pruning, pending_no_pruning.drain(..))
-                        .await
-                        .unwrap();
-                    commit_writes(&mut db_pruning, pending_pruning.drain(..))
-                        .await
-                        .unwrap();
-                    db_pruning
-                        .prune(db_no_pruning.sync_boundary().await)
-                        .await
-                        .unwrap();
-                }
+            // Commit periodically
+            if i % 50 == 49 {
+                commit_writes(&mut db_no_pruning, pending_no_pruning.drain(..))
+                    .await
+                    .unwrap();
+                commit_writes(&mut db_pruning, pending_pruning.drain(..))
+                    .await
+                    .unwrap();
+                db_pruning
+                    .prune(db_no_pruning.sync_boundary().await)
+                    .await
+                    .unwrap();
             }
+        }
 
-            // Final commit for remaining writes.
-            commit_writes(&mut db_no_pruning, pending_no_pruning)
-                .await
-                .unwrap();
-            commit_writes(&mut db_pruning, pending_pruning)
-                .await
-                .unwrap();
+        // Final commit for remaining writes.
+        commit_writes(&mut db_no_pruning, pending_no_pruning)
+            .await
+            .unwrap();
+        commit_writes(&mut db_pruning, pending_pruning)
+            .await
+            .unwrap();
 
-            // Get roots from both databases - they should match
-            let root_no_pruning = db_no_pruning.root();
-            let root_pruning = db_pruning.root();
-            assert_eq!(root_no_pruning, root_pruning);
+        // Get roots from both databases - they should match
+        let root_no_pruning = db_no_pruning.root();
+        let root_pruning = db_pruning.root();
+        assert_eq!(root_no_pruning, root_pruning);
 
-            // Also verify inactivity floors match
-            assert_eq!(
-                db_no_pruning.inactivity_floor_loc().await,
-                db_pruning.inactivity_floor_loc().await
-            );
+        // Also verify inactivity floors match
+        assert_eq!(
+            db_no_pruning.inactivity_floor_loc().await,
+            db_pruning.inactivity_floor_loc().await
+        );
 
-            db_no_pruning.destroy().await.unwrap();
-            db_pruning.destroy().await.unwrap();
-        });
+        db_no_pruning.destroy().await.unwrap();
+        db_pruning.destroy().await.unwrap();
     }
 
     /// Run `test_sync_persists_bitmap_pruning_boundary` against a database factory.
@@ -912,8 +948,10 @@ pub mod tests {
     /// This test verifies that calling `sync()` persists the bitmap pruning boundary that was
     /// set during `commit()`. If `sync()` didn't call `write_pruned`, the
     /// `pruned_bits()` count would be 0 after reopen instead of the expected value.
-    pub fn test_sync_persists_bitmap_pruning_boundary<M, C, F, Fut>(mut open_db: F)
-    where
+    pub async fn test_sync_persists_bitmap_pruning_boundary<M, C, F, Fut>(
+        mut context: Context,
+        mut open_db: F,
+    ) where
         M: merkle::Graftable + 'static,
         C: DbAny<M> + BitmapPrunedBits + 'static,
         C::Key: TestKey,
@@ -923,60 +961,59 @@ pub mod tests {
     {
         const ELEMENTS: u64 = 500;
 
-        let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
-        executor.start(|mut context| async move {
-            let partition = "sync-bitmap-pruning".to_string();
-            let rng_seed = context.next_u64();
-            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let partition = "sync-bitmap-pruning".to_string();
+        let rng_seed = context.next_u64();
+        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
 
-            // Apply random operations with commits to advance the inactivity floor.
-            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db).await.unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
+        // Apply random operations with commits to advance the inactivity floor.
+        db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+            .await
+            .unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
 
-            // Prune to flatten bitmap layers and advance pruned_chunks.
-            db.prune(db.sync_boundary().await).await.unwrap();
+        // Prune to flatten bitmap layers and advance pruned_chunks.
+        db.prune(db.sync_boundary().await).await.unwrap();
 
-            let pruned_bits_before = db.pruned_bits();
-            warn!(
-                "pruned_bits_before={}, inactivity_floor={}, op_count={}",
-                pruned_bits_before,
-                *db.inactivity_floor_loc().await,
-                *db.bounds().await.end
-            );
+        let pruned_bits_before = db.pruned_bits();
+        warn!(
+            "pruned_bits_before={}, inactivity_floor={}, op_count={}",
+            pruned_bits_before,
+            *db.inactivity_floor_loc().await,
+            *db.bounds().await.end
+        );
 
-            // Verify we actually have some pruning (otherwise the test is meaningless).
-            assert!(
-                pruned_bits_before > 0,
-                "Expected bitmap to have pruned bits after prune()"
-            );
+        // Verify we actually have some pruning (otherwise the test is meaningless).
+        assert!(
+            pruned_bits_before > 0,
+            "Expected bitmap to have pruned bits after prune()"
+        );
 
-            // Call sync() to persist the bitmap pruning boundary.
-            db.sync().await.unwrap();
+        // Call sync() to persist the bitmap pruning boundary.
+        db.sync().await.unwrap();
 
-            // Record the root before dropping.
-            let root_before = db.root();
-            drop(db);
+        // Record the root before dropping.
+        let root_before = db.root();
+        drop(db);
 
-            // Reopen the database.
-            let db: C = open_db(context.child("second"), partition).await;
+        // Reopen the database.
+        let db: C = open_db(context.child("second"), partition).await;
 
-            // The pruned bits count should match. If sync() didn't persist the bitmap pruned
-            // state, this would be 0.
-            let pruned_bits_after = db.pruned_bits();
-            warn!("pruned_bits_after={}", pruned_bits_after);
+        // The pruned bits count should match. If sync() didn't persist the bitmap pruned
+        // state, this would be 0.
+        let pruned_bits_after = db.pruned_bits();
+        warn!("pruned_bits_after={}", pruned_bits_after);
 
-            assert_eq!(
-                pruned_bits_after, pruned_bits_before,
-                "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
-            );
+        assert_eq!(
+            pruned_bits_after, pruned_bits_before,
+            "Bitmap pruned bits mismatch after reopen - sync() may not have called write_pruned()"
+        );
 
-            // Also verify the root matches.
-            assert_eq!(db.root(), root_before);
+        // Also verify the root matches.
+        assert_eq!(db.root(), root_before);
 
-            db.destroy().await.unwrap();
-        });
+        db.destroy().await.unwrap();
     }
 
     /// Run `test_current_db_build_big` against a database factory.
@@ -984,7 +1021,7 @@ pub mod tests {
     /// This test builds a database with 1000 keys, updates some, deletes some, and verifies that
     /// the final state matches an independently computed HashMap. It also verifies that the state
     /// persists correctly after close and reopen.
-    pub fn test_current_db_build_big<M, C, F, Fut>(mut open_db: F)
+    pub async fn test_current_db_build_big<M, C, F, Fut>(context: Context, mut open_db: F)
     where
         M: merkle::Graftable,
         C: DbAny<M>,
@@ -995,80 +1032,77 @@ pub mod tests {
     {
         const ELEMENTS: u64 = 1000;
 
-        let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
-        executor.start(|context| async move {
-            let mut db: C = open_db_clone(context.child("first"), "build-big".into()).await;
+        let mut db: C = open_db_clone(context.child("first"), "build-big".into()).await;
 
-            let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
+        let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
 
-            // All creates, updates, and deletes in one batch.
-            let mut batch = db.new_batch();
+        // All creates, updates, and deletes in one batch.
+        let mut batch = db.new_batch();
 
-            // Initial creates
-            for i in 0u64..ELEMENTS {
-                let k: C::Key = TestKey::from_seed(i);
-                let v: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
-                batch = batch.write(k, Some(v.clone()));
-                map.insert(k, v);
+        // Initial creates
+        for i in 0u64..ELEMENTS {
+            let k: C::Key = TestKey::from_seed(i);
+            let v: <C as DbAny<M>>::Value = TestValue::from_seed(i * 1000);
+            batch = batch.write(k, Some(v.clone()));
+            map.insert(k, v);
+        }
+
+        // Update every 3rd key
+        for i in 0u64..ELEMENTS {
+            if i % 3 != 0 {
+                continue;
             }
+            let k: C::Key = TestKey::from_seed(i);
+            let v: <C as DbAny<M>>::Value = TestValue::from_seed((i + 1) * 10000);
+            batch = batch.write(k, Some(v.clone()));
+            map.insert(k, v);
+        }
 
-            // Update every 3rd key
-            for i in 0u64..ELEMENTS {
-                if i % 3 != 0 {
-                    continue;
-                }
-                let k: C::Key = TestKey::from_seed(i);
-                let v: <C as DbAny<M>>::Value = TestValue::from_seed((i + 1) * 10000);
-                batch = batch.write(k, Some(v.clone()));
-                map.insert(k, v);
+        // Delete every 7th key
+        for i in 0u64..ELEMENTS {
+            if i % 7 != 1 {
+                continue;
             }
+            let k: C::Key = TestKey::from_seed(i);
+            batch = batch.write(k, None);
+            map.remove(&k);
+        }
 
-            // Delete every 7th key
-            for i in 0u64..ELEMENTS {
-                if i % 7 != 1 {
-                    continue;
-                }
-                let k: C::Key = TestKey::from_seed(i);
-                batch = batch.write(k, None);
-                map.remove(&k);
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+
+        // Sync and prune.
+        db.sync().await.unwrap();
+        db.prune(db.sync_boundary().await).await.unwrap();
+
+        // Record root before dropping.
+        let root = db.root();
+        db.sync().await.unwrap();
+        drop(db);
+
+        // Reopen the db and verify it has exactly the same state.
+        let db: C = open_db(context.child("second"), "build-big".into()).await;
+        assert_eq!(root, db.root());
+
+        // Confirm the db's state matches that of the separate map we computed independently.
+        for i in 0u64..ELEMENTS {
+            let k: C::Key = TestKey::from_seed(i);
+            if let Some(map_value) = map.get(&k) {
+                let Some(db_value) = db.get(&k).await.unwrap() else {
+                    panic!("key not found in db: {k}");
+                };
+                assert_eq!(*map_value, db_value);
+            } else {
+                assert!(db.get(&k).await.unwrap().is_none());
             }
-
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-
-            // Sync and prune.
-            db.sync().await.unwrap();
-            db.prune(db.sync_boundary().await).await.unwrap();
-
-            // Record root before dropping.
-            let root = db.root();
-            db.sync().await.unwrap();
-            drop(db);
-
-            // Reopen the db and verify it has exactly the same state.
-            let db: C = open_db(context.child("second"), "build-big".into()).await;
-            assert_eq!(root, db.root());
-
-            // Confirm the db's state matches that of the separate map we computed independently.
-            for i in 0u64..ELEMENTS {
-                let k: C::Key = TestKey::from_seed(i);
-                if let Some(map_value) = map.get(&k) {
-                    let Some(db_value) = db.get(&k).await.unwrap() else {
-                        panic!("key not found in db: {k}");
-                    };
-                    assert_eq!(*map_value, db_value);
-                } else {
-                    assert!(db.get(&k).await.unwrap().is_none());
-                }
-            }
-        });
+        }
     }
 
     /// Run `test_stale_batch_side_effect_free` against a database factory.
     ///
     /// The stale batch must be rejected without mutating the committed state.
-    pub fn test_stale_batch_side_effect_free<M, C, F, Fut>(mut open_db: F)
+    pub async fn test_stale_batch_side_effect_free<M, C, F, Fut>(context: Context, mut open_db: F)
     where
         M: merkle::Graftable,
         C: DbAny<M>,
@@ -1077,42 +1111,39 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let mut db: C = open_db(context.child("db"), "stale-side-effect-free".into()).await;
+        let mut db: C = open_db(context.child("db"), "stale-side-effect-free".into()).await;
 
-            let key1 = <C::Key as TestKey>::from_seed(1);
-            let key2 = <C::Key as TestKey>::from_seed(2);
-            let value1 = <<C as DbAny<M>>::Value as TestValue>::from_seed(10);
-            let value2 = <<C as DbAny<M>>::Value as TestValue>::from_seed(20);
+        let key1 = <C::Key as TestKey>::from_seed(1);
+        let key2 = <C::Key as TestKey>::from_seed(2);
+        let value1 = <<C as DbAny<M>>::Value as TestValue>::from_seed(10);
+        let value2 = <<C as DbAny<M>>::Value as TestValue>::from_seed(20);
 
-            let mut batch = db.new_batch();
-            batch = batch.write(key1, Some(value1.clone()));
-            let batch_a = batch.merkleize(&db, None).await.unwrap();
-            let mut batch = db.new_batch();
-            batch = batch.write(key2, Some(value2));
-            let batch_b = batch.merkleize(&db, None).await.unwrap();
+        let mut batch = db.new_batch();
+        batch = batch.write(key1, Some(value1.clone()));
+        let batch_a = batch.merkleize(&db, None).await.unwrap();
+        let mut batch = db.new_batch();
+        batch = batch.write(key2, Some(value2));
+        let batch_b = batch.merkleize(&db, None).await.unwrap();
 
-            db.apply_batch(batch_a).await.unwrap();
-            let expected_root = db.root();
-            let expected_bounds = db.bounds().await;
-            let expected_metadata = db.get_metadata().await.unwrap();
-            assert_eq!(db.get(&key1).await.unwrap(), Some(value1.clone()));
-            assert_eq!(db.get(&key2).await.unwrap(), None);
+        db.apply_batch(batch_a).await.unwrap();
+        let expected_root = db.root();
+        let expected_bounds = db.bounds().await;
+        let expected_metadata = db.get_metadata().await.unwrap();
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1.clone()));
+        assert_eq!(db.get(&key2).await.unwrap(), None);
 
-            let result = db.apply_batch(batch_b).await;
-            assert!(
-                matches!(result, Err(Error::StaleBatch { .. })),
-                "expected StaleBatch error, got {result:?}"
-            );
-            assert_eq!(db.root(), expected_root);
-            assert_eq!(db.bounds().await, expected_bounds);
-            assert_eq!(db.get_metadata().await.unwrap(), expected_metadata);
-            assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
-            assert_eq!(db.get(&key2).await.unwrap(), None);
+        let result = db.apply_batch(batch_b).await;
+        assert!(
+            matches!(result, Err(Error::StaleBatch { .. })),
+            "expected StaleBatch error, got {result:?}"
+        );
+        assert_eq!(db.root(), expected_root);
+        assert_eq!(db.bounds().await, expected_bounds);
+        assert_eq!(db.get_metadata().await.unwrap(), expected_metadata);
+        assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
+        assert_eq!(db.get(&key2).await.unwrap(), None);
 
-            db.destroy().await.unwrap();
-        });
+        db.destroy().await.unwrap();
     }
 
     use crate::translator::OneCap;
@@ -1343,94 +1374,113 @@ pub mod tests {
     // Defines all variants across both supported Merkle families.
     macro_rules! with_all_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "of", OrderedFixedDb, fixed_config);
-            $cb!($($args)*, "ov", OrderedVariableDb, variable_config);
-            $cb!($($args)*, "uf", UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, "uv", UnorderedVariableDb, variable_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
-            $cb!($($args)*, "of-mmb", OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "ov-mmb", OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "uf-mmb", UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "uv-mmb", UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "ofp1-mmb", OrderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "ovp1-mmb", OrderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ufp1-mmb", UnorderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "uvp1-mmb", UnorderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ofp2-mmb", OrderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "ovp2-mmb", OrderedVariableMmbP2Db, variable_config);
-            $cb!($($args)*, "ufp2-mmb", UnorderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "uvp2-mmb", UnorderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
+            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
+            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
+            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
+            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config);
         };
     }
 
     // Defines 6 ordered variants.
     macro_rules! with_ordered_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "of", OrderedFixedDb, fixed_config);
-            $cb!($($args)*, "ov", OrderedVariableDb, variable_config);
-            $cb!($($args)*, "ofp1", OrderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "ovp1", OrderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ofp2", OrderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "ovp2", OrderedVariableP2Db, variable_config);
-            $cb!($($args)*, "of-mmb", OrderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "ov-mmb", OrderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "ofp1-mmb", OrderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "ovp1-mmb", OrderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ofp2-mmb", OrderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "ovp2-mmb", OrderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, of, OrderedFixedDb, fixed_config);
+            $cb!($($args)*, ov, OrderedVariableDb, variable_config);
+            $cb!($($args)*, ofp1, OrderedFixedP1Db, fixed_config);
+            $cb!($($args)*, ovp1, OrderedVariableP1Db, variable_config);
+            $cb!($($args)*, ofp2, OrderedFixedP2Db, fixed_config);
+            $cb!($($args)*, ovp2, OrderedVariableP2Db, variable_config);
+            $cb!($($args)*, of_mmb, OrderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, ov_mmb, OrderedVariableMmbDb, variable_config);
+            $cb!($($args)*, ofp1_mmb, OrderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, ovp1_mmb, OrderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ofp2_mmb, OrderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, ovp2_mmb, OrderedVariableMmbP2Db, variable_config);
         };
     }
 
     // Defines 6 unordered variants.
     macro_rules! with_unordered_variants {
         ($cb:ident!($($args:tt)*)) => {
-            $cb!($($args)*, "uf", UnorderedFixedDb, fixed_config);
-            $cb!($($args)*, "uv", UnorderedVariableDb, variable_config);
-            $cb!($($args)*, "ufp1", UnorderedFixedP1Db, fixed_config);
-            $cb!($($args)*, "uvp1", UnorderedVariableP1Db, variable_config);
-            $cb!($($args)*, "ufp2", UnorderedFixedP2Db, fixed_config);
-            $cb!($($args)*, "uvp2", UnorderedVariableP2Db, variable_config);
-            $cb!($($args)*, "uf-mmb", UnorderedFixedMmbDb, fixed_config);
-            $cb!($($args)*, "uv-mmb", UnorderedVariableMmbDb, variable_config);
-            $cb!($($args)*, "ufp1-mmb", UnorderedFixedMmbP1Db, fixed_config);
-            $cb!($($args)*, "uvp1-mmb", UnorderedVariableMmbP1Db, variable_config);
-            $cb!($($args)*, "ufp2-mmb", UnorderedFixedMmbP2Db, fixed_config);
-            $cb!($($args)*, "uvp2-mmb", UnorderedVariableMmbP2Db, variable_config);
+            $cb!($($args)*, uf, UnorderedFixedDb, fixed_config);
+            $cb!($($args)*, uv, UnorderedVariableDb, variable_config);
+            $cb!($($args)*, ufp1, UnorderedFixedP1Db, fixed_config);
+            $cb!($($args)*, uvp1, UnorderedVariableP1Db, variable_config);
+            $cb!($($args)*, ufp2, UnorderedFixedP2Db, fixed_config);
+            $cb!($($args)*, uvp2, UnorderedVariableP2Db, variable_config);
+            $cb!($($args)*, uf_mmb, UnorderedFixedMmbDb, fixed_config);
+            $cb!($($args)*, uv_mmb, UnorderedVariableMmbDb, variable_config);
+            $cb!($($args)*, ufp1_mmb, UnorderedFixedMmbP1Db, fixed_config);
+            $cb!($($args)*, uvp1_mmb, UnorderedVariableMmbP1Db, variable_config);
+            $cb!($($args)*, ufp2_mmb, UnorderedFixedMmbP2Db, fixed_config);
+            $cb!($($args)*, uvp2_mmb, UnorderedVariableMmbP2Db, variable_config);
         };
     }
 
-    // Runner macros - receive common args followed by (label, type, config).
-    macro_rules! test_simple {
-        ($f:expr, $l:literal, $db:ty, $cfg:ident) => {
-            Box::pin(async {
-                $f(open_db_fn!($db, $cfg));
-            })
-            .await
+    // Emit one `#[test_group("slow")] #[test_traced]` test per variant.
+    // The fn name is `<f>_<variant_label>`, the body runs the async test
+    // function `f` on a fresh runner, passing it the `Context` and a DB opener
+    // for the variant.
+    macro_rules! test_for_variant {
+        ($f:ident, $traced:literal, $label:ident, $db:ty, $cfg:ident) => {
+            paste::paste! {
+                #[test_group("slow")]
+                #[test_traced($traced)]
+                fn [<$f _ $label>]() {
+                    let executor = deterministic::Runner::default();
+                    executor.start(|context| async move {
+                        // Box the future to prevent stack overflow when
+                        // monomorphized across DB variants.
+                        Box::pin($f(context, open_db_fn!($db, $cfg))).await
+                    });
+                }
+            }
         };
     }
 
-    // Macro to run a test on DB variants.
-    macro_rules! for_all_variants {
-        (simple: $f:expr) => {{
-            with_all_variants!(test_simple!($f));
-        }};
-        (ordered: $f:expr) => {{
-            with_ordered_variants!(test_simple!($f));
-        }};
-        (unordered: $f:expr) => {{
-            with_unordered_variants!(test_simple!($f));
-        }};
+    // Generate one slow test per variant across all 24 variants.
+    macro_rules! test_for_all_variants {
+        ($f:ident, $traced:literal) => {
+            with_all_variants!(test_for_variant!($f, $traced));
+        };
+    }
+
+    // Generate one slow test per variant across the 12 ordered variants.
+    macro_rules! test_for_ordered_variants {
+        ($f:ident, $traced:literal) => {
+            with_ordered_variants!(test_for_variant!($f, $traced));
+        };
+    }
+
+    // Generate one slow test per variant across the 12 unordered variants.
+    macro_rules! test_for_unordered_variants {
+        ($f:ident, $traced:literal) => {
+            with_unordered_variants!(test_for_variant!($f, $traced));
+        };
     }
 
     // Wrapper functions for build_big tests with ordered/unordered expected values.
-    fn test_ordered_build_big<M, C, F, Fut>(open_db: F)
+    async fn test_ordered_build_big<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable,
         C: DbAny<M>,
@@ -1439,10 +1489,10 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        test_current_db_build_big::<M, C, F, Fut>(open_db);
+        test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
 
-    fn test_unordered_build_big<M, C, F, Fut>(open_db: F)
+    async fn test_unordered_build_big<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable,
         C: DbAny<M>,
@@ -1451,88 +1501,21 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        test_current_db_build_big::<M, C, F, Fut>(open_db);
+        test_current_db_build_big::<M, C, F, Fut>(context, open_db).await;
     }
 
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_build_random_close_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_build_random_close_reopen);
-        });
-    }
+    test_for_all_variants!(test_build_random_close_reopen, "WARN");
+    test_for_all_variants!(test_simulate_write_failures, "WARN");
+    test_for_all_variants!(test_different_pruning_delays_same_root, "WARN");
+    test_for_all_variants!(test_sync_persists_bitmap_pruning_boundary, "WARN");
+    test_for_all_variants!(test_commit_after_sync_recovery, "WARN");
+    test_for_all_variants!(test_stale_batch_side_effect_free, "WARN");
 
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_simulate_write_failures() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_simulate_write_failures);
-        });
-    }
+    test_for_ordered_variants!(test_ordered_build_big, "WARN");
+    test_for_ordered_variants!(test_ordered_build_small_close_reopen, "DEBUG");
 
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_different_pruning_delays_same_root() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_different_pruning_delays_same_root);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_all_variants_sync_persists_bitmap_pruning_boundary() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_sync_persists_bitmap_pruning_boundary);
-        });
-    }
-
-    #[test_traced("WARN")]
-    fn test_all_variants_stale_batch_side_effect_free() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_stale_batch_side_effect_free);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_ordered_variants_build_big() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(ordered: test_ordered_build_big);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("WARN")]
-    fn test_unordered_variants_build_big() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(unordered: test_unordered_build_big);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("DEBUG")]
-    fn test_ordered_variants_build_small_close_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(ordered: ordered::tests::test_build_small_close_reopen);
-        });
-    }
-
-    #[test_group("slow")]
-    #[test_traced("DEBUG")]
-    fn test_unordered_variants_build_small_close_reopen() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(unordered: unordered::tests::test_build_small_close_reopen);
-        });
-    }
+    test_for_unordered_variants!(test_unordered_build_big, "WARN");
+    test_for_unordered_variants!(test_unordered_build_small_close_reopen, "DEBUG");
 
     // ---- Current-level batch API tests ----
     //
@@ -2671,8 +2654,10 @@ pub mod tests {
     ///
     /// Uses enough operations to cross a chunk boundary (CHUNK_SIZE_BITS = N*8), which exercises
     /// the grafted root computation for newly completed chunks.
-    pub fn test_speculative_root_matches_committed<M, C, F, Fut>(mut open_db: F)
-    where
+    pub async fn test_speculative_root_matches_committed<M, C, F, Fut>(
+        context: Context,
+        mut open_db: F,
+    ) where
         M: merkle::Graftable + 'static,
         C: DbAny<M> + 'static,
         C::Key: TestKey,
@@ -2680,43 +2665,33 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        let executor = deterministic::Runner::default();
         let mut open_db_clone = open_db.clone();
-        executor.start(|context| async move {
-            let partition = "speculative-root".to_string();
+        let partition = "speculative-root".to_string();
 
-            // Write enough operations to cross a chunk boundary. With N=32 (CHUNK_SIZE_BITS=256),
-            // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
-            // next partial chunk. This ensures the grafted root computation must handle the
-            // newly completed chunk.
-            let mut db: C = open_db_clone(context.child("init"), partition.clone()).await;
-            let mut batch = db.new_batch();
-            for i in 0..260 {
-                batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            let speculative_root = db.root();
+        // Write enough operations to cross a chunk boundary. With N=32 (CHUNK_SIZE_BITS=256),
+        // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
+        // next partial chunk. This ensures the grafted root computation must handle the
+        // newly completed chunk.
+        let mut db: C = open_db_clone(context.child("init"), partition.clone()).await;
+        let mut batch = db.new_batch();
+        for i in 0..260 {
+            batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
+        }
+        let merkleized = batch.merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        let speculative_root = db.root();
 
-            // Sync, close, and reopen to get the root recomputed from committed state.
-            db.sync().await.unwrap();
-            drop(db);
+        // Sync, close, and reopen to get the root recomputed from committed state.
+        db.sync().await.unwrap();
+        drop(db);
 
-            let db: C = open_db(context.child("reopen"), partition).await;
-            assert_eq!(db.root(), speculative_root);
+        let db: C = open_db(context.child("reopen"), partition).await;
+        assert_eq!(db.root(), speculative_root);
 
-            db.destroy().await.unwrap();
-        });
+        db.destroy().await.unwrap();
     }
 
-    #[test_group("slow")]
-    #[test_traced("INFO")]
-    fn test_all_variants_speculative_root_matches_committed() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_context| async move {
-            for_all_variants!(simple: test_speculative_root_matches_committed);
-        });
-    }
+    test_for_all_variants!(test_speculative_root_matches_committed, "INFO");
 
     /// MerkleizedBatch::get() at the current level reads overlay then base DB.
     #[test_traced("INFO")]

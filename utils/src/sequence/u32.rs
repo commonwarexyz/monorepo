@@ -1,6 +1,6 @@
 use crate::{Array, Span};
 use bytes::{Buf, BufMut};
-use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{Error as CodecError, FixedArray, FixedSize, Read, ReadExt, Write};
 use core::{
     cmp::{Ord, PartialOrd},
     fmt::{Debug, Display, Formatter},
@@ -17,7 +17,8 @@ pub enum Error {
 }
 
 /// An [Array] implementation for u32.
-#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+#[derive(Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default, FixedArray)]
+#[fixed_array(infallible)]
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[repr(transparent)]
 pub struct U32([u8; u32::SIZE]);
@@ -49,12 +50,6 @@ impl FixedSize for U32 {
 impl Span for U32 {}
 
 impl Array for U32 {}
-
-impl From<[u8; Self::SIZE]> for U32 {
-    fn from(value: [u8; Self::SIZE]) -> Self {
-        Self(value)
-    }
-}
 
 impl From<u32> for U32 {
     fn from(value: u32) -> Self {

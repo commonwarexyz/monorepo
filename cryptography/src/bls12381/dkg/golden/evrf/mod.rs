@@ -12,7 +12,8 @@ use crate::{
 use bandersnatch::{vrf_batch_checked, vrf_batch_checked_circuit, vrf_recv, F, G};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{
-    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedSize, Read, ReadExt, Write,
+    Encode, EncodeFixed, EncodeSize, Error as CodecError, FixedArray, FixedSize, Read, ReadExt,
+    Write,
 };
 use commonware_formatting::hex;
 use commonware_math::algebra::{Additive as _, CryptoGroup, Random};
@@ -324,7 +325,7 @@ impl FixedSize for PrivateKey {
 /// A Schnorr signature over the Bandersnatch curve.
 ///
 /// Consists of a commitment point K and a scalar response s.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Eq, Hash, Ord, PartialEq, PartialOrd, FixedArray)]
 pub struct Signature {
     raw: [u8; G::SIZE + F::SIZE],
 }
@@ -354,24 +355,6 @@ impl Span for Signature {}
 
 impl Array for Signature {}
 
-impl Hash for Signature {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.raw.hash(state);
-    }
-}
-
-impl Ord for Signature {
-    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.raw.cmp(&other.raw)
-    }
-}
-
-impl PartialOrd for Signature {
-    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
 impl AsRef<[u8]> for Signature {
     fn as_ref(&self) -> &[u8] {
         &self.raw
@@ -400,7 +383,7 @@ impl Display for Signature {
 /// A public key on the Bandersnatch curve, used for signatures and VRF outputs.
 ///
 /// This can be created using [`PrivateKey::public`].
-#[derive(Clone)]
+#[derive(Clone, FixedArray)]
 pub struct PublicKey {
     raw: [u8; G::SIZE],
     point: G,

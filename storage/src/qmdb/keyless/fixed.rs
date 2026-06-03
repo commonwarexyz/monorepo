@@ -201,6 +201,15 @@ mod test {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_commit_after_sync_recovery() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let db = open_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
+            tests::test_keyless_db_commit_after_sync_recovery(ctx, db, reopen::<mmr::Family>())
+                .await;
+        });
+    }
+
     #[test_traced("WARN")]
     fn test_keyless_fixed_build_basic() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -936,10 +945,7 @@ mod test {
     fn test_keyless_fixed_sync() {
         use crate::{
             merkle::Location,
-            qmdb::{
-                any::sync::Target,
-                sync::{self, engine::Config},
-            },
+            qmdb::sync::{self, engine::Config, Target},
         };
         use commonware_utils::{non_empty_range, sequence::U64};
         use std::sync::Arc;
@@ -969,7 +975,10 @@ mod test {
             let config = Config {
                 db_config: client_config,
                 fetch_batch_size: NZU64!(5),
-                target: Target::new(target_root, non_empty_range!(lower_bound, upper_bound)),
+                target: Target {
+                    root: target_root,
+                    range: non_empty_range!(lower_bound, upper_bound),
+                },
                 context: ctx.child("client"),
                 resolver: target_db.clone(),
                 apply_batch_size: 1024,

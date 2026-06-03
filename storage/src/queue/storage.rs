@@ -150,8 +150,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
 
     /// Append an item without persisting. Call [Self::commit] or [Self::sync]
     /// afterwards to make it durable. The item is readable immediately but
-    /// is not guaranteed to survive a crash until committed or the journal
-    /// auto-syncs at a section boundary (see [`variable::Journal`] invariant 1).
+    /// is not guaranteed to survive a crash until committed or synced.
     ///
     /// # Errors
     ///
@@ -499,6 +498,46 @@ mod tests {
                     assert_eq!(item, vec![i as u8]);
                 }
             }
+        });
+    }
+
+    #[test_traced]
+    fn test_commit_after_sync_recovers_without_second_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_config("test_commit_after_sync_recovery", &context);
+
+            {
+                let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
+
+                // Establish a synced baseline so the recovery watermark is behind the next commit.
+                queue.append(b"synced".to_vec()).await.unwrap();
+                queue.commit().await.unwrap();
+                queue.sync().await.unwrap();
+
+                // Commit later data without syncing; reopen must replay it from the old watermark.
+                queue.append(b"committed-a".to_vec()).await.unwrap();
+                queue.append(b"committed-b".to_vec()).await.unwrap();
+                queue.commit().await.unwrap();
+            }
+
+            let mut queue = Queue::<_, Vec<u8>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(queue.size().await, 3);
+            for (expected_pos, expected_item) in [
+                (0, b"synced".to_vec()),
+                (1, b"committed-a".to_vec()),
+                (2, b"committed-b".to_vec()),
+            ] {
+                let (pos, item) = queue.dequeue().await.unwrap().unwrap();
+                assert_eq!(pos, expected_pos);
+                assert_eq!(item, expected_item);
+            }
+
+            queue.destroy().await.unwrap();
         });
     }
 
