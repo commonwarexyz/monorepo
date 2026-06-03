@@ -76,6 +76,9 @@ impl Arbitrary<'_> for MarshalFuzzInput {
                 events.push(MarshalEvent::AckNext);
             }
             if events.len() < event_count {
+                events.push(MarshalEvent::Prune { block_idx: 0 });
+            }
+            if events.len() < event_count {
                 events.push(MarshalEvent::Subscribe {
                     block_idx: 0,
                     by_commitment: false,
