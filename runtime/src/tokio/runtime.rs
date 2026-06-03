@@ -423,6 +423,15 @@ impl crate::Runner for Runner {
             }
         }
 
+        // Make any storage a prior process left in the page cache crash-durable before user code
+        // reads. See `sync_storage_filesystem` for the per-platform guarantee.
+        if let Err(e) = sync_storage_filesystem(&self.cfg.storage_directory) {
+            panic!(
+                "failed to sync storage filesystem at startup ({}): {e}",
+                self.cfg.storage_directory.display()
+            );
+        }
+
         // Initialize network
         cfg_if::cfg_if! {
             if #[cfg(feature = "iouring-network")] {
@@ -495,6 +504,60 @@ impl crate::Runner for Runner {
         gauge.dec();
 
         output
+    }
+}
+
+/// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote but
+/// did not `fsync` are crash-durable before any storage structure reads them during `init`.
+///
+/// Per-platform guarantee:
+/// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable; the recovered
+///   data a structure reads during `init` is durable.
+/// - **macOS/BSD**: best-effort `sync(2)` only. macOS has no whole-filesystem durable flush, and
+///   `sync` does not flush the drive cache (and may return before buffers are written), so it is
+///   **not** crash-durable.
+/// - **Windows/wasm**: no whole-filesystem flush is performed; the guarantee is not provided.
+///
+/// Assumes the storage lives on a single filesystem (`syncfs` covers one filesystem), and on Linux
+/// reliable error detection requires kernel >= 5.8. A missing `dir` (a fresh start with no data
+/// yet) is treated as success.
+fn sync_storage_filesystem(dir: &std::path::Path) -> std::io::Result<()> {
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            use std::os::fd::AsRawFd;
+            let file = match std::fs::File::open(dir) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only that
+            // fd, performs no memory access, and returns -1 on error.
+            if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            tracing::info!(
+                storage_directory = %dir.display(),
+                "made storage filesystem durable at startup (syncfs)"
+            );
+            Ok(())
+        } else if #[cfg(unix)] {
+            // No `syncfs` on macOS/BSD. `sync` flushes dirty buffers system-wide but is not
+            // crash-durable on macOS, so this is best-effort only (see the function docs).
+            // SAFETY: `sync` takes no arguments and cannot fail.
+            unsafe { libc::sync() };
+            tracing::debug!(
+                storage_directory = %dir.display(),
+                "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
+            );
+            Ok(())
+        } else {
+            // Windows / wasm: no usable whole-filesystem durable flush.
+            tracing::debug!(
+                storage_directory = %dir.display(),
+                "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
+            );
+            Ok(())
+        }
     }
 }
 
