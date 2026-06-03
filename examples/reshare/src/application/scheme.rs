@@ -65,9 +65,9 @@ impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
 
     fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
         if let Some(verifier) = &self.certificate_verifier {
-            return Some(Scoped::Certificate(verifier.clone()));
+            return Some(Scoped::verifier(verifier.clone()));
         }
-        self.scheme(epoch).map(Scoped::Scheme)
+        self.scheme(epoch).map(Scoped::scheme)
     }
 
     fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {

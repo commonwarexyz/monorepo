@@ -300,7 +300,7 @@ mod test {
         type Scheme = Scheme;
 
         fn scoped(&self, scope: Epoch) -> Option<Scoped<Scheme>> {
-            self.0.lock().get(&scope).cloned().map(Scoped::Scheme)
+            self.0.lock().get(&scope).cloned().map(Scoped::scheme)
         }
     }
 
@@ -441,7 +441,7 @@ mod test {
         type Scheme = MaybeEnumerableScheme;
 
         fn scoped(&self, _: Epoch) -> Option<Scoped<MaybeEnumerableScheme>> {
-            Some(Scoped::Certificate(self.all.clone()))
+            Some(Scoped::verifier(self.all.clone()))
         }
 
         fn scheme(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {

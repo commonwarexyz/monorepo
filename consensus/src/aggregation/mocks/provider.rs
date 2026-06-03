@@ -45,6 +45,6 @@ impl<S: certificate::Scheme> certificate::Provider for Provider<S> {
 
     fn scoped(&self, epoch: Epoch) -> Option<Scoped<S>> {
         let schemes = self.schemes.lock();
-        schemes.get(&epoch).cloned().map(Scoped::Scheme)
+        schemes.get(&epoch).cloned().map(Scoped::scheme)
     }
 }

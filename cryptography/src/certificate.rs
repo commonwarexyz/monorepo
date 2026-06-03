@@ -400,37 +400,34 @@ pub trait Scheme: Verifier {
 
 /// Certificate provider result for a scope.
 ///
-/// Both variants implement [`Verifier`], so certificates can be verified directly against a
-/// `Scoped` without inspecting the variant. Use [`Scoped::into_scheme`] when signing operations
-/// are required.
+/// Implements [`Verifier`] for direct certificate verification. Use [`Scoped::into_scheme`] to
+/// recover the full signing scheme, which only succeeds for a [`Scoped::scheme`].
 #[derive(Clone, Debug)]
-pub enum Scoped<S>
-where
-    S: Scheme,
-{
-    /// A scope that can only verify certificates, not sign.
-    Certificate(Arc<S>),
-    /// A full signing scheme.
-    Scheme(Arc<S>),
+pub struct Scoped<S: Scheme> {
+    scheme: Arc<S>,
+    can_sign: bool,
 }
 
-impl<S> Scoped<S>
-where
-    S: Scheme,
-{
-    /// Returns the inner scheme for verification, regardless of variant.
-    fn inner(&self) -> &S {
-        match self {
-            Self::Certificate(scheme) | Self::Scheme(scheme) => scheme,
+impl<S: Scheme> Scoped<S> {
+    /// Builds a verify-only scope.
+    pub const fn verifier(scheme: Arc<S>) -> Self {
+        Self {
+            scheme,
+            can_sign: false,
         }
     }
 
-    /// Returns the full signing scheme, if available.
-    pub fn into_scheme(self) -> Option<Arc<S>> {
-        match self {
-            Self::Certificate(_) => None,
-            Self::Scheme(scheme) => Some(scheme),
+    /// Builds a full signing scope.
+    pub const fn scheme(scheme: Arc<S>) -> Self {
+        Self {
+            scheme,
+            can_sign: true,
         }
+    }
+
+    /// Returns the full signing scheme, or `None` for a verify-only scope.
+    pub fn into_scheme(self) -> Option<Arc<S>> {
+        self.can_sign.then_some(self.scheme)
     }
 }
 
@@ -443,7 +440,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
         &self,
         rng: &mut R,
         subject: Self::Subject<'_, D>,
-        certificate: &S::Certificate,
+        certificate: &Self::Certificate,
         strategy: &impl Strategy,
     ) -> bool
     where
@@ -451,7 +448,7 @@ impl<S: Scheme> Verifier for Scoped<S> {
         D: Digest,
         M: Faults,
     {
-        self.inner()
+        self.scheme
             .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
     }
 
@@ -464,10 +461,10 @@ impl<S: Scheme> Verifier for Scoped<S> {
     where
         R: CryptoRngCore,
         D: Digest,
-        I: Iterator<Item = (Self::Subject<'a, D>, &'a S::Certificate)>,
+        I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
         M: Faults,
     {
-        self.inner()
+        self.scheme
             .verify_certificates::<_, D, _, M>(rng, certificates, strategy)
     }
 
@@ -475,11 +472,11 @@ impl<S: Scheme> Verifier for Scoped<S> {
         S::is_batchable()
     }
 
-    fn certificate_codec_config(&self) -> <S::Certificate as Read>::Cfg {
-        self.inner().certificate_codec_config()
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
+        self.scheme.certificate_codec_config()
     }
 
-    fn certificate_codec_config_unbounded() -> <S::Certificate as Read>::Cfg {
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
         S::certificate_codec_config_unbounded()
     }
 }
@@ -618,7 +615,7 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
     type Scheme = S;
 
     fn scoped(&self, _: Sc) -> Option<Scoped<S>> {
-        Some(Scoped::Scheme(self.scheme.clone()))
+        Some(Scoped::scheme(self.scheme.clone()))
     }
 }
 
@@ -856,11 +853,11 @@ mod tests {
         let cert = make_certificate(&schemes, MESSAGE);
         let subject = TestSubject { message: MESSAGE };
 
-        let as_certificate = Scoped::Certificate(Arc::new(verifier));
-        let as_scheme = Scoped::Scheme(Arc::new(schemes[0].clone()));
+        let as_verifier = Scoped::verifier(Arc::new(verifier));
+        let as_scheme = Scoped::scheme(Arc::new(schemes[0].clone()));
 
-        // Both variants verify a valid certificate through the `Verifier` impl.
-        assert!(as_certificate.verify_certificate::<_, Sha256Digest, N3f1>(
+        // Both scopes verify a valid certificate through the `Verifier` impl.
+        assert!(as_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
             &mut rng,
             subject,
             &cert,
@@ -873,8 +870,8 @@ mod tests {
             &Sequential,
         ));
 
-        // Only the full-scheme variant yields a signing scheme.
-        assert!(as_certificate.into_scheme().is_none());
+        // A verify-only scope never yields its scheme; a full scope always does.
+        assert!(as_verifier.into_scheme().is_none());
         assert!(as_scheme.into_scheme().is_some());
     }
 

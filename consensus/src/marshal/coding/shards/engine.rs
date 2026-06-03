@@ -1776,7 +1776,7 @@ mod tests {
             self.schemes
                 .get(&scope)
                 .cloned()
-                .map(certificate::Scoped::Scheme)
+                .map(certificate::Scoped::scheme)
         }
     }
 
@@ -1808,7 +1808,7 @@ mod tests {
             if self.remaining_successes.fetch_sub(1, Ordering::AcqRel) <= 0 {
                 return None;
             }
-            Some(certificate::Scoped::Scheme(Arc::clone(&self.scheme)))
+            Some(certificate::Scoped::scheme(Arc::clone(&self.scheme)))
         }
     }
 

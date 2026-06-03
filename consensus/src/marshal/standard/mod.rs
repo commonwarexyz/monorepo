@@ -114,11 +114,11 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct CertificateProvider {
+    struct VerifierProvider {
         scheme: Arc<S>,
     }
 
-    impl CertificateProvider {
+    impl VerifierProvider {
         fn new(scheme: S) -> Self {
             Self {
                 scheme: Arc::new(scheme),
@@ -126,12 +126,12 @@ mod tests {
         }
     }
 
-    impl Provider for CertificateProvider {
+    impl Provider for VerifierProvider {
         type Scope = Epoch;
         type Scheme = S;
 
         fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
-            Some(Scoped::Certificate(self.scheme.clone()))
+            Some(Scoped::verifier(self.scheme.clone()))
         }
     }
 
@@ -4738,7 +4738,7 @@ mod tests {
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "notarized-delivery-stale-certificate-only",
-                CertificateProvider::new(schemes[0].clone()),
+                VerifierProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),

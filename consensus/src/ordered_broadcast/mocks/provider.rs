@@ -43,6 +43,6 @@ impl<S: certificate::Scheme> certificate::Provider for Provider<S> {
         schemes
             .get(&epoch)
             .cloned()
-            .map(certificate::Scoped::Scheme)
+            .map(certificate::Scoped::scheme)
     }
 }
