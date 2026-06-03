@@ -106,9 +106,12 @@ pub struct EmptyProvider;
 impl Provider for EmptyProvider {
     type Scope = Epoch;
     type Scheme = S;
-    type All = S;
+    type Verifier = S;
 
-    fn scoped(&self, _scope: Epoch) -> Option<std::sync::Arc<S>> {
+    fn scoped(
+        &self,
+        _scope: Epoch,
+    ) -> Option<commonware_cryptography::certificate::Scoped<S, Self::Verifier>> {
         None
     }
 }

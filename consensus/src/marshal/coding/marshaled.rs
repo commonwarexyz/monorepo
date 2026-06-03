@@ -660,7 +660,7 @@ where
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
-        let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+        let Some(scheme) = self.scheme_provider.scheme(consensus_context.epoch()) else {
             debug!(
                 round = %consensus_context.round,
                 "no scheme for epoch, skipping propose"
@@ -852,7 +852,7 @@ where
     ) -> oneshot::Receiver<bool> {
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
         // Send back a receiver with a dropped sender.
-        let Some(scheme) = self.scheme_provider.scoped(consensus_context.epoch()) else {
+        let Some(scheme) = self.scheme_provider.scheme(consensus_context.epoch()) else {
             debug!(
                 round = %consensus_context.round,
                 "no scheme for epoch, skipping verify"

@@ -12,7 +12,10 @@ use commonware_consensus::{
     types::Epoch,
     Epochable,
 };
-use commonware_cryptography::{certificate::{CertificateVerifier, Provider}, PublicKey};
+use commonware_cryptography::{
+    certificate::{Provider, Scoped},
+    PublicKey,
+};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
@@ -36,7 +39,7 @@ where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
-    D::All: commonware_consensus::simplex::scheme::CertificateVerifier<V::Commitment>,
+    D::Verifier: commonware_consensus::simplex::scheme::CertificateVerifier<V::Commitment>,
     V: Variant,
     T: Strategy,
     P: PublicKey,
@@ -58,7 +61,7 @@ where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
-    D::All: commonware_consensus::simplex::scheme::CertificateVerifier<V::Commitment>,
+    D::Verifier: commonware_consensus::simplex::scheme::CertificateVerifier<V::Commitment>,
     V: Variant,
     T: Strategy,
     P: PublicKey,
@@ -215,11 +218,14 @@ where
     ) -> Option<(P, Finalization<S, V::Commitment>)> {
         // Verify against the certificate scheme for the finalization's epoch. If no scheme is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let verified = if let Some(verifier) = self.provider.all() {
-            finalization.verify(self.context.as_present_mut(), verifier.as_ref(), &self.strategy)
-        } else {
-            let scheme = self.provider.scoped(finalization.epoch())?;
-            finalization.verify(self.context.as_present_mut(), scheme.as_ref(), &self.strategy)
+        let scoped = self.provider.scoped(finalization.epoch())?;
+        let verified = match scoped {
+            Scoped::Certificate(verifier) => {
+                finalization.verify(self.context.as_present_mut(), verifier.as_ref(), &self.strategy)
+            }
+            Scoped::Scheme(scheme) => {
+                finalization.verify(self.context.as_present_mut(), scheme.as_ref(), &self.strategy)
+            }
         };
         if !verified {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
@@ -281,25 +287,20 @@ where
         );
     }
 
-    /// Returns the certificate codec config for `epoch`, preferring a global verifier.
+    /// Returns the certificate codec config for `epoch`.
     fn certificate_codec_config(
         &self,
         epoch: Epoch,
     ) -> Option<<S::Certificate as commonware_codec::Read>::Cfg> {
         self.provider
-            .all()
-            .map(|verifier| verifier.certificate_codec_config())
-            .or_else(|| {
-                self.provider
-                    .scoped(epoch)
-                    .map(|scheme| scheme.certificate_codec_config())
-            })
+            .scoped(epoch)
+            .map(|scoped| scoped.certificate_codec_config())
     }
 
     /// Returns the number of distinct peer replies (`f + 1`) required for `epoch`.
     fn sample_size(&self, epoch: Epoch) -> Option<usize> {
         self.provider
-            .scoped(epoch)
+            .scheme(epoch)
             .map(|scheme| N3f1::max_faults(scheme.participants().len()) as usize + 1)
     }
 }

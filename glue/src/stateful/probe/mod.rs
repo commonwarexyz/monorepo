@@ -147,7 +147,7 @@ mod test {
     use commonware_cryptography::{
         certificate::{
             mocks::Fixture, Attestation, CertificateOnly, CertificateVerifier, ConstantProvider,
-            Provider, Scheme as CertificateScheme,
+            Provider, Scheme as CertificateScheme, Scoped,
         },
         ed25519,
         sha256::Digest as Sha256Digest,
@@ -282,8 +282,7 @@ mod test {
         }
     }
 
-    /// A certificate-scheme provider keyed by epoch, with no global verifier (`all` is `None`),
-    /// so verification always falls through to the epoch-scoped lookup.
+    /// A certificate-scheme provider keyed by epoch, with no certificate-only fallback.
     #[derive(Clone, Default)]
     struct EpochProvider(Arc<Mutex<BTreeMap<Epoch, Arc<Scheme>>>>);
 
@@ -300,14 +299,14 @@ mod test {
     impl Provider for EpochProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
-        type All = Scheme;
+        type Verifier = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
-            self.0.lock().get(&scope).cloned()
+        fn scoped(&self, scope: Epoch) -> Option<Scoped<Scheme, Self::Verifier>> {
+            self.0.lock().get(&scope).cloned().map(Scoped::Scheme)
         }
     }
 
-    /// Wraps the mock scheme so `all()` can verify certificates without exposing participants.
+    /// Wraps the mock scheme so certificate-only lookup can verify certificates without exposing participants.
     #[derive(Clone, Debug)]
     struct MaybeEnumerableScheme {
         inner: Scheme,
@@ -442,14 +441,14 @@ mod test {
     impl Provider for ParticipantlessAllProvider {
         type Scope = Epoch;
         type Scheme = MaybeEnumerableScheme;
-        type All = CertificateOnly<MaybeEnumerableScheme>;
+        type Verifier = CertificateOnly<MaybeEnumerableScheme>;
 
-        fn scoped(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {
-            Some(self.scoped.clone())
+        fn scoped(&self, _: Epoch) -> Option<Scoped<MaybeEnumerableScheme, Self::Verifier>> {
+            Some(Scoped::Certificate(self.all.clone()))
         }
 
-        fn all(&self) -> Option<Arc<Self::All>> {
-            Some(self.all.clone())
+        fn scheme(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {
+            Some(self.scoped.clone())
         }
     }
 
@@ -505,7 +504,7 @@ mod test {
         ) -> Self
         where
             D: Provider<Scope = Epoch, Scheme = Scheme>,
-            D::All: commonware_consensus::simplex::scheme::CertificateVerifier<Sha256Digest>,
+            D::Verifier: commonware_consensus::simplex::scheme::CertificateVerifier<Sha256Digest>,
             F: Fn(&Scheme) -> D,
         {
             let mut rng = test_rng();

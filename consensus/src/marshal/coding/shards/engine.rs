@@ -567,7 +567,7 @@ where
 
         if let Some(existing) = self.state.get(&commitment) {
             let round = existing.round();
-            let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+            let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
                 warn!(%commitment, "no scheme for epoch, ignoring shard");
                 return;
             };
@@ -722,7 +722,7 @@ where
         {
             return;
         }
-        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, ignoring external proposal");
             return;
         };
@@ -781,7 +781,7 @@ where
             }
             return;
         }
-        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, ignoring notarized commitment");
             return;
         };
@@ -835,7 +835,7 @@ where
             .expect("buffered shards can only be ingested with reconstruction state");
         let round = state.round();
         let leader_known = state.leader().is_some();
-        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme for epoch, dropping buffered shards");
             return false;
         };
@@ -907,7 +907,7 @@ where
     ) {
         let commitment = block.commitment();
 
-        let Some(scheme) = self.scheme_provider.scoped(round.epoch()) else {
+        let Some(scheme) = self.scheme_provider.scheme(round.epoch()) else {
             warn!(%commitment, "no scheme available, cannot broadcast shards");
             return;
         };
@@ -1681,7 +1681,7 @@ mod tests {
         CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon, Zoda,
     };
     use commonware_cryptography::{
-        certificate::Subject,
+        certificate::{self, Subject},
         ed25519::{PrivateKey, PublicKey},
         impl_certificate_ed25519,
         sha256::Digest as Sha256Digest,
@@ -1771,10 +1771,13 @@ mod tests {
     impl Provider for MultiEpochProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
-        type All = Scheme;
+        type Verifier = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
-            self.schemes.get(&scope).cloned()
+        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme, Self::Verifier>> {
+            self.schemes
+                .get(&scope)
+                .cloned()
+                .map(certificate::Scoped::Scheme)
         }
     }
 
@@ -1798,16 +1801,16 @@ mod tests {
     impl Provider for ChurningProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
-        type All = Scheme;
+        type Verifier = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
+        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme, Self::Verifier>> {
             if scope != Epoch::zero() {
                 return None;
             }
             if self.remaining_successes.fetch_sub(1, Ordering::AcqRel) <= 0 {
                 return None;
             }
-            Some(Arc::clone(&self.scheme))
+            Some(certificate::Scoped::Scheme(Arc::clone(&self.scheme)))
         }
     }
 

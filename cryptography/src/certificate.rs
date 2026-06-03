@@ -398,6 +398,47 @@ pub trait Scheme: CertificateVerifier {
     fn is_attributable() -> bool;
 }
 
+/// Certificate provider result for a scope.
+#[derive(Clone, Debug)]
+pub enum Scoped<S, V>
+where
+    S: Scheme,
+    V: CertificateVerifier<
+        Certificate = <S as CertificateVerifier>::Certificate,
+        PublicKey = <S as CertificateVerifier>::PublicKey,
+    >,
+{
+    /// A certificate-only verifier.
+    Certificate(Arc<V>),
+    /// A full signing scheme.
+    Scheme(Arc<S>),
+}
+
+impl<S, V> Scoped<S, V>
+where
+    S: Scheme,
+    V: CertificateVerifier<
+        Certificate = <S as CertificateVerifier>::Certificate,
+        PublicKey = <S as CertificateVerifier>::PublicKey,
+    >,
+{
+    /// Returns the full signing scheme, if available.
+    pub fn into_scheme(self) -> Option<Arc<S>> {
+        match self {
+            Self::Certificate(_) => None,
+            Self::Scheme(scheme) => Some(scheme),
+        }
+    }
+
+    /// Returns the certificate codec configuration.
+    pub fn certificate_codec_config(&self) -> <S::Certificate as Read>::Cfg {
+        match self {
+            Self::Certificate(verifier) => verifier.certificate_codec_config(),
+            Self::Scheme(scheme) => scheme.certificate_codec_config(),
+        }
+    }
+}
+
 /// Supplies the signing scheme for a given scope.
 ///
 /// This trait uses an associated `Scope` type, allowing implementations to work
@@ -407,27 +448,18 @@ pub trait Provider: Clone + Send + Sync + 'static {
     type Scope: Clone + Send + Sync + 'static;
     /// The signing scheme to provide.
     type Scheme: Scheme;
-    /// A verifier that can validate certificates from all scopes.
-    type All: CertificateVerifier<
+    /// A verifier that can validate certificates without exposing scheme-only operations.
+    type Verifier: CertificateVerifier<
         Certificate = <Self::Scheme as CertificateVerifier>::Certificate,
         PublicKey = <Self::Scheme as CertificateVerifier>::PublicKey,
     >;
 
-    /// Return the signing scheme that corresponds to `scope`.
-    fn scoped(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>>;
+    /// Return the certificate or signing scheme that corresponds to `scope`.
+    fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme, Self::Verifier>>;
 
-    /// Return a certificate verifier that can validate certificates from all scopes.
-    ///
-    /// This method allows implementations to provide a verifier that can validate
-    /// certificates from all scopes (without scope-specific state). For example,
-    /// `bls12381_threshold::Scheme` maintains a static public key across epochs that
-    /// can be used to verify certificates from any epoch, even after the committee
-    /// has rotated and the underlying secret shares have been refreshed.
-    ///
-    /// The default implementation returns `None`. Callers should fall back to
-    /// [`Provider::scoped`] for scope-specific verification.
-    fn all(&self) -> Option<Arc<Self::All>> {
-        None
+    /// Return the full signing scheme that corresponds to `scope`, if available.
+    fn scheme(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>> {
+        self.scoped(scope).and_then(Scoped::into_scheme)
     }
 }
 
@@ -544,14 +576,10 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
 {
     type Scope = Sc;
     type Scheme = S;
-    type All = S;
+    type Verifier = S;
 
-    fn scoped(&self, _: Sc) -> Option<Arc<S>> {
-        Some(self.scheme.clone())
-    }
-
-    fn all(&self) -> Option<Arc<Self::All>> {
-        Some(self.scheme.clone())
+    fn scoped(&self, _: Sc) -> Option<Scoped<S, Self::Verifier>> {
+        Some(Scoped::Scheme(self.scheme.clone()))
     }
 }
 

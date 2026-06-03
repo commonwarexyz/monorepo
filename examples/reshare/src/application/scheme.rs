@@ -8,7 +8,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt as dkg,
         primitives::variant::{MinSig, Variant},
     },
-    certificate::{self, CertificateOnly, Scheme},
+    certificate::{self, CertificateOnly, Scheme, Scoped},
     ed25519, PublicKey, Signer,
 };
 use commonware_utils::sync::Mutex;
@@ -63,15 +63,18 @@ impl<S: Scheme, C: Signer> Provider<S, C> {
 impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
     type Scope = Epoch;
     type Scheme = S;
-    type All = CertificateOnly<S>;
+    type Verifier = CertificateOnly<S>;
 
-    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
-        let schemes = self.schemes.lock();
-        schemes.get(&epoch).cloned()
+    fn scoped(&self, epoch: Epoch) -> Option<Scoped<S, Self::Verifier>> {
+        if let Some(verifier) = &self.certificate_verifier {
+            return Some(Scoped::Certificate(verifier.clone()));
+        }
+        self.scheme(epoch).map(Scoped::Scheme)
     }
 
-    fn all(&self) -> Option<Arc<Self::All>> {
-        self.certificate_verifier.clone()
+    fn scheme(&self, epoch: Epoch) -> Option<Arc<S>> {
+        let schemes = self.schemes.lock();
+        schemes.get(&epoch).cloned()
     }
 }
 

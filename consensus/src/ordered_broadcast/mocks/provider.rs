@@ -37,10 +37,10 @@ impl<S: certificate::Scheme> Default for Provider<S> {
 impl<S: certificate::Scheme> certificate::Provider for Provider<S> {
     type Scope = Epoch;
     type Scheme = S;
-    type All = S;
+    type Verifier = S;
 
-    fn scoped(&self, epoch: Epoch) -> Option<Arc<Self::Scheme>> {
+    fn scoped(&self, epoch: Epoch) -> Option<certificate::Scoped<Self::Scheme, Self::Verifier>> {
         let schemes = self.schemes.lock();
-        schemes.get(&epoch).cloned()
+        schemes.get(&epoch).cloned().map(certificate::Scoped::Scheme)
     }
 }

@@ -24,7 +24,7 @@ use commonware_consensus::{
     Monitor, Viewable,
 };
 use commonware_cryptography::{
-    certificate::{mocks::Fixture, Scheme},
+    certificate::{mocks::Fixture, CertificateVerifier as _},
     ed25519::PublicKey as Ed25519PublicKey,
     sha256::Digest as Sha256Digest,
     Sha256,

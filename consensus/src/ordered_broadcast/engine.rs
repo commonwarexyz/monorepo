@@ -70,7 +70,9 @@ pub struct Engine<
     Z: Reporter<Activity = Activity<C::PublicKey, P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
     T: Strategy,
-> {
+> where
+    P::Verifier: scheme::CertificateVerifier<C::PublicKey, D>,
+{
     ////////////////////////////////////////
     // Interfaces
     ////////////////////////////////////////
@@ -209,6 +211,8 @@ impl<
         M: Monitor<Index = Epoch>,
         T: Strategy,
     > Engine<E, C, S, P, D, A, R, Z, M, T>
+where
+    P::Verifier: scheme::CertificateVerifier<C::PublicKey, D>,
 {
     /// Creates a new engine with the given context and configuration.
     pub fn new(context: E, cfg: Config<C, S, P, D, A, R, Z, M, T>) -> Self {
@@ -540,7 +544,7 @@ impl<
         )));
 
         // Get the validator scheme for the current epoch
-        let Some(scheme) = self.validators_provider.scoped(self.epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(self.epoch) else {
             return Err(Error::UnknownScheme(self.epoch));
         };
 
@@ -614,7 +618,7 @@ impl<
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
     fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
-        let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 
@@ -837,7 +841,7 @@ impl<
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
-        let Some(scheme) = self.validators_provider.scoped(epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(epoch) else {
             return Err(Error::UnknownScheme(epoch));
         };
         let validators = scheme.participants();
@@ -910,7 +914,7 @@ impl<
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Get the scheme for the epoch to validate the sender
-        let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 

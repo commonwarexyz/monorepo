@@ -26,7 +26,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{CertificateVerifier, Provider},
+    certificate::{CertificateVerifier, Provider, Scoped},
     Digestible,
 };
 use commonware_macros::select_loop;
@@ -79,7 +79,7 @@ where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
-    P::All: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
+    P::Verifier: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
         Commitment = V::Commitment,
@@ -145,7 +145,7 @@ where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
-    P::All: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
+    P::Verifier: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
         Commitment = V::Commitment,
@@ -1010,13 +1010,16 @@ where
             return;
         }
 
-        let verified = if let Some(verifier) = self.provider.all() {
-            finalization.verify(self.context.as_mut(), verifier.as_ref(), &self.strategy)
-        } else {
-            let Some(scheme) = self.provider.scoped(finalization.epoch()) else {
-                panic!("floor finalization epoch unavailable");
-            };
-            finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
+        let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
+            panic!("floor finalization epoch unavailable");
+        };
+        let verified = match scoped {
+            Scoped::Certificate(verifier) => {
+                finalization.verify(self.context.as_mut(), verifier.as_ref(), &self.strategy)
+            }
+            Scoped::Scheme(scheme) => {
+                finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
+            }
         };
         assert!(
             verified,
@@ -1330,18 +1333,18 @@ where
                     return false;
                 };
 
-                // Wrong-round data must be rejected before the scoped-provider lookup below.
-                // That lookup may miss for pruned epochs even when `all()` was sufficient to
-                // decode the certificate, and missing scoped state is treated as stale rather
-                // than peer-faulting.
+                // Wrong-round data must be rejected before the full-scheme lookup below.
+                // That lookup may miss for pruned epochs even when a certificate-only scoped
+                // value was sufficient to decode the certificate, and missing full-scheme state
+                // is treated as stale rather than peer-faulting.
                 if notarization.round() != round {
                     response.send_lossy(false);
                     return false;
                 }
 
-                // `V::check_payload` requires a scoped provider, while decoding may use an
-                // all-epoch verifier.
-                let Some(scheme) = self.provider.scoped(notarization.epoch()) else {
+                // `V::check_payload` requires a full scheme, while decoding may use a
+                // certificate-only verifier.
+                let Some(scheme) = self.provider.scheme(notarization.epoch()) else {
                     debug!(
                         ?round,
                         floor = %self.floor.processed_height(),
@@ -1408,46 +1411,42 @@ where
             })
             .collect();
 
-        // Batch verify using the all-epoch verifier if available, otherwise
-        // batch verify per epoch using scoped verifiers.
-        let verified = if let Some(verifier) = self.provider.all() {
-            verify_certificates(
-                self.context.as_mut(),
-                verifier.as_ref(),
-                &certs,
-                &self.strategy,
-            )
-        } else {
-            let mut verified = vec![false; delivers.len()];
+        let mut verified = vec![false; delivers.len()];
 
-            // Group indices by epoch.
-            let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-            for (i, item) in delivers.iter().enumerate() {
-                let epoch = match item {
-                    PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                    PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-                };
-                by_epoch.entry(epoch).or_default().push(i);
-            }
+        // Group indices by epoch.
+        let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
+        for (i, item) in delivers.iter().enumerate() {
+            let epoch = match item {
+                PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
+                PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
+            };
+            by_epoch.entry(epoch).or_default().push(i);
+        }
 
-            // Batch verify each epoch group.
-            for (epoch, indices) in &by_epoch {
-                let Some(scheme) = self.provider.scoped(*epoch) else {
-                    continue;
-                };
-                let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results = verify_certificates(
+        // Batch verify each epoch group.
+        for (epoch, indices) in &by_epoch {
+            let Some(scoped) = self.provider.scoped(*epoch) else {
+                continue;
+            };
+            let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
+            let results = match scoped {
+                Scoped::Certificate(verifier) => verify_certificates(
+                    self.context.as_mut(),
+                    verifier.as_ref(),
+                    &group,
+                    &self.strategy,
+                ),
+                Scoped::Scheme(scheme) => verify_certificates(
                     self.context.as_mut(),
                     scheme.as_ref(),
                     &group,
                     &self.strategy,
-                );
-                for (j, &idx) in indices.iter().enumerate() {
-                    verified[idx] = results[j];
-                }
+                ),
+            };
+            for (j, &idx) in indices.iter().enumerate() {
+                verified[idx] = results[j];
             }
-            verified
-        };
+        }
 
         // Process each verified item, rejecting unverified ones.
         let mut wrote = false;
@@ -1546,19 +1545,14 @@ where
         wrote
     }
 
-    /// Returns the certificate codec config for `epoch`, preferring a global verifier.
+    /// Returns the certificate codec config for `epoch`.
     fn certificate_codec_config(
         &self,
         epoch: Epoch,
     ) -> Option<<<P::Scheme as CertificateVerifier>::Certificate as Read>::Cfg> {
         self.provider
-            .all()
-            .map(|verifier| verifier.certificate_codec_config())
-            .or_else(|| {
-                self.provider
-                    .scoped(epoch)
-                    .map(|scheme| scheme.certificate_codec_config())
-            })
+            .scoped(epoch)
+            .map(|scoped| scoped.certificate_codec_config())
     }
 
     // -------------------- Application Dispatch --------------------

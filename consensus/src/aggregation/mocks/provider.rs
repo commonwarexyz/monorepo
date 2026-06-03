@@ -5,7 +5,7 @@
 //! and retrieving them later.
 
 use crate::types::Epoch;
-use commonware_cryptography::certificate::{self, Scheme};
+use commonware_cryptography::certificate::{self, Scheme, Scoped};
 use commonware_utils::sync::Mutex;
 use std::{collections::HashMap, sync::Arc};
 
@@ -42,10 +42,10 @@ impl<S: Scheme> Provider<S> {
 impl<S: Scheme> certificate::Provider for Provider<S> {
     type Scope = Epoch;
     type Scheme = S;
-    type All = S;
+    type Verifier = S;
 
-    fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
+    fn scoped(&self, epoch: Epoch) -> Option<Scoped<S, Self::Verifier>> {
         let schemes = self.schemes.lock();
-        schemes.get(&epoch).cloned()
+        schemes.get(&epoch).cloned().map(Scoped::Scheme)
     }
 }

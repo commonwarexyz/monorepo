@@ -73,7 +73,8 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         certificate::{
-            CertificateOnly, CertificateVerifier as _, ConstantProvider, Provider, mocks::Fixture,
+            CertificateOnly, CertificateVerifier as _, ConstantProvider, Provider, Scoped,
+            mocks::Fixture,
         },
         ed25519::PublicKey,
         sha256::Sha256,
@@ -131,14 +132,10 @@ mod tests {
     impl Provider for AllOnlyProvider {
         type Scope = Epoch;
         type Scheme = S;
-        type All = CertificateOnly<S>;
+        type Verifier = CertificateOnly<S>;
 
-        fn scoped(&self, _: Epoch) -> Option<Arc<S>> {
-            None
-        }
-
-        fn all(&self) -> Option<Arc<Self::All>> {
-            Some(self.scheme.clone())
+        fn scoped(&self, _: Epoch) -> Option<Scoped<S, Self::Verifier>> {
+            Some(Scoped::Certificate(self.scheme.clone()))
         }
     }
 
@@ -2899,7 +2896,7 @@ mod tests {
     where
         R: Reporter<Activity = Update<B>>,
         P: Provider<Scope = Epoch, Scheme = S>,
-        P::All: crate::simplex::scheme::CertificateVerifier<D>,
+        P::Verifier: crate::simplex::scheme::CertificateVerifier<D>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
         let config = Config {
@@ -4732,7 +4729,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_acknowledges_stale_without_scoped_provider() {
+    fn test_standard_notarized_delivery_acknowledges_stale_without_full_scheme() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -4745,7 +4742,7 @@ mod tests {
 
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "notarized-delivery-stale-all-only",
+                "notarized-delivery-stale-certificate-only",
                 AllOnlyProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
