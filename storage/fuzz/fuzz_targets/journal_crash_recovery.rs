@@ -307,6 +307,21 @@ trait FuzzJournal: Sized {
     fn destroy(self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+/// Drain a reader's replay stream into a `(position, item)` vector.
+async fn collect_replay<R: Reader<Item = Item>>(
+    reader: R,
+    buffer: NonZeroUsize,
+    start_pos: u64,
+) -> Result<Vec<(u64, Item)>, Error> {
+    let stream = reader.replay(buffer, start_pos).await?;
+    futures::pin_mut!(stream);
+    let mut out = Vec::new();
+    while let Some(result) = stream.next().await {
+        out.push(result?);
+    }
+    Ok(out)
+}
+
 impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     type Config = FixedConfig;
 
@@ -451,37 +466,6 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     async fn destroy(self) -> Result<(), Error> {
         VariableJournal::destroy(self).await
     }
-}
-
-/// Drain a reader's replay stream into a `(position, item)` vector.
-async fn collect_replay<R: Reader<Item = Item>>(
-    reader: R,
-    buffer: NonZeroUsize,
-    start_pos: u64,
-) -> Result<Vec<(u64, Item)>, Error> {
-    let stream = reader.replay(buffer, start_pos).await?;
-    futures::pin_mut!(stream);
-    let mut out = Vec::new();
-    while let Some(result) = stream.next().await {
-        out.push(result?);
-    }
-    Ok(out)
-}
-
-/// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
-/// returns at least one list (possibly empty), so a bare recovery is still exercised.
-fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Vec<JournalOperation>> {
-    let mut cycles = Vec::new();
-    let mut current = Vec::new();
-    for op in ops {
-        if matches!(op, JournalOperation::Crash) {
-            cycles.push(std::mem::take(&mut current));
-        } else {
-            current.push(op.clone());
-        }
-    }
-    cycles.push(current);
-    cycles
 }
 
 /// Verify the recovered journal matches the `Expected` carried from the previous (crashed) cycle.
@@ -802,6 +786,22 @@ where
         run_ops(&mut journal, &mut expected, &ops, params).await;
         expected
     })
+}
+
+/// Split the operation stream into one `ops` list per cycle, cutting at each `Crash` marker. Always
+/// returns at least one list (possibly empty), so a bare recovery is still exercised.
+fn split_into_cycles(ops: &[JournalOperation]) -> Vec<Vec<JournalOperation>> {
+    let mut cycles = Vec::new();
+    let mut current = Vec::new();
+    for op in ops {
+        if matches!(op, JournalOperation::Crash) {
+            cycles.push(std::mem::take(&mut current));
+        } else {
+            current.push(op.clone());
+        }
+    }
+    cycles.push(current);
+    cycles
 }
 
 fn run<J: FuzzJournal + Send + 'static>(input: &FuzzInput, tag: &str)
