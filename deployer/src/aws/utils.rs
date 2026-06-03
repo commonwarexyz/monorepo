@@ -43,6 +43,10 @@ fn scp_target(ip: &str, remote_path: &str) -> String {
     format!("{}:{remote_path}", ssh_target(ip))
 }
 
+fn ssh_attach_code_ok(code: Option<i32>) -> bool {
+    matches!(code, Some(0 | 130))
+}
+
 /// Fetch the current machine's public IPv4 address
 pub async fn get_public_ip() -> Result<String, Error> {
     // icanhazip.com is maintained by Cloudflare as of 6/6/2021 (https://major.io/p/a-new-future-for-icanhazip/)
@@ -97,7 +101,7 @@ pub async fn ssh_attach(key_file: &str, ip: &str) -> Result<(), Error> {
         .stderr(Stdio::inherit())
         .status()
         .await?;
-    if status.success() {
+    if ssh_attach_code_ok(status.code()) {
         return Ok(());
     }
     Err(Error::SshFailed)
@@ -253,7 +257,7 @@ async fn download_file_once(url: &str, dest: &Path) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{scp_target, ssh_target};
+    use super::{scp_target, ssh_attach_code_ok, ssh_target};
 
     #[test]
     fn test_ssh_target_ipv4() {
@@ -271,5 +275,14 @@ mod tests {
             scp_target("2001:db8::1", "/tmp/profile.json"),
             "ubuntu@[2001:db8::1]:/tmp/profile.json"
         );
+    }
+
+    #[test]
+    fn test_ssh_attach_code_ok() {
+        assert!(ssh_attach_code_ok(Some(0)));
+        assert!(ssh_attach_code_ok(Some(130)));
+        assert!(!ssh_attach_code_ok(Some(1)));
+        assert!(!ssh_attach_code_ok(Some(255)));
+        assert!(!ssh_attach_code_ok(None));
     }
 }

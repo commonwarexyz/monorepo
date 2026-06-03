@@ -135,7 +135,7 @@ fn find_host_match(tag: &str, hosts: Hosts, ip: &str) -> Option<InstanceMatch> {
 #[cfg(test)]
 mod tests {
     use super::{find_host_match, normalize_ip, InstanceMatch};
-    use crate::aws::{Host, Hosts, MonitoringIps, MONITORING_REGION};
+    use crate::aws::{Host, Hosts, Ips, MONITORING_REGION};
     use std::net::IpAddr;
 
     fn instance(tag: &str, region: &str, ip: &str) -> InstanceMatch {
@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn test_find_host_match() {
         let hosts = Hosts {
-            monitoring: MonitoringIps {
+            monitoring: Ips {
                 public: "2.2.2.2".parse::<IpAddr>().unwrap(),
                 private: "10.0.0.1".parse::<IpAddr>().unwrap(),
             },
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn test_find_monitoring_match() {
         let hosts = Hosts {
-            monitoring: MonitoringIps {
+            monitoring: Ips {
                 public: "2.2.2.2".parse::<IpAddr>().unwrap(),
                 private: "10.0.0.1".parse::<IpAddr>().unwrap(),
             },
