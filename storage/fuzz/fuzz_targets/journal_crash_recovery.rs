@@ -23,11 +23,10 @@
 //!
 //! # Expected
 //!
-//! A crash can land anywhere in a range of outcomes, so we cannot predict the exact recovered
-//! state. `Expected` instead tracks conservative bounds: a guaranteed-durable prefix plus ceilings
-//! on the size and pruning boundary. `assert_matches_expected` asserts the real recovery lands within them.
-//! Once it passes, the state is known exactly, so `observe` reads it back as the precise starting
-//! point for the next cycle.
+//! A crash can land anywhere in a range of outcomes, so `Expected` tracks conservative bounds (a
+//! guaranteed-durable prefix plus size/pruning ceilings) rather than an exact state.
+//! `assert_matches_expected` checks recovery lands within them; `observe` then reads the now-known
+//! state back as the next cycle's starting point.
 //!
 //! # Faults
 //!
@@ -208,18 +207,11 @@ impl Params {
     }
 }
 
-/// What a recovery is expected to produce after an unclean shutdown: a guaranteed-durable floor and
-/// conservative upper bounds.
-///
-/// The bounds are deliberately conservative, so every assertion in `assert_matches_expected` is sound under
-/// any fault/crash interleaving:
+/// Conservative bounds on what a recovery may produce after an unclean shutdown:
 /// - positions `[0, durable_prune)` are pruned (reads return `ItemPruned`),
-/// - positions `[max_prune, durable_len)` are present with the exact content `values[pos]`,
+/// - positions `[max_prune, durable_len)` hold the exact content `values[pos]`,
 /// - the recovered size is in `[durable_len, max_size]`,
-/// - the recovered pruning boundary is in `[durable_prune, max_prune]`,
-/// - `values.len()` tracks the in-memory size, so `values[pos]` is the latest value at `pos`.
-///
-/// The methods below are the per-operation update rules that maintain these invariants.
+/// - the recovered pruning boundary is in `[durable_prune, max_prune]`.
 #[derive(Clone, Default)]
 struct Expected {
     /// Guaranteed-durable prefix length; also the minimum recovered size.
@@ -235,20 +227,18 @@ struct Expected {
 }
 
 impl Expected {
-    /// A successful tail append. The item is not durable until the next sync/commit, so it only
-    /// raises the size ceiling.
+    /// Successful append: not durable until the next sync/commit, so only raise the ceiling.
     fn appended(&mut self, item: Item) {
         self.values.push(item);
         self.max_size = self.max_size.max(self.values.len() as u64);
     }
 
-    /// A failed append: the item may have partially persisted, so widen the size ceiling only.
+    /// Failed append: the item may have partially persisted, so only raise the ceiling.
     fn append_failed(&mut self, size_before: u64) {
         self.max_size = self.max_size.max(size_before + 1);
     }
 
-    /// Sync makes the whole in-memory state durable: size, content, and pruning boundary are all
-    /// pinned exactly.
+    /// Sync pins size, content, and pruning boundary exactly.
     fn synced(&mut self, bounds: Range<u64>) {
         self.durable_len = bounds.end;
         self.max_size = bounds.end;
@@ -256,32 +246,26 @@ impl Expected {
         self.max_prune = bounds.start;
     }
 
-    /// Commit makes appended data durable but not the pruning boundary, so pin only the size.
+    /// Commit pins the size but not the pruning boundary.
     fn committed(&mut self, size: u64) {
         self.durable_len = size;
         self.max_size = size;
     }
 
-    /// Rewind to `target`: data below `target` is untouched on disk, while the truncated tail may
-    /// or may not persist, so the recovered size ranges over `[target, prev_size]`.
+    /// Rewind: the truncated tail may or may not persist, so recovered size is in `[target, prev]`.
     fn rewound(&mut self, target: u64, prev_size: u64) {
         self.durable_len = self.durable_len.min(target);
         self.max_size = self.max_size.max(prev_size);
     }
 
-    /// A successful prune durably advances the pruning boundary to `boundary`. Pruning deletes whole
-    /// section blobs from storage (`context.remove`, not buffered behind a sync), and recovery
-    /// rebuilds the boundary forward from the surviving blobs, so a reopen can never resurrect data
-    /// below `boundary`. Pin the boundary exactly. (The boundary only moves forward, so this never
-    /// lowers `durable_prune`.)
+    /// Successful prune durably deletes whole sections, so recovery can never reopen below
+    /// `boundary`; pin it exactly. (The boundary only moves forward.)
     fn pruned(&mut self, boundary: u64) {
         self.durable_prune = boundary;
         self.max_prune = boundary;
     }
 
-    /// A failed prune may have deleted some sections before erroring (sections go oldest-first), so
-    /// the boundary may have advanced as far as `ceiling` but is not guaranteed to have moved. Raise
-    /// only the ceiling.
+    /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not for certain.
     fn prune_failed(&mut self, ceiling: u64) {
         self.max_prune = self.max_prune.max(ceiling);
     }
@@ -379,8 +363,6 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn commit(&mut self) -> Result<(), Error> {
-        // Unlike `sync`, `commit` flushes without advancing the watermark, so recovery must walk
-        // blob lengths; exercise that path here.
         FixedJournal::commit(self).await
     }
 
@@ -510,9 +492,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
         expected.max_prune
     );
 
-    // Below the recovered boundary every position is pruned, so reads must return `ItemPruned`.
-    // Using the actual boundary (not the `durable_prune` floor) makes the pruned vs. in-bounds
-    // split exact, so the loop below can require everything in bounds to be readable.
+    // Below the boundary every position is pruned.
     for pos in 0..boundary {
         match journal.read(pos).await {
             Err(Error::ItemPruned(_)) => {}
@@ -520,9 +500,8 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
         }
     }
 
-    // Within bounds [boundary, size) every position must be readable (never pruned). Content is
-    // pinned for the durable prefix; the volatile tail is readable but its content is unconstrained
-    // (torn writes / unsynced rewind). Reads are collected for the replay cross-check.
+    // Within [boundary, size) every position is readable; content is pinned only for the durable
+    // prefix. Reads are kept for the replay cross-check.
     let mut read_items = Vec::with_capacity((size - boundary) as usize);
     for pos in boundary..size {
         let item = journal
@@ -538,9 +517,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
         read_items.push(item);
     }
 
-    // Replay must yield exactly [boundary, size) contiguously and agree with `read()` at every
-    // position. The cross-check covers the whole range, including the volatile tail where neither
-    // path is checked against `expected`, so a read/replay divergence cannot slip through.
+    // Replay must yield exactly [boundary, size) contiguously and agree with `read()` everywhere.
     let items = journal
         .replay(NZUsize!(VERIFY_REPLAY_BUF), boundary)
         .await
@@ -561,9 +538,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
     }
 }
 
-/// Read the recovered journal back into an `Expected` describing exactly that state. The data is on
-/// disk and durable against the next unclean drop, except where a later rewind/prune/torn-append
-/// touches it (handled by the per-op update rules).
+/// Read the recovered journal back into an `Expected` pinned to exactly that state.
 async fn observe<J: FuzzJournal>(journal: &J) -> Expected {
     let bounds = journal.bounds().await;
     let items = journal
@@ -583,8 +558,8 @@ async fn observe<J: FuzzJournal>(journal: &J) -> Expected {
     }
 }
 
-/// Confirm the journal is usable after opening by appending a sentinel and reading it back. Runs
-/// fault-free, so it must succeed; the sentinel is unsynced, so it only widens the size ceiling.
+/// Confirm the journal accepts and reads back a sentinel after opening. Recorded as a ceiling-only
+/// append, not pinned: an unsynced append may flush durably, so recovery may or may not surface it.
 async fn assert_round_trip<J: FuzzJournal>(journal: &mut J, expected: &mut Expected) {
     let size = journal.size().await;
     let sentinel = Item::from([0xCDu8; ITEM_SIZE]);
@@ -601,15 +576,12 @@ async fn assert_round_trip<J: FuzzJournal>(journal: &mut J, expected: &mut Expec
     expected.appended(sentinel);
 }
 
-/// Check that `read(pos)` returned the right result for where `pos` sits, and panic if it did not.
-///
-/// Relative to the live range `bounds` (= `[start, end)`):
+/// Check `read(pos)` against `bounds` (= `[start, end)`), panicking on a wrong result:
 ///   - live (`start <= pos < end`) -> `Ok(item)`,
 ///   - pruned (`pos < start`)      -> `Err(ItemPruned)`,
 ///   - past the end (`pos >= end`) -> `Err(ItemOutOfRange)`.
 ///
-/// Anything else is a real bug: no read faults are injected and `read` is a pure lookup, so it
-/// cannot legitimately fail here (unlike `replay`, which repairs the tail). A bad read panics.
+/// No read faults are injected and `read` is a pure lookup, so any other result is a real bug.
 fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
     let ok = match &result {
         Ok(_) => bounds.contains(&pos),
@@ -624,15 +596,10 @@ fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
     );
 }
 
-/// Whether the cycle should continue after a raw `replay(start_pos)` at an arbitrary start.
-///
-/// `replay` validates the start before doing any I/O, so an out-of-range start is deterministic:
-///   - `start_pos < start` -> `Err(ItemPruned)`,
-///   - `start_pos > end`   -> `Err(ItemOutOfRange)` (`start_pos == end` is in range: an empty replay).
-///
-/// An in-range start either succeeds or hits a legitimate tail-repair I/O fault (`replay` resizes
-/// and syncs under faults); the fault ends the cycle. Success out of range, the wrong validation
-/// error, or a validation error for an in-range start is a bug, so panic.
+/// Whether the cycle continues after a raw `replay(start_pos)`. Validation precedes any I/O, so an
+/// out-of-range start is deterministic: `< start` -> `ItemPruned`, `> end` -> `ItemOutOfRange`
+/// (`== end` is in range). An in-range start succeeds or hits a tail-repair I/O fault (ends the
+/// cycle); any other result is a bug.
 fn should_continue_raw_replay(
     result: Result<Vec<(u64, Item)>, Error>,
     start_pos: u64,
@@ -655,8 +622,6 @@ fn should_continue_raw_replay(
 }
 
 /// Assert an in-bounds `replay(start)` returned the full contiguous suffix `[start, bounds.end)`.
-/// The `Append` write buffer serves replay from its logical view, so buffered (unsynced) tail items
-/// are included; the recovered length equals `bounds.end - start` exactly.
 fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) {
     assert_eq!(
         items.len() as u64,
@@ -703,10 +668,7 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Read { pos } => {
-                // Exercise a guaranteed in-bounds read each cycle (the raw `pos` may be out of
-                // bounds), then the raw read to cover the pruned / out-of-range paths. Reads inject
-                // no faults and are pure lookups, so every outcome is determined by `bounds` and is
-                // asserted exactly; a read never ends the cycle.
+                // A guaranteed in-bounds read, then the raw read for the pruned/out-of-range paths.
                 let bounds = journal.bounds().await;
                 if !bounds.is_empty() {
                     let target = bounds.start + (*pos % (bounds.end - bounds.start));
@@ -737,9 +699,8 @@ async fn run_ops<J: FuzzJournal>(
                 if bounds.is_empty() {
                     true
                 } else {
-                    // Usually clamp to a retained position in [start, end], which is always a valid
-                    // rewind target; occasionally pass the raw value to exercise the validation
-                    // paths (target past the end, or below the pruning boundary).
+                    // Usually clamp to a valid retained target; occasionally pass the raw value to
+                    // exercise the validation paths.
                     let use_raw_target = *size % 8 == 0;
                     let target = if use_raw_target {
                         *size
@@ -753,11 +714,8 @@ async fn run_ops<J: FuzzJournal>(
                             expected.values.truncate(target as usize);
                             true
                         }
-                        // Validation error (target out of range): rejected before any mutation, so
-                        // the journal is unchanged and the expectation must stay put (lowering
-                        // durable_len would mask later loss of still-durable data). Only the raw
-                        // target can be invalid; a clamped target is always a retained position, so
-                        // a validation error there is a bug.
+                        // Validation error: rejected before any mutation, so leave the expectation
+                        // put. Only a raw target can be invalid; on a clamped target this is a bug.
                         Err(e @ (Error::InvalidRewind(_) | Error::ItemPruned(_))) => {
                             assert!(
                                 use_raw_target,
@@ -778,8 +736,7 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Prune { min_pos } => {
-                // Pass the raw position: `prune` caps it to the size internally, so this also covers
-                // the prune-past-size path. The capped target bounds how far the boundary can move.
+                // Raw position: `prune` caps it to size internally, covering prune-past-size.
                 let size = journal.size().await;
                 match journal.prune(*min_pos).await {
                     Ok(_) => {
@@ -788,8 +745,7 @@ async fn run_ops<J: FuzzJournal>(
                         true
                     }
                     Err(_) => {
-                        // Pruning removes whole sections, so a failed prune can advance the boundary
-                        // at most to the section-aligned floor of the capped target.
+                        // A failed prune advances the boundary at most to the section floor.
                         let capped = (*min_pos).min(size);
                         let section_floor =
                             capped / params.items_per_section * params.items_per_section;
@@ -800,17 +756,14 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Replay { buffer, start_pos } => {
-                // The clamped (in-bounds) replay must return the full contiguous suffix matching
-                // `read()`, or hit a legitimate tail-repair I/O fault; the raw replay probes the
-                // validation paths.
+                // The clamped (in-bounds) replay must return the full suffix matching `read()`, or
+                // hit a tail-repair I/O fault; the raw replay probes the validation paths.
                 let bounds = journal.bounds().await;
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
                 let clamped_ok = match journal.replay(NZUsize!(*buffer), clamped).await {
                     Ok(items) => {
                         assert_replay_suffix(&items, clamped, &bounds);
-                        // Cross-check replay content against `read()` (reads are fault-free here),
-                        // so a start-dependent replay regression cannot pass as long as it returns
-                        // `Ok`.
+                        // Cross-check replay content against `read()`.
                         for (pos, item) in &items {
                             let via_read = journal.read(*pos).await.unwrap_or_else(|e| {
                                 panic!("read({pos}) cross-check during replay: {e:?}")
@@ -835,7 +788,7 @@ async fn run_ops<J: FuzzJournal>(
                     )
             }
 
-            // `split_into_cycles` strips `Crash`; treat a stray one defensively as ending the cycle.
+            // `split_into_cycles` strips `Crash`; a stray one defensively ends the cycle.
             JournalOperation::Crash => false,
         };
 
@@ -845,10 +798,8 @@ async fn run_ops<J: FuzzJournal>(
     }
 }
 
-/// Run one crash cycle: recover via `init`, verify the recovered state matches the `Expected`
-/// carried from the prior crash, `observe` the journal, prove it still works, then run the cycle's
-/// ops under faults and crash (drop). Returns the updated `Expected` and a checkpoint for the next
-/// cycle.
+/// Run one crash cycle: recover, check against `incoming`, run the ops under faults, then crash
+/// (drop). Returns the `Expected` and checkpoint for the next cycle.
 fn run_cycle<J: FuzzJournal + Send + 'static>(
     runner: deterministic::Runner,
     incoming: Expected,
@@ -936,7 +887,8 @@ where
         );
     }
 
-    // Final fault-free recovery: full verification, a clean durable round-trip, then cleanup.
+    // Final fault-free phase: verify the carried state recovers, then prove a synced round-trip is
+    // durable across an actual reopen (not just readable from the live handle), and clean up.
     deterministic::Runner::from(checkpoint).start(move |ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let mut journal = J::init(
@@ -945,9 +897,10 @@ where
         )
         .await
         .expect("final recovery should succeed");
-
         assert_matches_expected(&journal, &expected).await;
 
+        // Append a sentinel and sync it, pinning the exact durable state.
+        let mut expected = observe(&journal).await;
         let size = journal.size().await;
         let sentinel = Item::from([0xEFu8; ITEM_SIZE]);
         let pos = journal
@@ -955,7 +908,19 @@ where
             .await
             .expect("final append");
         assert_eq!(pos, size);
+        expected.appended(sentinel.clone());
         journal.sync().await.expect("final sync");
+        expected.synced(journal.bounds().await);
+        drop(journal);
+
+        // Reopen and confirm the synced sentinel survived the restart.
+        let journal = J::init(
+            ctx.child("journal_final_verify"),
+            J::config(&partition, &ctx, &params),
+        )
+        .await
+        .expect("final reopen should succeed");
+        assert_matches_expected(&journal, &expected).await;
         assert_eq!(
             journal.read(pos).await.expect("final read"),
             sentinel,
