@@ -29,7 +29,7 @@ use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
+    certificate::{mocks::Fixture, CertificateVerifier as _, ConstantProvider, Provider},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
@@ -106,6 +106,7 @@ pub struct EmptyProvider;
 impl Provider for EmptyProvider {
     type Scope = Epoch;
     type Scheme = S;
+    type All = S;
 
     fn scoped(&self, _scope: Epoch) -> Option<std::sync::Arc<S>> {
         None

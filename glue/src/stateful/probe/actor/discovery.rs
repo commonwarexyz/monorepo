@@ -12,7 +12,7 @@ use commonware_consensus::{
     types::Epoch,
     Epochable,
 };
-use commonware_cryptography::{certificate::Provider, PublicKey};
+use commonware_cryptography::{certificate::{CertificateVerifier, Provider}, PublicKey};
 use commonware_macros::select_loop;
 use commonware_p2p::{Blocker, Receiver, Recipients, Sender};
 use commonware_parallel::Strategy;
@@ -23,7 +23,7 @@ use commonware_utils::{
 };
 use futures::future::{self, Either};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 use tracing::debug;
 
 /// The discovery phase of [`Probe`](super::Probe).
@@ -36,6 +36,7 @@ where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
+    D::All: commonware_consensus::simplex::scheme::CertificateVerifier<V::Commitment>,
     V: Variant,
     T: Strategy,
     P: PublicKey,
@@ -57,6 +58,7 @@ where
     E: Spawner + CryptoRngCore + Clock + Metrics,
     S: Scheme<V::Commitment>,
     D: Provider<Scope = Epoch, Scheme = S>,
+    D::All: commonware_consensus::simplex::scheme::CertificateVerifier<V::Commitment>,
     V: Variant,
     T: Strategy,
     P: PublicKey,
@@ -192,17 +194,14 @@ where
         if proposal.epoch() < self.minimum_epoch {
             return Ok(None);
         }
-        let Some(scheme) = self.certificate_verifier(proposal.epoch()) else {
+        let Some(certificate_codec_config) = self.certificate_codec_config(proposal.epoch()) else {
             return Ok(None);
         };
-        S::Certificate::decode_cfg(&mut message, &scheme.certificate_codec_config()).map(
-            |certificate| {
-                Some(Finalization {
-                    proposal,
-                    certificate,
-                })
-            },
-        )
+        let certificate = S::Certificate::decode_cfg(&mut message, &certificate_codec_config)?;
+        Ok(Some(Finalization {
+            proposal,
+            certificate,
+        }))
     }
 
     /// Verifies a [`Finalization`] from `peer`.
@@ -216,12 +215,13 @@ where
     ) -> Option<(P, Finalization<S, V::Commitment>)> {
         // Verify against the certificate scheme for the finalization's epoch. If no scheme is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let scheme = self.certificate_verifier(finalization.epoch())?;
-        if !finalization.verify(
-            self.context.as_present_mut(),
-            scheme.as_ref(),
-            &self.strategy,
-        ) {
+        let verified = if let Some(verifier) = self.provider.all() {
+            finalization.verify(self.context.as_present_mut(), verifier.as_ref(), &self.strategy)
+        } else {
+            let scheme = self.provider.scoped(finalization.epoch())?;
+            finalization.verify(self.context.as_present_mut(), scheme.as_ref(), &self.strategy)
+        };
+        if !verified {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
             return None;
         }
@@ -281,10 +281,19 @@ where
         );
     }
 
-    /// Returns a scheme suitable for verifying certificates at `epoch`, preferring a global
-    /// verifier and falling back to the epoch-scoped scheme.
-    fn certificate_verifier(&self, epoch: Epoch) -> Option<Arc<S>> {
-        self.provider.all().or_else(|| self.provider.scoped(epoch))
+    /// Returns the certificate codec config for `epoch`, preferring a global verifier.
+    fn certificate_codec_config(
+        &self,
+        epoch: Epoch,
+    ) -> Option<<S::Certificate as commonware_codec::Read>::Cfg> {
+        self.provider
+            .all()
+            .map(|verifier| verifier.certificate_codec_config())
+            .or_else(|| {
+                self.provider
+                    .scoped(epoch)
+                    .map(|scheme| scheme.certificate_codec_config())
+            })
     }
 
     /// Returns the number of distinct peer replies (`f + 1`) required for `epoch`.

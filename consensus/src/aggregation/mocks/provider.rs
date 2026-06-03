@@ -42,6 +42,7 @@ impl<S: Scheme> Provider<S> {
 impl<S: Scheme> certificate::Provider for Provider<S> {
     type Scope = Epoch;
     type Scheme = S;
+    type All = S;
 
     fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock();

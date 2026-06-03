@@ -105,12 +105,30 @@ impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
     }
 }
 
+/// Marker trait for certificate verifiers compatible with `simplex`.
+///
+/// This trait binds a [`certificate::CertificateVerifier`] to the [`Subject`] subject type
+/// used by the simplex protocol. It is automatically implemented for any verifier whose subject
+/// type matches `Subject<'a, D>`.
+pub trait CertificateVerifier<D: Digest>:
+    for<'a> certificate::CertificateVerifier<Subject<'a, D> = Subject<'a, D>>
+{
+}
+
+impl<D: Digest, S> CertificateVerifier<D> for S where
+    S: for<'a> certificate::CertificateVerifier<Subject<'a, D> = Subject<'a, D>>
+{
+}
+
 /// Marker trait for signing schemes compatible with `simplex`.
 ///
 /// This trait binds a [`certificate::Scheme`] to the [`Subject`] subject type
 /// used by the simplex protocol. It is automatically implemented for any scheme
 /// whose subject type matches `Subject<'a, D>`.
-pub trait Scheme<D: Digest>: for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>> {}
+pub trait Scheme<D: Digest>:
+    CertificateVerifier<D> + for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>>
+{
+}
 
 impl<D: Digest, S> Scheme<D> for S where
     S: for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>>

@@ -8,7 +8,7 @@ use commonware_cryptography::{
         dkg::feldman_desmedt as dkg,
         primitives::variant::{MinSig, Variant},
     },
-    certificate::{self, Scheme},
+    certificate::{self, CertificateOnly, Scheme},
     ed25519, PublicKey, Signer,
 };
 use commonware_utils::sync::Mutex;
@@ -26,7 +26,7 @@ pub type EdScheme = simplex::scheme::ed25519::Scheme;
 pub struct Provider<S: Scheme, C: Signer> {
     schemes: Arc<Mutex<HashMap<Epoch, Arc<S>>>>,
     namespace: Vec<u8>,
-    certificate_verifier: Option<Arc<S>>,
+    certificate_verifier: Option<Arc<CertificateOnly<S>>>,
     signer: C,
 }
 
@@ -35,7 +35,8 @@ impl<S: Scheme, C: Signer> Provider<S, C> {
         Self {
             schemes: Arc::new(Mutex::new(HashMap::new())),
             namespace,
-            certificate_verifier: certificate_verifier.map(Arc::new),
+            certificate_verifier: certificate_verifier
+                .map(|verifier| Arc::new(CertificateOnly::new(verifier))),
             signer,
         }
     }
@@ -62,13 +63,14 @@ impl<S: Scheme, C: Signer> Provider<S, C> {
 impl<S: Scheme, C: Signer> certificate::Provider for Provider<S, C> {
     type Scope = Epoch;
     type Scheme = S;
+    type All = CertificateOnly<S>;
 
     fn scoped(&self, epoch: Epoch) -> Option<Arc<S>> {
         let schemes = self.schemes.lock();
         schemes.get(&epoch).cloned()
     }
 
-    fn all(&self) -> Option<Arc<S>> {
+    fn all(&self) -> Option<Arc<Self::All>> {
         self.certificate_verifier.clone()
     }
 }

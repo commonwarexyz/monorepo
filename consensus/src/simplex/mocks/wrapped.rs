@@ -56,7 +56,7 @@ impl<S> Scheme<S> {
 
     fn corrupt_signature<D>(
         inner: &S,
-        subject: <S as commonware_cryptography::certificate::Scheme>::Subject<'_, D>,
+        subject: <S as commonware_cryptography::certificate::CertificateVerifier>::Subject<'_, D>,
         signer: Participant,
         signature: &<S as commonware_cryptography::certificate::Scheme>::Signature,
     ) -> Lazy<<S as commonware_cryptography::certificate::Scheme>::Signature>
@@ -118,7 +118,7 @@ where
     fn build(
         self,
         participants: &commonware_utils::ordered::Set<
-            <Scheme<S> as commonware_cryptography::certificate::Scheme>::PublicKey,
+            <Scheme<S> as commonware_cryptography::certificate::CertificateVerifier>::PublicKey,
         >,
     ) -> Self::Elector {
         Elector {
@@ -137,10 +137,47 @@ where
         &self,
         round: Round,
         certificate: Option<
-            &<Scheme<S> as commonware_cryptography::certificate::Scheme>::Certificate,
+            &<Scheme<S> as commonware_cryptography::certificate::CertificateVerifier>::Certificate,
         >,
     ) -> Participant {
         self.inner.elect(round, certificate)
+    }
+}
+
+impl<S> commonware_cryptography::certificate::CertificateVerifier for Scheme<S>
+where
+    S: commonware_cryptography::certificate::Scheme,
+{
+    type Subject<'a, D: commonware_cryptography::Digest> = S::Subject<'a, D>;
+    type PublicKey = S::PublicKey;
+    type Certificate = S::Certificate;
+
+    fn verify_certificate<R, D, M>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        certificate: &Self::Certificate,
+        strategy: &impl commonware_parallel::Strategy,
+    ) -> bool
+    where
+        R: rand_core::CryptoRngCore,
+        D: commonware_cryptography::Digest,
+        M: Faults,
+    {
+        self.inner
+            .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
+    }
+
+    fn is_batchable() -> bool {
+        S::is_batchable()
+    }
+
+    fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+        self.inner.certificate_codec_config()
+    }
+
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+        S::certificate_codec_config_unbounded()
     }
 }
 
@@ -148,10 +185,7 @@ impl<S> commonware_cryptography::certificate::Scheme for Scheme<S>
 where
     S: commonware_cryptography::certificate::Scheme,
 {
-    type Subject<'a, D: commonware_cryptography::Digest> = S::Subject<'a, D>;
-    type PublicKey = S::PublicKey;
     type Signature = S::Signature;
-    type Certificate = S::Certificate;
 
     fn me(&self) -> Option<Participant> {
         self.inner.me()
@@ -254,35 +288,7 @@ where
         )
     }
 
-    fn verify_certificate<R, D, M>(
-        &self,
-        rng: &mut R,
-        subject: Self::Subject<'_, D>,
-        certificate: &Self::Certificate,
-        strategy: &impl commonware_parallel::Strategy,
-    ) -> bool
-    where
-        R: rand_core::CryptoRngCore,
-        D: commonware_cryptography::Digest,
-        M: Faults,
-    {
-        self.inner
-            .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
-    }
-
     fn is_attributable() -> bool {
         S::is_attributable()
-    }
-
-    fn is_batchable() -> bool {
-        S::is_batchable()
-    }
-
-    fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-        self.inner.certificate_codec_config()
-    }
-
-    fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-        S::certificate_codec_config_unbounded()
     }
 }

@@ -12,7 +12,7 @@ use crate::{
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
-    certificate::{Provider, Scheme},
+    certificate::{CertificateVerifier, Provider, Scheme},
     Digest,
 };
 use commonware_macros::select_loop;
@@ -74,7 +74,7 @@ pub struct Engine<
     A: Automaton<Context = Height, Digest = D>,
     Z: Reporter<Activity = Activity<P::Scheme, D>>,
     M: Monitor<Index = Epoch>,
-    B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+    B: Blocker<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
     T: Strategy,
 > {
     // ---------- Interfaces ----------
@@ -114,7 +114,7 @@ pub struct Engine<
     tip: Height,
 
     /// Tracks the tips of all validators.
-    safe_tip: SafeTip<<P::Scheme as Scheme>::PublicKey>,
+    safe_tip: SafeTip<<P::Scheme as CertificateVerifier>::PublicKey>,
 
     /// The keys represent the set of all `Height` values for which we are attempting to form a
     /// certificate, but do not yet have one. Values may be [Pending::Unverified] or [Pending::Verified],
@@ -157,7 +157,7 @@ impl<
         A: Automaton<Context = Height, Digest = D>,
         Z: Reporter<Activity = Activity<P::Scheme, D>>,
         M: Monitor<Index = Epoch>,
-        B: Blocker<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+        B: Blocker<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
         T: Strategy,
     > Engine<E, P, D, A, Z, M, B, T>
 {
@@ -215,8 +215,8 @@ impl<
     pub fn start(
         mut self,
         network: (
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-            impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Sender<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+            impl Receiver<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
         ),
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(network))
@@ -226,8 +226,8 @@ impl<
     async fn run(
         mut self,
         network: (
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
-            impl Receiver<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Sender<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
+            impl Receiver<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
         ),
     ) {
         let (mut sender, mut receiver) = wrap(
@@ -435,7 +435,7 @@ impl<
         height: Height,
         digest: D,
         sender: &mut WrappedSender<
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Sender<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -571,7 +571,7 @@ impl<
         &mut self,
         height: Height,
         sender: &mut WrappedSender<
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Sender<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) -> Result<(), Error> {
@@ -611,7 +611,7 @@ impl<
     fn validate_ack(
         &mut self,
         ack: &Ack<P::Scheme, D>,
-        sender: &<P::Scheme as Scheme>::PublicKey,
+        sender: &<P::Scheme as CertificateVerifier>::PublicKey,
     ) -> Result<(), Error> {
         // Validate epoch
         {
@@ -725,7 +725,7 @@ impl<
         &mut self,
         ack: Ack<P::Scheme, D>,
         sender: &mut WrappedSender<
-            impl Sender<PublicKey = <P::Scheme as Scheme>::PublicKey>,
+            impl Sender<PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
             TipAck<P::Scheme, D>,
         >,
     ) {

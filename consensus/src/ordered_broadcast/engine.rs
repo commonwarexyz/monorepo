@@ -21,7 +21,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    certificate::{Provider, Scheme},
+    certificate::{CertificateVerifier, Provider, Scheme},
     Digest, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
@@ -582,7 +582,7 @@ impl<
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
-        certificate: <P::Scheme as Scheme>::Certificate,
+        certificate: <P::Scheme as CertificateVerifier>::Certificate,
     ) {
         // Set the certificate, returning early if it already exists
         if !self.ack_manager.add_certificate(
@@ -904,7 +904,7 @@ impl<
     fn validate_ack(
         &mut self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
-        sender: &<P::Scheme as Scheme>::PublicKey,
+        sender: &<P::Scheme as CertificateVerifier>::PublicKey,
     ) -> Result<(), Error> {
         // Validate chunk
         self.validate_chunk(&ack.chunk, ack.epoch)?;

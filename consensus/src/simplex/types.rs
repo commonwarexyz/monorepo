@@ -942,7 +942,7 @@ pub fn verify_certificates<'a, R, S, D>(
 ) -> Vec<bool>
 where
     R: CryptoRngCore,
-    S: scheme::Scheme<D>,
+    S: scheme::CertificateVerifier<D>,
     D: Digest,
 {
     scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
@@ -986,12 +986,9 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     pub fn verify<R: CryptoRngCore>(
         &self,
         rng: &mut R,
-        scheme: &S,
+        scheme: &impl scheme::CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
-    ) -> bool
-    where
-        S: scheme::Scheme<D>,
-    {
+    ) -> bool {
         scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Notarize {
@@ -1221,12 +1218,9 @@ impl<S: Scheme> Nullification<S> {
     pub fn verify<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
-        scheme: &S,
+        scheme: &impl scheme::CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
-    ) -> bool
-    where
-        S: scheme::Scheme<D>,
-    {
+    ) -> bool {
         scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Nullify { round: self.round },
@@ -1469,12 +1463,9 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     pub fn verify<R: CryptoRngCore>(
         &self,
         rng: &mut R,
-        scheme: &S,
+        scheme: &impl scheme::CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
-    ) -> bool
-    where
-        S: scheme::Scheme<D>,
-    {
+    ) -> bool {
         scheme.verify_certificate::<_, D, N3f1>(
             rng,
             Subject::Finalize {

@@ -146,7 +146,8 @@ mod test {
     };
     use commonware_cryptography::{
         certificate::{
-            mocks::Fixture, Attestation, ConstantProvider, Provider, Scheme as CertificateScheme,
+            mocks::Fixture, Attestation, CertificateOnly, CertificateVerifier, ConstantProvider,
+            Provider, Scheme as CertificateScheme,
         },
         ed25519,
         sha256::Digest as Sha256Digest,
@@ -299,6 +300,7 @@ mod test {
     impl Provider for EpochProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
+        type All = Scheme;
 
         fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
             self.0.lock().get(&scope).cloned()
@@ -332,12 +334,44 @@ mod test {
         }
     }
 
-    impl CertificateScheme for MaybeEnumerableScheme {
+    impl CertificateVerifier for MaybeEnumerableScheme {
         type Subject<'a, D: commonware_cryptography::Digest> =
             commonware_consensus::simplex::types::Subject<'a, D>;
         type PublicKey = ed25519::PublicKey;
+        type Certificate = <Scheme as CertificateVerifier>::Certificate;
+
+        fn verify_certificate<R, D, M>(
+            &self,
+            rng: &mut R,
+            subject: Self::Subject<'_, D>,
+            certificate: &Self::Certificate,
+            strategy: &impl ParallelStrategy,
+        ) -> bool
+        where
+            R: rand_core::CryptoRngCore,
+            D: commonware_cryptography::Digest,
+            M: commonware_utils::Faults,
+        {
+            self.inner
+                .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
+        }
+
+        fn is_batchable() -> bool {
+            Scheme::is_batchable()
+        }
+
+        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+            self.inner.certificate_codec_config()
+        }
+
+        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
+        {
+            Scheme::certificate_codec_config_unbounded()
+        }
+    }
+
+    impl CertificateScheme for MaybeEnumerableScheme {
         type Signature = <Scheme as CertificateScheme>::Signature;
-        type Certificate = <Scheme as CertificateScheme>::Certificate;
 
         fn me(&self) -> Option<commonware_utils::Participant> {
             self.inner.me()
@@ -393,56 +427,28 @@ mod test {
             )
         }
 
-        fn verify_certificate<R, D, M>(
-            &self,
-            rng: &mut R,
-            subject: Self::Subject<'_, D>,
-            certificate: &Self::Certificate,
-            strategy: &impl ParallelStrategy,
-        ) -> bool
-        where
-            R: rand_core::CryptoRngCore,
-            D: commonware_cryptography::Digest,
-            M: commonware_utils::Faults,
-        {
-            self.inner
-                .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
-        }
-
         fn is_attributable() -> bool {
             Scheme::is_attributable()
-        }
-
-        fn is_batchable() -> bool {
-            Scheme::is_batchable()
-        }
-
-        fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-            self.inner.certificate_codec_config()
-        }
-
-        fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg
-        {
-            Scheme::certificate_codec_config_unbounded()
         }
     }
 
     /// Provides a participant-less all-epoch verifier plus an epoch-scoped committee.
     #[derive(Clone)]
     struct ParticipantlessAllProvider {
-        all: Arc<MaybeEnumerableScheme>,
+        all: Arc<CertificateOnly<MaybeEnumerableScheme>>,
         scoped: Arc<MaybeEnumerableScheme>,
     }
 
     impl Provider for ParticipantlessAllProvider {
         type Scope = Epoch;
         type Scheme = MaybeEnumerableScheme;
+        type All = CertificateOnly<MaybeEnumerableScheme>;
 
         fn scoped(&self, _: Epoch) -> Option<Arc<MaybeEnumerableScheme>> {
             Some(self.scoped.clone())
         }
 
-        fn all(&self) -> Option<Arc<MaybeEnumerableScheme>> {
+        fn all(&self) -> Option<Arc<Self::All>> {
             Some(self.all.clone())
         }
     }
@@ -499,6 +505,7 @@ mod test {
         ) -> Self
         where
             D: Provider<Scope = Epoch, Scheme = Scheme>,
+            D::All: commonware_consensus::simplex::scheme::CertificateVerifier<Sha256Digest>,
             F: Fn(&Scheme) -> D,
         {
             let mut rng = test_rng();
@@ -1314,7 +1321,10 @@ mod test {
                 .map(|scheme| MaybeEnumerableScheme::new(scheme, true))
                 .collect();
             let provider = ParticipantlessAllProvider {
-                all: Arc::new(MaybeEnumerableScheme::new(verifier.clone(), false)),
+                all: Arc::new(CertificateOnly::new(MaybeEnumerableScheme::new(
+                    verifier.clone(),
+                    false,
+                ))),
                 scoped: Arc::new(MaybeEnumerableScheme::new(verifier, true)),
             };
 

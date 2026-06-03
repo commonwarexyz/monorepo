@@ -1771,6 +1771,7 @@ mod tests {
     impl Provider for MultiEpochProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
+        type All = Scheme;
 
         fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
             self.schemes.get(&scope).cloned()
@@ -1797,6 +1798,7 @@ mod tests {
     impl Provider for ChurningProvider {
         type Scope = Epoch;
         type Scheme = Scheme;
+        type All = Scheme;
 
         fn scoped(&self, scope: Epoch) -> Option<Arc<Scheme>> {
             if scope != Epoch::zero() {

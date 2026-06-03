@@ -94,7 +94,7 @@ mod tests {
     use commonware_codec::{Encode, FixedSize};
     use commonware_coding::{CodecConfig, Config as CodingConfig, ReedSolomon};
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+        certificate::{CertificateVerifier as _, mocks::Fixture, ConstantProvider},
         sha256::Sha256,
         Committable, Digestible, Hasher,
     };

@@ -100,7 +100,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
+    certificate::{CertificateVerifier, Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher,
 };
 use commonware_macros::select;
@@ -125,7 +125,7 @@ use tracing::{debug, warn};
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
-    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
@@ -136,9 +136,9 @@ where
     pub application: A,
     /// Mailbox for communicating with the marshal engine.
     pub marshal:
-        core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
+        core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateVerifier>::PublicKey>>,
     /// Mailbox for communicating with the shards engine.
-    pub shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
+    pub shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateVerifier>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
     pub scheme_provider: Z,
     /// Strategy for parallel operations.
@@ -157,7 +157,7 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
@@ -166,8 +166,8 @@ where
 {
     context: Arc<AsyncMutex<E>>,
     application: A,
-    marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>>,
-    shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateScheme>::PublicKey>,
+    marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as CertificateVerifier>::PublicKey>>,
+    shards: shards::Mailbox<B, C, H, <Z::Scheme as CertificateVerifier>::PublicKey>,
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
@@ -184,7 +184,7 @@ impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment>>,
@@ -217,7 +217,7 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
@@ -313,7 +313,7 @@ where
     /// extract its embedded context.
     async fn deferred_verify(
         &mut self,
-        consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        consensus_context: Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>,
         commitment: Commitment,
         prefetched_block: Option<CodedBlock<B, C, H>>,
         stage: Stage,
@@ -627,7 +627,7 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
@@ -637,7 +637,7 @@ where
     ES: Epocher,
 {
     type Digest = Commitment;
-    type Context = Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>;
+    type Context = Context<Self::Digest, <Z::Scheme as CertificateVerifier>::PublicKey>;
 
     /// Proposes a new block or re-proposes the epoch boundary block.
     ///
@@ -651,7 +651,7 @@ where
     /// on the block surviving restart.
     async fn propose(
         &mut self,
-        consensus_context: Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        consensus_context: Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -847,7 +847,7 @@ where
     /// start block verification early (hidden behind shard validity and network latency).
     async fn verify(
         &mut self,
-        consensus_context: Context<Self::Digest, <Z::Scheme as CertificateScheme>::PublicKey>,
+        consensus_context: Context<Self::Digest, <Z::Scheme as CertificateVerifier>::PublicKey>,
         payload: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // If there's no scheme for the current epoch, we cannot vote on the proposal.
@@ -1032,7 +1032,7 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
@@ -1058,7 +1058,7 @@ where
     A: Application<
         E,
         Block = B,
-        Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+        Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
@@ -1068,7 +1068,7 @@ where
     ES: Epocher,
 {
     type Digest = Commitment;
-    type PublicKey = <Z::Scheme as CertificateScheme>::PublicKey;
+    type PublicKey = <Z::Scheme as CertificateVerifier>::PublicKey;
     type Plan = Plan<Self::PublicKey>;
 
     fn broadcast(&mut self, commitment: Self::Digest, plan: Self::Plan) -> Feedback {
@@ -1089,7 +1089,7 @@ where
     A: Application<
             E,
             Block = B,
-            Context = Context<Commitment, <Z::Scheme as CertificateScheme>::PublicKey>,
+            Context = Context<Commitment, <Z::Scheme as CertificateVerifier>::PublicKey>,
         > + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,

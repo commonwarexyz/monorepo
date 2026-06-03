@@ -26,7 +26,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
+    certificate::{CertificateVerifier, Provider},
     Digestible,
 };
 use commonware_macros::select_loop;
@@ -47,7 +47,7 @@ use commonware_utils::{
 };
 use futures::{future::join_all, try_join};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -79,6 +79,7 @@ where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
+    P::All: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
         Commitment = V::Commitment,
@@ -144,6 +145,7 @@ where
     E: BufferPooler + CryptoRngCore + Spawner + Metrics + Clock + Storage,
     V: Variant,
     P: Provider<Scope = Epoch, Scheme: Scheme<V::Commitment>>,
+    P::All: crate::simplex::scheme::CertificateVerifier<V::Commitment>,
     FC: Certificates<
         BlockDigest = <V::Block as Digestible>::Digest,
         Commitment = V::Commitment,
@@ -303,9 +305,9 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
         >,
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver))
     }
@@ -320,12 +322,12 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
         >,
     {
         self.start(
             application,
-            NoBuffer::<<P::Scheme as CertificateScheme>::PublicKey>::new(),
+            NoBuffer::<<P::Scheme as CertificateVerifier>::PublicKey>::new(),
             resolver,
         )
     }
@@ -340,9 +342,9 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
         >,
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
@@ -509,11 +511,11 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as CertificateVerifier>::PublicKey,
         >,
     {
         if message.response_closed() {
@@ -782,7 +784,7 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let mut needs_sync = false;
@@ -995,7 +997,7 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateVerifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let round = finalization.round();
@@ -1008,11 +1010,16 @@ where
             return;
         }
 
-        let Some(scheme) = self.get_scheme_certificate_verifier(finalization.epoch()) else {
-            panic!("floor finalization epoch unavailable");
+        let verified = if let Some(verifier) = self.provider.all() {
+            finalization.verify(self.context.as_mut(), verifier.as_ref(), &self.strategy)
+        } else {
+            let Some(scheme) = self.provider.scoped(finalization.epoch()) else {
+                panic!("floor finalization epoch unavailable");
+            };
+            finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy)
         };
         assert!(
-            finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy),
+            verified,
             "floor finalization must verify"
         );
 
@@ -1258,7 +1265,7 @@ where
                     response.send_lossy(true);
                     return false;
                 };
-                let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
+                let Some(certificate_codec_config) = self.certificate_codec_config(bounds.epoch()) else {
                     debug!(
                         %height,
                         floor = %self.floor.processed_height(),
@@ -1268,7 +1275,6 @@ where
                     return false;
                 };
 
-                let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
@@ -1307,7 +1313,7 @@ where
                 false
             }
             Key::Notarized { round } => {
-                let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
+                let Some(certificate_codec_config) = self.certificate_codec_config(round.epoch()) else {
                     debug!(
                         ?round,
                         floor = %self.floor.processed_height(),
@@ -1317,7 +1323,6 @@ where
                     return false;
                 };
 
-                let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(notarization) =
                     Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
@@ -1334,8 +1339,8 @@ where
                     return false;
                 }
 
-                // `V::check_payload` requires a scoped provider, and `get_scheme_certificate_verifier`
-                // may use an all-epoch provider.
+                // `V::check_payload` requires a scoped provider, while decoding may use an
+                // all-epoch verifier.
                 let Some(scheme) = self.provider.scoped(notarization.epoch()) else {
                     debug!(
                         ?round,
@@ -1405,10 +1410,10 @@ where
 
         // Batch verify using the all-epoch verifier if available, otherwise
         // batch verify per epoch using scoped verifiers.
-        let verified = if let Some(scheme) = self.provider.all() {
+        let verified = if let Some(verifier) = self.provider.all() {
             verify_certificates(
                 self.context.as_mut(),
-                scheme.as_ref(),
+                verifier.as_ref(),
                 &certs,
                 &self.strategy,
             )
@@ -1541,12 +1546,19 @@ where
         wrote
     }
 
-    /// Returns a scheme suitable for verifying certificates at the given epoch.
-    ///
-    /// Prefers a certificate verifier if available, otherwise falls back
-    /// to the scheme for the given epoch.
-    fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
-        self.provider.all().or_else(|| self.provider.scoped(epoch))
+    /// Returns the certificate codec config for `epoch`, preferring a global verifier.
+    fn certificate_codec_config(
+        &self,
+        epoch: Epoch,
+    ) -> Option<<<P::Scheme as CertificateVerifier>::Certificate as Read>::Cfg> {
+        self.provider
+            .all()
+            .map(|verifier| verifier.certificate_codec_config())
+            .or_else(|| {
+                self.provider
+                    .scoped(epoch)
+                    .map(|scheme| scheme.certificate_codec_config())
+            })
     }
 
     // -------------------- Application Dispatch --------------------

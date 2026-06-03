@@ -549,11 +549,97 @@ fn seed_message_from_subject<D: Digest>(subject: &Subject<'_, D>) -> bytes::Byte
     }
 }
 
-impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
+impl<P: PublicKey, V: Variant> certificate::CertificateVerifier for Scheme<P, V> {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = P;
-    type Signature = Signature<V>;
     type Certificate = Certificate<V>;
+
+    fn verify_certificate<R, D, M>(
+        &self,
+        rng: &mut R,
+        subject: Subject<'_, D>,
+        certificate: &Self::Certificate,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        M: Faults,
+    {
+        let Some(cert) = certificate.get() else {
+            return false;
+        };
+
+        let identity = self.identity();
+        let namespace = self.namespace();
+
+        let vote_namespace = subject.namespace(namespace);
+        let vote_message = subject.message();
+        let seed_message = seed_message_from_subject(&subject);
+
+        let entries = &[
+            (vote_namespace, vote_message.as_ref(), cert.vote_signature),
+            (&namespace.seed, seed_message.as_ref(), cert.seed_signature),
+        ];
+        batch::verify_same_signer::<_, V, _>(rng, identity, entries, strategy).is_ok()
+    }
+
+    fn verify_certificates<'a, R, D, I, M>(
+        &self,
+        rng: &mut R,
+        certificates: I,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
+        M: Faults,
+    {
+        let identity = self.identity();
+        let namespace = self.namespace();
+
+        let mut seeds = HashMap::new();
+        let mut entries: Vec<_> = Vec::new();
+
+        for (context, certificate) in certificates {
+            let Some(cert) = certificate.get() else {
+                return false;
+            };
+
+            let vote_namespace = context.namespace(namespace);
+            let vote_message = context.message();
+            entries.push((vote_namespace, vote_message, cert.vote_signature));
+
+            let seed_message = seed_message_from_subject(&context);
+            if let Some(previous) = seeds.get(&seed_message) {
+                if *previous != cert.seed_signature {
+                    return false;
+                }
+            } else {
+                entries.push((&namespace.seed, seed_message.clone(), cert.seed_signature));
+                seeds.insert(seed_message, cert.seed_signature);
+            }
+        }
+
+        let entries_refs: Vec<_> = entries
+            .iter()
+            .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))
+            .collect();
+        batch::verify_same_signer::<_, V, _>(rng, identity, &entries_refs, strategy).is_ok()
+    }
+
+    fn is_batchable() -> bool {
+        true
+    }
+
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
+
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}
+}
+
+impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
+    type Signature = Signature<V>;
 
     fn me(&self) -> Option<Participant> {
         match &self.role {
@@ -775,99 +861,9 @@ impl<P: PublicKey, V: Variant> certificate::Scheme for Scheme<P, V> {
         )
     }
 
-    fn verify_certificate<R, D, M>(
-        &self,
-        rng: &mut R,
-        subject: Subject<'_, D>,
-        certificate: &Self::Certificate,
-        strategy: &impl Strategy,
-    ) -> bool
-    where
-        R: CryptoRngCore,
-        D: Digest,
-        M: Faults,
-    {
-        let Some(cert) = certificate.get() else {
-            return false;
-        };
-
-        let identity = self.identity();
-        let namespace = self.namespace();
-
-        let vote_namespace = subject.namespace(namespace);
-        let vote_message = subject.message();
-        let seed_message = seed_message_from_subject(&subject);
-
-        let entries = &[
-            (vote_namespace, vote_message.as_ref(), cert.vote_signature),
-            (&namespace.seed, seed_message.as_ref(), cert.seed_signature),
-        ];
-        batch::verify_same_signer::<_, V, _>(rng, identity, entries, strategy).is_ok()
-    }
-
-    fn verify_certificates<'a, R, D, I, M>(
-        &self,
-        rng: &mut R,
-        certificates: I,
-        strategy: &impl Strategy,
-    ) -> bool
-    where
-        R: CryptoRngCore,
-        D: Digest,
-        I: Iterator<Item = (Subject<'a, D>, &'a Self::Certificate)>,
-        M: Faults,
-    {
-        let identity = self.identity();
-        let namespace = self.namespace();
-
-        let mut seeds = HashMap::new();
-        let mut entries: Vec<_> = Vec::new();
-
-        for (context, certificate) in certificates {
-            let Some(cert) = certificate.get() else {
-                return false;
-            };
-
-            // Prepare vote message with context-specific namespace
-            let vote_namespace = context.namespace(namespace);
-            let vote_message = context.message();
-            entries.push((vote_namespace, vote_message, cert.vote_signature));
-
-            // Seed signatures are per-round, so multiple certificates for the same round
-            // (e.g., notarization and finalization) share the same seed. We only include
-            // each unique seed once in the aggregate, but verify all certificates for a
-            // round have matching seeds.
-            let seed_message = seed_message_from_subject(&context);
-            if let Some(previous) = seeds.get(&seed_message) {
-                if *previous != cert.seed_signature {
-                    return false;
-                }
-            } else {
-                entries.push((&namespace.seed, seed_message.clone(), cert.seed_signature));
-                seeds.insert(seed_message, cert.seed_signature);
-            }
-        }
-
-        // We care about the correctness of each signature, so we use batch verification rather
-        // than computing the aggregate signature and verifying it.
-        let entries_refs: Vec<_> = entries
-            .iter()
-            .map(|(ns, msg, sig)| (*ns, msg.as_ref(), *sig))
-            .collect();
-        batch::verify_same_signer::<_, V, _>(rng, identity, &entries_refs, strategy).is_ok()
-    }
-
     fn is_attributable() -> bool {
         false
     }
-
-    fn is_batchable() -> bool {
-        true
-    }
-
-    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {}
-
-    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {}
 }
 
 #[cfg(test)]
@@ -890,7 +886,7 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{mocks::Fixture, Scheme as _},
+        certificate::{mocks::Fixture, CertificateVerifier as _, Scheme as _},
         ed25519,
         ed25519::certificate::mocks::participants as ed25519_participants,
         sha256::Digest as Sha256Digest,

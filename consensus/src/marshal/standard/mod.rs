@@ -72,7 +72,9 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
+        certificate::{
+            CertificateOnly, CertificateVerifier as _, ConstantProvider, Provider, mocks::Fixture,
+        },
         ed25519::PublicKey,
         sha256::Sha256,
         Digestible, Hasher as _,
@@ -115,13 +117,13 @@ mod tests {
 
     #[derive(Clone)]
     struct AllOnlyProvider {
-        scheme: Arc<S>,
+        scheme: Arc<CertificateOnly<S>>,
     }
 
     impl AllOnlyProvider {
         fn new(scheme: S) -> Self {
             Self {
-                scheme: Arc::new(scheme),
+                scheme: Arc::new(CertificateOnly::new(scheme)),
             }
         }
     }
@@ -129,12 +131,13 @@ mod tests {
     impl Provider for AllOnlyProvider {
         type Scope = Epoch;
         type Scheme = S;
+        type All = CertificateOnly<S>;
 
         fn scoped(&self, _: Epoch) -> Option<Arc<S>> {
             None
         }
 
-        fn all(&self) -> Option<Arc<S>> {
+        fn all(&self) -> Option<Arc<Self::All>> {
             Some(self.scheme.clone())
         }
     }
@@ -2896,6 +2899,7 @@ mod tests {
     where
         R: Reporter<Activity = Update<B>>,
         P: Provider<Scope = Epoch, Scheme = S>,
+        P::All: crate::simplex::scheme::CertificateVerifier<D>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
         let config = Config {
