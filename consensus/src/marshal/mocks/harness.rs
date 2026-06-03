@@ -29,7 +29,7 @@ use commonware_broadcast::buffered;
 use commonware_coding::{CodecConfig, ReedSolomon};
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
-    certificate::{mocks::Fixture, ConstantProvider, Provider, Verifier as _},
+    certificate::{self, mocks::Fixture, ConstantProvider, Provider, Verifier as _},
     ed25519::{PrivateKey, PublicKey},
     sha256::{Digest as Sha256Digest, Sha256},
     Committable, Digest as DigestTrait, Digestible, Hasher as _, Signer,
@@ -107,7 +107,7 @@ impl Provider for EmptyProvider {
     type Scope = Epoch;
     type Scheme = S;
 
-    fn scoped(&self, _scope: Epoch) -> Option<commonware_cryptography::certificate::Scoped<S>> {
+    fn scoped(&self, _scope: Epoch) -> Option<certificate::Scoped<S>> {
         None
     }
 }
