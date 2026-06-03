@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > Constantinople</title>
+    <meta name="description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify.">
+    <meta name="author" content="Ben Clabby">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="https://commonware.xyz/blogs/constantinople" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="https://commonware.xyz/imgs/constantinople.png" />
+    <meta property="og:title" content="Constantinople" />
+    <meta property="og:description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify." />
+    <meta property="article:author" content="Ben Clabby" />
+    <meta property="article:published_time" content="2026-06-04T00:00:00Z" />
+    <meta property="article:modified_time" content="2026-06-04T00:00:00Z" />
+
+    <link rel="canonical" href="https://commonware.xyz/blogs/constantinople" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="https://commonware.xyz/blogs/constantinople" />
+    <meta property="twitter:title" content="Constantinople" />
+    <meta property="twitter:description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify." />
+    <meta property="twitter:image" content="https://commonware.xyz/imgs/constantinople.png" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    <meta property="twitter:creator" content="https://x.com/vex_0x" />
+
+    <link rel="stylesheet" type="text/css" href="/style.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+    <script>hljs.highlightAll();</script>
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1>Constantinople</h1>
+        <div class="meta">
+            <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
+            <div class="date">June 4th, 2026</div>
+        </div>
+        <p>For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify.</p>
+        <div class="image-container">
+            <video style="width: 100%; height: auto;" autoplay loop muted playsinline controls>
+                <source src="/imgs/constantinople.mp4" type="video/mp4">
+            </video>
+            <div class="image-caption">Figure 1: A user submits a WebAuthn transaction; the browser verifies it end-to-end, from the consensus certificate down to the transaction's inclusion proof in the finalized chain.</div>
+        </div>
+        <p>From button click to a confirmation backed by the finalized chain, the clip above takes under a second. The verification proofs arrive shortly after. What matters isn't just the speed, or that a transaction landed; it's <i>where it was verified</i>. Every step runs in the browser, with no trusted intermediary and no RPC to take on faith.</p>
+        <p>First, the client verifies the BLS12-381 threshold certificate over the finalized block, confirming that a supermajority of the validator set agreed on that view. Next, it pulls the block itself and checks that the block's commitment matches the one the certificate signed. Finally, it verifies an inclusion proof placing the user's transaction under the block's global transaction root, the same root consensus committed to. Only then does the UI mark the transaction confirmed. That is full light-client verification, from a consensus certificate all the way down to a single transaction, running on the same device that signed it with a WebAuthn passkey.</p>
+        <h2>Architecture</h2>
+        <table>
+            <tr>
+                <th>Component</th>
+                <th>Primitive</th>
+            </tr>
+            <tr>
+                <td>Consensus</td>
+                <td><a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/index.html"><code>simplex</code></a> (with the <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/simplex/scheme/bls12381_threshold/index.html">BLS12-381 threshold scheme</a>) + <a href="https://docs.rs/commonware-consensus/latest/commonware_consensus/marshal/coding/index.html">erasure coded broadcast</a></td>
+            </tr>
+            <tr>
+                <td>P2P</td>
+                <td><a href="https://docs.rs/commonware-p2p/latest/commonware_p2p/authenticated/discovery/index.html"><code>authenticated::discovery</code></a></td>
+            </tr>
+            <tr>
+                <td>Storage</td>
+                <td><a href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/index.html"><code>qmdb</code></a> (<a href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/any/index.html"><code>qmdb::any</code></a> + <a href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/keyless/index.html"><code>qmdb::keyless::CompactDb</code></a> variants)</td>
+            </tr>
+            <tr>
+                <td>Execution</td>
+                <td><a href="https://docs.rs/commonware-glue/latest/commonware_glue/stateful/index.html"><code>glue::stateful</code></a> (with <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/ed25519/index.html"><code>ed25519</code></a> and <a href="https://docs.rs/commonware-cryptography/latest/commonware_cryptography/secp256r1/index.html"><code>secp256r1</code></a>/WebAuthn accounts)</td>
+            </tr>
+        </table>
+        <p>Every layer is a commonware primitive: no external frameworks, no opaque glue code stitching them together. Well, almost no glue.</p>
+        <h2><code>commonware-glue</code></h2>
+        <p><code>commonware-glue</code>'s first primitive, <a href="https://docs.rs/commonware-glue/latest/commonware_glue/stateful/index.html"><code>stateful</code></a>, is a reusable high-throughput base layer for stateful applications: bring a state transition function (STF) and it hands you simplex consensus, QMDB storage, pending state trees, crash recovery, and trustless state sync underneath it. Constantinople is just one such STF. Everything below the execution layer is shared, unmodified, reusable infrastructure.</p>
+        <h3>Pending State Management</h3>
+        <p>Through the <a href="https://docs.rs/commonware-storage/latest/commonware_storage/qmdb/any/batch/index.html">new QMDB batch API</a>, glue maintains a tree of pending state changes on top of the finalized chain, enabling safe computation of the state root in each block. When consensus finalizes a block, the branch of pending batches leading to it is persisted to disk and the rest are pruned.</p>
+        <div class="image-container">
+            <img src="/imgs/glue-stateful-pending.png" alt="Pending state management with glue::stateful">
+            <div class="image-caption">Figure 2: Pending state management with glue::stateful.</div>
+        </div>
+        <h3>State Sync</h3>
+        <p>In addition, <code>glue::stateful</code> provides a route for trustless state synchronization, using the finalized chain as a source of truth for database roots and active operation ranges. As a refresher from <a href="/blogs/adb-any">"The Simplest Database You Need"</a>, QMDB variants are constructed over an append-only log of operations, maintaining an "inactivity floor" (before which, no operations are required to compute the current state). State sync is the process of fetching batches of operations spanning subsets of <code>[inactivity_floor, database_size)</code>, along with range proofs to authenticate the received operations, in order to bootstrap the chain state. No rolling snapshots to maintain as a chain operator, and no execution required to get caught up to tip as a participant!</p>
+        <div class="image-container">
+            <img src="/imgs/glue-state-sync.png" alt="Visualization of a state sync of qmdb::any">
+            <div class="image-caption">Figure 3: Visualization of qmdb::any state sync.</div>
+        </div>
+        <h2>Deployment</h2>
+        <p>On a live deployment with 25 validators in <code>us-west-2</code> and 25 validators in <code>us-east-1</code>, Constantinople achieves a throughput of ~70k TPS with a block time of ~250ms and finalization latency of ~385ms (p75). Every block is around 2.5MB in size. To stress QMDB compaction in the worst case, each block deliberately updates ~2^14 <i>existing</i> accounts: every update supersedes a prior value, forcing the inactivity floor to climb and the database to compact aggressively.</p>
+        <div class="image-container">
+            <img src="/imgs/constantinople-tps.png" alt="Chain performance over time">
+            <div class="image-caption">Figure 4: Chain performance over time.</div>
+        </div>
+        <div class="image-container">
+            <img src="/imgs/constantinople-bandwidth.png" alt="Ingress and Egress bandwidth over time">
+            <div class="image-caption">Figure 5: Ingress and Egress bandwidth over time.</div>
+        </div>
+        <div class="image-container">
+            <img src="/imgs/constantinople-cert-latency.png" alt="Finalization latency over time (p75)">
+            <div class="image-caption">Figure 6: Finalization latency over time (p75).</div>
+        </div>
+        <div class="image-container">
+            <img src="/imgs/constantinople-disk.png" alt="Disk Utilization over time">
+            <div class="image-caption">Figure 7: Disk utilization over time.</div>
+        </div>
+        <h2>Where does it all go?</h2>
+        <p>As you can see, disk utilization on the indexer is growing rapidly. The indexer in the above deployment is using Exoware's <a href="https://github.com/exowarexyz/monorepo/tree/main/examples/simulator">RocksDB-backed simulator</a>, and maintaining this level of throughput for more than even a few hours would require complex auto-scaling, provisioning new disks several times a day, large compression routines, and more.</p>
+        <p>Stay tuned for <a href="https://exoware.xyz/">Exoware</a>'s solution to this problem: <code>kv-mk1</code>.</p>
+        <h2>Run it yourself</h2>
+        <p>Constantinople is <a href="https://github.com/commonwarexyz/constantinople">open source on GitHub</a> under Apache 2.0 and MIT. Try it yourself today by running:</p>
+        <pre>
+            <code class="language-bash">
+git clone https://github.com/commonwarexyz/constantinople.git && cd constantinople
+
+# Set up a local cluster with 4 validators and 1 indexing secondary.
+cargo run --bin constantinople-deploy -- generate \
+    --validators 4 \
+    --secondaries 1 \
+    --output-dir ./local \
+    --spammer \
+    --spammer-accounts 4096 \
+    --spammer-accounts-jitter 0.1 \
+    local
+
+# Run the `mprocs` command printed by the setup script to start the cluster.
+            </code>
+        </pre>
+        <p>For a more detailed guide on deploying a Constantinople cluster remotely, check out <a href="https://github.com/commonwarexyz/constantinople/tree/main/bin/deploy#remote-deployment">the remote deployment instructions</a>.</p>
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
