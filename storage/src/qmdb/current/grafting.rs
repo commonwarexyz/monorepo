@@ -220,9 +220,10 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
     }
 }
 
-/// A [HasherTrait] implementation used for verifying proofs over grafted [Storage].
+/// A [`merkle::hasher::Hasher`] implementation used for verifying proofs over grafted storage.
 ///
-/// The ops structure uses family `F`, so this implements `HasherTrait<F>` to match the proof.
+/// The ops structure uses family `F`, so this implements [`merkle::hasher::Hasher`] for that
+/// family to match the proof.
 /// Proof verification walks the tree from leaves to root, recomputing digests at each node.
 /// Since a proof path crosses the grafting boundary (from ops leaves up through grafted peaks),
 /// two different hashing behaviors are needed depending on the node's height relative to the
@@ -232,7 +233,7 @@ impl<F: Graftable, H: HasherTrait<F>> HasherTrait<F> for GraftedHasher<F, H> {
 /// - **At**: the children form an ops subtree root, which is combined with a bitmap chunk element
 ///   to reconstruct the grafted leaf digest.
 #[derive(Clone)]
-pub(super) struct Verifier<'a, F: Graftable, H: CHasher> {
+pub struct Verifier<'a, F: Graftable, H: CHasher> {
     hasher: merkle::hasher::Standard<H>,
     grafting_height: u32,
 
@@ -255,7 +256,7 @@ impl<'a, F: Graftable, H: CHasher> Verifier<'a, F, H> {
     /// `graftable_chunks` is the number of chunks committed by the grafted tree; any chunk index
     /// in `chunks` at or beyond this boundary is treated as pending and **not** combined with
     /// the ops subtree root at the grafting height.
-    pub(super) const fn new(
+    pub const fn new(
         grafting_height: u32,
         start_chunk_index: u64,
         chunks: Vec<&'a [u8]>,
