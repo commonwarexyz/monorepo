@@ -17,6 +17,12 @@ pub const PROMTAIL_VERSION: &str = "3.4.2";
 /// Version of Node Exporter to download and install
 pub const NODE_EXPORTER_VERSION: &str = "1.9.0";
 
+/// Version of the Grafana Node Exporter Full dashboard to provision.
+///
+/// The public dashboard is available at:
+/// <https://grafana.com/grafana/dashboards/1860-node-exporter-full/>
+pub const GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION: &str = "45";
+
 /// Version of Loki to download and install
 pub const LOKI_VERSION: &str = "3.4.2";
 
@@ -211,6 +217,12 @@ pub fn grafana_dashboards_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/all.yml")
 }
 
+pub fn grafana_node_exporter_dashboard_s3_key(version: &str) -> String {
+    format!(
+        "{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/grafana/node-exporter-full-revision-{version}.json"
+    )
+}
+
 pub fn loki_config_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/loki/config.yml")
 }
@@ -344,6 +356,11 @@ pub(crate) fn node_exporter_download_url(version: &str, architecture: Architectu
         "https://github.com/prometheus/node_exporter/releases/download/v{version}/node_exporter-{version}.linux-{arch}.tar.gz",
         arch = architecture.as_str()
     )
+}
+
+/// Returns the download URL for the Node Exporter Full Grafana dashboard
+pub(crate) fn grafana_node_exporter_dashboard_download_url(version: &str) -> String {
+    format!("https://grafana.com/api/dashboards/1860/revisions/{version}/download")
 }
 
 /// Returns the download URL for Promtail from GitHub
@@ -662,6 +679,7 @@ pub struct MonitoringUrls {
     pub datasources_yml: String,
     pub all_yml: String,
     pub dashboard: String,
+    pub node_exporter_dashboard: String,
     pub loki_yml: String,
     pub pyroscope_yml: String,
     pub tempo_yml: String,
@@ -705,6 +723,7 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/datasources.yml '{}' &
 {WGET} -O /home/ubuntu/all.yml '{}' &
 {WGET} -O /home/ubuntu/dashboard.json '{}' &
+{WGET} -O /home/ubuntu/node-exporter-full.json '{}' &
 {WGET} -O /home/ubuntu/loki.yml '{}' &
 {WGET} -O /home/ubuntu/pyroscope.yml '{}' &
 {WGET} -O /home/ubuntu/tempo.yml '{}' &
@@ -717,7 +736,7 @@ wait
 
 # Verify all downloads succeeded
 for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
-         fonts-dejavu-mono.deb fonts-dejavu-core.deb fontconfig-config.deb libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json \
+         fonts-dejavu-mono.deb fonts-dejavu-core.deb fontconfig-config.deb libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json node-exporter-full.json \
          loki.yml pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service \
          tempo.service node_exporter.service; do
     if [ ! -f "/home/ubuntu/$f" ]; then
@@ -743,6 +762,7 @@ done
         urls.datasources_yml,
         urls.all_yml,
         urls.dashboard,
+        urls.node_exporter_dashboard,
         urls.loki_yml,
         urls.pyroscope_yml,
         urls.tempo_yml,
@@ -829,6 +849,7 @@ sudo mv /home/ubuntu/prometheus.yml /opt/prometheus/prometheus.yml
 sudo mv /home/ubuntu/datasources.yml /etc/grafana/provisioning/datasources/datasources.yml
 sudo mv /home/ubuntu/all.yml /etc/grafana/provisioning/dashboards/all.yml
 sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json
+sudo mv /home/ubuntu/node-exporter-full.json /var/lib/grafana/dashboards/node-exporter-full.json
 sudo mkdir -p /etc/loki
 sudo mv /home/ubuntu/loki.yml /etc/loki/loki.yml
 sudo chown root:root /etc/loki/loki.yml
@@ -1371,6 +1392,10 @@ mod tests {
             format!("tools/configs/{version}/grafana/all.yml")
         );
         assert_eq!(
+            grafana_node_exporter_dashboard_s3_key(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
+            format!("tools/configs/{version}/grafana/node-exporter-full-revision-{GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION}.json")
+        );
+        assert_eq!(
             loki_config_s3_key(),
             format!("tools/configs/{version}/loki/config.yml")
         );
@@ -1422,6 +1447,49 @@ mod tests {
             binary_service_s3_key_for_arch(Architecture::X86_64),
             format!("tools/configs/{version}/binary/service-amd64")
         );
+    }
+
+    #[test]
+    fn test_monitoring_installs_node_exporter_dashboard() {
+        let urls = MonitoringUrls {
+            prometheus_bin: "prometheus".to_string(),
+            grafana_bin: "grafana".to_string(),
+            loki_bin: "loki".to_string(),
+            pyroscope_bin: "pyroscope".to_string(),
+            tempo_bin: "tempo".to_string(),
+            node_exporter_bin: "node-exporter".to_string(),
+            fonts_dejavu_mono_deb: "fonts-dejavu-mono".to_string(),
+            fonts_dejavu_core_deb: "fonts-dejavu-core".to_string(),
+            fontconfig_config_deb: "fontconfig-config".to_string(),
+            libfontconfig_deb: "libfontconfig".to_string(),
+            unzip_deb: "unzip".to_string(),
+            adduser_deb: "adduser".to_string(),
+            musl_deb: "musl".to_string(),
+            prometheus_config: "prometheus-config".to_string(),
+            datasources_yml: "datasources".to_string(),
+            all_yml: "dashboards".to_string(),
+            dashboard: "dashboard".to_string(),
+            node_exporter_dashboard: "node-exporter-dashboard".to_string(),
+            loki_yml: "loki-config".to_string(),
+            pyroscope_yml: "pyroscope-config".to_string(),
+            tempo_yml: "tempo-config".to_string(),
+            prometheus_service: "prometheus-service".to_string(),
+            loki_service: "loki-service".to_string(),
+            pyroscope_service: "pyroscope-service".to_string(),
+            tempo_service: "tempo-service".to_string(),
+            node_exporter_service: "node-exporter-service".to_string(),
+        };
+
+        let download = install_monitoring_download_cmd(&urls);
+        assert!(download.contains("-O /home/ubuntu/node-exporter-full.json"));
+        assert!(download.contains("node-exporter-dashboard"));
+        assert!(download.contains("node-exporter-full.json"));
+
+        let setup = install_monitoring_setup_cmd(PROMETHEUS_VERSION, Architecture::Arm64);
+        assert!(setup.contains(
+            "sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json"
+        ));
+        assert!(setup.contains("sudo mv /home/ubuntu/node-exporter-full.json /var/lib/grafana/dashboards/node-exporter-full.json"));
     }
 
     #[test]
