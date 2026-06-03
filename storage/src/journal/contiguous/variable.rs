@@ -3078,6 +3078,68 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_recovery_retries_from_pruning_boundary_after_short_middle_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-short-middle-retry".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..30u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Keep the offsets watermark in bounds and within the retained data end bound, but make
+            // the data section that contains the watermark too short to reach it.
+            journal
+                .test_set_offsets_recovery_watermark(15)
+                .await
+                .unwrap();
+            journal.test_rewind_data_to_position(12).await.unwrap();
+            journal.test_sync_data().await.unwrap();
+            journal.test_append_data(2, 9999).await.unwrap();
+            journal.test_sync_data().await.unwrap();
+            drop(journal);
+
+            // The first rebuild from watermark 15 starts in section 1 and tries to skip five items,
+            // but section 1 contains only positions 10 and 11 before replay jumps to section 2.
+            // That should return Ok(None), retry from the pruning boundary, and then truncate the
+            // orphaned section 2.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..12);
+            assert_eq!(journal.test_offsets_size().await, 12);
+            for i in 0..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(12).await,
+                Err(Error::ItemOutOfRange(12))
+            ));
+
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(
+                data_blobs.len(),
+                2,
+                "orphaned section 2 should be truncated away"
+            );
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_variable_rewind_commit_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
