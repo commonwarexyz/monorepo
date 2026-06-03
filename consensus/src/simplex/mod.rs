@@ -209,7 +209,7 @@
 //! ### Batched Verification
 //!
 //! Unlike other consensus constructions that verify all incoming messages received from peers, for schemes
-//! where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable) returns `true`
+//! where [`Verifier::is_batchable()`](commonware_cryptography::certificate::Verifier::is_batchable) returns `true`
 //! (such as [scheme::ed25519], [scheme::bls12381_multisig] and [scheme::bls12381_threshold]), `simplex` lazily
 //! verifies messages (only when a quorum is met), enabling efficient batch verification. For schemes where
 //! `is_batchable()` returns `false` (such as [scheme::secp256r1]), signatures are verified eagerly as they
