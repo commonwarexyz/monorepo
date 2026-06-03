@@ -2,6 +2,58 @@
 
 use commonware_macros::stability_scope;
 
+/// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote but
+/// did not `fsync` are crash-durable before any storage structure reads.
+///
+/// Per-platform guarantee:
+/// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable; the recovered
+///   data a structure reads during `init` is durable.
+/// - **macOS/BSD**: best-effort `sync(2)` only. macOS has no whole-filesystem durable flush, and
+///   `sync` does not flush the drive cache (and may return before buffers are written), so it is
+///   **not** crash-durable.
+/// - **Windows**: no whole-filesystem flush is performed; the guarantee is not provided.
+///
+/// Assumes the storage lives on a single filesystem (`syncfs` covers one filesystem), and on Linux
+/// reliable error detection requires kernel >= 5.8. A missing `dir` (a fresh start with no data
+/// yet) is treated as success.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn sync_fs(dir: &std::path::Path) -> std::io::Result<()> {
+    cfg_if::cfg_if! {
+        if #[cfg(target_os = "linux")] {
+            use std::os::fd::AsRawFd;
+            let file = match std::fs::File::open(dir) {
+                Ok(file) => file,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only that
+            // fd, performs no memory access, and returns -1 on error.
+            if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            tracing::debug!(
+                storage_directory = %dir.display(),
+                "made storage filesystem durable at startup (syncfs)"
+            );
+            Ok(())
+        } else if #[cfg(unix)] {
+            // SAFETY: `sync` takes no arguments and cannot fail.
+            unsafe { libc::sync() };
+            tracing::debug!(
+                storage_directory = %dir.display(),
+                "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
+            );
+            Ok(())
+        } else {
+            tracing::debug!(
+                storage_directory = %dir.display(),
+                "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
+            );
+            Ok(())
+        }
+    }
+}
+
 stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
