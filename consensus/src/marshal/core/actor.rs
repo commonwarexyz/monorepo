@@ -1257,16 +1257,9 @@ where
                 wrote
             }
             Key::Finalized { height } => {
-                let Some(bounds) = self.epocher.containing(height) else {
-                    debug!(
-                        %height,
-                        floor = %self.floor.processed_height(),
-                        "ignoring stale delivery"
-                    );
-                    response.send_lossy(true);
-                    return false;
-                };
-                let Some(certificate_codec_config) = self.certificate_codec_config(bounds.epoch()) else {
+                let Some((epoch, certificate_codec_config)) =
+                    self.certificate_codec_config_for_height(height)
+                else {
                     debug!(
                         %height,
                         floor = %self.floor.processed_height(),
@@ -1282,6 +1275,10 @@ where
                     response.send_lossy(false);
                     return false;
                 };
+                if finalization.epoch() != epoch {
+                    response.send_lossy(false);
+                    return false;
+                }
 
                 let Ok(block) =
                     V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
@@ -1299,9 +1296,7 @@ where
                 // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
                 // the requested block is certified.
                 let commitment = finalization.proposal.payload;
-                if block.height() != height
-                    || block.digest() != V::commitment_to_inner(commitment)
-                    || finalization.epoch() != bounds.epoch()
+                if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
                     response.send_lossy(false);
                     return false;
@@ -1314,7 +1309,7 @@ where
                 false
             }
             Key::Notarized { round } => {
-                let Some(certificate_codec_config) = self.certificate_codec_config(round.epoch()) else {
+                let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
                         floor = %self.floor.processed_height(),
@@ -1323,7 +1318,7 @@ where
                     response.send_lossy(true);
                     return false;
                 };
-
+                let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(notarization) =
                     Notarization::read_cfg(&mut value, &certificate_codec_config)
                 else {
@@ -1331,26 +1326,12 @@ where
                     return false;
                 };
 
-                // Wrong-round data must be rejected before the full-scheme lookup below.
-                // That lookup may miss for pruned epochs even when a certificate-only scoped
-                // value was sufficient to decode the certificate, and missing full-scheme state
-                // is treated as stale rather than peer-faulting.
+                // The resolver key binds this response to `round`; a certificate for any other
+                // round is a bad response even if it decodes correctly.
                 if notarization.round() != round {
                     response.send_lossy(false);
                     return false;
                 }
-
-                // `V::check_payload` requires a full scheme, while decoding may use a
-                // certificate-only verifier.
-                let Some(scheme) = self.provider.scheme(notarization.epoch()) else {
-                    debug!(
-                        ?round,
-                        floor = %self.floor.processed_height(),
-                        "ignoring stale delivery"
-                    );
-                    response.send_lossy(true);
-                    return false;
-                };
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
@@ -1409,8 +1390,6 @@ where
             })
             .collect();
 
-        let mut verified = vec![false; delivers.len()];
-
         // Group indices by epoch.
         let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
         for (i, item) in delivers.iter().enumerate() {
@@ -1422,6 +1401,7 @@ where
         }
 
         // Batch verify each epoch group.
+        let mut verified = vec![false; delivers.len()];
         for (epoch, indices) in &by_epoch {
             let Some(scoped) = self.provider.scoped(*epoch) else {
                 continue;
@@ -1551,6 +1531,15 @@ where
         self.provider
             .scoped(epoch)
             .map(|scoped| scoped.certificate_codec_config())
+    }
+
+    fn certificate_codec_config_for_height(
+        &self,
+        height: Height,
+    ) -> Option<(Epoch, <<P::Scheme as Verifier>::Certificate as Read>::Cfg)> {
+        let epoch = self.epocher.containing(height)?.epoch();
+        self.certificate_codec_config(epoch)
+            .map(|config| (epoch, config))
     }
 
     // -------------------- Application Dispatch --------------------

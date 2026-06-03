@@ -404,8 +404,8 @@ pub enum Scoped<S>
 where
     S: Scheme,
 {
-    /// A certificate-only verifier.
-    Certificate(Arc<CertificateOnly<S>>),
+    /// A verifier-only adapter.
+    Certificate(Arc<VerifierOnly<S>>),
     /// A full signing scheme.
     Scheme(Arc<S>),
 }
@@ -569,20 +569,20 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
     }
 }
 
-/// A certificate verifier that intentionally hides scheme-only operations.
+/// A verifier adapter that intentionally hides scheme-only operations.
 #[derive(Clone, Debug)]
-pub struct CertificateOnly<V: Verifier> {
+pub struct VerifierOnly<V: Verifier> {
     verifier: V,
 }
 
-impl<V: Verifier> CertificateOnly<V> {
+impl<V: Verifier> VerifierOnly<V> {
     /// Creates a verifier wrapper.
     pub const fn new(verifier: V) -> Self {
         Self { verifier }
     }
 }
 
-impl<V: Verifier> Verifier for CertificateOnly<V> {
+impl<V: Verifier> Verifier for VerifierOnly<V> {
     type Subject<'a, D: Digest> = V::Subject<'a, D>;
     type PublicKey = V::PublicKey;
     type Certificate = V::Certificate;

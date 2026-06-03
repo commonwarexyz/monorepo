@@ -73,7 +73,7 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::{
         certificate::{
-            CertificateOnly, Verifier as _, ConstantProvider, Provider, Scoped,
+            VerifierOnly, Verifier as _, ConstantProvider, Provider, Scoped,
             mocks::Fixture,
         },
         ed25519::PublicKey,
@@ -117,19 +117,19 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct AllOnlyProvider {
-        scheme: Arc<CertificateOnly<S>>,
+    struct VerifierOnlyProvider {
+        scheme: Arc<VerifierOnly<S>>,
     }
 
-    impl AllOnlyProvider {
+    impl VerifierOnlyProvider {
         fn new(scheme: S) -> Self {
             Self {
-                scheme: Arc::new(CertificateOnly::new(scheme)),
+                scheme: Arc::new(VerifierOnly::new(scheme)),
             }
         }
     }
 
-    impl Provider for AllOnlyProvider {
+    impl Provider for VerifierOnlyProvider {
         type Scope = Epoch;
         type Scheme = S;
 
@@ -4741,7 +4741,7 @@ mod tests {
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
                 "notarized-delivery-stale-certificate-only",
-                AllOnlyProvider::new(schemes[0].clone()),
+                VerifierOnlyProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
