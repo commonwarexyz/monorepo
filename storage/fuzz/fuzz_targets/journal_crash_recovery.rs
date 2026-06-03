@@ -24,7 +24,7 @@
 //!
 //! A crash can land anywhere in a range, so `Expected` tracks conservative bounds (a
 //! guaranteed-durable prefix plus size/pruning ceilings), not an exact state.
-//! `assert_matches_expected` checks recovery falls within them; `observe` then snapshots it as the
+//! `assert_matches_expected` checks recovery falls within them; `to_expected` then snapshots it as the
 //! next cycle's start.
 //!
 //! # Faults
@@ -32,6 +32,14 @@
 //! The operation phase runs under write/sync/resize fault injection. The torn-write modes
 //! (`partial_write_rate`, `partial_resize_rate`) cut a write or truncation short, leaving the
 //! half-finished bytes a real crash would.
+//!
+//! # Positions
+//!
+//! Position arguments (`Read`, `Rewind`, `Replay`) come straight from the fuzzer, so a random `u64`
+//! is almost always out of range. Each such op runs twice: once with the value clamped into the
+//! live range, which must take the success path, and once with the raw value, which exercises the
+//! validation path (`ItemPruned` below the start, `ItemOutOfRange` past the end). Clamping
+//! guarantees the success path is covered on every input; the raw value still tests rejection.
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
@@ -67,8 +75,7 @@ const MAX_WRITE_BUF: usize = 2048;
 /// Buffer size used for internal verification replays.
 const VERIFY_REPLAY_BUF: usize = 1024;
 
-/// Maximum number of operations per fuzz input. Caps the crash-cycle count and per-cycle
-/// verification work so executions stay fast.
+/// Maximum number of operations per fuzz input.
 const MAX_OPERATIONS: usize = 128;
 
 fn bounded_non_zero(u: &mut Unstructured<'_>) -> arbitrary::Result<usize> {
@@ -176,7 +183,7 @@ struct FuzzInput {
     operations: Vec<JournalOperation>,
 }
 
-/// Configuration knobs shared by every cycle: journal config plus fault-injection rates.
+/// Journal config plus fault-injection rates, shared by every cycle.
 #[derive(Clone, Copy)]
 struct Params {
     page_size: NonZeroU16,
@@ -496,7 +503,7 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
     }
 
     // Within [boundary, size) every position is readable; content is pinned only for the durable
-    // prefix. Reads are kept for the replay cross-check.
+    // prefix. Items are saved for the replay cross-check below.
     let mut read_items = Vec::with_capacity((size - boundary) as usize);
     for pos in boundary..size {
         let item = journal
@@ -534,12 +541,12 @@ async fn assert_matches_expected<J: FuzzJournal>(journal: &J, expected: &Expecte
 }
 
 /// Read the recovered journal back into an `Expected` pinned to exactly that state.
-async fn observe<J: FuzzJournal>(journal: &J) -> Expected {
+async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
     let bounds = journal.bounds().await;
     let items = journal
         .replay(NZUsize!(VERIFY_REPLAY_BUF), bounds.start)
         .await
-        .expect("observe replay");
+        .expect("to_expected replay");
     let mut values = vec![Item::from([0u8; ITEM_SIZE]); bounds.end as usize];
     for (pos, item) in items {
         values[pos as usize] = item;
@@ -553,8 +560,9 @@ async fn observe<J: FuzzJournal>(journal: &J) -> Expected {
     }
 }
 
-/// Confirm the journal accepts and reads back a sentinel after opening. Recorded as a ceiling-only
-/// append, not pinned: an unsynced append may flush durably, so recovery may or may not surface it.
+/// Append a sentinel and read it back, confirming the reopened journal is writable. The append is
+/// not synced, so it only raises the expected size ceiling, not the durable floor: a later crash
+/// may or may not have persisted it.
 async fn assert_round_trip<J: FuzzJournal>(journal: &mut J, expected: &mut Expected) {
     let size = journal.size().await;
     let sentinel = Item::from([0xCDu8; ITEM_SIZE]);
@@ -571,12 +579,8 @@ async fn assert_round_trip<J: FuzzJournal>(journal: &mut J, expected: &mut Expec
     expected.appended(sentinel);
 }
 
-/// Check `read(pos)` against `bounds` (= `[start, end)`), panicking on a wrong result:
-///   - live (`start <= pos < end`) -> `Ok(item)`,
-///   - pruned (`pos < start`)      -> `Err(ItemPruned)`,
-///   - past the end (`pos >= end`) -> `Err(ItemOutOfRange)`.
-///
-/// No read faults are injected and `read` is a pure lookup, so any other result is a real bug.
+/// Check `read(pos)` against `bounds`. No read faults are injected and `read` is a pure lookup, so
+/// anything but `Ok` in range / `ItemPruned` below / `ItemOutOfRange` past the end is a real bug.
 fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
     let ok = match &result {
         Ok(_) => bounds.contains(&pos),
@@ -591,10 +595,10 @@ fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
     );
 }
 
-/// Whether the cycle continues after a raw `replay(start_pos)`. Validation precedes any I/O, so an
-/// out-of-range start is deterministic: `< start` -> `ItemPruned`, `> end` -> `ItemOutOfRange`
-/// (`== end` is in range). An in-range start succeeds or hits a tail-repair I/O fault (ends the
-/// cycle); any other result is a bug.
+/// Whether the cycle continues after the raw replay. Validation
+/// precedes any I/O, so an out-of-range start is deterministic: `< start` -> `ItemPruned`,
+/// `> end` -> `ItemOutOfRange` (`== end` is in range). An in-range start succeeds or hits a
+/// tail-repair I/O fault (ends the cycle); any other result is a bug.
 fn should_continue_raw_replay(
     result: Result<Vec<(u64, Item)>, Error>,
     start_pos: u64,
@@ -616,7 +620,8 @@ fn should_continue_raw_replay(
     }
 }
 
-/// Assert an in-bounds `replay(start)` returned the full contiguous suffix `[start, bounds.end)`.
+/// Assert the items from replaying an in-bounds `start` are exactly positions `[start, bounds.end)`,
+/// contiguous and in order.
 fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) {
     assert_eq!(
         items.len() as u64,
@@ -634,10 +639,9 @@ fn assert_replay_suffix(items: &[(u64, Item)], start: u64, bounds: &Range<u64>) 
     }
 }
 
-/// Run a cycle's ops under faults, updating `expected`. Stops early if an op may have left the
-/// journal inconsistent (any mutable error, or a replay that hit a tail-repair I/O fault); the
-/// caller then drops the journal to simulate the crash. Reads never fault here, so a bad read
-/// panics rather than ending the cycle.
+/// Run a cycle's ops under faults, updating `expected`. Stops early on any error that may have left
+/// the journal inconsistent (a mutable-method error or a tail-repair I/O fault); the caller then
+/// drops the journal to crash. Reads never fault, so a bad read panics instead of ending the cycle.
 async fn run_ops<J: FuzzJournal>(
     journal: &mut J,
     expected: &mut Expected,
@@ -663,7 +667,6 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Read { pos } => {
-                // A guaranteed in-bounds read, then the raw read for the pruned/out-of-range paths.
                 let bounds = journal.bounds().await;
                 if !bounds.is_empty() {
                     let target = bounds.start + (*pos % (bounds.end - bounds.start));
@@ -704,7 +707,6 @@ async fn run_ops<J: FuzzJournal>(
                     };
                     match journal.rewind(target).await {
                         Ok(()) => {
-                            // Rewound to `target`; the truncated tail may or may not persist.
                             expected.rewound(target, bounds.end);
                             expected.values.truncate(target as usize);
                             true
@@ -735,7 +737,6 @@ async fn run_ops<J: FuzzJournal>(
                 let size = journal.size().await;
                 match journal.prune(*min_pos).await {
                     Ok(_) => {
-                        // The deleted sections are durably gone; pin the boundary exactly.
                         expected.pruned(journal.bounds().await.start);
                         true
                     }
@@ -751,14 +752,13 @@ async fn run_ops<J: FuzzJournal>(
             }
 
             JournalOperation::Replay { buffer, start_pos } => {
-                // The clamped (in-bounds) replay must return the full suffix matching `read()`, or
-                // hit a tail-repair I/O fault; the raw replay probes the validation paths.
+                // The clamped replay must return the full suffix matching `read()`, or hit a
+                // tail-repair I/O fault.
                 let bounds = journal.bounds().await;
                 let clamped = bounds.start + (*start_pos % (bounds.end - bounds.start + 1));
                 let clamped_ok = match journal.replay(NZUsize!(*buffer), clamped).await {
                     Ok(items) => {
                         assert_replay_suffix(&items, clamped, &bounds);
-                        // Cross-check replay content against `read()`.
                         for (pos, item) in &items {
                             let via_read = journal.read(*pos).await.unwrap_or_else(|e| {
                                 panic!("read({pos}) cross-check during replay: {e:?}")
@@ -812,13 +812,12 @@ where
         let mut journal = J::init(ctx.child("journal"), cfg)
             .await
             .expect("recovery should succeed without panic");
-        // The recovered state must match what the previous cycle left durable.
         assert_matches_expected(&journal, &expected).await;
 
-        let mut expected = observe(&journal).await;
+        let mut expected = to_expected(&journal).await;
         assert_round_trip(&mut journal, &mut expected).await;
 
-        // Enable faults for the operation phase, then drop the journal at the end (the crash).
+        // Faults on for the operation phase; returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
         run_ops(&mut journal, &mut expected, &ops, params).await;
         expected
@@ -870,7 +869,6 @@ where
         params,
     );
 
-    // Each later cycle recovers from the previous crash, runs its ops, then crashes again.
     for ops in cycles.iter().skip(1) {
         let runner = deterministic::Runner::from(checkpoint);
         (expected, checkpoint) = run_cycle::<J>(
@@ -882,8 +880,8 @@ where
         );
     }
 
-    // Final fault-free phase: verify the carried state recovers, then prove a synced round-trip is
-    // durable across an actual reopen (not just readable from the live handle), and clean up.
+    // Final fault-free phase: verify recovery, then prove a synced round-trip survives an actual
+    // reopen (not just a read from the live handle), and clean up.
     deterministic::Runner::from(checkpoint).start(move |ctx| async move {
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let mut journal = J::init(
@@ -895,7 +893,7 @@ where
         assert_matches_expected(&journal, &expected).await;
 
         // Append a sentinel and sync it, pinning the exact durable state.
-        let mut expected = observe(&journal).await;
+        let mut expected = to_expected(&journal).await;
         let size = journal.size().await;
         let sentinel = Item::from([0xEFu8; ITEM_SIZE]);
         let pos = journal
