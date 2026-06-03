@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Namespace, Provider, Verifier},
+    certificate::{Attestation, Namespace, Provider, Scheme, Subject, Verifier},
     Digest, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
@@ -368,7 +368,7 @@ pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     pub epoch: Epoch,
 }
 
-impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
+impl<P: PublicKey, D: Digest> Subject for AckSubject<'_, P, D> {
     type Namespace = AckNamespace;
 
     fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
@@ -391,7 +391,7 @@ impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
 /// seen and acknowledged the parent chunk, making it an essential part of the chain linking
 /// mechanism.
 #[derive(Clone, Debug)]
-pub struct Parent<S: certificate::Scheme, D: Digest> {
+pub struct Parent<S: Scheme, D: Digest> {
     /// Digest of the parent chunk.
     pub digest: D,
 
@@ -403,7 +403,7 @@ pub struct Parent<S: certificate::Scheme, D: Digest> {
     pub certificate: S::Certificate,
 }
 
-impl<S: certificate::Scheme, D: Digest> Parent<S, D> {
+impl<S: Scheme, D: Digest> Parent<S, D> {
     /// Create a new parent with the given digest, epoch, and signature.
     ///
     /// The parent links a chunk to its predecessor in the chain and provides
@@ -417,7 +417,7 @@ impl<S: certificate::Scheme, D: Digest> Parent<S, D> {
     }
 }
 
-impl<S: certificate::Scheme, D: Digest> PartialEq for Parent<S, D>
+impl<S: Scheme, D: Digest> PartialEq for Parent<S, D>
 where
     S::Certificate: PartialEq,
 {
@@ -428,9 +428,9 @@ where
     }
 }
 
-impl<S: certificate::Scheme, D: Digest> Eq for Parent<S, D> where S::Certificate: Eq {}
+impl<S: Scheme, D: Digest> Eq for Parent<S, D> where S::Certificate: Eq {}
 
-impl<S: certificate::Scheme, D: Digest> Hash for Parent<S, D>
+impl<S: Scheme, D: Digest> Hash for Parent<S, D>
 where
     S::Certificate: Hash,
 {
@@ -441,7 +441,7 @@ where
     }
 }
 
-impl<S: certificate::Scheme, D: Digest> Write for Parent<S, D> {
+impl<S: Scheme, D: Digest> Write for Parent<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.digest.write(writer);
         self.epoch.write(writer);
@@ -449,7 +449,7 @@ impl<S: certificate::Scheme, D: Digest> Write for Parent<S, D> {
     }
 }
 
-impl<S: certificate::Scheme, D: Digest> Read for Parent<S, D> {
+impl<S: Scheme, D: Digest> Read for Parent<S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -464,14 +464,14 @@ impl<S: certificate::Scheme, D: Digest> Read for Parent<S, D> {
     }
 }
 
-impl<S: certificate::Scheme, D: Digest> EncodeSize for Parent<S, D> {
+impl<S: Scheme, D: Digest> EncodeSize for Parent<S, D> {
     fn encode_size(&self) -> usize {
         self.digest.encode_size() + self.epoch.encode_size() + self.certificate.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Parent<S, D>
+impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Parent<S, D>
 where
     D: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,
@@ -498,7 +498,7 @@ where
 /// Nodes form a linked chain from each sequencer, ensuring that new chunks can only be added
 /// after their predecessors have been properly acknowledged by the validator set.
 #[derive(Clone, Debug)]
-pub struct Node<P: PublicKey, S: certificate::Scheme, D: Digest> {
+pub struct Node<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk of the node.
     pub chunk: Chunk<P, D>,
 
@@ -515,7 +515,7 @@ pub struct Node<P: PublicKey, S: certificate::Scheme, D: Digest> {
     pub parent: Option<Parent<S, D>>,
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Node<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// Create a new node with the given chunk, signature, and parent.
     ///
     /// For genesis nodes (height = 0), parent should be None.
@@ -664,7 +664,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Node<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Hash for Node<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Hash for Node<P, S, D> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.chunk.hash(state);
         self.signature.hash(state);
@@ -672,7 +672,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Hash for Node<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> PartialEq for Node<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> PartialEq for Node<P, S, D> {
     fn eq(&self, other: &Self) -> bool {
         self.chunk == other.chunk
             && self.signature == other.signature
@@ -680,9 +680,9 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> PartialEq for Node<P, S, D
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Eq for Node<P, S, D> {}
+impl<P: PublicKey, S: Scheme, D: Digest> Eq for Node<P, S, D> {}
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Node<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Node<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.signature.write(writer);
@@ -690,7 +690,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Node<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Node<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Node<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -716,14 +716,14 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Node<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> EncodeSize for Node<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Node<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.signature.encode_size() + self.parent.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<C: PublicKey, S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Node<C, S, D>
+impl<C: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Node<C, S, D>
 where
     C: for<'a> arbitrary::Arbitrary<'a>,
     C::Signature: for<'a> arbitrary::Arbitrary<'a>,
@@ -757,7 +757,7 @@ where
 /// once enough validators (a quorum) have acknowledged the chunk. This certificate
 /// serves as proof that the chunk was reliably broadcast.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Ack<P: PublicKey, S: certificate::Scheme, D: Digest> {
+pub struct Ack<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being acknowledged.
     pub chunk: Chunk<P, D>,
 
@@ -771,7 +771,7 @@ pub struct Ack<P: PublicKey, S: certificate::Scheme, D: Digest> {
     pub attestation: Attestation<S>,
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Ack<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Ack<P, S, D> {
     /// Create a new ack with the given chunk, epoch, and attestation.
     pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, attestation: Attestation<S>) -> Self {
         Self {
@@ -816,7 +816,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Ack<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Ack<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Ack<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.epoch.write(writer);
@@ -824,7 +824,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Ack<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Ack<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Ack<P, S, D> {
     type Cfg = ();
 
     fn read_cfg(reader: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
@@ -839,14 +839,14 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Ack<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Ack<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.epoch.encode_size() + self.attestation.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<P, S, D>
+impl<P: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Ack<P, S, D>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     D: for<'a> arbitrary::Arbitrary<'a>,
@@ -874,7 +874,7 @@ where
 /// and provide the appropriate information to other components.
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
-pub enum Activity<P: PublicKey, S: certificate::Scheme, D: Digest> {
+pub enum Activity<P: PublicKey, S: Scheme, D: Digest> {
     /// A new tip for a sequencer
     ///
     /// This activity is only emitted when the application has verified some peer proposal.
@@ -883,7 +883,7 @@ pub enum Activity<P: PublicKey, S: certificate::Scheme, D: Digest> {
     Lock(Lock<P, S, D>),
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Activity<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Activity<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {
             Self::Tip(proposal) => {
@@ -898,7 +898,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Activity<P, S, D
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Activity<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Activity<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -913,7 +913,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Activity<P, S, D>
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> EncodeSize for Activity<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Activity<P, S, D> {
     fn encode_size(&self) -> usize {
         1 + match self {
             Self::Tip(proposal) => proposal.encode_size(),
@@ -923,7 +923,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> EncodeSize for Activity<P,
 }
 
 #[cfg(feature = "arbitrary")]
-impl<C: PublicKey, S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<C, S, D>
+impl<C: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Activity<C, S, D>
 where
     Proposal<C, D>: for<'a> arbitrary::Arbitrary<'a>,
     Lock<C, S, D>: for<'a> arbitrary::Arbitrary<'a>,
@@ -1030,7 +1030,7 @@ where
 /// 2. Allowing sequencers to build chains of chunks
 /// 3. Preventing sequencers from creating forks in their chains
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Lock<P: PublicKey, S: certificate::Scheme, D: Digest> {
+pub struct Lock<P: PublicKey, S: Scheme, D: Digest> {
     /// Chunk that is being locked.
     pub chunk: Chunk<P, D>,
 
@@ -1043,7 +1043,7 @@ pub struct Lock<P: PublicKey, S: certificate::Scheme, D: Digest> {
     pub certificate: S::Certificate,
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Lock<P, S, D> {
     /// Create a new Lock with the given chunk, epoch, and certificate.
     pub const fn new(chunk: Chunk<P, D>, epoch: Epoch, certificate: S::Certificate) -> Self {
         Self {
@@ -1072,7 +1072,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Lock<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Write for Lock<P, S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         self.chunk.write(writer);
         self.epoch.write(writer);
@@ -1080,7 +1080,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Write for Lock<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> Read for Lock<P, S, D> {
     type Cfg = <S::Certificate as Read>::Cfg;
 
     fn read_cfg(reader: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, CodecError> {
@@ -1095,14 +1095,14 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Read for Lock<P, S, D> {
     }
 }
 
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
+impl<P: PublicKey, S: Scheme, D: Digest> EncodeSize for Lock<P, S, D> {
     fn encode_size(&self) -> usize {
         self.chunk.encode_size() + self.epoch.encode_size() + self.certificate.encode_size()
     }
 }
 
 #[cfg(feature = "arbitrary")]
-impl<P: PublicKey, S: certificate::Scheme, D: Digest> arbitrary::Arbitrary<'_> for Lock<P, S, D>
+impl<P: PublicKey, S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Lock<P, S, D>
 where
     P: for<'a> arbitrary::Arbitrary<'a>,
     S::Certificate: for<'a> arbitrary::Arbitrary<'a>,

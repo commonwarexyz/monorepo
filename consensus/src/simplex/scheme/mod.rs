@@ -16,7 +16,7 @@
 //!   Because peer connections are authenticated, evidence can be used locally (as it must be sent by said participant)
 //!   but can't be used by an external observer.
 //!
-//! The [`certificate::Scheme::is_attributable()`] associated function signals whether evidence can be safely
+//! The [`CertificateScheme::is_attributable()`] associated function signals whether evidence can be safely
 //! exposed. For applications only interested in collecting evidence for liveness/faults, use [`reporter::AttributableReporter`]
 //! which automatically handles filtering and verification based on scheme (hiding votes/proofs that are not attributable). If
 //! full observability is desired, process all messages passed through the [`crate::Reporter`] interface.
@@ -41,7 +41,13 @@
 use crate::simplex::types::Subject;
 use bytes::Bytes;
 use commonware_codec::Encode;
-use commonware_cryptography::{certificate, Digest};
+use commonware_cryptography::{
+    certificate::{
+        Namespace as CertificateNamespace, Scheme as CertificateScheme,
+        Subject as CertificateSubject, Verifier,
+    },
+    Digest,
+};
 use commonware_utils::union;
 
 pub mod bls12381_multisig;
@@ -79,13 +85,13 @@ impl Namespace {
     }
 }
 
-impl certificate::Namespace for Namespace {
+impl CertificateNamespace for Namespace {
     fn derive(namespace: &[u8]) -> Self {
         Self::new(namespace)
     }
 }
 
-impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
+impl<'a, D: Digest> CertificateSubject for Subject<'a, D> {
     type Namespace = Namespace;
 
     fn namespace<'b>(&self, derived: &'b Self::Namespace) -> &'b [u8] {
@@ -107,31 +113,31 @@ impl<'a, D: Digest> certificate::Subject for Subject<'a, D> {
 
 /// Marker trait for certificate verifiers compatible with `simplex`.
 ///
-/// This trait binds a [`certificate::Verifier`] to the [`Subject`] subject type
+/// This trait binds a [`Verifier`] to the [`Subject`] subject type
 /// used by the simplex protocol. It is automatically implemented for any verifier whose subject
 /// type matches `Subject<'a, D>`.
 pub trait CertificateVerifier<D: Digest>:
-    for<'a> certificate::Verifier<Subject<'a, D> = Subject<'a, D>>
+    for<'a> Verifier<Subject<'a, D> = Subject<'a, D>>
 {
 }
 
 impl<D: Digest, S> CertificateVerifier<D> for S where
-    S: for<'a> certificate::Verifier<Subject<'a, D> = Subject<'a, D>>
+    S: for<'a> Verifier<Subject<'a, D> = Subject<'a, D>>
 {
 }
 
 /// Marker trait for signing schemes compatible with `simplex`.
 ///
-/// This trait binds a [`certificate::Scheme`] to the [`Subject`] subject type
+/// This trait binds a [`CertificateScheme`] to the [`Subject`] subject type
 /// used by the simplex protocol. It is automatically implemented for any scheme
 /// whose subject type matches `Subject<'a, D>`.
 pub trait Scheme<D: Digest>:
-    CertificateVerifier<D> + for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>>
+    CertificateVerifier<D> + for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
 {
 }
 
 impl<D: Digest, S> Scheme<D> for S where
-    S: for<'a> certificate::Scheme<Subject<'a, D> = Subject<'a, D>>
+    S: for<'a> CertificateScheme<Subject<'a, D> = Subject<'a, D>>
 {
 }
 

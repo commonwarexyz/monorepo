@@ -1,7 +1,7 @@
 //! Types used in [crate::simplex].
 
 use crate::{
-    simplex::scheme,
+    simplex::scheme::{self, CertificateVerifier},
     types::{Epoch, Participant, Round, View},
     Epochable, Viewable,
 };
@@ -942,7 +942,7 @@ pub fn verify_certificates<'a, R, S, D>(
 ) -> Vec<bool>
 where
     R: CryptoRngCore,
-    S: scheme::CertificateVerifier<D>,
+    S: CertificateVerifier<D>,
     D: Digest,
 {
     scheme.verify_certificates_bisect::<_, D, N3f1>(rng, certificates, strategy)
@@ -986,7 +986,7 @@ impl<S: Scheme, D: Digest> Notarization<S, D> {
     pub fn verify<R: CryptoRngCore>(
         &self,
         rng: &mut R,
-        scheme: &impl scheme::CertificateVerifier<D, Certificate = S::Certificate>,
+        scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
     ) -> bool {
         scheme.verify_certificate::<_, D, N3f1>(
@@ -1218,7 +1218,7 @@ impl<S: Scheme> Nullification<S> {
     pub fn verify<R: CryptoRngCore, D: Digest>(
         &self,
         rng: &mut R,
-        scheme: &impl scheme::CertificateVerifier<D, Certificate = S::Certificate>,
+        scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
     ) -> bool {
         scheme.verify_certificate::<_, D, N3f1>(
@@ -1463,7 +1463,7 @@ impl<S: Scheme, D: Digest> Finalization<S, D> {
     pub fn verify<R: CryptoRngCore>(
         &self,
         rng: &mut R,
-        scheme: &impl scheme::CertificateVerifier<D, Certificate = S::Certificate>,
+        scheme: &impl CertificateVerifier<D, Certificate = S::Certificate>,
         strategy: &impl Strategy,
     ) -> bool {
         scheme.verify_certificate::<_, D, N3f1>(

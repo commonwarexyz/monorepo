@@ -1322,12 +1322,6 @@ where
                     return false;
                 };
 
-                // The resolver key binds this response to `round`; a certificate for any other
-                // round is a bad response even if it decodes correctly.
-                if notarization.round() != round {
-                    response.send_lossy(false);
-                    return false;
-                }
                 let commitment = notarization.proposal.payload;
                 if !V::check_payload(scheme.as_ref(), commitment) {
                     response.send_lossy(false);
@@ -1339,7 +1333,9 @@ where
                     return false;
                 };
 
-                if V::commitment(&block) != notarization.proposal.payload {
+                if V::commitment(&block) != notarization.proposal.payload
+                    || notarization.round() != round
+                {
                     response.send_lossy(false);
                     return false;
                 }

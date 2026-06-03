@@ -12,7 +12,7 @@ use crate::{
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
-    certificate::{self, Provider, Scheme as _, Verifier},
+    certificate::{Provider, Scheme, Verifier},
     Digest,
 };
 use commonware_macros::select_loop;
@@ -44,7 +44,7 @@ use std::{
 use tracing::{debug, error, info, trace, warn};
 
 /// An entry for a height that does not yet have a certificate.
-enum Pending<S: certificate::Scheme, D: Digest> {
+enum Pending<S: Scheme, D: Digest> {
     /// The automaton has not yet provided the digest for this height.
     /// The signatures may have arbitrary digests.
     Unverified(BTreeMap<Epoch, BTreeMap<Participant, Ack<S, D>>>),

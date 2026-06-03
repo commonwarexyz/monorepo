@@ -154,7 +154,7 @@ use commonware_actor::mailbox;
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
-    certificate::{self, Provider, Scheme as _},
+    certificate::{Provider, Scheme as CertificateScheme},
     Committable, Digestible, Hasher, PublicKey,
 };
 use commonware_macros::select_loop;
@@ -287,7 +287,7 @@ pub struct Engine<E, S, X, D, C, H, B, P, T>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
-    S::Scheme: certificate::Scheme<PublicKey = P>,
+    S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker,
     D: PeerProvider<PublicKey = P>,
     C: CodingScheme,
@@ -373,7 +373,7 @@ impl<E, S, X, D, C, H, B, P, T> Engine<E, S, X, D, C, H, B, P, T>
 where
     E: BufferPooler + Rng + Spawner + Metrics + Clock,
     S: Provider<Scope = Epoch>,
-    S::Scheme: certificate::Scheme<PublicKey = P>,
+    S::Scheme: CertificateScheme<PublicKey = P>,
     X: Blocker<PublicKey = P>,
     D: PeerProvider<PublicKey = P>,
     C: CodingScheme,
@@ -1414,7 +1414,7 @@ where
 /// Context required for processing incoming network shards.
 struct InsertCtx<'a, Sch, S>
 where
-    Sch: certificate::Scheme,
+    Sch: CertificateScheme,
     S: Strategy,
 {
     scheme: &'a Sch,
@@ -1422,15 +1422,15 @@ where
     participants_len: u64,
 }
 
-impl<Sch: certificate::Scheme, S: Strategy> Clone for InsertCtx<'_, Sch, S> {
+impl<Sch: CertificateScheme, S: Strategy> Clone for InsertCtx<'_, Sch, S> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<Sch: certificate::Scheme, S: Strategy> Copy for InsertCtx<'_, Sch, S> {}
+impl<Sch: CertificateScheme, S: Strategy> Copy for InsertCtx<'_, Sch, S> {}
 
-impl<'a, Sch: certificate::Scheme, S: Strategy> InsertCtx<'a, Sch, S> {
+impl<'a, Sch: CertificateScheme, S: Strategy> InsertCtx<'a, Sch, S> {
     fn new(scheme: &'a Sch, strategy: &'a S) -> Self {
         let participants_len = u64::try_from(scheme.participants().len())
             .expect("participant count impossibly out of bounds");
@@ -1562,7 +1562,7 @@ where
         blocker: &mut X,
     ) -> bool
     where
-        Sch: certificate::Scheme<PublicKey = P>,
+        Sch: CertificateScheme<PublicKey = P>,
         S: Strategy,
         X: Blocker<PublicKey = P>,
     {
@@ -1681,7 +1681,7 @@ mod tests {
         CodecConfig, Config as CodingConfig, PhasedAsScheme, ReedSolomon, Zoda,
     };
     use commonware_cryptography::{
-        certificate::{self, Subject},
+        certificate::{Scoped, Subject},
         ed25519::{PrivateKey, PublicKey},
         impl_certificate_ed25519,
         sha256::Digest as Sha256Digest,
@@ -1772,11 +1772,8 @@ mod tests {
         type Scope = Epoch;
         type Scheme = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme>> {
-            self.schemes
-                .get(&scope)
-                .cloned()
-                .map(certificate::Scoped::scheme)
+        fn scoped(&self, scope: Epoch) -> Option<Scoped<Scheme>> {
+            self.schemes.get(&scope).cloned().map(Scoped::scheme)
         }
     }
 
@@ -1801,14 +1798,14 @@ mod tests {
         type Scope = Epoch;
         type Scheme = Scheme;
 
-        fn scoped(&self, scope: Epoch) -> Option<certificate::Scoped<Scheme>> {
+        fn scoped(&self, scope: Epoch) -> Option<Scoped<Scheme>> {
             if scope != Epoch::zero() {
                 return None;
             }
             if self.remaining_successes.fetch_sub(1, Ordering::AcqRel) <= 0 {
                 return None;
             }
-            Some(certificate::Scoped::scheme(Arc::clone(&self.scheme)))
+            Some(Scoped::scheme(Arc::clone(&self.scheme)))
         }
     }
 
