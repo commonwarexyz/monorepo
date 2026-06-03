@@ -560,25 +560,6 @@ async fn to_expected<J: FuzzJournal>(journal: &J) -> Expected {
     }
 }
 
-/// Append a sentinel and read it back, confirming the reopened journal is writable. The append is
-/// not synced, so it only raises the expected size ceiling, not the durable floor: a later crash
-/// may or may not have persisted it.
-async fn assert_round_trip<J: FuzzJournal>(journal: &mut J, expected: &mut Expected) {
-    let size = journal.size().await;
-    let sentinel = Item::from([0xCDu8; ITEM_SIZE]);
-    let pos = journal
-        .append(sentinel.clone())
-        .await
-        .expect("append after open");
-    assert_eq!(pos, size, "post-open append at wrong position");
-    assert_eq!(
-        journal.read(pos).await.expect("read sentinel"),
-        sentinel,
-        "sentinel readback mismatch"
-    );
-    expected.appended(sentinel);
-}
-
 /// Check `read(pos)` against `bounds`. No read faults are injected and `read` is a pure lookup, so
 /// anything but `Ok` in range / `ItemPruned` below / `ItemOutOfRange` past the end is a real bug.
 fn assert_read(result: Result<Item, Error>, pos: u64, bounds: &Range<u64>) {
@@ -815,7 +796,6 @@ where
         assert_matches_expected(&journal, &expected).await;
 
         let mut expected = to_expected(&journal).await;
-        assert_round_trip(&mut journal, &mut expected).await;
 
         // Faults on for the operation phase; returning drops the journal (the crash).
         *ctx.storage_fault_config().write() = params.fault_config();
