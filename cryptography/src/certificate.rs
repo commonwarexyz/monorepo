@@ -849,6 +849,35 @@ mod tests {
         assert_eq!(result, vec![false]);
     }
 
+    #[test]
+    fn test_scoped_verifies_and_into_scheme() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_ed25519(4);
+        let cert = make_certificate(&schemes, MESSAGE);
+        let subject = TestSubject { message: MESSAGE };
+
+        let as_certificate = Scoped::Certificate(Arc::new(verifier));
+        let as_scheme = Scoped::Scheme(Arc::new(schemes[0].clone()));
+
+        // Both variants verify a valid certificate through the `Verifier` impl.
+        assert!(as_certificate.verify_certificate::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            subject,
+            &cert,
+            &Sequential,
+        ));
+        assert!(as_scheme.verify_certificate::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            subject,
+            &cert,
+            &Sequential,
+        ));
+
+        // Only the full-scheme variant yields a signing scheme.
+        assert!(as_certificate.into_scheme().is_none());
+        assert!(as_scheme.into_scheme().is_some());
+    }
+
     #[cfg(feature = "arbitrary")]
     mod conformance {
         use super::{ed25519_fixture::Scheme, *};

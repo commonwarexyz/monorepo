@@ -1268,6 +1268,10 @@ where
                     response.send_lossy(false);
                     return false;
                 };
+
+                // We decoded the certificate with the codec config for the height's epoch, so the
+                // finalization must claim that same epoch. A mismatch means the bytes were bounded
+                // against the wrong participant set, so reject before verification.
                 if finalization.epoch() != epoch {
                     response.send_lossy(false);
                     return false;
@@ -1514,6 +1518,7 @@ where
             .map(|scoped| scoped.certificate_codec_config())
     }
 
+    /// Returns the epoch containing `height` and its certificate codec config.
     fn certificate_codec_config_for_height(
         &self,
         height: Height,
