@@ -46,7 +46,7 @@ pub(super) struct CommonMetrics<E: Clock> {
     pub append_many_calls: Counter,
     /// Duration of append-many calls.
     append_many_duration: Timed,
-    /// Single-item async read calls.
+    /// Single-item read calls.
     pub read_calls: Counter,
     /// Duration of single-item read calls.
     read_duration: Timed,
