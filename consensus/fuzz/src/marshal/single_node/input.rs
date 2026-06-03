@@ -20,9 +20,11 @@ pub enum MarshalEvent {
     ReportNotarization { block_idx: u8 },
     /// Best-effort local read of a finalized block by height (pure query).
     GetBlock { block_idx: u8 },
-    /// Subscribe to a block by digest or commitment with a round-fetch
-    /// fallback, exercising the missing-block subscription path.
+    /// Subscribe to a block by digest or commitment with a fetch fallback,
+    /// exercising the missing-block subscription path.
     Subscribe { block_idx: u8, by_commitment: bool },
+    /// Set marshal's durable floor to the next processable finalized block.
+    SetFloor { block_idx: u8 },
     /// Request pruning finalized archives below a height (only effective at
     /// or below the current floor).
     Prune { block_idx: u8 },
@@ -53,7 +55,40 @@ impl Arbitrary<'_> for MarshalFuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
         let mut events = Vec::with_capacity(event_count);
-        if u.len() >= 2 && u.arbitrary::<bool>()? {
+        if events.len() < event_count && !u.is_empty() && u.arbitrary::<bool>()? {
+            events.push(MarshalEvent::Subscribe {
+                block_idx: 0,
+                by_commitment: true,
+            });
+        }
+        if event_count - events.len() >= 2 && u.len() >= 2 && u.arbitrary::<bool>()? {
+            if u.arbitrary::<bool>()? {
+                events.push(MarshalEvent::Propose { block_idx: 0 });
+                events.push(MarshalEvent::SetFloor { block_idx: 0 });
+            } else {
+                events.push(MarshalEvent::SetFloor { block_idx: 0 });
+                events.push(MarshalEvent::Propose { block_idx: 0 });
+            }
+            if events.len() < event_count {
+                events.push(MarshalEvent::AckNext);
+            }
+            if events.len() < event_count {
+                events.push(MarshalEvent::AckNext);
+            }
+            if events.len() < event_count {
+                events.push(MarshalEvent::Subscribe {
+                    block_idx: 0,
+                    by_commitment: false,
+                });
+            }
+            if events.len() < event_count {
+                events.push(MarshalEvent::Subscribe {
+                    block_idx: 0,
+                    by_commitment: true,
+                });
+            }
+        }
+        if events.len() < event_count && u.len() >= 2 && u.arbitrary::<bool>()? {
             events.push(MarshalEvent::PublishViaVariant {
                 block_idx: u.arbitrary()?,
             });
