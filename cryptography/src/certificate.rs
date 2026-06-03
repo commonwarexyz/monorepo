@@ -315,8 +315,8 @@ pub trait Verifier: Clone + Debug + Send + Sync + 'static {
 
 /// Cryptographic surface for multi-party certificate schemes.
 ///
-/// A `Scheme` produces attestations, validates them (individually or in batches), assembles
-/// certificates, and verifies recovered certificates. Implementations may override the
+/// A `Scheme` extends [`Verifier`] with the signing surface: it produces attestations, validates
+/// them (individually or in batches), and assembles certificates. Implementations may override the
 /// provided defaults to take advantage of scheme-specific batching strategies.
 pub trait Scheme: Verifier {
     /// Signature emitted by individual participants.
@@ -398,10 +398,11 @@ pub trait Scheme: Verifier {
     fn is_attributable() -> bool;
 }
 
-/// Certificate provider result for a scope.
+/// A scheme handle returned by a [`Provider`] for one scope.
 ///
-/// Implements [`Verifier`] for direct certificate verification. Use [`Scoped::into_scheme`] to
-/// recover the full signing scheme, which only succeeds for a [`Scoped::scheme`].
+/// Always usable as a [`Verifier`] for certificate verification. The full signing scheme is
+/// recoverable with [`Scoped::into_scheme`] only when the scope was built with [`Scoped::scheme`].
+/// A scope built with [`Scoped::verifier`] yields `None`.
 #[derive(Clone, Debug)]
 pub struct Scoped<S: Scheme> {
     scheme: Arc<S>,
@@ -491,10 +492,19 @@ pub trait Provider: Clone + Send + Sync + 'static {
     /// The signing scheme to provide.
     type Scheme: Scheme;
 
-    /// Return the certificate or signing scheme that corresponds to `scope`.
+    /// Return a [`Scoped`] for `scope` capable of verifying certificates produced under it.
+    ///
+    /// A scheme that can verify certificates from any scope without scope-specific state should
+    /// return a verify-only [`Scoped`] (via [`Scoped::verifier`]) for every scope. A fixed group
+    /// public key that survives committee rotation is one such case. A scheme that needs
+    /// scope-specific verification state should return `None` once that state is unavailable.
     fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme>>;
 
     /// Return the full signing scheme that corresponds to `scope`, if available.
+    ///
+    /// The default returns a scheme only when [`Provider::scoped`] yields a signing scope, so a
+    /// verify-only scope produces `None`. Override this when the signing scheme is available even
+    /// for scopes that [`Provider::scoped`] serves with a verify-only result.
     fn scheme(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>> {
         self.scoped(scope).and_then(Scoped::into_scheme)
     }
