@@ -12,7 +12,7 @@ use crate::{
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
-    certificate::{self, Scheme as _, Verifier, Provider},
+    certificate::{self, Provider, Scheme as _, Verifier},
     Digest,
 };
 use commonware_macros::select_loop;

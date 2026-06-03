@@ -15,7 +15,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Encode};
 use commonware_cryptography::{
-    certificate::{Verifier, Scheme},
+    certificate::{Scheme, Verifier},
     Digest,
 };
 use commonware_parallel::Sequential;

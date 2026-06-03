@@ -154,7 +154,7 @@ use commonware_actor::mailbox;
 use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
-    certificate::{self, Scheme as _, Provider},
+    certificate::{self, Provider, Scheme as _},
     Committable, Digestible, Hasher, PublicKey,
 };
 use commonware_macros::select_loop;

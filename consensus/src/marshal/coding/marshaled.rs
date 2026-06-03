@@ -100,7 +100,7 @@ use crate::{
 use commonware_actor::Feedback;
 use commonware_coding::Scheme as CodingScheme;
 use commonware_cryptography::{
-    certificate::{Scheme as _, Verifier, Provider},
+    certificate::{Provider, Scheme as _, Verifier},
     Committable, Digestible, Hasher,
 };
 use commonware_macros::select;
@@ -135,8 +135,7 @@ where
     /// The underlying application to wrap.
     pub application: A,
     /// Mailbox for communicating with the marshal engine.
-    pub marshal:
-        core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as Verifier>::PublicKey>>,
+    pub marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as Verifier>::PublicKey>>,
     /// Mailbox for communicating with the shards engine.
     pub shards: shards::Mailbox<B, C, H, <Z::Scheme as Verifier>::PublicKey>,
     /// Provider for signing schemes scoped by epoch.
@@ -1055,11 +1054,7 @@ where
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<
-        E,
-        Block = B,
-        Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
-    >,
+    A: Application<E, Block = B, Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
@@ -1086,11 +1081,8 @@ where
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<
-            E,
-            Block = B,
-            Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
-        > + Reporter<Activity = Update<B>>,
+    A: Application<E, Block = B, Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>>
+        + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,

@@ -886,7 +886,7 @@ mod tests {
                 variant::{MinPk, MinSig, Variant},
             },
         },
-        certificate::{mocks::Fixture, Verifier as _, Scheme as _},
+        certificate::{mocks::Fixture, Scheme as _, Verifier as _},
         ed25519,
         ed25519::certificate::mocks::participants as ed25519_participants,
         sha256::Digest as Sha256Digest,

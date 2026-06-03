@@ -26,7 +26,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Verifier, Provider},
+    certificate::{Provider, Verifier},
     Digestible,
 };
 use commonware_macros::select_loop;
@@ -1012,10 +1012,7 @@ where
             panic!("floor finalization epoch unavailable");
         };
         let verified = finalization.verify(self.context.as_mut(), &scoped, &self.strategy);
-        assert!(
-            verified,
-            "floor finalization must verify"
-        );
+        assert!(verified, "floor finalization must verify");
 
         let commitment = finalization.proposal.payload;
         let digest = V::commitment_to_inner(commitment);

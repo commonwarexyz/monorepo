@@ -72,10 +72,7 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        certificate::{
-            Verifier as _, ConstantProvider, Provider, Scoped,
-            mocks::Fixture,
-        },
+        certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
         ed25519::PublicKey,
         sha256::Sha256,
         Digestible, Hasher as _,

@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Verifier, Namespace, Provider},
+    certificate::{self, Attestation, Namespace, Provider, Verifier},
     Digest, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
@@ -564,8 +564,7 @@ impl<P: PublicKey, S: certificate::Scheme, D: Digest> Node<P, S, D> {
             })?;
 
             // Decode certificate with epoch-specific bounded config
-            let certificate =
-                S::Certificate::read_cfg(reader, &scoped.certificate_codec_config())?;
+            let certificate = S::Certificate::read_cfg(reader, &scoped.certificate_codec_config())?;
 
             Some(Parent {
                 digest,

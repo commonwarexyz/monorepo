@@ -4,7 +4,7 @@ use crate::{
     Automaton, Monitor, Reporter,
 };
 use commonware_cryptography::{
-    certificate::{Verifier, Provider},
+    certificate::{Provider, Verifier},
     Digest,
 };
 use commonware_p2p::Blocker;

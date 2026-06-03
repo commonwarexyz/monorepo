@@ -146,8 +146,7 @@ mod test {
     };
     use commonware_cryptography::{
         certificate::{
-            self, mocks::Fixture, Attestation, Verifier, ConstantProvider,
-            Provider, Scoped,
+            self, mocks::Fixture, Attestation, ConstantProvider, Provider, Scoped, Verifier,
         },
         ed25519,
         sha256::Digest as Sha256Digest,

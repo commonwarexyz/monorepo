@@ -217,8 +217,7 @@ where
         // Verify against the certificate scheme for the finalization's epoch. If no scheme is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
         let scoped = self.provider.scoped(finalization.epoch())?;
-        let verified =
-            finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy);
+        let verified = finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy);
         if !verified {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
             return None;

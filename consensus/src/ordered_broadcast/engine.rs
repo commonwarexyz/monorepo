@@ -21,7 +21,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    certificate::{Scheme as _, Verifier, Provider},
+    certificate::{Provider, Scheme as _, Verifier},
     Digest, PublicKey, Signer,
 };
 use commonware_macros::select_loop;

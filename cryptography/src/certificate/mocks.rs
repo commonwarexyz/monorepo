@@ -710,7 +710,7 @@ macro_rules! impl_certificate_mock {
 mod tests {
     use super::{Certificates, Shared, Signatures};
     use crate::{
-        certificate::{Attestation, Verifier as _, Lazy, Scheme as _},
+        certificate::{Attestation, Lazy, Scheme as _, Verifier as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };
