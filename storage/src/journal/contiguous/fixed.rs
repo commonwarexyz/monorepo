@@ -1706,7 +1706,9 @@ mod tests {
             inner.sync(0).await.unwrap();
             inner.sync(1).await.unwrap();
 
-            let size = Journal::<_, Digest>::compute_size(&inner, 5, 0).await.unwrap();
+            let size = Journal::<_, Digest>::compute_size(&inner, 5, 0)
+                .await
+                .unwrap();
             assert_eq!(size, 7);
             inner.destroy().await.unwrap();
         });
@@ -1734,7 +1736,9 @@ mod tests {
             inner.sync(0).await.unwrap();
             inner.sync(1).await.unwrap();
 
-            let size = Journal::<_, Digest>::compute_size(&inner, 5, 0).await.unwrap();
+            let size = Journal::<_, Digest>::compute_size(&inner, 5, 0)
+                .await
+                .unwrap();
             assert_eq!(size, 5);
             inner.destroy().await.unwrap();
         });
