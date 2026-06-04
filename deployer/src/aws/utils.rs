@@ -1,12 +1,12 @@
 //! Utility functions for interacting with EC2 instances
 
 use crate::aws::Error;
-use std::path::Path;
+use std::{path::Path, process::Output};
 use tokio::{
     fs::File,
     io::AsyncWriteExt,
     process::Command,
-    time::{sleep, Duration},
+    time::{sleep, timeout, Duration},
 };
 use tracing::{info, warn};
 
@@ -18,6 +18,15 @@ pub const MAX_POLL_ATTEMPTS: usize = 30;
 
 /// Interval between retries
 pub const RETRY_INTERVAL: Duration = Duration::from_secs(15);
+
+/// Maximum time to wait for a non-polling SSH command to complete
+pub const SSH_COMMAND_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Maximum time to wait for a service status poll to complete
+pub const SSH_POLL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Maximum time to wait for an SCP download to complete
+pub const SCP_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Protocol for deployer ingress
 pub const DEPLOYER_PROTOCOL: &str = "tcp";
@@ -42,9 +51,19 @@ pub async fn get_public_ip() -> Result<String, Error> {
 
 /// Executes a command on a remote instance via SSH with retries
 pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), Error> {
+    ssh_execute_with_timeout(key_file, ip, command, SSH_COMMAND_TIMEOUT).await
+}
+
+/// Executes a command on a remote instance via SSH with retries and a per-attempt timeout
+pub async fn ssh_execute_with_timeout(
+    key_file: &str,
+    ip: &str,
+    command: &str,
+    command_timeout: Duration,
+) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
-        let output = Command::new("ssh")
-            .arg("-i")
+        let mut cmd = Command::new("ssh");
+        cmd.arg("-i")
             .arg(key_file)
             .arg("-o")
             .arg("IdentitiesOnly=yes")
@@ -53,9 +72,16 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{ip}"))
-            .arg(command)
-            .output()
-            .await?;
+            .arg(command);
+        let output = match command_output(cmd, "ssh", ip, command_timeout).await {
+            Ok(output) => output,
+            Err(err @ Error::CommandTimeout { .. }) => {
+                warn!(ip, error = ?err, "SSH command timed out");
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if output.status.success() {
             return Ok(());
         }
@@ -68,8 +94,8 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
 /// Polls the status of a systemd service on a remote instance until active
 pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
-        let output = Command::new("ssh")
-            .arg("-i")
+        let mut cmd = Command::new("ssh");
+        cmd.arg("-i")
             .arg(key_file)
             .arg("-o")
             .arg("IdentitiesOnly=yes")
@@ -78,9 +104,16 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{ip}"))
-            .arg(format!("systemctl is-active {service}"))
-            .output()
-            .await?;
+            .arg(format!("systemctl is-active {service}"));
+        let output = match command_output(cmd, "ssh", ip, SSH_POLL_TIMEOUT).await {
+            Ok(output) => output,
+            Err(err @ Error::CommandTimeout { .. }) => {
+                warn!(service, error = ?err, "service status poll timed out");
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         let parsed = String::from_utf8_lossy(&output.stdout);
         let parsed = parsed.trim();
         if parsed == "active" {
@@ -99,8 +132,8 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
 /// Polls the status of a systemd service on a remote instance until it becomes inactive
 pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> Result<(), Error> {
     for _ in 0..MAX_POLL_ATTEMPTS {
-        let output = Command::new("ssh")
-            .arg("-i")
+        let mut cmd = Command::new("ssh");
+        cmd.arg("-i")
             .arg(key_file)
             .arg("-o")
             .arg("IdentitiesOnly=yes")
@@ -109,9 +142,16 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{ip}"))
-            .arg(format!("systemctl is-active {service}"))
-            .output()
-            .await?;
+            .arg(format!("systemctl is-active {service}"));
+        let output = match command_output(cmd, "ssh", ip, SSH_POLL_TIMEOUT).await {
+            Ok(output) => output,
+            Err(err @ Error::CommandTimeout { .. }) => {
+                warn!(service, error = ?err, "service status poll timed out");
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         let parsed = String::from_utf8_lossy(&output.stdout);
         let parsed = parsed.trim();
         if parsed == "inactive" {
@@ -135,8 +175,8 @@ pub async fn scp_download(
     local_path: &str,
 ) -> Result<(), Error> {
     for _ in 0..MAX_SSH_ATTEMPTS {
-        let output = Command::new("scp")
-            .arg("-i")
+        let mut cmd = Command::new("scp");
+        cmd.arg("-i")
             .arg(key_file)
             .arg("-o")
             .arg("IdentitiesOnly=yes")
@@ -145,9 +185,16 @@ pub async fn scp_download(
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
             .arg(format!("ubuntu@{ip}:{remote_path}"))
-            .arg(local_path)
-            .output()
-            .await?;
+            .arg(local_path);
+        let output = match command_output(cmd, "scp", ip, SCP_DOWNLOAD_TIMEOUT).await {
+            Ok(output) => output,
+            Err(err @ Error::CommandTimeout { .. }) => {
+                warn!(ip, error = ?err, "SCP timed out");
+                sleep(RETRY_INTERVAL).await;
+                continue;
+            }
+            Err(err) => return Err(err),
+        };
         if output.status.success() {
             return Ok(());
         }
@@ -155,6 +202,23 @@ pub async fn scp_download(
         sleep(RETRY_INTERVAL).await;
     }
     Err(Error::SshFailed)
+}
+
+async fn command_output(
+    mut command: Command,
+    program: &str,
+    ip: &str,
+    command_timeout: Duration,
+) -> Result<Output, Error> {
+    command.kill_on_drop(true);
+    match timeout(command_timeout, command.output()).await {
+        Ok(output) => Ok(output?),
+        Err(_) => Err(Error::CommandTimeout {
+            program: program.to_string(),
+            ip: ip.to_string(),
+            seconds: command_timeout.as_secs(),
+        }),
+    }
 }
 
 /// Converts an IP address to a CIDR block
