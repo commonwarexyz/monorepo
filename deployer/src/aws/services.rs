@@ -5,6 +5,10 @@ use crate::aws::{
     Architecture,
 };
 
+// Binary artifacts and user SSH state live under this directory. NVMe-backed instances mount
+// instance-store storage here so existing binary configs use NVMe without extra configuration.
+const HOME_DIRECTORY: &str = "/home/ubuntu";
+
 /// Deployer version used to namespace static configs in S3
 const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -914,18 +918,30 @@ pub struct InstanceUrls {
 }
 
 /// Phase 1 (optional): Install apt packages on binary instances
-/// Only needed when profiling is enabled (for linux-tools)
-pub(crate) const fn install_binary_apt_cmd(profiling: bool) -> Option<&'static str> {
+/// Only needed when profiling is enabled or NVMe instance-store devices are mounted.
+pub(crate) fn install_binary_apt_cmd(profiling: bool, nvme: bool) -> Option<String> {
+    let mut packages = Vec::new();
     if profiling {
-        Some(
-            r#"set -e
-sudo apt-get update -y
-sudo apt-get install -y linux-tools-common linux-tools-generic linux-tools-$(uname -r)
-"#,
-        )
-    } else {
-        None
+        packages.extend([
+            "linux-tools-common",
+            "linux-tools-generic",
+            "linux-tools-$(uname -r)",
+        ]);
     }
+    if nvme {
+        packages.push("mdadm");
+    }
+    if packages.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        r#"set -e
+sudo apt-get update -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {}
+"#,
+        packages.join(" ")
+    ))
 }
 
 /// Phase 2: Download files from S3 on binary instances
@@ -986,6 +1002,92 @@ done
         urls.libjemalloc_deb,
         urls.logrotate_deb,
         urls.unzip_deb,
+    )
+}
+
+pub(crate) fn nvme_setup_cmd() -> String {
+    format!(
+        r#"
+# Configure EC2 NVMe instance-store mounting
+sudo tee /usr/local/bin/commonware-mount-nvme >/dev/null <<'EOF'
+#!/bin/sh
+set -e
+cd /
+
+NVME_MOUNT='{mount_directory}'
+sudo udevadm settle || true
+NVME_DEVICES="$(for model_path in /sys/block/nvme*n1/device/model; do
+    [ -e "$model_path" ] || continue
+    if grep -q 'Amazon EC2 NVMe Instance Storage' "$model_path"; then
+        basename "$(dirname "$(dirname "$model_path")")" | sed 's#^#/dev/#'
+    fi
+done | sort)"
+NVME_COUNT="$(printf '%s\n' "$NVME_DEVICES" | sed '/^$/d' | wc -l)"
+
+if [ "$NVME_COUNT" -eq 0 ]; then
+    echo "ERROR: NVMe instance storage requested but no EC2 NVMe instance-store devices were found" >&2
+    exit 1
+fi
+
+sudo mkdir -p "$NVME_MOUNT"
+
+if [ "$NVME_COUNT" -eq 1 ]; then
+    NVME_TARGET="$(printf '%s\n' "$NVME_DEVICES" | head -n1)"
+else
+    NVME_TARGET=/dev/md/commonware-nvme
+    sudo mkdir -p /dev/md
+    sudo mdadm --assemble "$NVME_TARGET" $NVME_DEVICES >/dev/null 2>&1 || true
+    if [ ! -e "$NVME_TARGET" ]; then
+        sudo mdadm --create "$NVME_TARGET" --name=commonware-nvme --level=0 --raid-devices="$NVME_COUNT" --force $NVME_DEVICES
+    fi
+    sudo udevadm settle || true
+fi
+
+if ! blkid "$NVME_TARGET" >/dev/null 2>&1; then
+    sudo mkfs.ext4 -F "$NVME_TARGET"
+fi
+if ! findmnt -rn --mountpoint "$NVME_MOUNT" >/dev/null; then
+    NVME_STAGE="$(mktemp -d /tmp/commonware-nvme.XXXXXX)"
+    cleanup_stage() {{
+        if [ -n "${{NVME_STAGE:-}}" ]; then
+            sudo umount "$NVME_STAGE" >/dev/null 2>&1 || true
+            sudo rmdir "$NVME_STAGE" >/dev/null 2>&1 || true
+        fi
+    }}
+    trap cleanup_stage EXIT
+    sudo mount "$NVME_TARGET" "$NVME_STAGE"
+    sudo tar -C "$NVME_MOUNT" -cpf - . | sudo tar -C "$NVME_STAGE" -xpf -
+    sudo umount "$NVME_STAGE"
+    sudo rmdir "$NVME_STAGE"
+    NVME_STAGE=
+    sudo mount "$NVME_TARGET" "$NVME_MOUNT"
+fi
+sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
+EOF
+sudo chmod +x /usr/local/bin/commonware-mount-nvme
+sudo tee /etc/systemd/system/commonware-nvme.service >/dev/null <<'EOF'
+[Unit]
+Description=Mount Commonware NVMe instance storage
+Before=binary.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/commonware-mount-nvme
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo mkdir -p /etc/systemd/system/binary.service.d
+sudo tee /etc/systemd/system/binary.service.d/nvme.conf >/dev/null <<'EOF'
+[Unit]
+Requires=commonware-nvme.service
+After=commonware-nvme.service
+EOF
+sudo systemctl daemon-reload
+sudo systemctl start commonware-nvme
+"#,
+        mount_directory = HOME_DIRECTORY,
     )
 }
 

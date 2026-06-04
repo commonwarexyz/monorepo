@@ -11,8 +11,9 @@ use aws_sdk_ec2::{
     error::BuildError,
     primitives::Blob,
     types::{
-        BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
-        SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
+        BlockDeviceMapping, EbsBlockDevice, EphemeralNvmeSupport, Filter, InstanceStateName,
+        InstanceTypeInfo, ResourceType, SecurityGroup, SummaryStatus, Tag, TagSpecification,
+        VpcPeeringConnectionStateReasonCode,
     },
     Error as Ec2Error,
 };
@@ -64,25 +65,32 @@ pub async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), E
     Ok(())
 }
 
-/// Detects the architecture of an instance type using the AWS API
-pub(crate) async fn detect_architecture(
+async fn describe_instance_type(
     client: &Ec2Client,
     instance_type: &str,
-) -> Result<super::Architecture, Ec2Error> {
+) -> Result<InstanceTypeInfo, Ec2Error> {
     let response = client
         .describe_instance_types()
         .instance_types(InstanceType::try_parse(instance_type).expect("invalid instance type"))
         .send()
         .await?;
 
-    let instance_info = response
+    response
         .instance_types
         .and_then(|types| types.into_iter().next())
         .ok_or_else(|| {
             Ec2Error::from(BuildError::other(format!(
                 "instance type {instance_type} not found"
             )))
-        })?;
+        })
+}
+
+/// Detects the architecture of an instance type using the AWS API
+pub(crate) async fn detect_architecture(
+    client: &Ec2Client,
+    instance_type: &str,
+) -> Result<super::Architecture, Ec2Error> {
+    let instance_info = describe_instance_type(client, instance_type).await?;
 
     let architectures = instance_info
         .processor_info
@@ -100,6 +108,29 @@ pub(crate) async fn detect_architecture(
             "instance type {instance_type} has no supported architecture"
         ))))
     }
+}
+
+fn has_nvme_instance_storage(instance_info: &InstanceTypeInfo) -> bool {
+    instance_info.instance_storage_supported().unwrap_or(false)
+        && instance_info
+            .instance_storage_info()
+            .and_then(|storage| storage.nvme_support())
+            .is_some_and(|support| {
+                matches!(
+                    support,
+                    EphemeralNvmeSupport::Required | EphemeralNvmeSupport::Supported
+                )
+            })
+}
+
+/// Checks whether an instance type exposes EC2 NVMe instance-store devices.
+pub(crate) async fn supports_nvme_instance_storage(
+    client: &Ec2Client,
+    instance_type: &str,
+) -> Result<bool, Ec2Error> {
+    let instance_info = describe_instance_type(client, instance_type).await?;
+
+    Ok(has_nvme_instance_storage(&instance_info))
 }
 
 /// Finds the latest Ubuntu 24.04 AMI for the given architecture in the region
@@ -1204,5 +1235,39 @@ pub async fn wait_for_enis_deleted(ec2_client: &Ec2Client, sg_id: &str) -> Resul
             return Ok(());
         }
         sleep(RETRY_INTERVAL).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_nvme_instance_storage;
+    use aws_sdk_ec2::types::{EphemeralNvmeSupport, InstanceStorageInfo, InstanceTypeInfo};
+
+    #[test]
+    fn nvme_instance_storage_requires_supported_instance_storage() {
+        let unsupported = InstanceTypeInfo::builder()
+            .instance_storage_supported(false)
+            .instance_storage_info(
+                InstanceStorageInfo::builder()
+                    .nvme_support(EphemeralNvmeSupport::Supported)
+                    .build(),
+            )
+            .build();
+
+        assert!(!has_nvme_instance_storage(&unsupported));
+    }
+
+    #[test]
+    fn nvme_instance_storage_accepts_supported_nvme() {
+        let supported = InstanceTypeInfo::builder()
+            .instance_storage_supported(true)
+            .instance_storage_info(
+                InstanceStorageInfo::builder()
+                    .nvme_support(EphemeralNvmeSupport::Required)
+                    .build(),
+            )
+            .build();
+
+        assert!(has_nvme_instance_storage(&supported));
     }
 }
