@@ -163,11 +163,12 @@ git clone https://github.com/commonwarexyz/constantinople.git && cd constantinop
 # Set up a local cluster with 4 validators and 1 indexing secondary.
 cargo run --bin constantinople-deploy -- generate \
     --validators 4 \
-    --secondaries 1 \
-    --output-dir ./local \
+    --indexer \
+    --relayer \
     --spammer \
     --spammer-accounts 4096 \
     --spammer-accounts-jitter 0.1 \
+    --output-dir ./local \
     local
 
 # Run the `mprocs` command printed by the setup script to start the cluster.
