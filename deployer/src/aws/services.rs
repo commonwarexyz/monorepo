@@ -1005,6 +1005,7 @@ done
     )
 }
 
+/// Returns a command that mounts EC2 NVMe instance-store storage at the binary working directory.
 pub(crate) fn nvme_setup_cmd() -> String {
     format!(
         r#"
