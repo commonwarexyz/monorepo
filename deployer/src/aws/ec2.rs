@@ -11,8 +11,9 @@ use aws_sdk_ec2::{
     error::BuildError,
     primitives::Blob,
     types::{
-        BlockDeviceMapping, EbsBlockDevice, Filter, InstanceStateName, ResourceType, SecurityGroup,
-        SummaryStatus, Tag, TagSpecification, VpcPeeringConnectionStateReasonCode,
+        BlockDeviceMapping, EbsBlockDevice, EphemeralNvmeSupport, Filter, InstanceStateName,
+        InstanceTypeInfo, ResourceType, SecurityGroup, SummaryStatus, Tag, TagSpecification,
+        VpcPeeringConnectionStateReasonCode,
     },
     Error as Ec2Error,
 };
@@ -64,25 +65,32 @@ pub async fn delete_key_pair(client: &Ec2Client, key_name: &str) -> Result<(), E
     Ok(())
 }
 
-/// Detects the architecture of an instance type using the AWS API
-pub(crate) async fn detect_architecture(
+async fn describe_instance_type(
     client: &Ec2Client,
     instance_type: &str,
-) -> Result<super::Architecture, Ec2Error> {
+) -> Result<InstanceTypeInfo, Ec2Error> {
     let response = client
         .describe_instance_types()
         .instance_types(InstanceType::try_parse(instance_type).expect("invalid instance type"))
         .send()
         .await?;
 
-    let instance_info = response
+    response
         .instance_types
         .and_then(|types| types.into_iter().next())
         .ok_or_else(|| {
             Ec2Error::from(BuildError::other(format!(
                 "instance type {instance_type} not found"
             )))
-        })?;
+        })
+}
+
+/// Detects the architecture of an instance type using the AWS API
+pub(crate) async fn detect_architecture(
+    client: &Ec2Client,
+    instance_type: &str,
+) -> Result<super::Architecture, Ec2Error> {
+    let instance_info = describe_instance_type(client, instance_type).await?;
 
     let architectures = instance_info
         .processor_info
@@ -100,6 +108,25 @@ pub(crate) async fn detect_architecture(
             "instance type {instance_type} has no supported architecture"
         ))))
     }
+}
+
+/// Checks whether an instance type exposes EC2 NVMe instance-store devices.
+pub(crate) async fn supports_nvme_instance_storage(
+    client: &Ec2Client,
+    instance_type: &str,
+) -> Result<bool, Ec2Error> {
+    let instance_info = describe_instance_type(client, instance_type).await?;
+
+    Ok(instance_info.instance_storage_supported().unwrap_or(false)
+        && instance_info
+            .instance_storage_info()
+            .and_then(|storage| storage.nvme_support())
+            .is_some_and(|support| {
+                matches!(
+                    support,
+                    EphemeralNvmeSupport::Required | EphemeralNvmeSupport::Supported
+                )
+            }))
 }
 
 /// Finds the latest Ubuntu 24.04 AMI for the given architecture in the region
