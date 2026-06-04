@@ -66,6 +66,10 @@ stability_scope!(BETA {
     /// This trait is required for blocks used with deferred verification in [CertifiableAutomaton].
     /// It allows the verification context to be derived directly from the block when a validator
     /// needs to participate in certification but never verified the block locally (necessary for liveness).
+    ///
+    /// The [`Digestible`] implementation for a [`CertifiableBlock`] must commit to the block's
+    /// embedded consensus context. In other words, changing [`CertifiableBlock::context`] for a
+    /// block must also change [`Digestible::digest`].
     pub trait CertifiableBlock: Block {
         /// The consensus context type stored in this block.
         type Context: Clone + Encode;

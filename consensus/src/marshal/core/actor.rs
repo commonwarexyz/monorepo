@@ -26,7 +26,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox;
 use commonware_codec::{Decode, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Provider, Scheme as CertificateScheme},
+    certificate::{Provider, Verifier},
     Digestible,
 };
 use commonware_macros::select_loop;
@@ -47,7 +47,7 @@ use commonware_utils::{
 };
 use futures::{future::join_all, try_join};
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -303,9 +303,9 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         spawn_cell!(self.context, self.run(application, buffer, resolver))
     }
@@ -320,12 +320,12 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
     {
         self.start(
             application,
-            NoBuffer::<<P::Scheme as CertificateScheme>::PublicKey>::new(),
+            NoBuffer::<<P::Scheme as Verifier>::PublicKey>::new(),
             resolver,
         )
     }
@@ -340,9 +340,9 @@ where
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
     {
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
@@ -509,11 +509,11 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: TargetedResolver<
             Key = ResolverRequestFor<V>,
             Subscriber = Annotation,
-            PublicKey = <P::Scheme as CertificateScheme>::PublicKey,
+            PublicKey = <P::Scheme as Verifier>::PublicKey,
         >,
     {
         if message.response_closed() {
@@ -782,7 +782,7 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let mut needs_sync = false;
@@ -880,7 +880,7 @@ where
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
-                response.send_lossy((finalization, block).encode());
+                response.send_lossy((finalization, V::into_inner(block)).encode());
             }
             Key::Notarized { round } => {
                 let Some(notarization) = self.cache.get_notarization(round).await else {
@@ -995,7 +995,7 @@ where
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
-        Buf: Buffer<V, PublicKey = <P::Scheme as CertificateScheme>::PublicKey>,
+        Buf: Buffer<V, PublicKey = <P::Scheme as Verifier>::PublicKey>,
         R: Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     {
         let round = finalization.round();
@@ -1008,11 +1008,11 @@ where
             return;
         }
 
-        let Some(scheme) = self.get_scheme_certificate_verifier(finalization.epoch()) else {
+        let Some(scoped) = self.provider.scoped(finalization.epoch()) else {
             panic!("floor finalization epoch unavailable");
         };
         assert!(
-            finalization.verify(self.context.as_mut(), scheme.as_ref(), &self.strategy),
+            finalization.verify(self.context.as_mut(), &scoped, &self.strategy),
             "floor finalization must verify"
         );
 
@@ -1249,16 +1249,9 @@ where
                 wrote
             }
             Key::Finalized { height } => {
-                let Some(bounds) = self.epocher.containing(height) else {
-                    debug!(
-                        %height,
-                        floor = %self.floor.processed_height(),
-                        "ignoring stale delivery"
-                    );
-                    response.send_lossy(true);
-                    return false;
-                };
-                let Some(scheme) = self.get_scheme_certificate_verifier(bounds.epoch()) else {
+                let Some((epoch, certificate_codec_config)) =
+                    self.certificate_codec_config_for_height(height)
+                else {
                     debug!(
                         %height,
                         floor = %self.floor.processed_height(),
@@ -1268,7 +1261,6 @@ where
                     return false;
                 };
 
-                let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(finalization) =
                     Finalization::read_cfg(&mut value, &certificate_codec_config)
                 else {
@@ -1276,16 +1268,33 @@ where
                     return false;
                 };
 
-                let commitment = finalization.proposal.payload;
-                let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
-                let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
+                // We decoded the certificate with the codec config for the height's epoch, so the
+                // finalization must claim that same epoch. A mismatch means the bytes were bounded
+                // against the wrong participant set, so reject before verification.
+                if finalization.epoch() != epoch {
+                    response.send_lossy(false);
+                    return false;
+                }
+
+                // Decode the block carried with the finalization. Below, it is checked against
+                // the requested height and the finalization payload.
+                let Ok(block) =
+                    V::ApplicationBlock::decode_cfg(&mut value, &self.block_codec_config)
+                else {
                     response.send_lossy(false);
                     return false;
                 };
 
-                if block.height() != height
-                    || V::commitment(&block) != commitment
-                    || finalization.epoch() != bounds.epoch()
+                // In contrast to the `Block` and `Notarization` deliveries, the finalization delivery
+                // is guaranteed to be certified (assuming the certificate verifies). Because of this,
+                // we can skip broader payload checks and just check that the application block matches
+                // the commitment in the finalization proposal.
+                //
+                // TODO(https://github.com/commonwarexyz/monorepo/issues/3938): Apply this pattern
+                // conditionally to `Request::Block` and `Request::Notarized`, if the requester knows
+                // the requested block is certified.
+                let commitment = finalization.proposal.payload;
+                if block.height() != height || block.digest() != V::commitment_to_inner(commitment)
                 {
                     response.send_lossy(false);
                     return false;
@@ -1298,7 +1307,7 @@ where
                 false
             }
             Key::Notarized { round } => {
-                let Some(scheme) = self.get_scheme_certificate_verifier(round.epoch()) else {
+                let Some(scheme) = self.provider.scheme(round.epoch()) else {
                     debug!(
                         ?round,
                         floor = %self.floor.processed_height(),
@@ -1307,7 +1316,6 @@ where
                     response.send_lossy(true);
                     return false;
                 };
-
                 let certificate_codec_config = scheme.certificate_codec_config();
                 let Ok(notarization) =
                     Notarization::read_cfg(&mut value, &certificate_codec_config)
@@ -1316,16 +1324,27 @@ where
                     return false;
                 };
 
+                // The resolver key binds this response to `round`; a certificate for any other
+                // round is a bad response even if it decodes correctly.
+                if notarization.round() != round {
+                    response.send_lossy(false);
+                    return false;
+                }
+
+                // Use the notarization payload to derive the block decode config. Below, the
+                // decoded block is checked against the same payload.
                 let commitment = notarization.proposal.payload;
+                if !V::check_payload(scheme.as_ref(), commitment) {
+                    response.send_lossy(false);
+                    return false;
+                }
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
                 let Ok(block) = V::Block::decode_cfg(value, &block_cfg) else {
                     response.send_lossy(false);
                     return false;
                 };
 
-                if notarization.round() != round
-                    || V::commitment(&block) != notarization.proposal.payload
-                {
+                if V::commitment(&block) != notarization.proposal.payload {
                     response.send_lossy(false);
                     return false;
                 }
@@ -1372,46 +1391,29 @@ where
             })
             .collect();
 
-        // Batch verify using the all-epoch verifier if available, otherwise
-        // batch verify per epoch using scoped verifiers.
-        let verified = if let Some(scheme) = self.provider.all() {
-            verify_certificates(
-                self.context.as_mut(),
-                scheme.as_ref(),
-                &certs,
-                &self.strategy,
-            )
-        } else {
-            let mut verified = vec![false; delivers.len()];
+        // Group indices by epoch.
+        let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
+        for (i, item) in delivers.iter().enumerate() {
+            let epoch = match item {
+                PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
+                PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
+            };
+            by_epoch.entry(epoch).or_default().push(i);
+        }
 
-            // Group indices by epoch.
-            let mut by_epoch: BTreeMap<Epoch, Vec<usize>> = BTreeMap::new();
-            for (i, item) in delivers.iter().enumerate() {
-                let epoch = match item {
-                    PendingVerification::Notarized { notarization, .. } => notarization.epoch(),
-                    PendingVerification::Finalized { finalization, .. } => finalization.epoch(),
-                };
-                by_epoch.entry(epoch).or_default().push(i);
+        // Batch verify each epoch group.
+        let mut verified = vec![false; delivers.len()];
+        for (epoch, indices) in &by_epoch {
+            let Some(scoped) = self.provider.scoped(*epoch) else {
+                continue;
+            };
+            let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
+            let results =
+                verify_certificates(self.context.as_mut(), &scoped, &group, &self.strategy);
+            for (j, &idx) in indices.iter().enumerate() {
+                verified[idx] = results[j];
             }
-
-            // Batch verify each epoch group.
-            for (epoch, indices) in &by_epoch {
-                let Some(scheme) = self.provider.scoped(*epoch) else {
-                    continue;
-                };
-                let group: Vec<_> = indices.iter().map(|&i| certs[i]).collect();
-                let results = verify_certificates(
-                    self.context.as_mut(),
-                    scheme.as_ref(),
-                    &group,
-                    &self.strategy,
-                );
-                for (j, &idx) in indices.iter().enumerate() {
-                    verified[idx] = results[j];
-                }
-            }
-            verified
-        };
+        }
 
         // Process each verified item, rejecting unverified ones.
         let mut wrote = false;
@@ -1433,6 +1435,7 @@ where
                 } => {
                     // Valid finalization received.
                     response.send_lossy(true);
+                    let block = V::from_application_block(block, finalization.proposal.payload);
                     let round = finalization.round();
                     let height = block.height();
                     let digest = block.digest();
@@ -1509,12 +1512,24 @@ where
         wrote
     }
 
-    /// Returns a scheme suitable for verifying certificates at the given epoch.
-    ///
-    /// Prefers a certificate verifier if available, otherwise falls back
-    /// to the scheme for the given epoch.
-    fn get_scheme_certificate_verifier(&self, epoch: Epoch) -> Option<Arc<P::Scheme>> {
-        self.provider.all().or_else(|| self.provider.scoped(epoch))
+    /// Returns the certificate codec config for `epoch`.
+    fn certificate_codec_config(
+        &self,
+        epoch: Epoch,
+    ) -> Option<<<P::Scheme as Verifier>::Certificate as Read>::Cfg> {
+        self.provider
+            .scoped(epoch)
+            .map(|scoped| scoped.certificate_codec_config())
+    }
+
+    /// Returns the epoch containing `height` and its certificate codec config.
+    fn certificate_codec_config_for_height(
+        &self,
+        height: Height,
+    ) -> Option<(Epoch, <<P::Scheme as Verifier>::Certificate as Read>::Cfg)> {
+        let epoch = self.epocher.containing(height)?.epoch();
+        self.certificate_codec_config(epoch)
+            .map(|config| (epoch, config))
     }
 
     // -------------------- Application Dispatch --------------------

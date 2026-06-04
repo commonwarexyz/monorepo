@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Namespace, Provider, Scheme},
+    certificate::{Attestation, Namespace, Provider, Scheme, Subject, Verifier},
     Digest, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
@@ -368,7 +368,7 @@ pub struct AckSubject<'a, P: PublicKey, D: Digest> {
     pub epoch: Epoch,
 }
 
-impl<P: PublicKey, D: Digest> certificate::Subject for AckSubject<'_, P, D> {
+impl<P: PublicKey, D: Digest> Subject for AckSubject<'_, P, D> {
     type Namespace = AckNamespace;
 
     fn namespace<'a>(&self, derived: &'a Self::Namespace) -> &'a [u8] {
@@ -556,7 +556,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             let epoch = Epoch::read(reader)?;
 
             // Get scheme for parent's epoch
-            let scheme = provider.scoped(epoch).ok_or_else(|| {
+            let scoped = provider.scoped(epoch).ok_or_else(|| {
                 CodecError::Wrapped(
                     "consensus::ordered_broadcast::Node::read_staged",
                     Box::new(Error::UnknownScheme(epoch)),
@@ -564,7 +564,7 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             })?;
 
             // Decode certificate with epoch-specific bounded config
-            let certificate = S::Certificate::read_cfg(reader, &scheme.certificate_codec_config())?;
+            let certificate = S::Certificate::read_cfg(reader, &scoped.certificate_codec_config())?;
 
             Some(Parent {
                 digest,
@@ -624,14 +624,16 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
     /// - Some(parent_chunk) for non-genesis nodes
     ///
     /// If verification fails, returns an appropriate error.
-    pub fn verify<R: CryptoRngCore>(
+    pub fn verify<R, Pr>(
         &self,
         rng: &mut R,
         verifier: &ChunkVerifier,
-        provider: &impl Provider<Scope = Epoch, Scheme = S>,
+        provider: &Pr,
         strategy: &impl Strategy,
     ) -> Result<Option<Chunk<P, D>>, Error>
     where
+        R: CryptoRngCore,
+        Pr: Provider<Scope = Epoch, Scheme = S>,
         S: scheme::Scheme<P, D>,
     {
         // Verify chunk signature
@@ -648,15 +650,14 @@ impl<P: PublicKey, S: Scheme, D: Digest> Node<P, S, D> {
             self.chunk.height.previous().ok_or(Error::ParentMissing)?,
             parent.digest,
         );
-        let parent_scheme = provider
+        let scoped = provider
             .scoped(parent.epoch)
             .ok_or(Error::UnknownScheme(parent.epoch))?;
         let ctx = AckSubject {
             chunk: &parent_chunk,
             epoch: parent.epoch,
         };
-        if !parent_scheme.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy)
-        {
+        if !scoped.verify_certificate::<R, D, N3f1>(rng, ctx, &parent.certificate, strategy) {
             return Err(Error::InvalidCertificate);
         }
         Ok(Some(parent_chunk))
