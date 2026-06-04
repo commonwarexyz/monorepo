@@ -1524,6 +1524,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::journal::contiguous::tests::RemoveHookContext;
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::{select, test_traced};
@@ -1532,16 +1533,9 @@ mod tests {
         Blob, BufferPooler, Clock as _, Error as RuntimeError, Metrics as _, Runner, Spawner as _,
         Storage, Supervisor as _,
     };
-    use commonware_utils::{sync::Notify, NZUsize, NZU16, NZU64};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
-    use std::{
-        num::NonZeroU16,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-        time::{Duration, SystemTime},
-    };
+    use std::{num::NonZeroU16, sync::Arc, time::Duration};
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(44);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(3);
@@ -1607,190 +1601,6 @@ mod tests {
             Ok(blobs) => blobs,
             Err(RuntimeError::PartitionMissing(_)) => Vec::new(),
             Err(err) => panic!("Failed to scan partition {partition}: {err}"),
-        }
-    }
-
-    /// Coordinates a test pause after a target section is removed from storage.
-    struct RemoveBlocker {
-        target: Vec<u8>,
-        removed: Notify,
-        release: Notify,
-    }
-
-    impl RemoveBlocker {
-        /// Create a blocker for removal of the given section.
-        fn new(section: u64) -> Self {
-            Self {
-                target: section.to_be_bytes().to_vec(),
-                removed: Notify::new(),
-                release: Notify::new(),
-            }
-        }
-    }
-
-    enum RemoveHook {
-        Block(Arc<RemoveBlocker>),
-        FailOnCall {
-            calls: Arc<AtomicUsize>,
-            fail_on: usize,
-        },
-    }
-
-    /// Deterministic test context that can intercept remove calls.
-    struct RemoveHookContext {
-        inner: Context,
-        hook: RemoveHook,
-    }
-
-    impl RemoveHookContext {
-        /// Wrap a deterministic context and pause removal of the blocker's target section.
-        fn blocking(inner: Context, blocker: Arc<RemoveBlocker>) -> Self {
-            Self {
-                inner,
-                hook: RemoveHook::Block(blocker),
-            }
-        }
-
-        /// Wrap a deterministic context and fail the `fail_on`th remove call.
-        fn failing(inner: Context, fail_on: usize) -> Self {
-            Self {
-                inner,
-                hook: RemoveHook::FailOnCall {
-                    calls: Arc::new(AtomicUsize::new(0)),
-                    fail_on,
-                },
-            }
-        }
-    }
-
-    impl commonware_runtime::Supervisor for RemoveHookContext {
-        fn name(&self) -> commonware_runtime::Name {
-            self.inner.name()
-        }
-
-        fn child(&self, label: &'static str) -> Self {
-            Self {
-                inner: self.inner.child(label),
-                hook: self.hook.clone(),
-            }
-        }
-
-        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
-            Self {
-                inner: self.inner.with_attribute(key, value),
-                hook: self.hook,
-            }
-        }
-    }
-
-    impl Clone for RemoveHook {
-        fn clone(&self) -> Self {
-            match self {
-                Self::Block(blocker) => Self::Block(blocker.clone()),
-                Self::FailOnCall { calls, fail_on } => Self::FailOnCall {
-                    calls: calls.clone(),
-                    fail_on: *fail_on,
-                },
-            }
-        }
-    }
-
-    impl commonware_runtime::Metrics for RemoveHookContext {
-        fn register<
-            N: Into<String>,
-            H: Into<String>,
-            M: commonware_runtime::telemetry::metrics::Metric,
-        >(
-            &self,
-            name: N,
-            help: H,
-            metric: M,
-        ) -> commonware_runtime::telemetry::metrics::Registered<M> {
-            self.inner.register(name, help, metric)
-        }
-
-        fn encode(&self) -> String {
-            self.inner.encode()
-        }
-    }
-
-    impl governor::clock::Clock for RemoveHookContext {
-        type Instant = SystemTime;
-
-        fn now(&self) -> Self::Instant {
-            self.inner.current()
-        }
-    }
-
-    impl governor::clock::ReasonablyRealtime for RemoveHookContext {}
-
-    impl commonware_runtime::Clock for RemoveHookContext {
-        fn current(&self) -> SystemTime {
-            self.inner.current()
-        }
-
-        fn sleep(
-            &self,
-            duration: Duration,
-        ) -> impl std::future::Future<Output = ()> + Send + 'static {
-            self.inner.sleep(duration)
-        }
-
-        fn sleep_until(
-            &self,
-            deadline: SystemTime,
-        ) -> impl std::future::Future<Output = ()> + Send + 'static {
-            self.inner.sleep_until(deadline)
-        }
-    }
-
-    impl BufferPooler for RemoveHookContext {
-        fn network_buffer_pool(&self) -> &commonware_runtime::BufferPool {
-            self.inner.network_buffer_pool()
-        }
-
-        fn storage_buffer_pool(&self) -> &commonware_runtime::BufferPool {
-            self.inner.storage_buffer_pool()
-        }
-    }
-
-    impl Storage for RemoveHookContext {
-        type Blob = <Context as Storage>::Blob;
-
-        async fn open_versioned(
-            &self,
-            partition: &str,
-            name: &[u8],
-            versions: std::ops::RangeInclusive<u16>,
-        ) -> Result<(Self::Blob, u64, u16), RuntimeError> {
-            self.inner.open_versioned(partition, name, versions).await
-        }
-
-        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RuntimeError> {
-            match &self.hook {
-                RemoveHook::Block(blocker) => {
-                    let block = name.is_some_and(|name| name == blocker.target.as_slice());
-                    let result = self.inner.remove(partition, name).await;
-                    if block {
-                        blocker.removed.notify_one();
-                        blocker.release.notified().await;
-                    }
-                    result
-                }
-                RemoveHook::FailOnCall { calls, fail_on } => {
-                    let call = calls.fetch_add(1, Ordering::Relaxed) + 1;
-                    if call == *fail_on {
-                        return Err(RuntimeError::Io(std::io::Error::other(
-                            "injected remove failure",
-                        )));
-                    }
-                    self.inner.remove(partition, name).await
-                }
-            }
-        }
-
-        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RuntimeError> {
-            self.inner.scan(partition).await
         }
     }
 
@@ -2031,9 +1841,8 @@ mod tests {
     fn test_fixed_journal_reads_during_prune_unlink() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let blocker = Arc::new(RemoveBlocker::new(0));
-            let journal_context =
-                RemoveHookContext::blocking(context.child("journal"), blocker.clone());
+            let (journal_context, blocker) =
+                RemoveHookContext::blocking_any(context.child("journal"), 0);
             let cfg = test_cfg(&journal_context, NZU64!(2));
             let journal = Arc::new(
                 Journal::<_, Digest>::init(journal_context.child("inner"), cfg)
@@ -2121,7 +1930,7 @@ mod tests {
     fn test_fixed_journal_partial_prune_remove_failure_reopens_suffix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let remove_context = RemoveHookContext::failing(context.child("first"), 2);
+            let remove_context = RemoveHookContext::failing_any(context.child("first"), 2);
             let cfg = test_cfg(&remove_context, NZU64!(2));
             let journal = Journal::<_, Digest>::init(remove_context.child("journal"), cfg.clone())
                 .await

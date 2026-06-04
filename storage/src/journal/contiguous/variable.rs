@@ -1476,23 +1476,18 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::journal::contiguous::tests::{partition_sync_fault, run_contiguous_tests};
+    use crate::journal::contiguous::tests::{
+        partition_sync_fault, run_contiguous_tests, RemoveHookContext,
+    };
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
         buffer::paged::{Append, CacheRef},
-        deterministic, Blob as _, BufferPooler, Clock as _, Error as RuntimeError, Metrics as _,
-        Runner, Spawner as _, Storage, Supervisor as _,
+        deterministic, Blob as _, Clock as _, Error as RuntimeError, Metrics as _, Runner,
+        Spawner as _, Storage, Supervisor as _,
     };
-    use commonware_utils::{sequence::FixedBytes, sync::Notify, NZUsize, NZU16, NZU64};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use futures::{pin_mut, FutureExt as _};
-    use std::{
-        num::NonZeroU16,
-        sync::{
-            atomic::{AtomicUsize, Ordering},
-            Arc,
-        },
-        time::{Duration, SystemTime},
-    };
+    use std::{num::NonZeroU16, sync::Arc, time::Duration};
 
     // Use some jank sizes to exercise boundary conditions.
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
@@ -1500,214 +1495,6 @@ mod tests {
     // Larger page sizes for tests that need more buffer space.
     const LARGE_PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
-
-    /// Coordinates a test pause after a target section is removed from storage.
-    struct RemoveBlocker {
-        partition: String,
-        target: Vec<u8>,
-        removed: Notify,
-        release: Notify,
-    }
-
-    impl RemoveBlocker {
-        /// Create a blocker for removal of the given section in `partition`.
-        fn new(partition: String, section: u64) -> Self {
-            Self {
-                partition,
-                target: section.to_be_bytes().to_vec(),
-                removed: Notify::new(),
-                release: Notify::new(),
-            }
-        }
-    }
-
-    enum RemoveHook {
-        Block(Arc<RemoveBlocker>),
-        FailOnPartition {
-            partition: String,
-            calls: Arc<AtomicUsize>,
-            fail_on: usize,
-        },
-    }
-
-    impl Clone for RemoveHook {
-        fn clone(&self) -> Self {
-            match self {
-                Self::Block(blocker) => Self::Block(blocker.clone()),
-                Self::FailOnPartition {
-                    partition,
-                    calls,
-                    fail_on,
-                } => Self::FailOnPartition {
-                    partition: partition.clone(),
-                    calls: calls.clone(),
-                    fail_on: *fail_on,
-                },
-            }
-        }
-    }
-
-    /// Deterministic test context that can intercept remove calls.
-    struct RemoveHookContext {
-        inner: deterministic::Context,
-        hook: RemoveHook,
-    }
-
-    impl RemoveHookContext {
-        /// Wrap a deterministic context and pause removal of `section` in `partition`.
-        fn blocking(
-            inner: deterministic::Context,
-            partition: String,
-            section: u64,
-        ) -> (Self, Arc<RemoveBlocker>) {
-            let blocker = Arc::new(RemoveBlocker::new(partition, section));
-            (
-                Self {
-                    inner,
-                    hook: RemoveHook::Block(blocker.clone()),
-                },
-                blocker,
-            )
-        }
-
-        /// Wrap a deterministic context and fail the `fail_on`th remove call in `partition`.
-        fn failing(inner: deterministic::Context, partition: String, fail_on: usize) -> Self {
-            Self {
-                inner,
-                hook: RemoveHook::FailOnPartition {
-                    partition,
-                    calls: Arc::new(AtomicUsize::new(0)),
-                    fail_on,
-                },
-            }
-        }
-    }
-
-    impl commonware_runtime::Supervisor for RemoveHookContext {
-        fn name(&self) -> commonware_runtime::Name {
-            self.inner.name()
-        }
-
-        fn child(&self, label: &'static str) -> Self {
-            Self {
-                inner: self.inner.child(label),
-                hook: self.hook.clone(),
-            }
-        }
-
-        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
-            Self {
-                inner: self.inner.with_attribute(key, value),
-                hook: self.hook,
-            }
-        }
-    }
-
-    impl commonware_runtime::Metrics for RemoveHookContext {
-        fn register<
-            N: Into<String>,
-            H: Into<String>,
-            M: commonware_runtime::telemetry::metrics::Metric,
-        >(
-            &self,
-            name: N,
-            help: H,
-            metric: M,
-        ) -> commonware_runtime::telemetry::metrics::Registered<M> {
-            self.inner.register(name, help, metric)
-        }
-
-        fn encode(&self) -> String {
-            self.inner.encode()
-        }
-    }
-
-    impl governor::clock::Clock for RemoveHookContext {
-        type Instant = SystemTime;
-
-        fn now(&self) -> Self::Instant {
-            self.inner.current()
-        }
-    }
-
-    impl governor::clock::ReasonablyRealtime for RemoveHookContext {}
-
-    impl commonware_runtime::Clock for RemoveHookContext {
-        fn current(&self) -> SystemTime {
-            self.inner.current()
-        }
-
-        fn sleep(
-            &self,
-            duration: Duration,
-        ) -> impl std::future::Future<Output = ()> + Send + 'static {
-            self.inner.sleep(duration)
-        }
-
-        fn sleep_until(
-            &self,
-            deadline: SystemTime,
-        ) -> impl std::future::Future<Output = ()> + Send + 'static {
-            self.inner.sleep_until(deadline)
-        }
-    }
-
-    impl BufferPooler for RemoveHookContext {
-        fn network_buffer_pool(&self) -> &commonware_runtime::BufferPool {
-            self.inner.network_buffer_pool()
-        }
-
-        fn storage_buffer_pool(&self) -> &commonware_runtime::BufferPool {
-            self.inner.storage_buffer_pool()
-        }
-    }
-
-    impl Storage for RemoveHookContext {
-        type Blob = <deterministic::Context as Storage>::Blob;
-
-        async fn open_versioned(
-            &self,
-            partition: &str,
-            name: &[u8],
-            versions: std::ops::RangeInclusive<u16>,
-        ) -> Result<(Self::Blob, u64, u16), RuntimeError> {
-            self.inner.open_versioned(partition, name, versions).await
-        }
-
-        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RuntimeError> {
-            match &self.hook {
-                RemoveHook::Block(blocker) => {
-                    let block = partition == blocker.partition
-                        && name.is_some_and(|name| name == blocker.target.as_slice());
-                    let result = self.inner.remove(partition, name).await;
-                    if block {
-                        blocker.removed.notify_one();
-                        blocker.release.notified().await;
-                    }
-                    result
-                }
-                RemoveHook::FailOnPartition {
-                    partition: target,
-                    calls,
-                    fail_on,
-                } => {
-                    if partition == target {
-                        let call = calls.fetch_add(1, Ordering::Relaxed) + 1;
-                        if call == *fail_on {
-                            return Err(RuntimeError::Io(std::io::Error::other(
-                                "injected remove failure",
-                            )));
-                        }
-                    }
-                    self.inner.remove(partition, name).await
-                }
-            }
-        }
-
-        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RuntimeError> {
-            self.inner.scan(partition).await
-        }
-    }
 
     #[test_traced]
     fn test_variable_journal_reads_during_prune_begin() {

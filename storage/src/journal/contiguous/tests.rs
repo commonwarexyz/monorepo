@@ -5,9 +5,22 @@ use crate::{
     journal::{contiguous::Mutable, Error},
     Persistable,
 };
-use commonware_utils::NZUsize;
+use commonware_runtime::{
+    deterministic, telemetry::metrics, BufferPool, BufferPooler, Clock, Error as RuntimeError,
+    Metrics, Name, Storage, Supervisor,
+};
+use commonware_utils::{sync::Notify, NZUsize};
 use futures::{future::BoxFuture, StreamExt};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
+use std::{
+    future::Future,
+    ops::RangeInclusive,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime},
+};
 
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
@@ -177,6 +190,245 @@ pub(super) mod partition_sync_fault {
             }
             self.inner.sync().await
         }
+    }
+}
+
+/// Coordinates a test pause after a target blob is removed from storage.
+pub(in crate::journal::contiguous) struct RemoveBlocker {
+    partition: Option<String>,
+    target: Vec<u8>,
+    pub(in crate::journal::contiguous) removed: Notify,
+    pub(in crate::journal::contiguous) release: Notify,
+}
+
+impl RemoveBlocker {
+    fn new(partition: Option<String>, section: u64) -> Self {
+        Self {
+            partition,
+            target: section.to_be_bytes().to_vec(),
+            removed: Notify::new(),
+            release: Notify::new(),
+        }
+    }
+}
+
+enum RemoveHook {
+    Block(Arc<RemoveBlocker>),
+    Fail {
+        partition: Option<String>,
+        calls: Arc<AtomicUsize>,
+        fail_on: usize,
+    },
+}
+
+impl Clone for RemoveHook {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Block(blocker) => Self::Block(blocker.clone()),
+            Self::Fail {
+                partition,
+                calls,
+                fail_on,
+            } => Self::Fail {
+                partition: partition.clone(),
+                calls: calls.clone(),
+                fail_on: *fail_on,
+            },
+        }
+    }
+}
+
+/// Deterministic test context that can intercept remove calls.
+pub(in crate::journal::contiguous) struct RemoveHookContext {
+    inner: deterministic::Context,
+    hook: RemoveHook,
+}
+
+impl RemoveHookContext {
+    /// Wrap a deterministic context and pause removal of `section` in any partition.
+    pub(in crate::journal::contiguous) fn blocking_any(
+        inner: deterministic::Context,
+        section: u64,
+    ) -> (Self, Arc<RemoveBlocker>) {
+        Self::blocking_inner(inner, None, section)
+    }
+
+    /// Wrap a deterministic context and pause removal of `section` in `partition`.
+    pub(in crate::journal::contiguous) fn blocking(
+        inner: deterministic::Context,
+        partition: String,
+        section: u64,
+    ) -> (Self, Arc<RemoveBlocker>) {
+        Self::blocking_inner(inner, Some(partition), section)
+    }
+
+    fn blocking_inner(
+        inner: deterministic::Context,
+        partition: Option<String>,
+        section: u64,
+    ) -> (Self, Arc<RemoveBlocker>) {
+        let blocker = Arc::new(RemoveBlocker::new(partition, section));
+        (
+            Self {
+                inner,
+                hook: RemoveHook::Block(blocker.clone()),
+            },
+            blocker,
+        )
+    }
+
+    /// Wrap a deterministic context and fail the `fail_on`th remove call in any partition.
+    pub(in crate::journal::contiguous) fn failing_any(
+        inner: deterministic::Context,
+        fail_on: usize,
+    ) -> Self {
+        Self::failing_inner(inner, None, fail_on)
+    }
+
+    /// Wrap a deterministic context and fail the `fail_on`th remove call in `partition`.
+    pub(in crate::journal::contiguous) fn failing(
+        inner: deterministic::Context,
+        partition: String,
+        fail_on: usize,
+    ) -> Self {
+        Self::failing_inner(inner, Some(partition), fail_on)
+    }
+
+    fn failing_inner(
+        inner: deterministic::Context,
+        partition: Option<String>,
+        fail_on: usize,
+    ) -> Self {
+        Self {
+            inner,
+            hook: RemoveHook::Fail {
+                partition,
+                calls: Arc::new(AtomicUsize::new(0)),
+                fail_on,
+            },
+        }
+    }
+
+    fn partition_matches(target: &Option<String>, partition: &str) -> bool {
+        target
+            .as_ref()
+            .map_or(true, |target| target.as_str() == partition)
+    }
+}
+
+impl Supervisor for RemoveHookContext {
+    fn name(&self) -> Name {
+        self.inner.name()
+    }
+
+    fn child(&self, label: &'static str) -> Self {
+        Self {
+            inner: self.inner.child(label),
+            hook: self.hook.clone(),
+        }
+    }
+
+    fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+        Self {
+            inner: self.inner.with_attribute(key, value),
+            hook: self.hook,
+        }
+    }
+}
+
+impl Metrics for RemoveHookContext {
+    fn register<N: Into<String>, H: Into<String>, M: metrics::Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> metrics::Registered<M> {
+        self.inner.register(name, help, metric)
+    }
+
+    fn encode(&self) -> String {
+        self.inner.encode()
+    }
+}
+
+impl Clock for RemoveHookContext {
+    fn current(&self) -> SystemTime {
+        self.inner.current()
+    }
+
+    fn sleep(&self, duration: Duration) -> impl Future<Output = ()> + Send + 'static {
+        self.inner.sleep(duration)
+    }
+
+    fn sleep_until(&self, deadline: SystemTime) -> impl Future<Output = ()> + Send + 'static {
+        self.inner.sleep_until(deadline)
+    }
+}
+
+impl GovernorClock for RemoveHookContext {
+    type Instant = SystemTime;
+
+    fn now(&self) -> Self::Instant {
+        self.current()
+    }
+}
+
+impl ReasonablyRealtime for RemoveHookContext {}
+
+impl BufferPooler for RemoveHookContext {
+    fn network_buffer_pool(&self) -> &BufferPool {
+        self.inner.network_buffer_pool()
+    }
+
+    fn storage_buffer_pool(&self) -> &BufferPool {
+        self.inner.storage_buffer_pool()
+    }
+}
+
+impl Storage for RemoveHookContext {
+    type Blob = <deterministic::Context as Storage>::Blob;
+
+    async fn open_versioned(
+        &self,
+        partition: &str,
+        name: &[u8],
+        versions: RangeInclusive<u16>,
+    ) -> Result<(Self::Blob, u64, u16), RuntimeError> {
+        self.inner.open_versioned(partition, name, versions).await
+    }
+
+    async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RuntimeError> {
+        match &self.hook {
+            RemoveHook::Block(blocker) => {
+                let block = Self::partition_matches(&blocker.partition, partition)
+                    && name.is_some_and(|name| name == blocker.target.as_slice());
+                let result = self.inner.remove(partition, name).await;
+                if block {
+                    blocker.removed.notify_one();
+                    blocker.release.notified().await;
+                }
+                result
+            }
+            RemoveHook::Fail {
+                partition: target,
+                calls,
+                fail_on,
+            } => {
+                if Self::partition_matches(target, partition) {
+                    let call = calls.fetch_add(1, Ordering::Relaxed) + 1;
+                    if call == *fail_on {
+                        return Err(RuntimeError::Io(std::io::Error::other(
+                            "injected remove failure",
+                        )));
+                    }
+                }
+                self.inner.remove(partition, name).await
+            }
+        }
+    }
+
+    async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RuntimeError> {
+        self.inner.scan(partition).await
     }
 }
 
