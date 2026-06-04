@@ -401,11 +401,67 @@ macro_rules! impl_certificate_secp256r1 {
             }
         }
 
-        impl<P: $crate::PublicKey> $crate::certificate::Scheme for Scheme<P> {
+        impl<P: $crate::PublicKey> $crate::certificate::Verifier for Scheme<P> {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
-            type Signature = $crate::secp256r1::standard::Signature;
             type Certificate = $crate::secp256r1::certificate::Certificate;
+
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic.verify_certificate::<Self, _, D, M>(
+                    rng,
+                    subject,
+                    certificate,
+                )
+            }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                for (subject, certificate) in certificates {
+                    if !self.generic.verify_certificate::<Self, _, D, M>(rng, subject, certificate) {
+                        return false;
+                    }
+                }
+                true
+            }
+
+            fn is_batchable() -> bool {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::secp256r1::certificate::Generic::<P, $namespace>::certificate_codec_config_unbounded()
+            }
+        }
+
+        impl<P: $crate::PublicKey> $crate::certificate::Scheme for Scheme<P> {
+            type Signature = $crate::secp256r1::standard::Signature;
 
             fn me(&self) -> Option<commonware_utils::Participant> {
                 self.generic.me()
@@ -468,61 +524,8 @@ macro_rules! impl_certificate_secp256r1 {
                 self.generic.assemble::<Self, _, M>(attestations)
             }
 
-            fn verify_certificate<R, D, M>(
-                &self,
-                rng: &mut R,
-                subject: Self::Subject<'_, D>,
-                certificate: &Self::Certificate,
-                _strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand_core::CryptoRngCore,
-                D: $crate::Digest,
-                M: commonware_utils::Faults,
-            {
-                self.generic.verify_certificate::<Self, _, D, M>(
-                    rng,
-                    subject,
-                    certificate,
-                )
-            }
-
-            fn verify_certificates<'a, R, D, I, M>(
-                &self,
-                rng: &mut R,
-                certificates: I,
-                _strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand_core::CryptoRngCore,
-                D: $crate::Digest,
-                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                M: commonware_utils::Faults,
-            {
-                for (subject, certificate) in certificates {
-                    if !self.generic.verify_certificate::<Self, _, D, M>(rng, subject, certificate) {
-                        return false;
-                    }
-                }
-                true
-            }
-
             fn is_attributable() -> bool {
                 $crate::secp256r1::certificate::Generic::<P, $namespace>::is_attributable()
-            }
-
-            fn is_batchable() -> bool {
-                $crate::secp256r1::certificate::Generic::<P, $namespace>::is_batchable()
-            }
-
-            fn certificate_codec_config(
-                &self,
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                self.generic.certificate_codec_config()
-            }
-
-            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::secp256r1::certificate::Generic::<P, $namespace>::certificate_codec_config_unbounded()
             }
         }
     };
@@ -531,7 +534,10 @@ macro_rules! impl_certificate_secp256r1 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
+    use crate::{
+        certificate::{Scheme as _, Verifier as _},
+        sha256::Digest as Sha256Digest,
+    };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;

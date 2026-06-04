@@ -186,16 +186,15 @@ pub trait Factory<T: Translator>: Unordered + Sized {
 /// A trait defining the additional operations provided by a memory-efficient index that allows
 /// ordered traversal of the indexed keys.
 pub trait Ordered: Unordered + Send + Sync {
-    type Iterator<'a>: Iterator<Item = &'a Self::Value> + Send
-    where
-        Self: 'a;
-
     // Returns an iterator over all values associated with a translated key that lexicographically
     // precedes the result of translating `key`. The implementation will cycle around to the last
     // translated key if `key` is less than or equal to the first translated key. The returned
     // boolean indicates whether the result is from cycling. Returns None if there are no keys in
     // the index.
-    fn prev_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
+    fn prev_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
     where
         Self::Value: 'a;
 
@@ -212,19 +211,26 @@ pub trait Ordered: Unordered + Send + Sync {
     /// 0b, returning true for the bool. Because values associated with the same translated key can
     /// appear in any order, keys with the same first byte in this example would need to be ordered
     /// by the caller if a full ordering over the untranslated keyspace is desired.
-    fn next_translated_key<'a>(&'a self, key: &[u8]) -> Option<(Self::Iterator<'a>, bool)>
+    fn next_translated_key<'a>(
+        &'a self,
+        key: &[u8],
+    ) -> Option<(impl Iterator<Item = &'a Self::Value> + Send + 'a, bool)>
     where
         Self::Value: 'a;
 
     // Returns an iterator over all values associated with the lexicographically first translated
     // key, or None if there are no keys in the index.
-    fn first_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    fn first_translated_key<'a>(
+        &'a self,
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
     where
         Self::Value: 'a;
 
     // Returns an iterator over all values associated with the lexicographically last translated
     // key, or None if there are no keys in the index.
-    fn last_translated_key<'a>(&'a self) -> Option<Self::Iterator<'a>>
+    fn last_translated_key<'a>(
+        &'a self,
+    ) -> Option<impl Iterator<Item = &'a Self::Value> + Send + 'a>
     where
         Self::Value: 'a;
 }

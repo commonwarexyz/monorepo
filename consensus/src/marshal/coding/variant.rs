@@ -3,11 +3,11 @@ use crate::{
         ancestry::BlockProvider,
         coding::{
             shards,
-            types::{CodedBlock, CodedBlockCfg, StoredCodedBlock},
+            types::{coding_config_for_participants, CodedBlock, CodedBlockCfg, StoredCodedBlock},
         },
         core::{Buffer, CommitmentFallback, Mailbox, Variant},
     },
-    simplex::types::Context,
+    simplex::{scheme::Scheme as SimplexScheme, types::Context},
     types::{coding::Commitment, Round},
     CertifiableBlock,
 };
@@ -57,6 +57,15 @@ where
         block.context().parent.1
     }
 
+    fn check_payload<S>(scheme: &S, payload: Self::Commitment) -> bool
+    where
+        S: SimplexScheme<Self::Commitment>,
+    {
+        let n_participants = u16::try_from(scheme.participants().len())
+            .expect("scheme must have at most 2^16-1 participants");
+        payload.config() == coding_config_for_participants(n_participants)
+    }
+
     fn block_cfg(
         block_cfg: &<Self::ApplicationBlock as Read>::Cfg,
         expected: Self::Commitment,
@@ -69,6 +78,13 @@ where
 
     fn into_inner(block: Self::Block) -> Self::ApplicationBlock {
         block.into_inner()
+    }
+
+    fn from_application_block(
+        block: Self::ApplicationBlock,
+        payload: Self::Commitment,
+    ) -> Self::Block {
+        CodedBlock::new_trusted(block, payload)
     }
 }
 

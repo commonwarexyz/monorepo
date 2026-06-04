@@ -16,7 +16,7 @@ use commonware_runtime::deterministic;
 
 pub trait Simplex: 'static
 where
-    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
+    <<Self::Scheme as certificate::Verifier>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
     type Elector: ElectorConfig<Self::Scheme> + Default;

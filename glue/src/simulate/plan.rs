@@ -558,7 +558,7 @@ impl<D: EngineDefinition> Plan<D> {
                         if tracker.min_view() >= after {
                             info!(target: "simulator", "starting delayed participants");
                             for pk in &delayed {
-                                team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone())
+                                team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
                                     .await;
                             }
                             delayed_started = true;
@@ -599,7 +599,8 @@ impl<D: EngineDefinition> Plan<D> {
                 break;
             },
             Some(pk) = restart_rx.recv() else break => {
-                team.restart(&ctx, &oracle, pk, monitor_tx.clone()).await;
+                let was_delayed = delayed.contains(&pk);
+                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed).await;
             },
             Some(cmd) = schedule_rx.recv() else break => match cmd {
                 ScheduleCmd::Crash(pk) => {
@@ -608,7 +609,8 @@ impl<D: EngineDefinition> Plan<D> {
                     }
                 }
                 ScheduleCmd::Restart(pk) => {
-                    team.restart(&ctx, &oracle, pk, monitor_tx.clone()).await;
+                    let was_delayed = delayed.contains(&pk);
+                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed).await;
                 }
             },
             _ = crash_rx.recv() => {

@@ -372,6 +372,97 @@ pub async fn add_monitoring_ingress(
     Ok(())
 }
 
+/// Parses a configured EBS storage class.
+pub(crate) fn parse_storage_class(
+    target: &str,
+    storage_class: &str,
+) -> Result<VolumeType, super::Error> {
+    VolumeType::try_parse(storage_class).map_err(|_| super::Error::InvalidStorageClass {
+        target: target.to_string(),
+        storage_class: storage_class.to_string(),
+    })
+}
+
+/// Validates configured EBS options.
+///
+/// Source docs for EBS request-side limits:
+/// - IOPS and throughput request fields:
+///   https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_EbsBlockDevice.html
+/// - gp3 size, IOPS, and throughput ratios:
+///   https://docs.aws.amazon.com/ebs/latest/userguide/general-purpose.html
+/// - io1/io2 size-to-IOPS ratios:
+///   https://docs.aws.amazon.com/ebs/latest/userguide/provisioned-iops.html
+pub(crate) fn validate_storage_options(
+    target: &str,
+    storage_class: &VolumeType,
+    storage_size: i32,
+    storage_iops: Option<i32>,
+    storage_throughput: Option<i32>,
+) -> Result<(), super::Error> {
+    // Provisioned IOPS SSD volumes require an explicit IOPS value at launch.
+    if storage_iops.is_none() && matches!(storage_class, VolumeType::Io1 | VolumeType::Io2) {
+        return Err(super::Error::MissingStorageIops {
+            target: target.to_string(),
+            storage_class: storage_class.as_str().to_string(),
+        });
+    }
+
+    // Request IOPS is limited by both the EbsBlockDevice range and the
+    // volume-type-specific storage size ratio.
+    if let Some(storage_iops) = storage_iops {
+        let storage_size = i64::from(storage_size);
+        let storage_iops = i64::from(storage_iops);
+        let valid = match storage_class {
+            VolumeType::Gp3 => {
+                let max_iops = 80_000.min(3_000.max(storage_size * 500));
+                (3_000..=max_iops).contains(&storage_iops)
+            }
+            VolumeType::Io1 => {
+                let max_iops = 64_000.min(storage_size * 50);
+                (100..=max_iops).contains(&storage_iops)
+            }
+            VolumeType::Io2 => {
+                let max_iops = 256_000.min(storage_size * 1_000);
+                (100..=max_iops).contains(&storage_iops)
+            }
+            _ => false,
+        };
+        if !valid {
+            return Err(super::Error::InvalidStorageIops {
+                target: target.to_string(),
+                storage_class: storage_class.as_str().to_string(),
+                storage_iops: storage_iops as i32,
+            });
+        }
+    }
+
+    // EbsBlockDevice throughput is a gp3-only request field. gp3 throughput
+    // is capped at 0.25 MiB/s per effective provisioned IOPS.
+    match (storage_throughput, storage_class) {
+        (Some(storage_throughput), _) if !(125..=2_000).contains(&storage_throughput) => {
+            Err(super::Error::InvalidStorageThroughput {
+                target: target.to_string(),
+                storage_throughput,
+            })
+        }
+        (Some(_), storage_class) if !matches!(storage_class, VolumeType::Gp3) => {
+            Err(super::Error::UnsupportedStorageThroughput {
+                target: target.to_string(),
+                storage_class: storage_class.as_str().to_string(),
+            })
+        }
+        (Some(storage_throughput), VolumeType::Gp3)
+            if storage_throughput > storage_iops.unwrap_or(3_000) / 4 =>
+        {
+            Err(super::Error::InvalidStorageThroughput {
+                target: target.to_string(),
+                storage_throughput,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Attempts to launch EC2 instances. May fail on transient errors or rate limits.
 #[allow(clippy::too_many_arguments)]
 async fn try_launch_instances(
@@ -380,6 +471,8 @@ async fn try_launch_instances(
     instance_type: InstanceType,
     storage_size: i32,
     storage_class: VolumeType,
+    storage_iops: Option<i32>,
+    storage_throughput: Option<i32>,
     key_name: &str,
     subnet_id: &str,
     sg_id: &str,
@@ -387,6 +480,18 @@ async fn try_launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<Vec<String>, Ec2Error> {
+    // Build the root EBS mapping with optional provisioned performance settings.
+    let mut ebs = EbsBlockDevice::builder()
+        .volume_size(storage_size)
+        .volume_type(storage_class)
+        .delete_on_termination(true);
+    if let Some(storage_iops) = storage_iops {
+        ebs = ebs.iops(storage_iops);
+    }
+    if let Some(storage_throughput) = storage_throughput {
+        ebs = ebs.throughput(storage_throughput);
+    }
+
     let resp = client
         .run_instances()
         .image_id(ami_id)
@@ -414,13 +519,7 @@ async fn try_launch_instances(
         .block_device_mappings(
             BlockDeviceMapping::builder()
                 .device_name("/dev/sda1")
-                .ebs(
-                    EbsBlockDevice::builder()
-                        .volume_size(storage_size)
-                        .volume_type(storage_class)
-                        .delete_on_termination(true)
-                        .build(),
-                )
+                .ebs(ebs.build())
                 .build(),
         )
         .send()
@@ -464,6 +563,8 @@ pub async fn launch_instances(
     instance_type: InstanceType,
     storage_size: i32,
     storage_class: VolumeType,
+    storage_iops: Option<i32>,
+    storage_throughput: Option<i32>,
     key_name: &str,
     subnets: &[(String, String)],
     az_support: &BTreeMap<String, BTreeSet<String>>,
@@ -473,6 +574,14 @@ pub async fn launch_instances(
     name: &str,
     tag: &str,
 ) -> Result<(Vec<String>, String), super::Error> {
+    validate_storage_options(
+        name,
+        &storage_class,
+        storage_size,
+        storage_iops,
+        storage_throughput,
+    )?;
+
     // Filter to subnets in AZs that support this instance type
     let instance_type_str = instance_type.to_string();
     let eligible: Vec<(&str, &str)> = subnets
@@ -501,6 +610,8 @@ pub async fn launch_instances(
                 instance_type.clone(),
                 storage_size,
                 storage_class.clone(),
+                storage_iops,
+                storage_throughput,
                 key_name,
                 subnet_id,
                 sg_id,

@@ -474,11 +474,63 @@ macro_rules! impl_certificate_bls12381_multisig {
         impl<
             P: $crate::PublicKey,
             V: $crate::bls12381::primitives::variant::Variant,
-        > $crate::certificate::Scheme for Scheme<P, V> {
+        > $crate::certificate::Verifier for Scheme<P, V> {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
-            type Signature = V::Signature;
             type Certificate = $crate::bls12381::certificate::multisig::Certificate<V>;
+
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
+            }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
+            }
+
+            fn is_batchable() -> bool {
+                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
+            }
+        }
+
+        impl<
+            P: $crate::PublicKey,
+            V: $crate::bls12381::primitives::variant::Variant,
+        > $crate::certificate::Scheme for Scheme<P, V> {
+            type Signature = V::Signature;
 
             fn me(&self) -> Option<commonware_utils::Participant> {
                 self.generic.me()
@@ -539,54 +591,8 @@ macro_rules! impl_certificate_bls12381_multisig {
                 self.generic.assemble::<Self, _, M>(attestations)
             }
 
-            fn verify_certificate<R, D, M>(
-                &self,
-                rng: &mut R,
-                subject: Self::Subject<'_, D>,
-                certificate: &Self::Certificate,
-                _strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand_core::CryptoRngCore,
-                D: $crate::Digest,
-                M: commonware_utils::Faults,
-            {
-                self.generic
-                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
-            }
-
-            fn verify_certificates<'a, R, D, I, M>(
-                &self,
-                rng: &mut R,
-                certificates: I,
-                _strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand_core::CryptoRngCore,
-                D: $crate::Digest,
-                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                M: commonware_utils::Faults,
-            {
-                self.generic
-                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
-            }
-
             fn is_attributable() -> bool {
                 $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_attributable()
-            }
-
-            fn is_batchable() -> bool {
-                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::is_batchable()
-            }
-
-            fn certificate_codec_config(
-                &self,
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                self.generic.certificate_codec_config()
-            }
-
-            fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::bls12381::certificate::multisig::Generic::<P, V, $namespace>::certificate_codec_config_unbounded()
             }
         }
     };
@@ -601,7 +607,7 @@ mod tests {
             ops::compute_public,
             variant::{MinPk, MinSig, Variant},
         },
-        certificate::{Attestation, Scheme as _},
+        certificate::{Attestation, Scheme as _, Verifier as _},
         ed25519::{self, PrivateKey as Ed25519PrivateKey},
         sha256::Digest as Sha256Digest,
         Signer as _,
