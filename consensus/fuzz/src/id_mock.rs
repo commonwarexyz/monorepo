@@ -298,11 +298,67 @@ where
     (participants, schemes)
 }
 
-impl certificate::Scheme for Scheme {
+impl certificate::Verifier for Scheme {
     type Subject<'a, D: Digest> = Subject<'a, D>;
     type PublicKey = PublicKey;
-    type Signature = Signature;
     type Certificate = Certificate;
+
+    fn verify_certificate<R, D, M>(
+        &self,
+        _rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        certificate: &Self::Certificate,
+        _strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: rand_core::CryptoRngCore,
+        D: Digest,
+        M: Faults,
+    {
+        if certificate.signers.len() != self.participants.len() {
+            return false;
+        }
+        if certificate.signers.count() != certificate.signatures.len() {
+            return false;
+        }
+        if certificate.signers.count() < self.participants.quorum::<M>() as usize {
+            return false;
+        }
+
+        let hash = self.message_hash(&subject);
+        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
+            if self.participants.key(signer).is_none() {
+                return false;
+            }
+            let Some(signature) = signature.get() else {
+                return false;
+            };
+            if signature.signer != signer.get() {
+                return false;
+            }
+            if !self.record.contains(signature.signer, hash) {
+                return false;
+            }
+        }
+
+        true
+    }
+
+    fn is_batchable() -> bool {
+        false
+    }
+
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
+        self.participants.len()
+    }
+
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
+        u32::MAX as usize
+    }
+}
+
+impl certificate::Scheme for Scheme {
+    type Signature = Signature;
 
     fn me(&self) -> Option<Participant> {
         self.signer
@@ -392,60 +448,7 @@ impl certificate::Scheme for Scheme {
         })
     }
 
-    fn verify_certificate<R, D, M>(
-        &self,
-        _rng: &mut R,
-        subject: Self::Subject<'_, D>,
-        certificate: &Self::Certificate,
-        _strategy: &impl Strategy,
-    ) -> bool
-    where
-        R: rand_core::CryptoRngCore,
-        D: Digest,
-        M: Faults,
-    {
-        if certificate.signers.len() != self.participants.len() {
-            return false;
-        }
-        if certificate.signers.count() != certificate.signatures.len() {
-            return false;
-        }
-        if certificate.signers.count() < self.participants.quorum::<M>() as usize {
-            return false;
-        }
-
-        let hash = self.message_hash(&subject);
-        for (signer, signature) in certificate.signers.iter().zip(&certificate.signatures) {
-            if self.participants.key(signer).is_none() {
-                return false;
-            }
-            let Some(signature) = signature.get() else {
-                return false;
-            };
-            if signature.signer != signer.get() {
-                return false;
-            }
-            if !self.record.contains(signature.signer, hash) {
-                return false;
-            }
-        }
-
-        true
-    }
-
     fn is_attributable() -> bool {
         true
-    }
-
-    fn is_batchable() -> bool {
-        false
-    }
-
-    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
-        self.participants.len()
-    }
-
-    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
-        u32::MAX as usize
     }
 }

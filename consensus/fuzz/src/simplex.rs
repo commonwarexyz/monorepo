@@ -57,7 +57,7 @@ impl<P: PublicKey, V: Variant> ElectorConfig<bls12381_threshold_vrf::Scheme<P, V
 
 pub trait Simplex: 'static
 where
-    <<Self::Scheme as certificate::Scheme>::Certificate as Read>::Cfg: Default,
+    <<Self::Scheme as certificate::Verifier>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest>;
     type Elector: ElectorConfig<Self::Scheme> + Default;
@@ -66,7 +66,7 @@ where
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     );
 }
@@ -82,7 +82,7 @@ impl Simplex for SimplexEd25519 {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = ed25519::fixture(context, namespace, n);
@@ -102,7 +102,7 @@ impl Simplex for SimplexId {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         id_mock::fixture(context, namespace, n)
@@ -123,7 +123,7 @@ impl Simplex for SimplexCertificateMock {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = cert_mock::fixture_with::<false, true, true, _>(context, namespace, n);
@@ -142,7 +142,7 @@ impl Simplex for SimplexEd25519CustomRoundRobin {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = ed25519::fixture(context, namespace, n);
@@ -161,7 +161,7 @@ impl Simplex for SimplexBls12381MultisigMinPk {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = bls12381_multisig::fixture::<MinPk, _>(context, namespace, n);
@@ -180,7 +180,7 @@ impl Simplex for SimplexBls12381MultisigMinSig {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = bls12381_multisig::fixture::<MinSig, _>(context, namespace, n);
@@ -199,7 +199,7 @@ impl Simplex for SimplexBls12381MinPk {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
@@ -218,7 +218,7 @@ impl Simplex for SimplexBls12381MinPkCustomRandom {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = bls12381_threshold_vrf::fixture::<MinPk, _>(context, namespace, n);
@@ -237,7 +237,7 @@ impl Simplex for SimplexBls12381MinSig {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = bls12381_threshold_vrf::fixture::<MinSig, _>(context, namespace, n);
@@ -256,7 +256,7 @@ impl Simplex for SimplexSecp256r1 {
         namespace: &[u8],
         n: u32,
     ) -> (
-        Vec<<Self::Scheme as certificate::Scheme>::PublicKey>,
+        Vec<<Self::Scheme as certificate::Verifier>::PublicKey>,
         Vec<Self::Scheme>,
     ) {
         let fixture = secp256r1::fixture(context, namespace, n);

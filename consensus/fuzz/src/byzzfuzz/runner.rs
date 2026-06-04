@@ -30,7 +30,7 @@ use commonware_consensus::{
     Monitor as _,
 };
 use commonware_cryptography::{
-    certificate::Scheme as CertificateScheme, sha256::Digest as Sha256Digest, Hasher, Sha256,
+    certificate::Verifier as CertificateScheme, sha256::Digest as Sha256Digest, Hasher, Sha256,
 };
 use commonware_macros::select;
 use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor};

@@ -44,7 +44,7 @@ use commonware_consensus::{
     Monitor, Viewable,
 };
 use commonware_cryptography::{
-    certificate::Scheme, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
+    certificate::Verifier, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
 };
 use commonware_p2p::{
     simulated::{Config as NetworkConfig, Link, Network, Oracle, SplitOrigin, SplitTarget},
@@ -365,7 +365,7 @@ impl Arbitrary<'_> for FuzzInput {
     }
 }
 
-pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Scheme>::PublicKey;
+pub(crate) type PublicKeyOf<P> = <<P as simplex::Simplex>::Scheme as Verifier>::PublicKey;
 
 type ReporterOf<P> = reporter::Reporter<
     deterministic::Context,
@@ -1189,7 +1189,7 @@ fn run_with_twins_campaign<P: simplex::Simplex>(input: FuzzInput) {
 
 fn twins_resolver_view<P: simplex::Simplex>(
     message: &IoBuf,
-    codec: &<<P::Scheme as Scheme>::Certificate as Read>::Cfg,
+    codec: &<<P::Scheme as Verifier>::Certificate as Read>::Cfg,
 ) -> Option<View> {
     let msg = ResolverMessage::<U64>::decode(message.clone()).ok()?;
     match msg.payload {

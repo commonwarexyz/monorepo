@@ -11,7 +11,7 @@ use rand_core::CryptoRngCore;
 
 /// `Verifier` is a utility for tracking and verifying consensus messages.
 ///
-/// For schemes where [`Scheme::is_batchable()`](commonware_cryptography::certificate::Scheme::is_batchable)
+/// For schemes where [`Verifier::is_batchable()`](commonware_cryptography::certificate::Verifier::is_batchable)
 /// returns `true` (such as [ed25519], [bls12381_multisig] and [bls12381_threshold]), this struct collects
 /// messages and defers verification until enough messages exist to potentially reach a quorum, enabling
 /// efficient batch verification. For schemes where `is_batchable()` returns `false` (such as [secp256r1]),

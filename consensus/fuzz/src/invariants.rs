@@ -8,7 +8,7 @@ use commonware_consensus::simplex::{
     elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme,
 };
 use commonware_cryptography::{
-    certificate::{Scheme as CertificateScheme, Signers},
+    certificate::{self, Signers},
     sha256::Digest as Sha256Digest,
 };
 use commonware_utils::ordered::Quorum;
@@ -155,7 +155,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         // Invariant: certificates_are_valid
         // Certificates have the correct number of signatures.
         for (view, data) in nullifications.iter() {
-            if <P::Scheme as CertificateScheme>::is_attributable() {
+            if <P::Scheme as certificate::Scheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
@@ -172,7 +172,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
 
         for (view, data) in notarizations.iter() {
-            if <P::Scheme as CertificateScheme>::is_attributable() {
+            if <P::Scheme as certificate::Scheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
@@ -189,7 +189,7 @@ pub fn check<P: Simplex>(n: u32, replicas: Vec<ReplicaState>) {
         }
 
         for (view, data) in finalizations.iter() {
-            if <P::Scheme as CertificateScheme>::is_attributable() {
+            if <P::Scheme as certificate::Scheme>::is_attributable() {
                 let count = data
                     .signature_count
                     .expect("Attributable scheme must have signature count");
