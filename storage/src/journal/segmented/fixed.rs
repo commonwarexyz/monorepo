@@ -27,6 +27,7 @@ use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
     Blob, Buf, Metrics, Storage,
 };
+use commonware_utils::NZUsize;
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -210,7 +211,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             })
             .collect::<Result<_, _>>()?;
 
-        blob.read_many_into(buf, &offsets, Self::CHUNK_SIZE).await?;
+        blob.read_many_into(buf, &offsets, NZUsize!(Self::CHUNK_SIZE))
+            .await?;
 
         let mut items = Vec::with_capacity(positions.len());
         for i in 0..positions.len() {
