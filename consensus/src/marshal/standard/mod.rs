@@ -72,7 +72,7 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Provider, Scheme as _},
+        certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
         ed25519::PublicKey,
         sha256::Sha256,
         Digestible, Hasher as _,
@@ -114,11 +114,11 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct AllOnlyProvider {
+    struct VerifierProvider {
         scheme: Arc<S>,
     }
 
-    impl AllOnlyProvider {
+    impl VerifierProvider {
         fn new(scheme: S) -> Self {
             Self {
                 scheme: Arc::new(scheme),
@@ -126,16 +126,12 @@ mod tests {
         }
     }
 
-    impl Provider for AllOnlyProvider {
+    impl Provider for VerifierProvider {
         type Scope = Epoch;
         type Scheme = S;
 
-        fn scoped(&self, _: Epoch) -> Option<Arc<S>> {
-            None
-        }
-
-        fn all(&self) -> Option<Arc<S>> {
-            Some(self.scheme.clone())
+        fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
+            Some(Scoped::verifier(self.scheme.clone()))
         }
     }
 
@@ -4728,7 +4724,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    fn test_standard_notarized_delivery_acknowledges_stale_without_scoped_provider() {
+    fn test_standard_notarized_delivery_acknowledges_stale_without_full_scheme() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {
             let Fixture { schemes, .. } =
@@ -4741,8 +4737,8 @@ mod tests {
 
             let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
                 context.child("validator"),
-                "notarized-delivery-stale-all-only",
-                AllOnlyProvider::new(schemes[0].clone()),
+                "notarized-delivery-stale-certificate-only",
+                VerifierProvider::new(schemes[0].clone()),
                 Application::<B>::manual_ack(),
                 Some(RecordingBuffer::default()),
                 Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
@@ -4763,6 +4759,95 @@ mod tests {
             assert!(
                 response_rx.await.expect("delivery response missing"),
                 "stale notarized delivery should acknowledge without blaming the peer"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-verify-only",
+                VerifierProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Finalized { height },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
+                            handler::Finalized::ByHeight { height },
+                        )),
+                    },
+                    value: (finalization, block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "finalization verified through a verify-only scope should be accepted"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_epoch_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Height 1 lives in epoch 0 under `FixedEpocher`, but the finalization claims epoch 1.
+            // The certificate decodes against epoch 0's config, so the epoch-equality guard must
+            // reject it and blame the peer before any verification.
+            let height = Height::new(1);
+            let round = Round::new(Epoch::new(1), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-epoch-mismatch",
+                VerifierProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Finalized { height },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
+                            handler::Finalized::ByHeight { height },
+                        )),
+                    },
+                    value: (finalization, block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "finalization whose epoch mismatches the height's epoch must blame the peer"
             );
         });
     }

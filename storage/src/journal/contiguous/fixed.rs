@@ -307,14 +307,18 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
     async fn read(&self, pos: u64) -> Result<A, Error> {
         let _timer = self.metrics.read_timer();
         self.metrics.read_calls.inc();
-        let result = match self.guard.read(pos, self.items_per_blob).await {
-            Ok(item) => {
-                self.metrics.items_read.inc();
-                Ok(item)
-            }
-            Err(error) => Err(error),
-        };
-        result
+
+        // Serve from the page cache synchronously when possible, avoiding the async storage path.
+        if let Some(item) = self.guard.try_read_sync(pos, self.items_per_blob) {
+            self.metrics.record_cache_hits(1);
+            self.metrics.items_read.inc();
+            return Ok(item);
+        }
+        self.metrics.record_cache_misses(1);
+
+        let item = self.guard.read(pos, self.items_per_blob).await?;
+        self.metrics.items_read.inc();
+        Ok(item)
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<A>, Error> {

@@ -1,8 +1,8 @@
 //! Cryptographic primitives for generating and verifying certificates.
 //!
-//! This module provides the [`Scheme`] trait and implementations for producing
-//! signatures, validating them (individually or in batches), assembling
-//! certificates, and verifying recovered certificates.
+//! This module provides the [`Verifier`] and [`Scheme`] traits and implementations for
+//! producing signatures, validating them (individually or in batches), assembling certificates, and
+//! verifying recovered certificates.
 //!
 //! # Pluggable Cryptography
 //!
@@ -182,90 +182,18 @@ pub trait Subject: Clone + Debug + Send + Sync {
     fn message(&self) -> Bytes;
 }
 
-/// Cryptographic surface for multi-party certificate schemes.
+/// Cryptographic surface for recovered certificate verification.
 ///
-/// A `Scheme` produces attestations, validates them (individually or in batches), assembles
-/// certificates, and verifies recovered certificates. Implementations may override the
-/// provided defaults to take advantage of scheme-specific batching strategies.
-pub trait Scheme: Clone + Debug + Send + Sync + 'static {
-    /// Subject type for signing and verification.
+/// A `Verifier` verifies recovered certificates, but does not expose participant
+/// metadata or signing operations.
+pub trait Verifier: Clone + Debug + Send + Sync + 'static {
+    /// Subject type for certificate verification.
     type Subject<'a, D: Digest>: Subject;
 
     /// Public key type for participant identity used to order and index the participant set.
     type PublicKey: PublicKey;
-    /// Signature emitted by individual participants.
-    type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
     /// Certificate assembled from a set of attestations.
     type Certificate: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + Codec;
-
-    /// Returns the index of "self" in the participant set, if available.
-    /// Returns `None` if the scheme is a verifier-only instance.
-    fn me(&self) -> Option<Participant>;
-
-    /// Returns the ordered set of participant public identity keys managed by the scheme.
-    fn participants(&self) -> &Set<Self::PublicKey>;
-
-    /// Signs a subject.
-    /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
-    fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
-
-    /// Verifies a single attestation against the participant material managed by the scheme.
-    fn verify_attestation<R, D>(
-        &self,
-        rng: &mut R,
-        subject: Self::Subject<'_, D>,
-        attestation: &Attestation<Self>,
-        strategy: &impl Strategy,
-    ) -> bool
-    where
-        R: CryptoRngCore,
-        D: Digest;
-
-    /// Batch-verifies attestations and separates valid attestations from signer indices that failed
-    /// verification.
-    ///
-    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
-    /// is undefined behavior, implementations may panic or produce incorrect results.
-    fn verify_attestations<R, D, I>(
-        &self,
-        rng: &mut R,
-        subject: Self::Subject<'_, D>,
-        attestations: I,
-        strategy: &impl Strategy,
-    ) -> Verification<Self>
-    where
-        R: CryptoRngCore,
-        D: Digest,
-        I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
-    {
-        let mut invalid = BTreeSet::new();
-
-        let verified = attestations.into_iter().filter_map(|attestation| {
-            if self.verify_attestation(&mut *rng, subject.clone(), &attestation, strategy) {
-                Some(attestation)
-            } else {
-                invalid.insert(attestation.signer);
-                None
-            }
-        });
-
-        Verification::new(verified.collect(), invalid.into_iter().collect())
-    }
-
-    /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
-    ///
-    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
-    /// is undefined behavior, implementations may panic or produce incorrect results.
-    fn assemble<I, M>(
-        &self,
-        attestations: I,
-        strategy: &impl Strategy,
-    ) -> Option<Self::Certificate>
-    where
-        I: IntoIterator<Item = Attestation<Self>>,
-        I::IntoIter: Send,
-        M: Faults;
 
     /// Verifies a certificate that was recovered or received from the network.
     fn verify_certificate<R, D, M>(
@@ -365,12 +293,6 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
         verified
     }
 
-    /// Returns whether per-participant fault evidence can be safely exposed.
-    ///
-    /// Schemes where individual signatures can be safely reported as fault evidence should
-    /// return `true`.
-    fn is_attributable() -> bool;
-
     /// Returns whether this scheme benefits from batch verification.
     ///
     /// Schemes that benefit from batch verification (like [`ed25519`], [`bls12381_multisig`]
@@ -391,6 +313,175 @@ pub trait Scheme: Clone + Debug + Send + Sync + 'static {
     fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg;
 }
 
+/// Cryptographic surface for multi-party certificate schemes.
+///
+/// A `Scheme` extends [`Verifier`] with the signing surface: it produces attestations, validates
+/// them (individually or in batches), and assembles certificates. Implementations may override the
+/// provided defaults to take advantage of scheme-specific batching strategies.
+pub trait Scheme: Verifier {
+    /// Signature emitted by individual participants.
+    type Signature: Clone + Debug + PartialEq + Eq + Hash + Send + Sync + CodecFixed<Cfg = ()>;
+
+    /// Returns the index of "self" in the participant set, if available.
+    /// Returns `None` if the scheme is a verifier-only instance.
+    fn me(&self) -> Option<Participant>;
+
+    /// Returns the ordered set of participant public identity keys managed by the scheme.
+    fn participants(&self) -> &Set<Self::PublicKey>;
+
+    /// Signs a subject.
+    /// Returns `None` if the scheme cannot sign (e.g. it's a verifier-only instance).
+    fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>>;
+
+    /// Verifies a single attestation against the participant material managed by the scheme.
+    fn verify_attestation<R, D>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        attestation: &Attestation<Self>,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest;
+
+    /// Batch-verifies attestations and separates valid attestations from signer indices that failed
+    /// verification.
+    ///
+    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
+    /// is undefined behavior, implementations may panic or produce incorrect results.
+    fn verify_attestations<R, D, I>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        attestations: I,
+        strategy: &impl Strategy,
+    ) -> Verification<Self>
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
+    {
+        let mut invalid = BTreeSet::new();
+
+        let verified = attestations.into_iter().filter_map(|attestation| {
+            if self.verify_attestation(&mut *rng, subject.clone(), &attestation, strategy) {
+                Some(attestation)
+            } else {
+                invalid.insert(attestation.signer);
+                None
+            }
+        });
+
+        Verification::new(verified.collect(), invalid.into_iter().collect())
+    }
+
+    /// Assembles attestations into a certificate, returning `None` if the threshold is not met.
+    ///
+    /// Callers must not include duplicate attestations from the same signer. Passing duplicates
+    /// is undefined behavior, implementations may panic or produce incorrect results.
+    fn assemble<I, M>(
+        &self,
+        attestations: I,
+        strategy: &impl Strategy,
+    ) -> Option<Self::Certificate>
+    where
+        I: IntoIterator<Item = Attestation<Self>>,
+        I::IntoIter: Send,
+        M: Faults;
+
+    /// Returns whether per-participant fault evidence can be safely exposed.
+    ///
+    /// Schemes where individual signatures can be safely reported as fault evidence should
+    /// return `true`.
+    fn is_attributable() -> bool;
+}
+
+/// A scheme handle returned by a [`Provider`] for one scope.
+///
+/// Always usable as a [`Verifier`] for certificate verification. The full signing scheme is
+/// recoverable with [`Scoped::into_scheme`] only when the scope was built with [`Scoped::scheme`].
+/// A scope built with [`Scoped::verifier`] yields `None`.
+#[derive(Clone, Debug)]
+pub struct Scoped<S: Scheme> {
+    scheme: Arc<S>,
+    can_sign: bool,
+}
+
+impl<S: Scheme> Scoped<S> {
+    /// Builds a verify-only scope.
+    pub const fn verifier(scheme: Arc<S>) -> Self {
+        Self {
+            scheme,
+            can_sign: false,
+        }
+    }
+
+    /// Builds a full signing scope.
+    pub const fn scheme(scheme: Arc<S>) -> Self {
+        Self {
+            scheme,
+            can_sign: true,
+        }
+    }
+
+    /// Returns the full signing scheme, or `None` for a verify-only scope.
+    pub fn into_scheme(self) -> Option<Arc<S>> {
+        self.can_sign.then_some(self.scheme)
+    }
+}
+
+impl<S: Scheme> Verifier for Scoped<S> {
+    type Subject<'a, D: Digest> = S::Subject<'a, D>;
+    type PublicKey = S::PublicKey;
+    type Certificate = S::Certificate;
+
+    fn verify_certificate<R, D, M>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        certificate: &Self::Certificate,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        M: Faults,
+    {
+        self.scheme
+            .verify_certificate::<_, D, M>(rng, subject, certificate, strategy)
+    }
+
+    fn verify_certificates<'a, R, D, I, M>(
+        &self,
+        rng: &mut R,
+        certificates: I,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        R: CryptoRngCore,
+        D: Digest,
+        I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+        M: Faults,
+    {
+        self.scheme
+            .verify_certificates::<_, D, _, M>(rng, certificates, strategy)
+    }
+
+    fn is_batchable() -> bool {
+        S::is_batchable()
+    }
+
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
+        self.scheme.certificate_codec_config()
+    }
+
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
+        S::certificate_codec_config_unbounded()
+    }
+}
+
 /// Supplies the signing scheme for a given scope.
 ///
 /// This trait uses an associated `Scope` type, allowing implementations to work
@@ -401,21 +492,21 @@ pub trait Provider: Clone + Send + Sync + 'static {
     /// The signing scheme to provide.
     type Scheme: Scheme;
 
-    /// Return the signing scheme that corresponds to `scope`.
-    fn scoped(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>>;
+    /// Return a [`Scoped`] for `scope` capable of verifying certificates produced under it.
+    ///
+    /// A scheme that can verify certificates from any scope without scope-specific state should
+    /// return a verify-only [`Scoped`] (via [`Scoped::verifier`]) for every scope. A fixed group
+    /// public key that survives committee rotation is one such case. A scheme that needs
+    /// scope-specific verification state should return `None` once that state is unavailable.
+    fn scoped(&self, scope: Self::Scope) -> Option<Scoped<Self::Scheme>>;
 
-    /// Return a certificate verifier that can validate certificates from all scopes.
+    /// Return the full signing scheme that corresponds to `scope`, if available.
     ///
-    /// This method allows implementations to provide a verifier that can validate
-    /// certificates from all scopes (without scope-specific state). For example,
-    /// `bls12381_threshold::Scheme` maintains a static public key across epochs that
-    /// can be used to verify certificates from any epoch, even after the committee
-    /// has rotated and the underlying secret shares have been refreshed.
-    ///
-    /// The default implementation returns `None`. Callers should fall back to
-    /// [`Provider::scoped`] for scope-specific verification.
-    fn all(&self) -> Option<Arc<Self::Scheme>> {
-        None
+    /// The default returns a scheme only when [`Provider::scoped`] yields a signing scope, so a
+    /// verify-only scope produces `None`. Override this when the signing scheme is available even
+    /// for scopes that [`Provider::scoped`] serves with a verify-only result.
+    fn scheme(&self, scope: Self::Scope) -> Option<Arc<Self::Scheme>> {
+        self.scoped(scope).and_then(Scoped::into_scheme)
     }
 }
 
@@ -533,12 +624,8 @@ impl<S: Scheme, Sc: Clone + Send + Sync + 'static> crate::certificate::Provider
     type Scope = Sc;
     type Scheme = S;
 
-    fn scoped(&self, _: Sc) -> Option<Arc<S>> {
-        Some(self.scheme.clone())
-    }
-
-    fn all(&self) -> Option<Arc<Self::Scheme>> {
-        Some(self.scheme.clone())
+    fn scoped(&self, _: Sc) -> Option<Scoped<S>> {
+        Some(Scoped::scheme(self.scheme.clone()))
     }
 }
 
@@ -638,7 +725,7 @@ mod tests {
     fn make_certificate(
         schemes: &[Ed25519Scheme],
         message: &'static [u8],
-    ) -> <Ed25519Scheme as Scheme>::Certificate {
+    ) -> <Ed25519Scheme as Verifier>::Certificate {
         let attestations: Vec<_> = schemes
             .iter()
             .filter_map(|s| s.sign::<Sha256Digest>(TestSubject { message }))
@@ -767,6 +854,54 @@ mod tests {
             &Sequential,
         );
         assert_eq!(result, vec![false]);
+    }
+
+    #[test]
+    fn test_scoped_verifies_and_into_scheme() {
+        let mut rng = test_rng();
+        let (schemes, verifier) = setup_ed25519(4);
+        let cert = make_certificate(&schemes, MESSAGE);
+        let subject = TestSubject { message: MESSAGE };
+
+        let as_verifier = Scoped::verifier(Arc::new(verifier));
+        let as_scheme = Scoped::scheme(Arc::new(schemes[0].clone()));
+
+        // Both scopes verify a valid certificate through the `Verifier` impl.
+        assert!(as_verifier.verify_certificate::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            subject,
+            &cert,
+            &Sequential,
+        ));
+        assert!(as_scheme.verify_certificate::<_, Sha256Digest, N3f1>(
+            &mut rng,
+            subject,
+            &cert,
+            &Sequential,
+        ));
+        let pairs = [(subject, &cert)];
+        assert!(as_verifier.verify_certificates::<_, Sha256Digest, _, N3f1>(
+            &mut rng,
+            pairs.iter().copied(),
+            &Sequential,
+        ));
+        assert_eq!(
+            <Scoped<Ed25519Scheme> as Verifier>::is_batchable(),
+            <Ed25519Scheme as Verifier>::is_batchable(),
+        );
+        assert_eq!(
+            as_verifier.certificate_codec_config(),
+            schemes[0].certificate_codec_config(),
+        );
+        let _ = <Scoped<Ed25519Scheme> as Verifier>::certificate_codec_config_unbounded();
+
+        // A verify-only scope never yields its scheme; a full scope always does.
+        assert!(as_verifier.into_scheme().is_none());
+        assert!(as_scheme.into_scheme().is_some());
+
+        let provider = ConstantProvider::<_, ()>::new(schemes[0].clone());
+        assert!(provider.scoped(()).is_some());
+        assert!(provider.scheme(()).is_some());
     }
 
     #[cfg(feature = "arbitrary")]
