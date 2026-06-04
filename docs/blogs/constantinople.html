@@ -9,7 +9,7 @@
     <link rel="icon" href="/favicon.ico" type="image/x-icon">
 
     <title>commonware > Constantinople</title>
-    <meta name="description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify.">
+    <meta name="description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back.">
     <meta name="author" content="Ben Clabby">
     <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
 
@@ -18,7 +18,7 @@
     <meta property="og:site_name" content="commonware" />
     <meta property="og:image" content="https://commonware.xyz/imgs/constantinople.png" />
     <meta property="og:title" content="Constantinople" />
-    <meta property="og:description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify." />
+    <meta property="og:description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back." />
     <meta property="article:author" content="Ben Clabby" />
     <meta property="article:published_time" content="2026-06-04T00:00:00Z" />
     <meta property="article:modified_time" content="2026-06-04T00:00:00Z" />
@@ -29,7 +29,7 @@
     <meta property="twitter:domain" content="commonware.xyz" />
     <meta property="twitter:url" content="https://commonware.xyz/blogs/constantinople" />
     <meta property="twitter:title" content="Constantinople" />
-    <meta property="twitter:description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify." />
+    <meta property="twitter:description" content="For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back." />
     <meta property="twitter:image" content="https://commonware.xyz/imgs/constantinople.png" />
     <meta property="twitter:site" content="@commonwarexyz" />
     <meta property="twitter:creator" content="https://x.com/vex_0x" />
@@ -86,15 +86,17 @@
             <div class="author">By <a href="https://x.com/vex_0x">Ben Clabby</a></div>
             <div class="date">June 4th, 2026</div>
         </div>
-        <p>For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back. Enter Constantinople: a simple blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify.</p>
+        <p>For a thousand years, the world's richest trade route ran through a single city. But Constantinople didn't grow rich moving cargo; it grew rich counting it. Throughput on a ledger is only worth something once you can read it back.</p>
+        <p>Enter Constantinople: a payments-focused blockchain built entirely on Commonware Library primitives pushing ~70k TPS with fully authenticated state on 50 16vcpu instances in us-east-1 and us-west-2. Alongside it, Exoware, the indexing layer that turns that firehose of state into something you can actually query and verify.</p>
         <div class="image-container">
             <video style="width: 100%; height: auto;" autoplay loop muted playsinline controls>
                 <source src="/imgs/constantinople.mp4" type="video/mp4">
             </video>
             <div class="image-caption">Figure 1: A user submits a WebAuthn transaction; the browser verifies it end-to-end, from the consensus certificate down to the transaction's inclusion proof in the finalized chain.</div>
         </div>
-        <p>From button click to a confirmation backed by the finalized chain, the clip above takes under a second. The verification proofs arrive shortly after. What matters isn't just the speed, or that a transaction landed; it's <i>where it was verified</i>. Every step runs in the browser, with no trusted intermediary and no RPC to take on faith.</p>
+        <p>From button click to a confirmation backed by the finalized chain, the clip above takes under a second. What matters isn't just the speed, or that a transaction landed; it's <i>where it was verified</i>. Every step runs in the browser, with no trusted intermediary and no RPC to take on faith.</p>
         <p>First, the client verifies the BLS12-381 threshold certificate over the finalized block, confirming that a supermajority of the validator set agreed on that view. Next, it pulls the block itself and checks that the block's commitment matches the one the certificate signed. Finally, it verifies an inclusion proof placing the user's transaction under the block's global transaction root, the same root consensus committed to. Only then does the UI mark the transaction confirmed. That is full light-client verification, from a consensus certificate all the way down to a single transaction, running on the same device that signed it with a WebAuthn passkey.</p>
+        <p>And there is no relayer in the middle. Validators verify the raw WebAuthn payload natively, as a first-class transaction signature: the assertion is a <code>secp256r1</code> signature whose challenge is the transaction digest itself, so the passkey signs the exact transaction it authorizes. The browser holding the passkey submits directly to the chain. No bundler, paymaster, or signing service translating passkeys into transactions on a user's behalf.</p>
         <h2>Architecture</h2>
         <table>
             <tr>
@@ -134,7 +136,7 @@
             <div class="image-caption">Figure 3: Visualization of qmdb::any state sync.</div>
         </div>
         <h2>Deployment</h2>
-        <p>On a live deployment with 25 validators in <code>us-west-2</code> and 25 validators in <code>us-east-1</code>, Constantinople achieves a throughput of ~70k TPS with a block time of ~250ms and finalization latency of ~385ms (p75). Every block is around 2.5MB in size. To stress QMDB compaction in the worst case, each block deliberately updates ~2^14 <i>existing</i> accounts: every update supersedes a prior value, forcing the inactivity floor to climb and the database to compact aggressively.</p>
+            <p>On a live deployment with 50 validators and 2 secondary nodes (relayer, indexer) across <code>us-west-2</code> and <code>us-east-1</code>, Constantinople achieves a throughput of ~70k TPS with a block time of ~250ms and finalization latency of ~385ms (p75). Every block is around 2.5MB in size, distributed across the network in <a href="https://commonware.xyz/blogs/coding">erasure coded chunks</a> by the proposer. To stress QMDB compaction in the worst case, each block deliberately updates ~2^14 <i>existing</i> accounts: every update supersedes a prior value, forcing the inactivity floor to climb and the database to compact aggressively.</p>
         <div class="image-container">
             <img src="/imgs/constantinople-tps.png" alt="Chain performance over time">
             <div class="image-caption">Figure 4: Chain performance over time.</div>
@@ -152,8 +154,8 @@
             <div class="image-caption">Figure 7: Disk utilization over time.</div>
         </div>
         <h2>Where does it all go?</h2>
-        <p>As you can see, disk utilization on the indexer is growing rapidly. The indexer in the above deployment is using Exoware's <a href="https://github.com/exowarexyz/monorepo/tree/main/examples/simulator">RocksDB-backed simulator</a>, and maintaining this level of throughput for more than even a few hours would require complex auto-scaling, provisioning new disks several times a day, large compression routines, and more.</p>
-        <p>Stay tuned for <a href="https://exoware.xyz/">Exoware</a>'s solution to this problem: <code>kv-mk1</code>.</p>
+        <p>As you can see, disk utilization on the indexer is growing rapidly - around 720GB per hour. The indexer in the above deployment is using Exoware's <a href="https://github.com/exowarexyz/monorepo/tree/main/examples/simulator">RocksDB-backed simulator</a>, and maintaining this level of throughput for more than even a few hours would require complex auto-scaling, provisioning new disks several times a day, large compression routines, and more.</p>
+        <p>Stay tuned for <a href="https://exoware.xyz/">Exoware</a>'s solution to this problem: <code>store</code>.</p>
         <h2>Run it yourself</h2>
         <p>Constantinople is <a href="https://github.com/commonwarexyz/constantinople">open source on GitHub</a> under Apache 2.0 and MIT. Try it yourself today by running:</p>
         <pre>
