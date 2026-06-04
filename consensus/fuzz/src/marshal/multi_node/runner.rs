@@ -14,8 +14,9 @@
 //!
 //! - Phase 1 (pre-GST): a sampled network partition is held for [`FAULT_PHASE`]
 //!   while the byzantine `Disrupter` runs. If every honest marshal delivers the
-//!   target number of ordered finalized blocks (`required_containers` clamped to
-//!   a single-epoch bound; see `MAX_REQUIRED`) during this phase, the run passes.
+//!   target number of ordered finalized blocks (`required_containers`, sampled
+//!   within a single-epoch bound; see `MAX_REQUIRED`) during this phase, the
+//!   run passes.
 //! - GST: the network heals (`apply_partition(None)`); the `Disrupter` stays
 //!   active (its faults are not gated by GST).
 //! - Phase 2 (post-GST): each honest marshal must reach its target (`required`,
@@ -48,13 +49,15 @@
 //! Either way the three honest validators must still deliver
 //! that target number of ordered blocks.
 
-use super::{engine::LiveMarshal, invariant, ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE};
+use super::{
+    engine::LiveMarshal, input::MarshalLivenessInput, invariant, ENGINE_CERTIFICATE,
+    ENGINE_RESOLVER, ENGINE_VOTE,
+};
 use crate::{
-    network_faults,
     simplex::Simplex,
     start_disrupter_with_epoch,
-    utils::{apply_partition, Partition, SetPartition},
-    FuzzInput, SimplexBls12381MinPk, BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW,
+    utils::{apply_partition, SetPartition},
+    SimplexBls12381MinPk, BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW,
 };
 use commonware_consensus::{
     marshal::mocks::{
@@ -68,6 +71,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::ConstantProvider;
 use commonware_macros::select;
+use commonware_p2p::simulated::Link;
 use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor as _};
 use commonware_utils::{FuzzRng, NZUsize};
 use futures::future::join_all;
@@ -86,6 +90,35 @@ const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 /// Poll interval for observing marshal delivery progress.
 const POLL: Duration = Duration::from_millis(50);
 
+async fn apply_degraded_network(
+    oracle: &mut commonware_p2p::simulated::Oracle<K, deterministic::Context>,
+    participants: &[K],
+) {
+    let Some(victim) = participants.last() else {
+        return;
+    };
+    let degraded = Link {
+        latency: Duration::from_millis(50),
+        jitter: Duration::from_millis(50),
+        success_rate: 0.6,
+    };
+    for peer in participants
+        .iter()
+        .take(participants.len().saturating_sub(1))
+    {
+        oracle.remove_link(victim.clone(), peer.clone()).await.ok();
+        oracle.remove_link(peer.clone(), victim.clone()).await.ok();
+        oracle
+            .add_link(victim.clone(), peer.clone(), degraded.clone())
+            .await
+            .unwrap();
+        oracle
+            .add_link(peer.clone(), victim.clone(), degraded.clone())
+            .await
+            .unwrap();
+    }
+}
+
 /// Highest finalized-block height marshal has delivered to `app`'s sink. The
 /// height-0 genesis floor block does not count as progress, so an empty/genesis
 /// sink reports 0.
@@ -94,14 +127,12 @@ fn highest_delivered<B: commonware_consensus::Block>(app: &Application<B>) -> u6
 }
 
 /// Run a single multi-node marshal liveness iteration for variant `H`.
-pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
+pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let mut input = input;
-
         // Shared threshold fixture: the same participants/schemes drive the
         // byzantine disrupter, the honest engines, and the marshal providers.
         let (participants, schemes): (Vec<K>, Vec<S>) =
@@ -114,25 +145,16 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
         )
         .await;
         setup_network_links(&mut oracle, &participants, LINK).await;
-
-        let required = input.required_containers.clamp(1, MAX_REQUIRED);
-
-        // Pre-GST network fault held for the bounded fault phase, applied via the
-        // simulated-network topology (not byzzfuzz interceptors). Populate an
-        // adaptive schedule from the chosen strategy (as the general harness
-        // does), then hold one partition: a static set-partition, or the first
-        // scheduled adaptive partition. `Connected` -> no fault.
-        if matches!(input.partition, Partition::Adaptive(_)) {
-            input.partition =
-                Partition::Adaptive(network_faults(input.strategy, required, &mut context));
+        if input.degraded_network {
+            apply_degraded_network(&mut oracle, &participants).await;
         }
-        let pre_gst_partition: Option<SetPartition> =
-            input.partition.set_partition().copied().or_else(|| {
-                input
-                    .partition
-                    .schedule()
-                    .and_then(|s| s.first().map(|&(_, p)| p))
-            });
+
+        let required = input.required_containers;
+
+        // Pre-GST network fault held for the bounded fault phase, applied via
+        // the simulated-network topology (not byzzfuzz interceptors).
+        // `Connected` means no topology fault.
+        let pre_gst_partition: Option<SetPartition> = input.partition.set_partition().copied();
         if let Some(partition) = pre_gst_partition.as_ref() {
             apply_partition(&oracle, &participants, Some(partition), &LINK).await;
         }
@@ -198,6 +220,7 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
                 setup.mailbox,
                 setup.extra,
                 genesis_commitment,
+                input.forwarding,
             )
             .await;
         }

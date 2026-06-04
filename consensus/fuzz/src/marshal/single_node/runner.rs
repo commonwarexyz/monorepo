@@ -9,6 +9,7 @@ use super::{
     input::{MarshalEvent, MarshalFuzzInput},
     invariant,
     variant::VariantPublish,
+    NUM_BLOCKS,
 };
 use commonware_consensus::{
     marshal::{
@@ -32,15 +33,15 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
     certificate::{mocks::Fixture, ConstantProvider},
+    Digestible,
 };
 use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
 use commonware_utils::{FuzzRng, NZUsize};
-use std::{collections::HashSet, num::NonZeroUsize, time::Duration};
-
-/// Number of blocks in the canonical chain. Kept well below
-/// `BLOCKS_PER_EPOCH` so every height maps to epoch 0 and the driver
-/// does not need to model epoch boundaries.
-const NUM_BLOCKS: u64 = 16;
+use std::{
+    collections::{HashSet, VecDeque},
+    num::NonZeroUsize,
+    time::Duration,
+};
 
 /// Generous backlog so the actor never blocks on ack pressure during the
 /// run. The driver intentionally leaves blocks unacked between events so
@@ -78,10 +79,10 @@ fn apply_pending_floor(
     finalized_anchors: &mut HashSet<u64>,
     processed_height: &mut u64,
     segment_starts: &mut [u64],
-) {
+) -> bool {
     let h = height.get();
     if *pending_floor != Some(h) {
-        return;
+        return false;
     }
     durable_available.insert(h);
     finalized_anchors.insert(h);
@@ -90,6 +91,26 @@ fn apply_pending_floor(
         *start = h;
     }
     *pending_floor = None;
+    true
+}
+
+fn assert_ready_delivery(ready_prefix: u64, height: Height) {
+    assert!(
+        height.get() <= ready_prefix,
+        "marshal delivered height {} before the fuzz model made it ready \
+         (ready_prefix={ready_prefix})",
+        height.get(),
+    );
+}
+
+fn assert_stale_ack(expected: Height, observed: Height) {
+    assert_eq!(
+        observed,
+        expected,
+        "stale ack bookkeeping mismatch: expected to skip height {}, observed {}",
+        expected.get(),
+        observed.get(),
+    );
 }
 
 /// Run the marshal fuzz driver against `H` (StandardHarness or CodingHarness).
@@ -162,9 +183,9 @@ where
         // - `durable_available`: blocks marshal has persisted to disk
         //   (via Propose / Verify / Certify, or via delivery on a
         //   ready_prefix advance). Survives restart.
-        // - `variant_available`: blocks confirmed in the in-memory
-        //   variant cache via PublishViaVariant. Cleared on Restart, and
-        //   FIFO-evicted per the variant's `VariantPublish::CACHE_CAPACITY` to
+        // - `variant_available`: blocks confirmed in the in-memory variant
+        //   cache via PublishViaVariant. Cleared on Restart, and FIFO-evicted
+        //   per the variant's `VariantPublish::CACHE_CAPACITY` to
         //   mirror a bounded broadcast cache (otherwise the shadow would think
         //   an evicted block is still repairable and assert a delivery that
         //   cannot happen).
@@ -191,12 +212,12 @@ where
         let mut segment_bounds: Vec<usize> = vec![0];
         let mut segment_starts: Vec<u64> = vec![setup.height.map_or(0, |h| h.get()) + 1];
         // For each restart, the heights pending ack at the moment of
-        // restart. The next actor instance must redeliver each one.
+        // restart. A later actor instance must redeliver each one.
         let mut expected_redeliveries: Vec<Vec<Height>> = Vec::new();
-        // Count of stale queue entries to silently skip on subsequent
-        // acks. Stale entries are the pre-restart pending acks whose
-        // ack handles are tied to the dead actor.
-        let mut stale_to_skip: usize = 0;
+        // Stale queue entries to skip on subsequent acks. These are application
+        // ack handles whose corresponding marshal waiters were orphaned by a
+        // restart or floor update.
+        let mut stale_to_skip: VecDeque<Height> = VecDeque::new();
         let mut restart_counter: usize = 0;
         let mut pending_floor: Option<u64> = None;
         let mut subscriptions = Vec::new();
@@ -214,7 +235,7 @@ where
                     let height = H::height(block);
                     H::propose(&mut handle, round_for_height(height), block).await;
                     durable_available.insert(height.get());
-                    apply_pending_floor(
+                    repair_wake |= apply_pending_floor(
                         &mut pending_floor,
                         height,
                         &mut durable_available,
@@ -229,7 +250,7 @@ where
                     let mut peers: [ValidatorHandle<H>; 0] = [];
                     H::verify(&mut handle, round_for_height(height), block, &mut peers).await;
                     durable_available.insert(height.get());
-                    apply_pending_floor(
+                    repair_wake |= apply_pending_floor(
                         &mut pending_floor,
                         height,
                         &mut durable_available,
@@ -246,7 +267,7 @@ where
                         "marshal certified() returned false: actor died mid-fuzz",
                     );
                     durable_available.insert(height.get());
-                    apply_pending_floor(
+                    repair_wake |= apply_pending_floor(
                         &mut pending_floor,
                         height,
                         &mut durable_available,
@@ -278,7 +299,7 @@ where
                     let block_available =
                         durable_available.contains(&h) || variant_available.contains(&h);
                     if block_available && pending_floor == Some(h) {
-                        apply_pending_floor(
+                        repair_wake |= apply_pending_floor(
                             &mut pending_floor,
                             height,
                             &mut durable_available,
@@ -286,7 +307,6 @@ where
                             &mut processed_height,
                             &mut segment_starts,
                         );
-                        repair_wake = true;
                     } else if block_available && h > processed_height {
                         finalized_anchors.insert(h);
                         durable_available.insert(h);
@@ -315,7 +335,7 @@ where
                     if (durable_available.contains(&h) || variant_available.contains(&h))
                         && pending_floor == Some(h)
                     {
-                        apply_pending_floor(
+                        repair_wake |= apply_pending_floor(
                             &mut pending_floor,
                             height,
                             &mut durable_available,
@@ -323,7 +343,6 @@ where
                             &mut processed_height,
                             &mut segment_starts,
                         );
-                        repair_wake = true;
                     }
                     if (durable_available.contains(&h) || variant_available.contains(&h))
                         && h > processed_height
@@ -332,12 +351,22 @@ where
                     }
                 }
                 MarshalEvent::GetBlock { block_idx } => {
-                    // Pure read of the finalized archive by height.
+                    // Read of the finalized archive by height. Absence can be
+                    // valid before finalization or after pruning, but any
+                    // returned block must match the canonical chain.
                     let block = &canonical[block_index(block_idx)];
-                    let _ = handle
+                    if let Some(returned) = handle
                         .mailbox
                         .get_block(Identifier::Height(H::height(block)))
-                        .await;
+                        .await
+                    {
+                        assert_eq!(
+                            returned.digest(),
+                            H::digest(block),
+                            "GetBlock returned wrong digest for height {}",
+                            H::height(block).get(),
+                        );
+                    }
                 }
                 MarshalEvent::Subscribe {
                     block_idx,
@@ -369,7 +398,7 @@ where
                     let pending_acks = application.pending_ack_heights();
                     // Existing stale entries are orphaned by earlier restarts.
                     // A live SetFloor only clears acks owned by the current actor.
-                    let stale_pending = stale_to_skip.min(pending_acks.len());
+                    let stale_pending = stale_to_skip.len().min(pending_acks.len());
                     let live_pending_acks = &pending_acks[stale_pending..];
                     let only_genesis_pending = live_pending_acks.iter().all(|h| h.get() == 0);
                     let current_segment_empty =
@@ -386,10 +415,10 @@ where
                         );
                         let finalization = H::make_finalization(proposal, &schemes, QUORUM);
                         handle.mailbox.set_floor(finalization);
-                        stale_to_skip += live_pending_acks.len();
+                        stale_to_skip.extend(live_pending_acks.iter().copied());
                         pending_floor = Some(h);
                         if durable_available.contains(&h) || variant_available.contains(&h) {
-                            apply_pending_floor(
+                            repair_wake |= apply_pending_floor(
                                 &mut pending_floor,
                                 height,
                                 &mut durable_available,
@@ -439,12 +468,13 @@ where
                 }
                 MarshalEvent::AckNext => {
                     if let Some(height) = application.acknowledge_next() {
-                        if stale_to_skip > 0 {
-                            stale_to_skip -= 1;
+                        if let Some(expected) = stale_to_skip.pop_front() {
+                            assert_stale_ack(expected, height);
                         } else if height.get() != 0 {
                             // Height 0 is the genesis floor block marshal
                             // surfaces on a fresh start; it is not a finalized
                             // container, so it is not recorded or validated.
+                            assert_ready_delivery(ready_prefix, height);
                             delivery_log.push(height);
                             // Marshal persists processed_height in
                             // its metadata as each ack returns.
@@ -461,11 +491,12 @@ where
                     // or floor updates so pending_ack_heights() reflects
                     // only the soon-to-die actor. Their marshal waiters
                     // were already orphaned, so the ack signal is a no-op.
-                    while stale_to_skip > 0 {
-                        if application.acknowledge_next().is_none() {
+                    while let Some(expected) = stale_to_skip.front().copied() {
+                        let Some(observed) = application.acknowledge_next() else {
                             break;
-                        }
-                        stale_to_skip -= 1;
+                        };
+                        assert_stale_ack(expected, observed);
+                        stale_to_skip.pop_front();
                     }
 
                     // Heights pending ack right now were dispatched by
@@ -474,26 +505,22 @@ where
                     // BEFORE pushing the segment boundary so they
                     // participate in the segment ordering check. We do
                     // NOT acknowledge them, so marshal's persistent
-                    // state retains them as unprocessed and the new
+                    // state retains them as unprocessed and a later
                     // instance must redeliver.
                     let pending_now = application.pending_ack_heights();
                     // All pending entries (including a genesis floor block) are
                     // orphaned once this actor dies, so the next instance's
                     // acks must skip every one of them.
-                    let stale_count = pending_now.len();
+                    stale_to_skip = pending_now.iter().copied().collect();
                     // Only real finalized containers (height > 0) participate
                     // in the segment ordering and redelivery checks.
                     let pending_real: Vec<Height> =
                         pending_now.into_iter().filter(|h| h.get() != 0).collect();
                     for h in &pending_real {
+                        assert_ready_delivery(ready_prefix, *h);
                         delivery_log.push(*h);
                     }
                     expected_redeliveries.push(pending_real);
-                    // The pending entries are now in delivery_log;
-                    // mark them stale so the next pop doesn't
-                    // re-record them.
-                    stale_to_skip = stale_count;
-
                     segment_bounds.push(delivery_log.len());
 
                     actor_handle.abort();
@@ -570,14 +597,19 @@ where
         // processed_height floor for symmetry with AckNext.
         context.sleep(FINAL_DRAIN).await;
         while let Some(height) = application.acknowledge_next() {
-            if stale_to_skip > 0 {
-                stale_to_skip -= 1;
+            if let Some(expected) = stale_to_skip.pop_front() {
+                assert_stale_ack(expected, height);
             } else if height.get() != 0 {
                 // Skip the genesis floor block (height 0); see AckNext.
+                assert_ready_delivery(ready_prefix, height);
                 delivery_log.push(height);
                 processed_height = processed_height.max(height.get());
             }
         }
+        assert!(
+            stale_to_skip.is_empty(),
+            "stale ack bookkeeping retained unmatched entries: {stale_to_skip:?}",
+        );
         segment_bounds.push(delivery_log.len());
 
         invariant::check_all::<H>(
@@ -586,7 +618,7 @@ where
             &segment_bounds,
             &segment_starts,
             &expected_redeliveries,
-            &application.blocks(),
+            &application.delivered(),
             &canonical,
         );
     });

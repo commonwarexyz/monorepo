@@ -47,6 +47,7 @@ pub trait LiveMarshal: TestHarness {
         marshal_mailbox: Mailbox<S, Self::Variant>,
         extra: Self::ValidatorExtra,
         genesis_commitment: Self::Commitment,
+        forwarding: ForwardingPolicy,
     ) -> impl Future<Output = ()> + Send;
 }
 
@@ -61,6 +62,7 @@ impl LiveMarshal for StandardHarness {
         marshal_mailbox: Mailbox<S, Self::Variant>,
         _extra: Self::ValidatorExtra,
         genesis_commitment: Self::Commitment,
+        forwarding: ForwardingPolicy,
     ) -> impl Future<Output = ()> + Send {
         async move {
             let control = oracle.control(validator.clone());
@@ -99,7 +101,7 @@ impl LiveMarshal for StandardHarness {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
-                forwarding: ForwardingPolicy::Disabled,
+                forwarding,
             };
             let engine = Engine::new(context.child("engine"), cfg);
             engine.start(vote, certificate, resolver);
@@ -118,6 +120,7 @@ impl LiveMarshal for CodingHarness {
         marshal_mailbox: Mailbox<S, Self::Variant>,
         extra: Self::ValidatorExtra,
         genesis_commitment: Self::Commitment,
+        forwarding: ForwardingPolicy,
     ) -> impl Future<Output = ()> + Send {
         async move {
             let control = oracle.control(validator.clone());
@@ -161,7 +164,7 @@ impl LiveMarshal for CodingHarness {
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
-                forwarding: ForwardingPolicy::Disabled,
+                forwarding,
             };
             let engine = Engine::new(context.child("engine"), cfg);
             engine.start(vote, certificate, resolver);

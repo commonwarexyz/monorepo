@@ -56,10 +56,10 @@
 //!     - `finalized_anchors`: heights at which a usable finalization
 //!       is stored. Survives restart.
 //! - **At-least-once across restart.** Heights pending ack at the moment
-//!   of restart are tracked. The new actor instance must redeliver each
+//!   of restart are tracked. A later actor instance must redeliver each
 //!   of them at least once before the run ends.
-//! - **Digest fidelity.** Every finalized block surfaced in
-//!   `application.blocks()` must match the canonical chain digest at its
+//! - **Digest fidelity.** Every finalized block surfaced in the append-only
+//!   application delivery log must match the canonical chain digest at its
 //!   height. The height-0 genesis floor block (surfaced on a fresh start) is
 //!   skipped: it is not part of the canonical chain, which starts at height 1.
 //! - **Durability acks.** `H::propose`/`H::verify`/`H::certify` return
@@ -115,3 +115,6 @@ mod variant;
 pub use input::{MarshalEvent, MarshalFuzzInput};
 pub use runner::fuzz_marshal;
 pub use variant::VariantPublish;
+
+/// Number of blocks in the canonical single-node fuzz chain.
+const NUM_BLOCKS: u64 = 16;

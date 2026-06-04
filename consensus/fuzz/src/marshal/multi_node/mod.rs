@@ -8,7 +8,7 @@
 //!
 //! The liveness check injects byzantine faults, then asserts that honest nodes keep making progress:
 //! every honest marshal delivers a target number of ordered finalized blocks
-//! (derived from `required_containers`, clamped to a single-epoch bound).
+//! (sampled within a single-epoch bound).
 //!
 //! # Layout
 //!
@@ -21,10 +21,12 @@
 
 mod app;
 mod engine;
+mod input;
 mod invariant;
 mod runner;
 
 pub use engine::LiveMarshal;
+pub use input::MarshalLivenessInput;
 pub use runner::fuzz_marshal_liveness;
 
 /// Engine p2p channel ids, shared by the honest engines and the byzantine
