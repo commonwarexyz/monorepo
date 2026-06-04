@@ -3,8 +3,8 @@
 //! Runs `N4F1C3` (three honest validators plus one byzantine `Disrupter`)
 //! over the simulated network and reuses the shared fuzz infrastructure
 //! (`setup_network`-style helpers, the byzantine `Disrupter`, strategy
-//! sampling, [`FuzzInput`]) exactly as the general harness does. The honest
-//! validators are parametrized by the *marshal sink* instead of the reporter
+//! sampling) with [`MarshalLivenessInput`]. The honest validators are
+//! parametrized by the *marshal sink* instead of the reporter
 //! sink (see [`LiveMarshal`]): each runs a live simplex engine whose `reporter`
 //! is a marshal mailbox, and marshal delivers ordered finalized blocks to a
 //! downstream [`Application`] sink.
