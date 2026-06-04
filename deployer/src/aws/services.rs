@@ -1008,12 +1008,10 @@ done
 pub(crate) fn nvme_setup_cmd() -> String {
     format!(
         r#"
-# Configure EC2 NVMe instance-store mounting
-sudo tee /usr/local/bin/commonware-mount-nvme >/dev/null <<'EOF'
-#!/bin/sh
 set -e
 cd /
 
+# Configure EC2 NVMe instance-store mounting
 NVME_MOUNT='{mount_directory}'
 sudo udevadm settle || true
 NVME_DEVICES="$(for model_path in /sys/block/nvme*n1/device/model; do
@@ -1043,7 +1041,7 @@ else
     sudo udevadm settle || true
 fi
 
-if ! blkid "$NVME_TARGET" >/dev/null 2>&1; then
+if ! sudo blkid "$NVME_TARGET" >/dev/null 2>&1; then
     sudo mkfs.ext4 -F "$NVME_TARGET"
 fi
 if ! findmnt -rn --mountpoint "$NVME_MOUNT" >/dev/null; then
@@ -1063,29 +1061,6 @@ if ! findmnt -rn --mountpoint "$NVME_MOUNT" >/dev/null; then
     sudo mount "$NVME_TARGET" "$NVME_MOUNT"
 fi
 sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
-EOF
-sudo chmod +x /usr/local/bin/commonware-mount-nvme
-sudo tee /etc/systemd/system/commonware-nvme.service >/dev/null <<'EOF'
-[Unit]
-Description=Mount Commonware NVMe instance storage
-Before=binary.service
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/commonware-mount-nvme
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo mkdir -p /etc/systemd/system/binary.service.d
-sudo tee /etc/systemd/system/binary.service.d/nvme.conf >/dev/null <<'EOF'
-[Unit]
-Requires=commonware-nvme.service
-After=commonware-nvme.service
-EOF
-sudo systemctl daemon-reload
-sudo systemctl start commonware-nvme
 "#,
         mount_directory = HOME_DIRECTORY,
     )
