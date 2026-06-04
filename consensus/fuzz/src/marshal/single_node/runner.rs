@@ -492,9 +492,13 @@ where
                     // only the soon-to-die actor. Their marshal waiters
                     // were already orphaned, so the ack signal is a no-op.
                     while let Some(expected) = stale_to_skip.front().copied() {
-                        let Some(observed) = application.acknowledge_next() else {
-                            break;
-                        };
+                        let observed = application.acknowledge_next().unwrap_or_else(|| {
+                            panic!(
+                                "stale ack bookkeeping expected queued height {} but application \
+                                 queue was empty",
+                                expected.get(),
+                            )
+                        });
                         assert_stale_ack(expected, observed);
                         stale_to_skip.pop_front();
                     }

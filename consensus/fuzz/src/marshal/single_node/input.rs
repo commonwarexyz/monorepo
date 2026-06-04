@@ -139,7 +139,7 @@ impl Arbitrary<'_> for MarshalFuzzInput {
         }
         if events.len() < event_count && u.len() >= 2 && u.arbitrary::<bool>()? {
             events.push(MarshalEvent::PublishViaVariant {
-                block_idx: u.arbitrary()?,
+                block_idx: block_idx(u)?,
             });
         }
         for _ in events.len()..event_count {

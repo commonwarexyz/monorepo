@@ -19,6 +19,8 @@
 //!   invariants.
 //! - `invariant` holds the end-of-run assertions.
 
+use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
+
 mod app;
 mod engine;
 mod input;
@@ -35,3 +37,9 @@ pub use runner::fuzz_marshal_liveness;
 const ENGINE_VOTE: u64 = 3;
 const ENGINE_CERTIFICATE: u64 = 4;
 const ENGINE_RESOLVER: u64 = 5;
+
+/// Highest fresh block height this single-epoch harness can require. With
+/// `FixedEpocher::new(BLOCKS_PER_EPOCH)`, height `BLOCKS_PER_EPOCH - 1` is the
+/// epoch-0 boundary block; after that the wrappers re-propose the boundary block
+/// instead of producing height `BLOCKS_PER_EPOCH`.
+const MAX_REQUIRED: u64 = BLOCKS_PER_EPOCH.get() - 1;

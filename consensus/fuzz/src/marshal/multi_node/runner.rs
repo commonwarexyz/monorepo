@@ -51,7 +51,7 @@
 
 use super::{
     engine::LiveMarshal, input::MarshalLivenessInput, invariant, ENGINE_CERTIFICATE,
-    ENGINE_RESOLVER, ENGINE_VOTE,
+    ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED,
 };
 use crate::{
     simplex::Simplex,
@@ -63,25 +63,18 @@ use commonware_consensus::{
     marshal::mocks::{
         application::Application,
         harness::{
-            setup_network_links, setup_network_with_participants, BLOCKS_PER_EPOCH, K, LINK,
-            NUM_VALIDATORS, S, TEST_QUOTA,
+            setup_network_links, setup_network_with_participants, K, LINK, NUM_VALIDATORS, S,
+            TEST_QUOTA,
         },
     },
     types::Epoch,
+    Block,
 };
 use commonware_cryptography::certificate::ConstantProvider;
-use commonware_macros::select;
 use commonware_p2p::simulated::Link;
-use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor as _};
+use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
 use commonware_utils::{FuzzRng, NZUsize};
-use futures::future::join_all;
 use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
-
-/// Highest fresh block height this single-epoch harness can require. With
-/// `FixedEpocher::new(BLOCKS_PER_EPOCH)`, height `BLOCKS_PER_EPOCH - 1` is the
-/// epoch-0 boundary block; after that the wrappers re-propose the boundary block
-/// instead of producing height `BLOCKS_PER_EPOCH`.
-const MAX_REQUIRED: u64 = BLOCKS_PER_EPOCH.get() - 1;
 
 /// Generous backlog so marshal never blocks on ack pressure; the downstream
 /// application auto-acks.
@@ -122,8 +115,37 @@ async fn apply_degraded_network(
 /// Highest finalized-block height marshal has delivered to `app`'s sink. The
 /// height-0 genesis floor block does not count as progress, so an empty/genesis
 /// sink reports 0.
-fn highest_delivered<B: commonware_consensus::Block>(app: &Application<B>) -> u64 {
+fn highest_delivered<B: Block>(app: &Application<B>) -> u64 {
     app.blocks().keys().next_back().map_or(0, |h| h.get())
+}
+
+fn targets_reached<B: Block>(apps: &[(usize, Application<B>)], targets: &[(usize, u64)]) -> bool {
+    targets.iter().all(|(target_idx, target)| {
+        apps.iter()
+            .find(|(idx, _)| idx == target_idx)
+            .is_some_and(|(_, app)| highest_delivered(app) >= *target)
+    })
+}
+
+async fn wait_for_targets<B: Block>(
+    context: &deterministic::Context,
+    apps: &[(usize, Application<B>)],
+    targets: &[(usize, u64)],
+    timeout: Duration,
+) -> bool {
+    let deadline = context.current() + timeout;
+    loop {
+        if targets_reached(apps, targets) {
+            return true;
+        }
+        let Ok(remaining) = deadline.duration_since(context.current()) else {
+            return false;
+        };
+        if remaining.is_zero() {
+            return false;
+        }
+        context.sleep(POLL.min(remaining)).await;
+    }
 }
 
 /// Run a single multi-node marshal liveness iteration for variant `H`.
@@ -226,27 +248,15 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
         }
 
         // Phase 1: hold the pre-GST network fault until either every honest
-        // marshal reaches `required` or the fault phase expires. Watchers poll
-        // the highest delivered height (height 0 is the genesis floor, not
-        // progress) and return true only if their node reached `required`.
-        let mut phase1_finishers = Vec::new();
-        for (idx, app) in honest_apps.iter().cloned() {
-            phase1_finishers.push(
-                context
-                    .child("phase1_finisher")
-                    .with_attribute("index", idx)
-                    .spawn(move |context| async move {
-                        while highest_delivered(&app) < required {
-                            context.sleep(POLL).await;
-                        }
-                        true
-                    }),
-            );
-        }
-        let phase1_early_complete = select! {
-            results = join_all(phase1_finishers) => results.iter().all(|r| matches!(r, Ok(true))),
-            _ = context.sleep(FAULT_PHASE) => false,
-        };
+        // marshal reaches `required` or the fault phase expires. The root
+        // future polls progress directly so timed-out phase-1 watchers do not
+        // keep running into the post-GST phase.
+        let phase1_targets: Vec<(usize, u64)> = honest_apps
+            .iter()
+            .map(|(idx, _)| (*idx, required))
+            .collect();
+        let phase1_early_complete =
+            wait_for_targets(&context, &honest_apps, &phase1_targets, FAULT_PHASE).await;
 
         if !phase1_early_complete {
             // Highest height deliverable in this single-epoch harness (the
@@ -257,7 +267,6 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
             // node below `required` must reach it; one already at/above must
             // advance by one, unless it is already at the epoch boundary.
             let mut watch_targets: Vec<(usize, u64, u64)> = Vec::with_capacity(honest_apps.len());
-            let mut watcher_inputs = Vec::with_capacity(honest_apps.len());
             for (idx, app) in honest_apps.iter().cloned() {
                 let baseline = highest_delivered(&app);
                 let target = if baseline < required {
@@ -268,7 +277,6 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
                     baseline
                 };
                 watch_targets.push((idx, baseline, target));
-                watcher_inputs.push((idx, app, target));
             }
 
             // GST heals the network topology. The byzantine `Disrupter` stays
@@ -277,24 +285,12 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
 
             // Phase 2: each honest marshal must reach its target within the
             // post-GST window.
-            let mut watchers = Vec::new();
-            for (idx, app, target) in watcher_inputs {
-                watchers.push(
-                    context
-                        .child("post_gst_watcher")
-                        .with_attribute("index", idx)
-                        .spawn(move |context| async move {
-                            while highest_delivered(&app) < target {
-                                context.sleep(POLL).await;
-                            }
-                            true
-                        }),
-                );
-            }
-            let phase2_complete = select! {
-                results = join_all(watchers) => results.iter().all(|r| matches!(r, Ok(true))),
-                _ = context.sleep(POST_GST_WINDOW) => false,
-            };
+            let phase2_targets: Vec<(usize, u64)> = watch_targets
+                .iter()
+                .map(|(idx, _, target)| (*idx, *target))
+                .collect();
+            let phase2_complete =
+                wait_for_targets(&context, &honest_apps, &phase2_targets, POST_GST_WINDOW).await;
 
             if !phase2_complete {
                 let mut diag = String::new();
