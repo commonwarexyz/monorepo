@@ -68,6 +68,7 @@
 //! ### Binary
 //!
 //! * Deployed in user-specified regions with configurable ARM64 or AMD64 instance types and storage.
+//!   Instances whose type includes EC2 NVMe instance store automatically mount it at `/home/ubuntu`.
 //! * Run:
 //!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
@@ -102,6 +103,15 @@
 //! Separate for monitoring (tag) and binary instances (`{tag}-binary`), dynamically configured for deployer and inter-instance traffic.
 //!
 //! # Workflow
+//!
+//! ## Lifecycle
+//!
+//! Deployments are managed through `aws create`, `aws update`, and `aws destroy`. Stopping,
+//! starting, or rebooting EC2 instances outside this lifecycle is not supported. Deployment
+//! metadata, generated host files, security group rules, monitoring scrape targets, and service
+//! configuration are derived from the instance addresses observed during `aws create`.
+//! Additionally, instance types with EC2 NVMe instance store use ephemeral storage mounted at
+//! `/home/ubuntu`.
 //!
 //! ## `aws create`
 //!
@@ -345,6 +355,8 @@ cfg_if::cfg_if! {
         pub use clean::clean;
         mod profile;
         pub use profile::profile;
+        mod attach;
+        pub use attach::attach;
         mod list;
         pub use list::list;
         pub mod s3;
@@ -400,6 +412,9 @@ cfg_if::cfg_if! {
 
         /// Profile subcommand name
         pub const PROFILE_CMD: &str = "profile";
+
+        /// Attach subcommand name
+        pub const ATTACH_CMD: &str = "attach";
 
         /// List subcommand name
         pub const LIST_CMD: &str = "list";
@@ -593,11 +608,21 @@ pub struct Host {
     pub ip: IpAddr,
 }
 
+/// Instance IP addresses.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Ips {
+    /// Public IP address of the instance.
+    pub public: IpAddr,
+
+    /// Private IP address of the instance.
+    pub private: IpAddr,
+}
+
 /// List of hosts
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Hosts {
-    /// Private IP address of the monitoring instance
-    pub monitoring: IpAddr,
+    /// Public and private IP addresses of the monitoring instance.
+    pub monitoring: Ips,
 
     /// Hosts deployed across all regions
     pub hosts: Vec<Host>,

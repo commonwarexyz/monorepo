@@ -659,6 +659,13 @@ stability_scope!(BETA {
     ///
     /// Storage can be backed by a local filesystem, cloud storage, etc.
     ///
+    /// # Durability
+    ///
+    /// Runtimes must ensure that any data readable when user code starts
+    /// executing is crash-durable. Storage structures may rely on this during
+    /// recovery: data read at initialization can be assumed to survive a
+    /// subsequent crash without an explicit [`Blob::sync`].
+    ///
     /// # Partition Names
     ///
     /// Partition names must be non-empty and contain only ASCII alphanumeric

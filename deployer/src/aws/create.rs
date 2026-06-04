@@ -6,7 +6,7 @@ use crate::aws::{
     s3::{self, *},
     services::*,
     utils::*,
-    Architecture, Config, Error, Host, Hosts, InstanceConfig, Metadata, CREATED_FILE_NAME,
+    Architecture, Config, Error, Host, Hosts, InstanceConfig, Ips, Metadata, CREATED_FILE_NAME,
     LOGS_PORT, METADATA_FILE_NAME, MONITORING_NAME, MONITORING_REGION, PROFILES_PORT, TRACES_PORT,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
@@ -217,6 +217,22 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             "detected architecture"
         );
         arch_by_instance_type.insert(instance_type.clone(), arch);
+    }
+
+    // Detect which binary instance types expose automatically attached EC2 NVMe instance store
+    let binary_instance_types: BTreeSet<String> = config
+        .instances
+        .iter()
+        .map(|instance| instance.instance_type.clone())
+        .collect();
+    let mut nvme_supported_by_instance_type = HashMap::new();
+    for instance_type in &binary_instance_types {
+        let supported = supports_nvme_instance_storage(&ec2_client, instance_type).await?;
+        info!(
+            instance_type = instance_type.as_str(),
+            supported, "detected NVMe instance-store support"
+        );
+        nvme_supported_by_instance_type.insert(instance_type.clone(), supported);
     }
 
     // Build per-instance architecture map and collect architectures needed
@@ -905,7 +921,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
 
     // Generate hosts.yaml and upload once (shared by all instances)
     let hosts = Hosts {
-        monitoring: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
+        monitoring: Ips {
+            public: monitoring_ip.clone().parse::<IpAddr>().unwrap(),
+            private: monitoring_private_ip.clone().parse::<IpAddr>().unwrap(),
+        },
         hosts: deployments
             .iter()
             .map(|d| Host {
@@ -1103,20 +1122,24 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let deployment_id = deployment.id.clone();
             let ec2_client = ec2_clients[&instance.region].clone();
             let ip = deployment.ip.clone();
+            let nvme = nvme_supported_by_instance_type[&instance.instance_type];
             let (urls, arch) = instance_urls_map.remove(&instance.name).unwrap();
-            (instance, deployment_id, ec2_client, ip, urls, arch)
+            (instance, deployment_id, ec2_client, ip, urls, arch, nvme)
         })
         .collect();
     let binary_futures = binary_configs.into_iter().map(
-        |(instance, deployment_id, ec2_client, ip, urls, arch)| async move {
+        |(instance, deployment_id, ec2_client, ip, urls, arch, nvme)| async move {
             let start = Instant::now();
 
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
             let deploy = format!("{:.1}s", start.elapsed().as_secs_f64());
 
             let download_start = Instant::now();
-            if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling) {
-                ssh_execute(private_key, &ip, apt_cmd).await?;
+            if let Some(apt_cmd) = install_binary_apt_cmd(instance.profiling, nvme) {
+                ssh_execute(private_key, &ip, &apt_cmd).await?;
+            }
+            if nvme {
+                ssh_execute(private_key, &ip, &nvme_setup_cmd()).await?;
             }
             ssh_execute(private_key, &ip, &install_binary_download_cmd(&urls)).await?;
             let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
