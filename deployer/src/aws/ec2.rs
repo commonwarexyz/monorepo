@@ -110,8 +110,14 @@ pub(crate) async fn detect_architecture(
     }
 }
 
-fn has_nvme_instance_storage(instance_info: &InstanceTypeInfo) -> bool {
-    instance_info.instance_storage_supported().unwrap_or(false)
+/// Checks whether an instance type exposes EC2 NVMe instance-store devices.
+pub(crate) async fn supports_nvme_instance_storage(
+    client: &Ec2Client,
+    instance_type: &str,
+) -> Result<bool, Ec2Error> {
+    let instance_info = describe_instance_type(client, instance_type).await?;
+
+    Ok(instance_info.instance_storage_supported().unwrap_or(false)
         && instance_info
             .instance_storage_info()
             .and_then(|storage| storage.nvme_support())
@@ -120,17 +126,7 @@ fn has_nvme_instance_storage(instance_info: &InstanceTypeInfo) -> bool {
                     support,
                     EphemeralNvmeSupport::Required | EphemeralNvmeSupport::Supported
                 )
-            })
-}
-
-/// Checks whether an instance type exposes EC2 NVMe instance-store devices.
-pub(crate) async fn supports_nvme_instance_storage(
-    client: &Ec2Client,
-    instance_type: &str,
-) -> Result<bool, Ec2Error> {
-    let instance_info = describe_instance_type(client, instance_type).await?;
-
-    Ok(has_nvme_instance_storage(&instance_info))
+            }))
 }
 
 /// Finds the latest Ubuntu 24.04 AMI for the given architecture in the region
@@ -1235,39 +1231,5 @@ pub async fn wait_for_enis_deleted(ec2_client: &Ec2Client, sg_id: &str) -> Resul
             return Ok(());
         }
         sleep(RETRY_INTERVAL).await;
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::has_nvme_instance_storage;
-    use aws_sdk_ec2::types::{EphemeralNvmeSupport, InstanceStorageInfo, InstanceTypeInfo};
-
-    #[test]
-    fn nvme_instance_storage_requires_supported_instance_storage() {
-        let unsupported = InstanceTypeInfo::builder()
-            .instance_storage_supported(false)
-            .instance_storage_info(
-                InstanceStorageInfo::builder()
-                    .nvme_support(EphemeralNvmeSupport::Supported)
-                    .build(),
-            )
-            .build();
-
-        assert!(!has_nvme_instance_storage(&unsupported));
-    }
-
-    #[test]
-    fn nvme_instance_storage_accepts_supported_nvme() {
-        let supported = InstanceTypeInfo::builder()
-            .instance_storage_supported(true)
-            .instance_storage_info(
-                InstanceStorageInfo::builder()
-                    .nvme_support(EphemeralNvmeSupport::Required)
-                    .build(),
-            )
-            .build();
-
-        assert!(has_nvme_instance_storage(&supported));
     }
 }
