@@ -8,6 +8,7 @@ mod common;
 mod generate;
 mod init;
 mod merkleize;
+mod merkleize_workload;
 
 criterion_main!(
     apply_batch::benches,

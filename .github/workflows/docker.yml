@@ -8,6 +8,7 @@ on:
         description: Which image to release
         required: true
         options:
+          - gungraun
           - riscv-unknown-elf-toolchain
           - rust-riscv32imac-cross
           - rust-riscv64imac-cross

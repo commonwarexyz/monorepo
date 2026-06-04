@@ -39,6 +39,7 @@ commonware-runtime = { workspace = true, features = ["test-utils"] }
 commonware-storage = { path = ".", features = ["std"] }
 criterion.workspace = true
 governor.workspace = true
+gungraun = { workspace = true, features = ["client_requests"] }
 paste.workspace = true
 rand.workspace = true
 rstest.workspace = true
@@ -82,6 +83,12 @@ bench = false
 name = "qmdb"
 harness = false
 path = "src/qmdb/benches/bench.rs"
+required-features = ["test-traits"]
+
+[[bench]]
+name = "qmdb_gungraun"
+harness = false
+path = "src/qmdb/benches/qmdb_gungraun.rs"
 required-features = ["test-traits"]
 
 [[bench]]

@@ -148,6 +148,7 @@ futures = "0.3.31"
 futures-timer = "3.0.3"
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 governor = "0.10.2"
+gungraun = "0.19.1"
 hashbrown = { version = "0.16.1", default-features = false, features = ["default-hasher"] }
 io-uring = "0.7.4"
 libc = "0.2.172"
@@ -200,6 +201,8 @@ zstd = "0.13.2"
 [profile.bench]
 # Because we enable overflow checks in "release", we should benchmark with them.
 overflow-checks = true
+# Gungraun requires debug symbols for bench targets.
+debug = true
 
 [profile.dev]
 # Although overflow checks are enabled by default in "dev", we explicitly
