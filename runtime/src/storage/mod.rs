@@ -7,18 +7,14 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     /// but did not `fsync` are crash-durable before any storage structure reads.
     ///
     /// Per-platform guarantee:
-    /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable; the
-    ///   recovered data a structure reads during `init` is durable.
-    /// - **macOS/BSD**: best-effort `sync(2)` only. macOS has no whole-filesystem durable flush,
-    ///   and `sync` does not flush the drive cache (and may return before buffers are written), so
-    ///   it is **not** crash-durable.
-    /// - **Windows**: best-effort whole-volume `FlushFileBuffers` (the closest `syncfs` analog),
-    ///   which requires administrative privileges to open the volume; if unavailable it is
-    ///   skipped, so it is **not** a crash-durability guarantee.
+    /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
+    /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
+    ///   crash-durable.
+    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
+    ///   otherwise, so it is **not** crash-durable.
     ///
-    /// Assumes the storage lives on a single filesystem (`syncfs` covers one filesystem), and on
-    /// Linux reliable error detection requires kernel >= 5.8. A missing `dir` (a fresh start with
-    /// no data yet) is treated as success.
+    /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
+    /// >= 5.8. A missing `dir` is treated as success.
     pub(crate) fn sync_fs(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
