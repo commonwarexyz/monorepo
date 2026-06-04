@@ -28,7 +28,7 @@ pub const DEPLOYER_MIN_PORT: i32 = 0;
 /// Maximum port for deployer ingress
 pub const DEPLOYER_MAX_PORT: i32 = 65535;
 
-fn ssh_host(ip: &str) -> String {
+fn scp_host(ip: &str) -> String {
     match ip.parse::<IpAddr>() {
         Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
         _ => ip.to_string(),
@@ -36,11 +36,11 @@ fn ssh_host(ip: &str) -> String {
 }
 
 fn ssh_target(ip: &str) -> String {
-    format!("ubuntu@{}", ssh_host(ip))
+    format!("ubuntu@{ip}")
 }
 
 fn scp_target(ip: &str, remote_path: &str) -> String {
-    format!("{}:{remote_path}", ssh_target(ip))
+    format!("ubuntu@{}:{remote_path}", scp_host(ip))
 }
 
 fn ssh_attach_code_ok(code: Option<i32>) -> bool {
@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_ssh_target_ipv6() {
-        assert_eq!(ssh_target("2001:db8::1"), "ubuntu@[2001:db8::1]");
+        assert_eq!(ssh_target("2001:db8::1"), "ubuntu@2001:db8::1");
     }
 
     #[test]
