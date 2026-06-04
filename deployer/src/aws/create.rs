@@ -219,7 +219,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         arch_by_instance_type.insert(instance_type.clone(), arch);
     }
 
-    // Detect which binary instance types expose automatically attached EC2 NVMe instance store.
+    // Detect which binary instance types expose automatically attached EC2 NVMe instance store
     let binary_instance_types: BTreeSet<String> = config
         .instances
         .iter()
