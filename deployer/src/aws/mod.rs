@@ -355,6 +355,8 @@ cfg_if::cfg_if! {
         pub use clean::clean;
         mod profile;
         pub use profile::profile;
+        mod attach;
+        pub use attach::attach;
         mod list;
         pub use list::list;
         pub mod s3;
@@ -410,6 +412,9 @@ cfg_if::cfg_if! {
 
         /// Profile subcommand name
         pub const PROFILE_CMD: &str = "profile";
+
+        /// Attach subcommand name
+        pub const ATTACH_CMD: &str = "attach";
 
         /// List subcommand name
         pub const LIST_CMD: &str = "list";
@@ -603,11 +608,21 @@ pub struct Host {
     pub ip: IpAddr,
 }
 
+/// Instance IP addresses.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Ips {
+    /// Public IP address of the instance.
+    pub public: IpAddr,
+
+    /// Private IP address of the instance.
+    pub private: IpAddr,
+}
+
 /// List of hosts
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Hosts {
-    /// Private IP address of the monitoring instance
-    pub monitoring: IpAddr,
+    /// Public and private IP addresses of the monitoring instance.
+    pub monitoring: Ips,
 
     /// Hosts deployed across all regions
     pub hosts: Vec<Host>,
