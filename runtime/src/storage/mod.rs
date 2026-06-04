@@ -15,7 +15,7 @@ stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
     ///
     /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
     /// >= 5.8. A missing `dir` is treated as success.
-    pub(crate) fn sync_fs(dir: &std::path::Path) -> std::io::Result<()> {
+    pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
         cfg_if::cfg_if! {
             if #[cfg(target_os = "linux")] {
                 use std::os::fd::AsRawFd;

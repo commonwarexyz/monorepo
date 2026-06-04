@@ -395,7 +395,7 @@ impl crate::Runner for Runner {
 
         // Make any storage a prior process left in the page cache crash-durable before we open it,
         // so the data read during init is durable.
-        if let Err(e) = crate::storage::sync_fs(&self.cfg.storage_directory) {
+        if let Err(e) = crate::storage::sync(&self.cfg.storage_directory) {
             panic!(
                 "failed to sync storage filesystem at startup ({}): {e}",
                 self.cfg.storage_directory.display()
@@ -926,7 +926,7 @@ mod tests {
         use crate::{Blob as _, Runner as _, Storage as _};
 
         // Write and sync a blob, drop the runtime, then reopen the same storage directory in a new
-        // runtime. `sync_fs` runs on startup and reads the blob back.
+        // runtime. `sync` runs on startup and reads the blob back.
         // Confirms the startup flush path runs and storage survives a restart.
         let cfg = Config::new();
         let dir = cfg.storage_directory().clone();
