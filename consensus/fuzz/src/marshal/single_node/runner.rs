@@ -367,7 +367,11 @@ where
                     let height = H::height(block);
                     let h = height.get();
                     let pending_acks = application.pending_ack_heights();
-                    let only_genesis_pending = pending_acks.iter().all(|h| h.get() == 0);
+                    // Existing stale entries are orphaned by earlier restarts.
+                    // A live SetFloor only clears acks owned by the current actor.
+                    let stale_pending = stale_to_skip.min(pending_acks.len());
+                    let live_pending_acks = &pending_acks[stale_pending..];
+                    let only_genesis_pending = live_pending_acks.iter().all(|h| h.get() == 0);
                     let current_segment_empty =
                         delivery_log.len() == *segment_bounds.last().unwrap();
                     if pending_floor.is_none()
@@ -382,7 +386,7 @@ where
                         );
                         let finalization = H::make_finalization(proposal, &schemes, QUORUM);
                         handle.mailbox.set_floor(finalization);
-                        stale_to_skip += pending_acks.len();
+                        stale_to_skip += live_pending_acks.len();
                         pending_floor = Some(h);
                         if durable_available.contains(&h) || variant_available.contains(&h) {
                             apply_pending_floor(
@@ -454,9 +458,9 @@ where
                     context.sleep(EVENT_SETTLE).await;
 
                     // Drain stale entries left over from prior restarts
-                    // so pending_ack_heights() reflects only the
-                    // soon-to-die actor. Their handles tie to dead
-                    // channels so the ack signal is a no-op.
+                    // or floor updates so pending_ack_heights() reflects
+                    // only the soon-to-die actor. Their marshal waiters
+                    // were already orphaned, so the ack signal is a no-op.
                     while stale_to_skip > 0 {
                         if application.acknowledge_next().is_none() {
                             break;
