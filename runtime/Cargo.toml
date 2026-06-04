@@ -61,6 +61,7 @@ tokio = { workspace = true, features = ["full"] }
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
 rand = { workspace = true, features = ["small_rng"] }
+rstest.workspace = true
 serde_json.workspace = true
 
 [features]

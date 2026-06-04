@@ -531,8 +531,9 @@ impl<B: Blob> Append<B> {
 
     /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false` otherwise.
     ///
-    /// Returns `true` only if all `buf.len()` bytes were satisfied. The caller must have
-    /// already validated that `offset + buf.len()` is within the blob's logical size.
+    /// Returns `true` only if all `buf.len()` bytes were satisfied. When `false` is returned, the
+    /// contents of `buf` are unspecified. The caller must have already validated that
+    /// `offset + buf.len()` is within the blob's logical size.
     ///
     /// The page cache is consulted first to minimize the risk of writer starvation from a
     /// burst of buffer reads (which jump ahead of queued writers on the buffer lock).
@@ -603,57 +604,19 @@ impl<B: Blob> Append<B> {
         &self,
         buf: &mut [u8],
         offsets: &[u64],
-        item_size: usize,
+        item_size: NonZeroUsize,
     ) -> Result<(), Error> {
-        assert_eq!(
-            buf.len(),
-            offsets
-                .len()
-                .checked_mul(item_size)
-                .expect("read_many_into buffer length overflow"),
-            "read_many_into requires buf.len() == offsets.len() * item_size"
-        );
+        // Acquire the buffer lock once for all items.
+        let buffer = self.buffer.read().await;
+        super::validate_read_many_into(buf.len(), offsets, item_size, buffer.size())?;
         if offsets.is_empty() {
             return Ok(());
         }
 
-        let last_end = offsets[offsets.len() - 1]
-            .checked_add(item_size as u64)
-            .ok_or(Error::OffsetOverflow)?;
-
-        // Acquire the buffer lock once for all items.
-        let buffer = self.buffer.read().await;
-        if last_end > buffer.size() {
-            return Err(Error::BlobInsufficientLength);
-        }
-
-        // Iterate over fixed-size output slots and copy items that overlap with the
-        // tip buffer directly into place. Items fully or partially below the tip
-        // need cache/blob reads and are recorded as (slice, offset) pairs.
-        // `chunks_exact_mut` yields disjoint per-item slots, so we never have to
-        // reborrow the parent buffer while cache/blob destinations remain live.
-        if item_size == 0 {
-            return Ok(());
-        }
-        let mut cache_ranges: Vec<(&mut [u8], u64)> = Vec::new();
-        for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
-            let end = offset + item_size as u64;
-
-            if end <= buffer.offset {
-                // Entirely below tip -- needs cache read.
-                cache_ranges.push((item_buf, offset));
-            } else if offset >= buffer.offset {
-                // Entirely in tip buffer.
-                let src = (offset - buffer.offset) as usize;
-                item_buf.copy_from_slice(&buffer.as_ref()[src..src + item_size]);
-            } else {
-                // Straddles tip boundary: copy suffix from tip, record prefix for cache.
-                let prefix_len = (buffer.offset - offset) as usize;
-                item_buf[prefix_len..].copy_from_slice(&buffer.as_ref()[..item_size - prefix_len]);
-                cache_ranges.push((&mut item_buf[..prefix_len], offset));
-            }
-        }
-
+        // Copy items overlapping the tip buffer into place and collect the rest as
+        // (slice, offset) pairs for cache/blob reads.
+        let mut cache_ranges =
+            super::split_read_many(buf, offsets, item_size, buffer.offset, buffer.as_ref());
         drop(buffer);
 
         if cache_ranges.is_empty() {
@@ -1214,6 +1177,65 @@ impl<B: Blob> Append<B> {
 
         Ok(())
     }
+
+    /// Consume this writable handle and return an immutable [`super::Sealed`] view of the same blob.
+    ///
+    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
+    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
+    /// [`super::Sealed::sync`].
+    ///
+    /// This requires unique ownership of the [`Append`] state. Sealing one clone while another
+    /// clone can still mutate the same blob would violate [`super::Sealed`]'s immutable-view
+    /// contract.
+    pub async fn seal(self) -> Result<super::Sealed<B>, Error> {
+        if Arc::strong_count(&self.buffer) != 1 || Arc::strong_count(&self.blob_state) != 1 {
+            return Err(Error::NotUnique);
+        }
+
+        // Flush all buffered data (including the partial page) to the blob without an fsync. This
+        // mirrors the pre-flush done by [`Self::replay`].
+        {
+            let buf_guard = self.buffer.write().await;
+            self.flush_internal(buf_guard, true, false).await?;
+        }
+
+        // After flush, the buffer holds at most the partial-page logical bytes and `blob_state`
+        // reflects the on-disk state of that page.
+        let buffer = self.buffer.read().await;
+        let blob_state = self.blob_state.read().await;
+        let logical_page_size = self.cache_ref.page_size();
+        let full_pages = blob_state.current_page;
+        assert_eq!(
+            full_pages.checked_mul(logical_page_size),
+            Some(buffer.offset),
+            "flushed page count is inconsistent with the buffer offset"
+        );
+        // Copy the partial page into a precisely-sized allocation so the sealed handle does not
+        // keep the (much larger) append buffer alive.
+        let partial_page = if buffer.is_empty() {
+            None
+        } else {
+            let mut copy = self.cache_ref.pool().alloc(buffer.len());
+            copy.put_slice(buffer.as_ref());
+            Some(copy.freeze())
+        };
+        let size = buffer.size();
+        let blob = blob_state.blob.clone();
+
+        Ok(super::Sealed::from_parts(
+            blob,
+            size,
+            partial_page,
+            self.cache_ref.clone(),
+            self.id,
+        ))
+    }
+
+    /// Page-cache id used for reads. Exposed for tests.
+    #[cfg(test)]
+    pub(super) const fn cache_id(&self) -> u64 {
+        self.id
+    }
 }
 
 #[cfg(test)]
@@ -1252,7 +1274,10 @@ mod tests {
 
             // Empty offsets should succeed immediately.
             let mut buf = [];
-            append.read_many_into(&mut buf, &[], 4).await.unwrap();
+            append
+                .read_many_into(&mut buf, &[], NZUsize!(4))
+                .await
+                .unwrap();
         });
     }
 
@@ -1274,7 +1299,10 @@ mod tests {
             // Read 4-byte items at offsets 0, 4, 8, 12, 16.
             let offsets = [0u64, 4, 8, 12, 16];
             let mut buf = vec![0u8; 5 * 4];
-            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+            append
+                .read_many_into(&mut buf, &offsets, NZUsize!(4))
+                .await
+                .unwrap();
 
             for (i, &off) in offsets.iter().enumerate() {
                 assert_eq!(
@@ -1308,6 +1336,33 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_try_read_sync_cache_miss() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"try_read_sync_cache_miss")
+                .await
+                .unwrap();
+            // A one-page cache lets us prime the first page while leaving the second uncached.
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let data: Vec<u8> = (0u8..=255).cycle().take(page_size * 2).collect();
+            append.append(&data).await.unwrap();
+            append.sync().await.unwrap();
+
+            let _ = append.read_at(0, page_size).await.unwrap();
+
+            // A read straddling the cached first page and the uncached second page misses.
+            let mut buf = vec![0xAA; 4];
+            assert!(!append.try_read_sync((page_size - 2) as u64, &mut buf));
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_read_many_into_all_from_cache() {
         // Sync data to disk so tip buffer is empty; reads go through page cache / blob.
         let executor = deterministic::Runner::default();
@@ -1325,7 +1380,10 @@ mod tests {
 
             let offsets = [0u64, 8, 16];
             let mut buf = vec![0u8; 3 * 4];
-            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+            append
+                .read_many_into(&mut buf, &offsets, NZUsize!(4))
+                .await
+                .unwrap();
 
             for (i, &off) in offsets.iter().enumerate() {
                 assert_eq!(
@@ -1358,7 +1416,10 @@ mod tests {
             // Offsets span both synced and unsynced regions.
             let offsets = [0u64, 4, 16, 24];
             let mut buf = vec![0u8; 4 * 4];
-            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+            append
+                .read_many_into(&mut buf, &offsets, NZUsize!(4))
+                .await
+                .unwrap();
 
             let all: Vec<u8> = (0..32).collect();
             for (i, &off) in offsets.iter().enumerate() {
@@ -1385,7 +1446,10 @@ mod tests {
 
             // Last offset's end (8 + 4 = 12) exceeds size (8).
             let mut buf = vec![0u8; 4];
-            let err = append.read_many_into(&mut buf, &[8], 4).await.unwrap_err();
+            let err = append
+                .read_many_into(&mut buf, &[8], NZUsize!(4))
+                .await
+                .unwrap_err();
             assert!(matches!(err, Error::BlobInsufficientLength));
         });
     }
@@ -1405,14 +1469,16 @@ mod tests {
             assert_eq!(append.size().await, 8);
 
             let mut buf = vec![0u8; 8];
-            append.read_many_into(&mut buf, &[0], 8).await.unwrap();
+            append
+                .read_many_into(&mut buf, &[0], NZUsize!(8))
+                .await
+                .unwrap();
             assert_eq!(&buf, &data);
         });
     }
 
-    #[test]
-    #[should_panic(expected = "read_many_into requires buf.len() == offsets.len() * item_size")]
-    fn test_read_many_into_short_buffer_panics() {
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_rejects_invalid_offsets() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
@@ -1426,7 +1492,30 @@ mod tests {
 
             let offsets = [0u64, 4];
             let mut buf = vec![0u8; 7];
-            append.read_many_into(&mut buf, &offsets, 4).await.unwrap();
+            let err = append
+                .read_many_into(&mut buf, &offsets, NZUsize!(4))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidInput(_)));
+
+            let mut buf = vec![0u8; 8];
+            let err = append
+                .read_many_into(&mut buf, &[8, 4], NZUsize!(4))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidInput(_)));
+
+            let err = append
+                .read_many_into(&mut buf, &[2, 4], NZUsize!(4))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::InvalidInput(_)));
+
+            let err = append
+                .read_many_into(&mut buf, &[u64::MAX - 1, 4], NZUsize!(4))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, Error::OffsetOverflow));
         });
     }
 
@@ -1454,7 +1543,7 @@ mod tests {
             let offsets: Vec<u64> = (0..35).map(|i| i * item_size as u64).collect();
             let mut batch_buf = vec![0u8; offsets.len() * item_size];
             append
-                .read_many_into(&mut batch_buf, &offsets, item_size)
+                .read_many_into(&mut batch_buf, &offsets, NZUsize!(item_size))
                 .await
                 .unwrap();
 
@@ -1519,7 +1608,7 @@ mod tests {
             ];
             let mut buf = vec![0u8; offsets.len() * item_size];
             append
-                .read_many_into(&mut buf, &offsets, item_size)
+                .read_many_into(&mut buf, &offsets, NZUsize!(item_size))
                 .await
                 .unwrap();
 
