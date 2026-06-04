@@ -13,8 +13,8 @@ use std::{ops::Deref, sync::Arc};
 pub(super) struct CacheMetrics {
     /// Fixed items read without async storage fallback.
     hits: Counter,
-    /// Fixed items not satisfied synchronously: misses inside `read_many` plus
-    /// all `try_read_sync` calls that returned `None`, including invalid or pruned probes.
+    /// Fixed items not satisfied synchronously: misses from `read` and `read_many`
+    /// plus all `try_read_sync` calls that returned `None`, including invalid or pruned probes.
     misses: Counter,
 }
 
@@ -46,7 +46,7 @@ pub(super) struct CommonMetrics<E: Clock> {
     pub append_many_calls: Counter,
     /// Duration of append-many calls.
     append_many_duration: Timed,
-    /// Single-item async read calls.
+    /// Single-item read calls.
     pub read_calls: Counter,
     /// Duration of single-item read calls.
     read_duration: Timed,
@@ -200,8 +200,8 @@ impl<E: RuntimeMetrics + Clock> FixedMetrics<E> {
             .counter("cache_hits", "Number of fixed items read synchronously");
         let misses = context.as_ref().counter(
             "cache_misses",
-            "Number of fixed items not satisfied synchronously, including pruned or out-of-range \
-             try_read_sync probes that returned None",
+            "Number of fixed items not satisfied synchronously by read or read_many, including \
+             pruned or out-of-range try_read_sync probes that returned None",
         );
         let common = CommonMetrics::new(context);
         Self {

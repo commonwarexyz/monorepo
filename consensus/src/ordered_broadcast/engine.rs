@@ -21,7 +21,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{
-    certificate::{Provider, Scheme},
+    certificate::{Provider, Scheme as _, Verifier},
     Digest, PublicKey, Signer,
 };
 use commonware_macros::select_loop;
@@ -540,7 +540,7 @@ impl<
         )));
 
         // Get the validator scheme for the current epoch
-        let Some(scheme) = self.validators_provider.scoped(self.epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(self.epoch) else {
             return Err(Error::UnknownScheme(self.epoch));
         };
 
@@ -582,7 +582,7 @@ impl<
         &mut self,
         chunk: &Chunk<C::PublicKey, D>,
         epoch: Epoch,
-        certificate: <P::Scheme as Scheme>::Certificate,
+        certificate: <P::Scheme as Verifier>::Certificate,
     ) {
         // Set the certificate, returning early if it already exists
         if !self.ack_manager.add_certificate(
@@ -614,7 +614,7 @@ impl<
     /// (e.g. already exists, certificate already exists, is outside the epoch bounds, etc.).
     fn handle_ack(&mut self, ack: &Ack<C::PublicKey, P::Scheme, D>) -> Result<(), Error> {
         // Get the scheme for the ack's epoch
-        let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 
@@ -837,7 +837,7 @@ impl<
         epoch: Epoch,
     ) -> Result<(), Error> {
         // Get the scheme for the epoch to access validators
-        let Some(scheme) = self.validators_provider.scoped(epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(epoch) else {
             return Err(Error::UnknownScheme(epoch));
         };
         let validators = scheme.participants();
@@ -904,13 +904,13 @@ impl<
     fn validate_ack(
         &mut self,
         ack: &Ack<C::PublicKey, P::Scheme, D>,
-        sender: &<P::Scheme as Scheme>::PublicKey,
+        sender: &<P::Scheme as Verifier>::PublicKey,
     ) -> Result<(), Error> {
         // Validate chunk
         self.validate_chunk(&ack.chunk, ack.epoch)?;
 
         // Get the scheme for the epoch to validate the sender
-        let Some(scheme) = self.validators_provider.scoped(ack.epoch) else {
+        let Some(scheme) = self.validators_provider.scheme(ack.epoch) else {
             return Err(Error::UnknownScheme(ack.epoch));
         };
 

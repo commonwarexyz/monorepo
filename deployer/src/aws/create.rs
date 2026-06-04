@@ -282,6 +282,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         fonts_dejavu_core_download_url(FONTS_DEJAVU_CORE_VERSION),
     )
     .await?;
+    let node_exporter_dashboard_url = cache_tool(
+        grafana_node_exporter_dashboard_s3_key(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
+        grafana_node_exporter_dashboard_download_url(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
+    )
+    .await?;
     // Cache tools for each architecture and store URLs per-architecture
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
@@ -1078,6 +1083,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         datasources_yml: datasources_url,
         all_yml: all_yml_url,
         dashboard: dashboard_url,
+        node_exporter_dashboard: node_exporter_dashboard_url,
         loki_yml: loki_yml_url,
         pyroscope_yml: pyroscope_yml_url,
         tempo_yml: tempo_yml_url,

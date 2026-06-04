@@ -252,18 +252,23 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
     async fn read(&self, position: u64) -> Result<V, Error> {
         let _timer = self.metrics.read_timer();
         self.metrics.read_calls.inc();
-        let result = match self
+
+        // Serve from the page cache synchronously when possible, collapsing the offsets and data
+        // lookups into buffer copies and avoiding the async storage path on a hit.
+        if let Some(item) =
+            self.guard
+                .try_read_sync(position, self.items_per_section, &self.offsets)
+        {
+            self.metrics.items_read.inc();
+            return Ok(item);
+        }
+
+        let item = self
             .guard
             .read(position, self.items_per_section, &self.offsets)
-            .await
-        {
-            Ok(item) => {
-                self.metrics.items_read.inc();
-                Ok(item)
-            }
-            Err(error) => Err(error),
-        };
-        result
+            .await?;
+        self.metrics.items_read.inc();
+        Ok(item)
     }
 
     async fn read_many(&self, positions: &[u64]) -> Result<Vec<V>, Error> {
