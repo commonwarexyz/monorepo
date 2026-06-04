@@ -387,7 +387,7 @@ where
     where
         S: Scheme<Certificate = U64>,
         S::Subject<'a, D>: Subject<Namespace = N>,
-        R: rand::Rng + rand::CryptoRng,
+        R: rand_core::CryptoRngCore,
         D: Digest,
         I: Iterator<Item = (S::Subject<'a, D>, &'a U64)>,
         M: Faults,
@@ -560,12 +560,80 @@ macro_rules! impl_certificate_mock {
                 const ATTRIBUTABLE: bool,
                 const BATCHABLE: bool,
                 const ALLOW_INVALID: bool,
-            > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+            > $crate::certificate::Verifier for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
         {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = P;
-            type Signature = commonware_utils::sequence::U64;
             type Certificate = commonware_utils::sequence::U64;
+
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
+            }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                _strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
+            }
+
+            fn is_batchable() -> bool {
+                $crate::certificate::mocks::Generic::<
+                    P,
+                    $namespace,
+                    ATTRIBUTABLE,
+                    BATCHABLE,
+                    ALLOW_INVALID,
+                >::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded(
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::certificate::mocks::Generic::<
+                    P,
+                    $namespace,
+                    ATTRIBUTABLE,
+                    BATCHABLE,
+                    ALLOW_INVALID,
+                >::certificate_codec_config_unbounded()
+            }
+        }
+
+        impl<
+                P: $crate::PublicKey,
+                const ATTRIBUTABLE: bool,
+                const BATCHABLE: bool,
+                const ALLOW_INVALID: bool,
+            > $crate::certificate::Scheme for Scheme<P, ATTRIBUTABLE, BATCHABLE, ALLOW_INVALID>
+        {
+            type Signature = commonware_utils::sequence::U64;
 
             fn me(&self) -> Option<commonware_utils::Participant> {
                 self.generic.me()
@@ -625,38 +693,6 @@ macro_rules! impl_certificate_mock {
                 self.generic.assemble::<Self, _, M>(attestations)
             }
 
-            fn verify_certificate<R, D, M>(
-                &self,
-                rng: &mut R,
-                subject: Self::Subject<'_, D>,
-                certificate: &Self::Certificate,
-                _strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand_core::CryptoRngCore,
-                D: $crate::Digest,
-                M: commonware_utils::Faults,
-            {
-                self.generic
-                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate)
-            }
-
-            fn verify_certificates<'a, R, D, I, M>(
-                &self,
-                rng: &mut R,
-                certificates: I,
-                _strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand::Rng + rand::CryptoRng,
-                D: $crate::Digest,
-                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                M: commonware_utils::Faults,
-            {
-                self.generic
-                    .verify_certificates::<Self, _, D, _, M>(rng, certificates)
-            }
-
             fn is_attributable() -> bool {
                 $crate::certificate::mocks::Generic::<
                     P,
@@ -666,33 +702,6 @@ macro_rules! impl_certificate_mock {
                     ALLOW_INVALID,
                 >::is_attributable()
             }
-
-            fn is_batchable() -> bool {
-                $crate::certificate::mocks::Generic::<
-                    P,
-                    $namespace,
-                    ATTRIBUTABLE,
-                    BATCHABLE,
-                    ALLOW_INVALID,
-                >::is_batchable()
-            }
-
-            fn certificate_codec_config(
-                &self,
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                self.generic.certificate_codec_config()
-            }
-
-            fn certificate_codec_config_unbounded(
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::certificate::mocks::Generic::<
-                    P,
-                    $namespace,
-                    ATTRIBUTABLE,
-                    BATCHABLE,
-                    ALLOW_INVALID,
-                >::certificate_codec_config_unbounded()
-            }
         }
     };
 }
@@ -701,7 +710,7 @@ macro_rules! impl_certificate_mock {
 mod tests {
     use super::{Certificates, Shared, Signatures};
     use crate::{
-        certificate::{Attestation, Lazy, Scheme as _},
+        certificate::{Attestation, Lazy, Scheme as _, Verifier as _},
         ed25519::PublicKey as Ed25519PublicKey,
         sha256::Digest as Sha256Digest,
     };

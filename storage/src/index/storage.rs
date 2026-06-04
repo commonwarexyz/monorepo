@@ -246,28 +246,7 @@ impl<V: Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, V, E> {
     }
 }
 
-/// An immutable iterator over the values associated with a translated key.
-pub struct ImmutableCursor<'a, V: Send + Sync> {
-    current: Option<&'a Record<V>>,
-}
-
-impl<'a, V: Send + Sync> ImmutableCursor<'a, V> {
-    /// Creates a new [ImmutableCursor] from a [Record].
-    pub(super) const fn new(record: &'a Record<V>) -> Self {
-        Self {
-            current: Some(record),
-        }
-    }
-}
-
-impl<'a, V: Send + Sync> Iterator for ImmutableCursor<'a, V> {
-    type Item = &'a V;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.current.map(|record| {
-            let value = &record.value;
-            self.current = record.next.as_deref();
-            value
-        })
-    }
+/// Walks the linked list of values starting at `head` and yields each value.
+pub(super) fn iter_chain<V: Send + Sync>(head: &Record<V>) -> impl Iterator<Item = &V> + Send {
+    std::iter::successors(Some(head), |r| r.next.as_deref()).map(|r| &r.value)
 }

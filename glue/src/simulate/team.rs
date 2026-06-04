@@ -53,6 +53,7 @@ impl<D: EngineDefinition> Team<D> {
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         pk: D::PublicKey,
         monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
+        delayed: bool,
     ) {
         // Abort existing handle if present
         if let Some(handle) = self.handles.remove(&pk) {
@@ -89,6 +90,7 @@ impl<D: EngineDefinition> Team<D> {
             .init(InitContext {
                 context: validator_ctx,
                 index,
+                delayed,
                 public_key: &pk,
                 oracle,
                 channels,
@@ -132,7 +134,8 @@ impl<D: EngineDefinition> Team<D> {
                 info!(target: "simulator", ?pk, "delayed participant");
                 continue;
             }
-            self.start_one(ctx, oracle, pk, monitor.clone()).await;
+            self.start_one(ctx, oracle, pk, monitor.clone(), false)
+                .await;
         }
     }
 
@@ -154,9 +157,10 @@ impl<D: EngineDefinition> Team<D> {
         oracle: &Oracle<D::PublicKey, deterministic::Context>,
         pk: D::PublicKey,
         monitor: mpsc::Sender<FinalizationUpdate<D::PublicKey>>,
+        delayed: bool,
     ) {
         info!(target: "simulator", ?pk, "restarting validator");
-        self.start_one(ctx, oracle, pk, monitor).await;
+        self.start_one(ctx, oracle, pk, monitor, delayed).await;
     }
 
     /// Collect references to all active (non-crashed) validator states.

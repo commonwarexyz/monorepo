@@ -72,7 +72,7 @@ mod tests {
     use commonware_broadcast::buffered;
     use commonware_codec::Encode;
     use commonware_cryptography::{
-        certificate::{mocks::Fixture, ConstantProvider, Scheme as _},
+        certificate::{mocks::Fixture, ConstantProvider, Provider, Scoped, Verifier as _},
         ed25519::PublicKey,
         sha256::Sha256,
         Digestible, Hasher as _,
@@ -111,6 +111,28 @@ mod tests {
     fn mailbox_provides_application_blocks() {
         fn assert_provider<P: BlockProvider<Block = B>>() {}
         assert_provider::<Mailbox<S, Standard<B>>>();
+    }
+
+    #[derive(Clone)]
+    struct VerifierProvider {
+        scheme: Arc<S>,
+    }
+
+    impl VerifierProvider {
+        fn new(scheme: S) -> Self {
+            Self {
+                scheme: Arc::new(scheme),
+            }
+        }
+    }
+
+    impl Provider for VerifierProvider {
+        type Scope = Epoch;
+        type Scheme = S;
+
+        fn scoped(&self, _: Epoch) -> Option<Scoped<S>> {
+            Some(Scoped::verifier(self.scheme.clone()))
+        }
     }
 
     #[test_traced("WARN")]
@@ -2854,10 +2876,10 @@ mod tests {
         }
     }
 
-    async fn start_standard_actor<R, Buf>(
+    async fn start_standard_actor<R, Buf, P>(
         context: deterministic::Context,
         partition_prefix: &str,
-        provider: ConstantProvider<S, Epoch>,
+        provider: P,
         application: R,
         buffer: Option<Buf>,
         start: Start<S, D, B>,
@@ -2869,6 +2891,7 @@ mod tests {
     )
     where
         R: Reporter<Activity = Update<B>>,
+        P: Provider<Scope = Epoch, Scheme = S>,
         Buf: crate::marshal::core::Buffer<Standard<B>, PublicKey = PublicKey> + Clone,
     {
         let config = Config {
@@ -4648,6 +4671,184 @@ mod tests {
                     panic!("notarized delivery did not wake block subscriber");
                 },
             }
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_notarized_delivery_rejects_wrong_round() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let requested_round = Round::new(Epoch::new(1), View::new(1));
+            let delivered_round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let proposal = Proposal::new(
+                delivered_round,
+                View::zero(),
+                StandardHarness::commitment(&block),
+            );
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "notarized-delivery-wrong-round",
+                ConstantProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Notarized {
+                            round: requested_round,
+                        },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization {
+                            round: requested_round,
+                        }),
+                    },
+                    value: (notarization, block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "wrong-round notarized delivery must not satisfy the request"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_notarized_delivery_acknowledges_stale_without_full_scheme() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let notarization = StandardHarness::make_notarization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "notarized-delivery-stale-certificate-only",
+                VerifierProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Notarized { round },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
+                    },
+                    value: (notarization, block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "stale notarized delivery should acknowledge without blaming the peer"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_verifies_with_verify_only_scope() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let height = Height::new(1);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-verify-only",
+                VerifierProvider::new(schemes[0].clone()),
+                Application::<B>::default(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Finalized { height },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
+                            handler::Finalized::ByHeight { height },
+                        )),
+                    },
+                    value: (finalization, block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                response_rx.await.expect("delivery response missing"),
+                "finalization verified through a verify-only scope should be accepted"
+            );
+        });
+    }
+
+    #[test_traced("WARN")]
+    fn test_standard_finalized_delivery_rejects_epoch_mismatch() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture { schemes, .. } =
+                bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            // Height 1 lives in epoch 0 under `FixedEpocher`, but the finalization claims epoch 1.
+            // The certificate decodes against epoch 0's config, so the epoch-equality guard must
+            // reject it and blame the peer before any verification.
+            let height = Height::new(1);
+            let round = Round::new(Epoch::new(1), View::new(1));
+            let block = make_raw_block(Sha256::hash(b""), height, 100);
+            let proposal = Proposal::new(round, View::zero(), StandardHarness::commitment(&block));
+            let finalization = StandardHarness::make_finalization(proposal, &schemes, QUORUM);
+
+            let (_mailbox, _buffer, resolver, _actor_handle) = start_standard_actor(
+                context.child("validator"),
+                "finalized-delivery-epoch-mismatch",
+                VerifierProvider::new(schemes[0].clone()),
+                Application::<B>::manual_ack(),
+                Some(RecordingBuffer::default()),
+                Start::Genesis(StandardHarness::genesis_block(NUM_VALIDATORS as u16)),
+            )
+            .await;
+
+            let (response, response_rx) = oneshot::channel();
+            assert!(resolver
+                .enqueue(handler::Message::Deliver {
+                    delivery: Delivery {
+                        key: handler::Key::Finalized { height },
+                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
+                            handler::Finalized::ByHeight { height },
+                        )),
+                    },
+                    value: (finalization, block).encode(),
+                    response,
+                })
+                .accepted());
+            assert!(
+                !response_rx.await.expect("delivery response missing"),
+                "finalization whose epoch mismatches the height's epoch must blame the peer"
+            );
         });
     }
 

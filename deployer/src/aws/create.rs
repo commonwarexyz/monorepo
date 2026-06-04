@@ -67,6 +67,40 @@ pub struct RegionResources {
     pub monitoring_sg_id: Option<String>,
 }
 
+/// Validates storage options before create allocates AWS resources.
+fn validate_storage_config(config: &Config) -> Result<(), Error> {
+    // Treat monitoring and binary instances uniformly because both launch an EBS volume.
+    let storage_configs = std::iter::once((
+        MONITORING_NAME,
+        config.monitoring.storage_class.as_str(),
+        config.monitoring.storage_size,
+        config.monitoring.storage_iops,
+        config.monitoring.storage_throughput,
+    ))
+    .chain(config.instances.iter().map(|instance| {
+        (
+            instance.name.as_str(),
+            instance.storage_class.as_str(),
+            instance.storage_size,
+            instance.storage_iops,
+            instance.storage_throughput,
+        )
+    }));
+
+    // Reject bad storage settings before key, S3, VPC, or instance resources are created.
+    for (target, storage_class, storage_size, storage_iops, storage_throughput) in storage_configs {
+        let storage_class = parse_storage_class(target, storage_class)?;
+        validate_storage_options(
+            target,
+            &storage_class,
+            storage_size,
+            storage_iops,
+            storage_throughput,
+        )?;
+    }
+    Ok(())
+}
+
 /// Sets up EC2 instances, deploys files, and configures monitoring and logging
 pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Load configuration from YAML file
@@ -87,6 +121,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             return Err(Error::InvalidInstanceName(instance.name.clone()));
         }
     }
+
+    // Validate storage settings before allocating any AWS resources.
+    validate_storage_config(&config)?;
 
     // Determine unique regions
     let mut regions: BTreeSet<String> = config.instances.iter().map(|i| i.region.clone()).collect();
@@ -243,6 +280,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let fonts_dejavu_core_url = cache_tool(
         fonts_dejavu_core_bin_s3_key(FONTS_DEJAVU_CORE_VERSION),
         fonts_dejavu_core_download_url(FONTS_DEJAVU_CORE_VERSION),
+    )
+    .await?;
+    let node_exporter_dashboard_url = cache_tool(
+        grafana_node_exporter_dashboard_s3_key(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
+        grafana_node_exporter_dashboard_download_url(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
     )
     .await?;
     // Cache tools for each architecture and store URLs per-architecture
@@ -559,7 +601,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let monitoring_instance_type =
         InstanceType::try_parse(&config.monitoring.instance_type).expect("Invalid instance type");
     let monitoring_storage_class =
-        VolumeType::try_parse(&config.monitoring.storage_class).expect("Invalid storage class");
+        parse_storage_class(MONITORING_NAME, &config.monitoring.storage_class)?;
     let monitoring_sg_id = monitoring_resources
         .monitoring_sg_id
         .as_ref()
@@ -615,6 +657,8 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 monitoring_instance_type,
                 config.monitoring.storage_size,
                 monitoring_storage_class,
+                config.monitoring.storage_iops,
+                config.monitoring.storage_throughput,
                 &key_name,
                 &monitoring_subnets,
                 &monitoring_az_support,
@@ -643,8 +687,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let key_name = key_name.clone();
             let instance_type =
                 InstanceType::try_parse(&instance.instance_type).expect("Invalid instance type");
-            let storage_class =
-                VolumeType::try_parse(&instance.storage_class).expect("Invalid storage class");
             let binary_sg_id = resources.binary_sg_id.as_ref().unwrap();
             let tag = tag.clone();
             let instance_name = instance.name.clone();
@@ -652,12 +694,15 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let subnets = grouped_subnets(instance, resources, &availability_zone_groups);
             let az_support = resources.az_support.clone();
             async move {
+                let storage_class = parse_storage_class(&instance.name, &instance.storage_class)?;
                 let (mut ids, az) = launch_instances(
                     ec2_client,
                     ami_id,
                     instance_type,
                     instance.storage_size,
                     storage_class,
+                    instance.storage_iops,
+                    instance.storage_throughput,
                     &key_name,
                     &subnets,
                     &az_support,
@@ -1038,6 +1083,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         datasources_yml: datasources_url,
         all_yml: all_yml_url,
         dashboard: dashboard_url,
+        node_exporter_dashboard: node_exporter_dashboard_url,
         loki_yml: loki_yml_url,
         pyroscope_yml: pyroscope_yml_url,
         tempo_yml: tempo_yml_url,
@@ -1381,9 +1427,9 @@ fn grouped_subnets(
 mod tests {
     use super::{
         grouped_subnets, select_availability_zone_groups, select_group_availability_zone,
-        RegionResources,
+        validate_storage_config, RegionResources,
     };
-    use crate::aws::{Error, InstanceConfig};
+    use crate::aws::{Config, Error, InstanceConfig, MonitoringConfig};
     use std::collections::{BTreeSet, HashMap};
 
     fn instance(
@@ -1399,9 +1445,31 @@ mod tests {
             instance_type: instance_type.to_string(),
             storage_size: 10,
             storage_class: "gp3".to_string(),
+            storage_iops: None,
+            storage_throughput: None,
             binary: "binary".to_string(),
             config: "config.yaml".to_string(),
             profiling: false,
+        }
+    }
+
+    fn config(monitoring: MonitoringConfig, instances: Vec<InstanceConfig>) -> Config {
+        Config {
+            tag: "tag".to_string(),
+            monitoring,
+            instances,
+            ports: Vec::new(),
+        }
+    }
+
+    fn monitoring(storage_class: &str, storage_iops: Option<i32>) -> MonitoringConfig {
+        MonitoringConfig {
+            instance_type: "c8g.4xlarge".to_string(),
+            storage_size: 10,
+            storage_class: storage_class.to_string(),
+            storage_iops,
+            storage_throughput: None,
+            dashboard: "dashboard.json".to_string(),
         }
     }
 
@@ -1429,6 +1497,205 @@ mod tests {
             binary_sg_id: None,
             monitoring_sg_id: None,
         }
+    }
+
+    #[test]
+    fn monitoring_io2_requires_storage_iops() {
+        let cfg = config(monitoring("io2", None), Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("io2 requires storage_iops");
+
+        assert!(matches!(
+            err,
+            Error::MissingStorageIops {
+                target,
+                storage_class,
+            } if target == "monitoring" && storage_class == "io2"
+        ));
+    }
+
+    #[test]
+    fn instance_io1_requires_storage_iops() {
+        let mut instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+        instance.storage_class = "io1".to_string();
+        let cfg = config(monitoring("gp3", None), vec![instance]);
+
+        let err = validate_storage_config(&cfg).expect_err("io1 requires storage_iops");
+
+        assert!(matches!(
+            err,
+            Error::MissingStorageIops {
+                target,
+                storage_class,
+            } if target == "worker" && storage_class == "io1"
+        ));
+    }
+
+    #[test]
+    fn gp3_storage_iops_must_be_in_range() {
+        let cfg = config(monitoring("gp3", Some(0)), Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("gp3 storage_iops is too low");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "monitoring" && storage_class == "gp3" && storage_iops == 0
+        ));
+    }
+
+    #[test]
+    fn io1_storage_iops_must_be_in_range() {
+        let mut instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+        instance.storage_class = "io1".to_string();
+        instance.storage_iops = Some(64_001);
+        let cfg = config(monitoring("gp3", None), vec![instance]);
+
+        let err = validate_storage_config(&cfg).expect_err("io1 storage_iops is too high");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "worker" && storage_class == "io1" && storage_iops == 64_001
+        ));
+    }
+
+    #[test]
+    fn io1_storage_iops_are_capped_by_storage_size() {
+        let mut instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+        instance.storage_class = "io1".to_string();
+        instance.storage_size = 10;
+        instance.storage_iops = Some(64_000);
+        let cfg = config(monitoring("gp3", None), vec![instance]);
+
+        let err = validate_storage_config(&cfg).expect_err("io1 storage_iops exceeds size ratio");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "worker" && storage_class == "io1" && storage_iops == 64_000
+        ));
+    }
+
+    #[test]
+    fn io2_storage_iops_must_be_in_range() {
+        let cfg = config(monitoring("io2", Some(256_001)), Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("io2 storage_iops is too high");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "monitoring" && storage_class == "io2" && storage_iops == 256_001
+        ));
+    }
+
+    #[test]
+    fn unsupported_storage_class_rejects_storage_iops() {
+        let cfg = config(monitoring("gp2", Some(3_000)), Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("gp2 does not accept storage_iops");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageIops {
+                target,
+                storage_class,
+                storage_iops,
+            } if target == "monitoring" && storage_class == "gp2" && storage_iops == 3_000
+        ));
+    }
+
+    #[test]
+    fn gp3_does_not_require_storage_iops() {
+        let cfg = config(
+            monitoring("gp3", None),
+            vec![instance("worker", "us-east-1", "c8g.4xlarge", None)],
+        );
+
+        validate_storage_config(&cfg).expect("gp3 has default IOPS");
+    }
+
+    #[test]
+    fn io2_accepts_storage_iops() {
+        let cfg = config(monitoring("io2", Some(10_000)), Vec::new());
+
+        validate_storage_config(&cfg).expect("io2 with storage_iops is valid");
+    }
+
+    // Throughput validation covers the gp3-only API field and gp3 ratio limits.
+    #[test]
+    fn storage_throughput_must_be_in_gp3_range() {
+        let mut monitoring = monitoring("gp3", None);
+        monitoring.storage_throughput = Some(124);
+        let cfg = config(monitoring, Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("storage_throughput is too low");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageThroughput {
+                target,
+                storage_throughput,
+            } if target == "monitoring" && storage_throughput == 124
+        ));
+    }
+
+    #[test]
+    fn storage_throughput_requires_gp3() {
+        let mut instance = instance("worker", "us-east-1", "c8g.4xlarge", None);
+        instance.storage_class = "io2".to_string();
+        instance.storage_iops = Some(10_000);
+        instance.storage_throughput = Some(250);
+        let cfg = config(monitoring("gp3", None), vec![instance]);
+
+        let err = validate_storage_config(&cfg).expect_err("throughput is only valid for gp3");
+
+        assert!(matches!(
+            err,
+            Error::UnsupportedStorageThroughput {
+                target,
+                storage_class,
+            } if target == "worker" && storage_class == "io2"
+        ));
+    }
+
+    #[test]
+    fn gp3_accepts_storage_throughput() {
+        let mut monitoring = monitoring("gp3", None);
+        monitoring.storage_throughput = Some(250);
+        let cfg = config(monitoring, Vec::new());
+
+        validate_storage_config(&cfg).expect("gp3 throughput is valid");
+    }
+
+    #[test]
+    fn gp3_storage_throughput_is_capped_by_iops() {
+        let mut monitoring = monitoring("gp3", None);
+        monitoring.storage_throughput = Some(2_000);
+        let cfg = config(monitoring, Vec::new());
+
+        let err = validate_storage_config(&cfg).expect_err("gp3 throughput exceeds default IOPS");
+
+        assert!(matches!(
+            err,
+            Error::InvalidStorageThroughput {
+                target,
+                storage_throughput,
+            } if target == "monitoring" && storage_throughput == 2_000
+        ));
     }
 
     #[test]

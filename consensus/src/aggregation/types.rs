@@ -8,7 +8,7 @@ use crate::{
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use commonware_cryptography::{
-    certificate::{self, Attestation, Scheme, Subject},
+    certificate::{Attestation, Namespace as CertificateNamespace, Scheme, Subject},
     Digest,
 };
 use commonware_parallel::Strategy;
@@ -90,7 +90,7 @@ fn ack_namespace(namespace: &[u8]) -> Vec<u8> {
 #[derive(Clone, Debug)]
 pub struct Namespace(Vec<u8>);
 
-impl certificate::Namespace for Namespace {
+impl CertificateNamespace for Namespace {
     fn derive(namespace: &[u8]) -> Self {
         Self(ack_namespace(namespace))
     }
