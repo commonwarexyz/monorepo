@@ -658,8 +658,8 @@ stability_scope!(BETA {
     /// # Durability
     ///
     /// Runtimes must ensure that any data readable when user code starts
-    /// executing is crash-durable. Storage structures rely on this during
-    /// recovery: data read at initialization is assumed to survive a
+    /// executing is crash-durable. Storage structures may rely on this during
+    /// recovery: data read at initialization can be assumed to survive a
     /// subsequent crash without an explicit [`Blob::sync`].
     ///
     /// # Partition Names
