@@ -10,8 +10,8 @@
 //! - [`multi_node`]: runs a live `N4F1C3` cluster (three honest nodes
 //!   plus one byzantine `Disrupter`) wired to real simplex consensus, and
 //!   checks marshal liveness (every honest node delivers a target number of
-//!   ordered finalized blocks, derived from `required_containers` clamped to a
-//!   single-epoch bound) plus cross-node agreement.
+//!   ordered finalized blocks sampled within a single-epoch bound) plus
+//!   cross-node agreement.
 //!
 //! # Goals, pros, and cons
 //!
@@ -29,5 +29,5 @@
 pub mod multi_node;
 pub mod single_node;
 
-pub use multi_node::fuzz_marshal_liveness;
+pub use multi_node::{fuzz_marshal_liveness, MarshalLivenessInput};
 pub use single_node::{fuzz_marshal, MarshalEvent, MarshalFuzzInput, VariantPublish};

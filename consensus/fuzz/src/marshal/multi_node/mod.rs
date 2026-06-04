@@ -8,7 +8,7 @@
 //!
 //! The liveness check injects byzantine faults, then asserts that honest nodes keep making progress:
 //! every honest marshal delivers a target number of ordered finalized blocks
-//! (derived from `required_containers`, clamped to a single-epoch bound).
+//! (sampled within a single-epoch bound).
 //!
 //! # Layout
 //!
@@ -19,12 +19,16 @@
 //!   invariants.
 //! - `invariant` holds the end-of-run assertions.
 
+use commonware_consensus::marshal::mocks::harness::BLOCKS_PER_EPOCH;
+
 mod app;
 mod engine;
+mod input;
 mod invariant;
 mod runner;
 
 pub use engine::LiveMarshal;
+pub use input::MarshalLivenessInput;
 pub use runner::fuzz_marshal_liveness;
 
 /// Engine p2p channel ids, shared by the honest engines and the byzantine
@@ -33,3 +37,9 @@ pub use runner::fuzz_marshal_liveness;
 const ENGINE_VOTE: u64 = 3;
 const ENGINE_CERTIFICATE: u64 = 4;
 const ENGINE_RESOLVER: u64 = 5;
+
+/// Highest fresh block height this single-epoch harness can require. With
+/// `FixedEpocher::new(BLOCKS_PER_EPOCH)`, height `BLOCKS_PER_EPOCH - 1` is the
+/// epoch-0 boundary block; after that the wrappers re-propose the boundary block
+/// instead of producing height `BLOCKS_PER_EPOCH`.
+const MAX_REQUIRED: u64 = BLOCKS_PER_EPOCH.get() - 1;

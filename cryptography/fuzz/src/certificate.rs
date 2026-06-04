@@ -17,7 +17,7 @@ use commonware_cryptography::{
         ops::{aggregate, compute_public},
         variant::Variant,
     },
-    certificate::{Scheme as CertScheme, Subject},
+    certificate::{Scheme as CertScheme, Subject, Verifier as CertVerifier},
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     secp256r1::standard::PrivateKey as SecpPrivateKey,
     sha256::Digest as Sha256Digest,
@@ -101,12 +101,12 @@ pub trait Fixture {
     fn setup(rng: &mut FuzzRng, n: u32) -> Option<(Vec<Self::Scheme>, Self::Scheme)>;
 
     /// Builds a subject for the given message.
-    fn subject(message: &[u8]) -> <Self::Scheme as CertScheme>::Subject<'_, Sha256Digest>;
+    fn subject(message: &[u8]) -> <Self::Scheme as CertVerifier>::Subject<'_, Sha256Digest>;
 
     /// Returns a deterministically-invalid clone of `certificate`.
     fn corrupt(
-        certificate: &<Self::Scheme as CertScheme>::Certificate,
-    ) -> <Self::Scheme as CertScheme>::Certificate;
+        certificate: &<Self::Scheme as CertVerifier>::Certificate,
+    ) -> <Self::Scheme as CertVerifier>::Certificate;
 }
 
 /// Ed25519: same key for identity and signing, individual signatures, batchable.
@@ -130,13 +130,13 @@ impl Fixture for Ed25519 {
         Some((signers, verifier))
     }
 
-    fn subject(message: &[u8]) -> <Self::Scheme as CertScheme>::Subject<'_, Sha256Digest> {
+    fn subject(message: &[u8]) -> <Self::Scheme as CertVerifier>::Subject<'_, Sha256Digest> {
         subject(message)
     }
 
     fn corrupt(
-        certificate: &<Self::Scheme as CertScheme>::Certificate,
-    ) -> <Self::Scheme as CertScheme>::Certificate {
+        certificate: &<Self::Scheme as CertVerifier>::Certificate,
+    ) -> <Self::Scheme as CertVerifier>::Certificate {
         let mut bad = certificate.clone();
         bad.signatures.swap(0, 1);
         bad
@@ -172,13 +172,13 @@ impl Fixture for Secp256r1 {
         Some((signers, verifier))
     }
 
-    fn subject(message: &[u8]) -> <Self::Scheme as CertScheme>::Subject<'_, Sha256Digest> {
+    fn subject(message: &[u8]) -> <Self::Scheme as CertVerifier>::Subject<'_, Sha256Digest> {
         subject(message)
     }
 
     fn corrupt(
-        certificate: &<Self::Scheme as CertScheme>::Certificate,
-    ) -> <Self::Scheme as CertScheme>::Certificate {
+        certificate: &<Self::Scheme as CertVerifier>::Certificate,
+    ) -> <Self::Scheme as CertVerifier>::Certificate {
         let mut bad = certificate.clone();
         bad.signatures.swap(0, 1);
         bad
@@ -211,13 +211,13 @@ impl<V: Variant> Fixture for Multisig<V> {
         Some((signers, verifier))
     }
 
-    fn subject(message: &[u8]) -> <Self::Scheme as CertScheme>::Subject<'_, Sha256Digest> {
+    fn subject(message: &[u8]) -> <Self::Scheme as CertVerifier>::Subject<'_, Sha256Digest> {
         subject(message)
     }
 
     fn corrupt(
-        certificate: &<Self::Scheme as CertScheme>::Certificate,
-    ) -> <Self::Scheme as CertScheme>::Certificate {
+        certificate: &<Self::Scheme as CertVerifier>::Certificate,
+    ) -> <Self::Scheme as CertVerifier>::Certificate {
         let mut bad = certificate.clone();
         bad.signature = Lazy::from(aggregate::Signature::<V>::zero());
         bad
@@ -327,11 +327,11 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 /// Certificate type produced by fixture `F`.
-type CertOf<F> = <<F as Fixture>::Scheme as CertScheme>::Certificate;
+type CertOf<F> = <<F as Fixture>::Scheme as CertVerifier>::Certificate;
 
 /// A `(subject, &certificate)` pair as consumed by batch certificate verification.
 type Item<'a, F> = (
-    <<F as Fixture>::Scheme as CertScheme>::Subject<'a, Sha256Digest>,
+    <<F as Fixture>::Scheme as CertVerifier>::Subject<'a, Sha256Digest>,
     &'a CertOf<F>,
 );
 
@@ -348,7 +348,7 @@ fn distinct_indices(selection: &[u8], n: usize) -> Vec<usize> {
 /// Drives the certificate scheme selected by `F` through a sequence of operations.
 pub fn fuzz<F: Fixture>(input: FuzzInput)
 where
-    for<'a> <F::Scheme as CertScheme>::Subject<'a, Sha256Digest>: Copy,
+    for<'a> <F::Scheme as CertVerifier>::Subject<'a, Sha256Digest>: Copy,
 {
     let FuzzInput {
         size_index,
@@ -365,8 +365,8 @@ where
     let cfg = verifier.certificate_codec_config();
 
     assert!(<F::Scheme as CertScheme>::is_attributable());
-    assert_eq!(<F::Scheme as CertScheme>::is_batchable(), F::BATCHABLE);
-    let _ = <F::Scheme as CertScheme>::certificate_codec_config_unbounded();
+    assert_eq!(<F::Scheme as CertVerifier>::is_batchable(), F::BATCHABLE);
+    let _ = <F::Scheme as CertVerifier>::certificate_codec_config_unbounded();
     assert!(verifier.me().is_none());
     assert!(signers[0].me().is_some());
     let _ = verifier.participants();

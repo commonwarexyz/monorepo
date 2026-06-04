@@ -3,8 +3,8 @@
 //! Runs `N4F1C3` (three honest validators plus one byzantine `Disrupter`)
 //! over the simulated network and reuses the shared fuzz infrastructure
 //! (`setup_network`-style helpers, the byzantine `Disrupter`, strategy
-//! sampling, [`FuzzInput`]) exactly as the general harness does. The honest
-//! validators are parametrized by the *marshal sink* instead of the reporter
+//! sampling) with [`MarshalLivenessInput`]. The honest validators are
+//! parametrized by the *marshal sink* instead of the reporter
 //! sink (see [`LiveMarshal`]): each runs a live simplex engine whose `reporter`
 //! is a marshal mailbox, and marshal delivers ordered finalized blocks to a
 //! downstream [`Application`] sink.
@@ -14,8 +14,9 @@
 //!
 //! - Phase 1 (pre-GST): a sampled network partition is held for [`FAULT_PHASE`]
 //!   while the byzantine `Disrupter` runs. If every honest marshal delivers the
-//!   target number of ordered finalized blocks (`required_containers` clamped to
-//!   a single-epoch bound; see `MAX_REQUIRED`) during this phase, the run passes.
+//!   target number of ordered finalized blocks (`required_containers`, sampled
+//!   within a single-epoch bound; see `MAX_REQUIRED`) during this phase, the
+//!   run passes.
 //! - GST: the network heals (`apply_partition(None)`); the `Disrupter` stays
 //!   active (its faults are not gated by GST).
 //! - Phase 2 (post-GST): each honest marshal must reach its target (`required`,
@@ -48,36 +49,32 @@
 //! Either way the three honest validators must still deliver
 //! that target number of ordered blocks.
 
-use super::{engine::LiveMarshal, invariant, ENGINE_CERTIFICATE, ENGINE_RESOLVER, ENGINE_VOTE};
+use super::{
+    engine::LiveMarshal, input::MarshalLivenessInput, invariant, ENGINE_CERTIFICATE,
+    ENGINE_RESOLVER, ENGINE_VOTE, MAX_REQUIRED,
+};
 use crate::{
-    network_faults,
     simplex::Simplex,
     start_disrupter_with_epoch,
-    utils::{apply_partition, Partition, SetPartition},
-    FuzzInput, SimplexBls12381MinPk, BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW,
+    utils::{apply_partition, SetPartition},
+    SimplexBls12381MinPk, BYZANTINE_IDX, FAULT_PHASE, POST_GST_WINDOW,
 };
 use commonware_consensus::{
     marshal::mocks::{
         application::Application,
         harness::{
-            setup_network_links, setup_network_with_participants, BLOCKS_PER_EPOCH, K, LINK,
-            NUM_VALIDATORS, S, TEST_QUOTA,
+            setup_network_links, setup_network_with_participants, K, LINK, NUM_VALIDATORS, S,
+            TEST_QUOTA,
         },
     },
     types::Epoch,
+    Block,
 };
 use commonware_cryptography::certificate::ConstantProvider;
-use commonware_macros::select;
-use commonware_runtime::{deterministic, Clock, Runner, Spawner, Supervisor as _};
+use commonware_p2p::simulated::Link;
+use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
 use commonware_utils::{FuzzRng, NZUsize};
-use futures::future::join_all;
 use std::{fmt::Write as _, num::NonZeroUsize, time::Duration};
-
-/// Highest fresh block height this single-epoch harness can require. With
-/// `FixedEpocher::new(BLOCKS_PER_EPOCH)`, height `BLOCKS_PER_EPOCH - 1` is the
-/// epoch-0 boundary block; after that the wrappers re-propose the boundary block
-/// instead of producing height `BLOCKS_PER_EPOCH`.
-const MAX_REQUIRED: u64 = BLOCKS_PER_EPOCH.get() - 1;
 
 /// Generous backlog so marshal never blocks on ack pressure; the downstream
 /// application auto-acks.
@@ -86,22 +83,78 @@ const MAX_PENDING_ACKS: NonZeroUsize = NZUsize!(64);
 /// Poll interval for observing marshal delivery progress.
 const POLL: Duration = Duration::from_millis(50);
 
+async fn apply_degraded_network(
+    oracle: &mut commonware_p2p::simulated::Oracle<K, deterministic::Context>,
+    participants: &[K],
+) {
+    let Some(victim) = participants.last() else {
+        return;
+    };
+    let degraded = Link {
+        latency: Duration::from_millis(50),
+        jitter: Duration::from_millis(50),
+        success_rate: 0.6,
+    };
+    for peer in participants
+        .iter()
+        .take(participants.len().saturating_sub(1))
+    {
+        oracle.remove_link(victim.clone(), peer.clone()).await.ok();
+        oracle.remove_link(peer.clone(), victim.clone()).await.ok();
+        oracle
+            .add_link(victim.clone(), peer.clone(), degraded.clone())
+            .await
+            .unwrap();
+        oracle
+            .add_link(peer.clone(), victim.clone(), degraded.clone())
+            .await
+            .unwrap();
+    }
+}
+
 /// Highest finalized-block height marshal has delivered to `app`'s sink. The
 /// height-0 genesis floor block does not count as progress, so an empty/genesis
 /// sink reports 0.
-fn highest_delivered<B: commonware_consensus::Block>(app: &Application<B>) -> u64 {
+fn highest_delivered<B: Block>(app: &Application<B>) -> u64 {
     app.blocks().keys().next_back().map_or(0, |h| h.get())
 }
 
+fn targets_reached<B: Block>(apps: &[(usize, Application<B>)], targets: &[(usize, u64)]) -> bool {
+    targets.iter().all(|(target_idx, target)| {
+        apps.iter()
+            .find(|(idx, _)| idx == target_idx)
+            .is_some_and(|(_, app)| highest_delivered(app) >= *target)
+    })
+}
+
+async fn wait_for_targets<B: Block>(
+    context: &deterministic::Context,
+    apps: &[(usize, Application<B>)],
+    targets: &[(usize, u64)],
+    timeout: Duration,
+) -> bool {
+    let deadline = context.current() + timeout;
+    loop {
+        if targets_reached(apps, targets) {
+            return true;
+        }
+        let Ok(remaining) = deadline.duration_since(context.current()) else {
+            return false;
+        };
+        if remaining.is_zero() {
+            return false;
+        }
+        context.sleep(POLL.min(remaining)).await;
+    }
+}
+
 /// Run a single multi-node marshal liveness iteration for variant `H`.
-pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
+pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: MarshalLivenessInput) {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
     let executor = deterministic::Runner::new(cfg);
 
     executor.start(|mut context| async move {
-        let mut input = input;
-
         // Shared threshold fixture: the same participants/schemes drive the
         // byzantine disrupter, the honest engines, and the marshal providers.
         let (participants, schemes): (Vec<K>, Vec<S>) =
@@ -114,25 +167,16 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
         )
         .await;
         setup_network_links(&mut oracle, &participants, LINK).await;
-
-        let required = input.required_containers.clamp(1, MAX_REQUIRED);
-
-        // Pre-GST network fault held for the bounded fault phase, applied via the
-        // simulated-network topology (not byzzfuzz interceptors). Populate an
-        // adaptive schedule from the chosen strategy (as the general harness
-        // does), then hold one partition: a static set-partition, or the first
-        // scheduled adaptive partition. `Connected` -> no fault.
-        if matches!(input.partition, Partition::Adaptive(_)) {
-            input.partition =
-                Partition::Adaptive(network_faults(input.strategy, required, &mut context));
+        if input.degraded_network {
+            apply_degraded_network(&mut oracle, &participants).await;
         }
-        let pre_gst_partition: Option<SetPartition> =
-            input.partition.set_partition().copied().or_else(|| {
-                input
-                    .partition
-                    .schedule()
-                    .and_then(|s| s.first().map(|&(_, p)| p))
-            });
+
+        let required = input.required_containers;
+
+        // Pre-GST network fault held for the bounded fault phase, applied via
+        // the simulated-network topology (not byzzfuzz interceptors).
+        // `Connected` means no topology fault.
+        let pre_gst_partition: Option<SetPartition> = input.partition.set_partition().copied();
         if let Some(partition) = pre_gst_partition.as_ref() {
             apply_partition(&oracle, &participants, Some(partition), &LINK).await;
         }
@@ -198,32 +242,21 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
                 setup.mailbox,
                 setup.extra,
                 genesis_commitment,
+                input.forwarding,
             )
             .await;
         }
 
         // Phase 1: hold the pre-GST network fault until either every honest
-        // marshal reaches `required` or the fault phase expires. Watchers poll
-        // the highest delivered height (height 0 is the genesis floor, not
-        // progress) and return true only if their node reached `required`.
-        let mut phase1_finishers = Vec::new();
-        for (idx, app) in honest_apps.iter().cloned() {
-            phase1_finishers.push(
-                context
-                    .child("phase1_finisher")
-                    .with_attribute("index", idx)
-                    .spawn(move |context| async move {
-                        while highest_delivered(&app) < required {
-                            context.sleep(POLL).await;
-                        }
-                        true
-                    }),
-            );
-        }
-        let phase1_early_complete = select! {
-            results = join_all(phase1_finishers) => results.iter().all(|r| matches!(r, Ok(true))),
-            _ = context.sleep(FAULT_PHASE) => false,
-        };
+        // marshal reaches `required` or the fault phase expires. The root
+        // future polls progress directly so timed-out phase-1 watchers do not
+        // keep running into the post-GST phase.
+        let phase1_targets: Vec<(usize, u64)> = honest_apps
+            .iter()
+            .map(|(idx, _)| (*idx, required))
+            .collect();
+        let phase1_early_complete =
+            wait_for_targets(&context, &honest_apps, &phase1_targets, FAULT_PHASE).await;
 
         if !phase1_early_complete {
             // Highest height deliverable in this single-epoch harness (the
@@ -234,7 +267,6 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
             // node below `required` must reach it; one already at/above must
             // advance by one, unless it is already at the epoch boundary.
             let mut watch_targets: Vec<(usize, u64, u64)> = Vec::with_capacity(honest_apps.len());
-            let mut watcher_inputs = Vec::with_capacity(honest_apps.len());
             for (idx, app) in honest_apps.iter().cloned() {
                 let baseline = highest_delivered(&app);
                 let target = if baseline < required {
@@ -245,7 +277,6 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
                     baseline
                 };
                 watch_targets.push((idx, baseline, target));
-                watcher_inputs.push((idx, app, target));
             }
 
             // GST heals the network topology. The byzantine `Disrupter` stays
@@ -254,24 +285,12 @@ pub fn fuzz_marshal_liveness<H: LiveMarshal>(input: FuzzInput) {
 
             // Phase 2: each honest marshal must reach its target within the
             // post-GST window.
-            let mut watchers = Vec::new();
-            for (idx, app, target) in watcher_inputs {
-                watchers.push(
-                    context
-                        .child("post_gst_watcher")
-                        .with_attribute("index", idx)
-                        .spawn(move |context| async move {
-                            while highest_delivered(&app) < target {
-                                context.sleep(POLL).await;
-                            }
-                            true
-                        }),
-                );
-            }
-            let phase2_complete = select! {
-                results = join_all(watchers) => results.iter().all(|r| matches!(r, Ok(true))),
-                _ = context.sleep(POST_GST_WINDOW) => false,
-            };
+            let phase2_targets: Vec<(usize, u64)> = watch_targets
+                .iter()
+                .map(|(idx, _, target)| (*idx, *target))
+                .collect();
+            let phase2_complete =
+                wait_for_targets(&context, &honest_apps, &phase2_targets, POST_GST_WINDOW).await;
 
             if !phase2_complete {
                 let mut diag = String::new();

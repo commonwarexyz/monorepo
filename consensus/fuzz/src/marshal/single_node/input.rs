@@ -1,12 +1,17 @@
 //! Libfuzzer-facing scenario: a byte tape (consumed by `FuzzRng`) plus a
 //! length-bounded list of events the driver replays against marshal.
 
+use super::NUM_BLOCKS;
 use arbitrary::Arbitrary;
 
 const MIN_EVENTS: usize = 1;
 const MAX_EVENTS: usize = 128;
 
-#[derive(Debug, Clone, Copy, Arbitrary)]
+fn block_idx(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<u8> {
+    u.int_in_range(0..=((NUM_BLOCKS - 1) as u8))
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum MarshalEvent {
     /// Notify marshal that a block was locally proposed.
     Propose { block_idx: u8 },
@@ -39,10 +44,51 @@ pub enum MarshalEvent {
     /// Abort the marshal actor and re-initialize from the same on-disk
     /// state. Pending acks at the moment of restart are NOT signaled,
     /// so marshal's persistent state retains them as un-processed and
-    /// the new instance must redeliver them (at-least-once).
+    /// a later instance must redeliver them (at-least-once).
     Restart,
     /// Yield without dispatching a marshal-facing event.
     Idle,
+}
+
+impl Arbitrary<'_> for MarshalEvent {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(match u.int_in_range(0..=99)? {
+            0..=11 => Self::Propose {
+                block_idx: block_idx(u)?,
+            },
+            12..=21 => Self::Verify {
+                block_idx: block_idx(u)?,
+            },
+            22..=31 => Self::Certify {
+                block_idx: block_idx(u)?,
+            },
+            32..=47 => Self::ReportFinalization {
+                block_idx: block_idx(u)?,
+            },
+            48..=57 => Self::ReportNotarization {
+                block_idx: block_idx(u)?,
+            },
+            58..=63 => Self::GetBlock {
+                block_idx: block_idx(u)?,
+            },
+            64..=71 => Self::Subscribe {
+                block_idx: block_idx(u)?,
+                by_commitment: u.arbitrary()?,
+            },
+            72..=77 => Self::SetFloor {
+                block_idx: block_idx(u)?,
+            },
+            78..=81 => Self::Prune {
+                block_idx: block_idx(u)?,
+            },
+            82..=89 => Self::PublishViaVariant {
+                block_idx: block_idx(u)?,
+            },
+            90..=95 => Self::AckNext,
+            96..=98 => Self::Restart,
+            _ => Self::Idle,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -93,7 +139,7 @@ impl Arbitrary<'_> for MarshalFuzzInput {
         }
         if events.len() < event_count && u.len() >= 2 && u.arbitrary::<bool>()? {
             events.push(MarshalEvent::PublishViaVariant {
-                block_idx: u.arbitrary()?,
+                block_idx: block_idx(u)?,
             });
         }
         for _ in events.len()..event_count {

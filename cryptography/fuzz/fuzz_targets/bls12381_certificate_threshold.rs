@@ -13,7 +13,8 @@ use commonware_cryptography::{
         primitives::variant::{MinPk, MinSig, Variant},
     },
     certificate::{
-        Attestation, ConstantProvider, Provider, Scheme as CertScheme, Signers, Subject,
+        Attestation, ConstantProvider, Provider, Scheme as CertScheme, Scoped, Signers, Subject,
+        Verifier,
     },
     ed25519::{self, PrivateKey as Ed25519PrivateKey},
     impl_certificate_bls12381_threshold,
@@ -54,7 +55,8 @@ fn subject(message: &[u8]) -> TestSubject<'_> {
     TestSubject { message }
 }
 
-/// A [`Provider`] that only implements `scoped`, exercising the default `all` (returns `None`).
+/// A [`Provider`] that only implements a verify-only scope, exercising the
+/// default `scheme` (returns `None`).
 #[derive(Clone)]
 struct DefaultAllProvider<S: CertScheme>(Arc<S>);
 
@@ -62,8 +64,8 @@ impl<S: CertScheme> Provider for DefaultAllProvider<S> {
     type Scope = ();
     type Scheme = S;
 
-    fn scoped(&self, _: ()) -> Option<Arc<S>> {
-        Some(self.0.clone())
+    fn scoped(&self, _: ()) -> Option<Scoped<S>> {
+        Some(Scoped::verifier(self.0.clone()))
     }
 }
 
@@ -352,15 +354,16 @@ where
                     assert!(signers.count() <= signers.len());
                 }
 
-                // `Provider` implementations: `ConstantProvider` overrides `all`,
-                // `DefaultAllProvider` uses the default `all` (returns `None`).
+                // `Provider` implementations: `ConstantProvider` exposes a full
+                // signing scheme, while `DefaultAllProvider` serves a verify-only
+                // scope so the default `scheme` returns `None`.
                 let constant =
                     ConstantProvider::<Scheme<ed25519::PublicKey, V>>::new(verifier.clone());
                 assert!(constant.scoped(()).is_some());
-                assert!(constant.all().is_some());
+                assert!(constant.scheme(()).is_some());
                 let default_all = DefaultAllProvider(Arc::new(verifier.clone()));
                 assert!(default_all.scoped(()).is_some());
-                assert!(default_all.all().is_none());
+                assert!(default_all.scheme(()).is_none());
             }
         }
     }

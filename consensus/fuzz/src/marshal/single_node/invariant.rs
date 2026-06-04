@@ -8,9 +8,11 @@
 //! violation, with a message that includes the relevant shadow state so
 //! libFuzzer's crash log is self-explanatory.
 
-use commonware_consensus::{marshal::mocks::harness::TestHarness, types::Height};
-use commonware_cryptography::Digestible;
-use std::collections::{BTreeMap, HashSet};
+use commonware_consensus::{
+    marshal::mocks::harness::{TestHarness, D},
+    types::Height,
+};
+use std::collections::{BTreeSet, HashSet};
 
 /// Run every marshal invariant. Called from the driver at end of run.
 pub fn check_all<H: TestHarness>(
@@ -19,13 +21,13 @@ pub fn check_all<H: TestHarness>(
     segment_bounds: &[usize],
     segment_starts: &[u64],
     expected_redeliveries: &[Vec<Height>],
-    application_blocks: &BTreeMap<Height, H::ApplicationBlock>,
+    application_delivered: &[(Height, D)],
     canonical: &[H::TestBlock],
 ) {
     check_ready_prefix_delivered(ready_prefix, delivery_log);
     check_segment_ordering(segment_bounds, segment_starts, delivery_log);
     check_redelivery_after_restart(expected_redeliveries, segment_bounds, delivery_log);
-    check_digest_fidelity::<H>(application_blocks, canonical);
+    check_digest_fidelity::<H>(application_delivered, canonical);
 }
 
 /// Invariant: ready-prefix delivery.
@@ -36,7 +38,7 @@ pub fn check_all<H: TestHarness>(
 /// observes a complete chain back to height 1, which is precisely when
 /// marshal is obliged to deliver the prefix.
 pub fn check_ready_prefix_delivered(ready_prefix: u64, delivery_log: &[Height]) {
-    let delivered_set: HashSet<u64> = delivery_log.iter().map(|h| h.get()).collect();
+    let delivered_set: BTreeSet<u64> = delivery_log.iter().map(|h| h.get()).collect();
     for h in 1..=ready_prefix {
         assert!(
             delivered_set.contains(&h),
@@ -94,16 +96,20 @@ pub fn check_segment_ordering(
 
 /// Invariant: at-least-once across restart.
 ///
-/// Each height that was pending ack at the moment of restart `i` must
-/// reappear somewhere in `delivery_log[segment_bounds[i+1]..]`. Their
-/// ack handles were never signaled, so marshal's persistent state
-/// retains them as un-processed and the new instance is obliged to
-/// redeliver.
+/// Each height that was pending ack at the moment of restart `i` must reappear
+/// after that restart. Their ack handles were never signaled, so marshal's
+/// persistent state retains them as un-processed and a later instance is
+/// obliged to redeliver.
 pub fn check_redelivery_after_restart(
     expected_redeliveries: &[Vec<Height>],
     segment_bounds: &[usize],
     delivery_log: &[Height],
 ) {
+    assert_eq!(
+        segment_bounds.len(),
+        expected_redeliveries.len() + 2,
+        "redelivery bookkeeping inconsistency",
+    );
     for (restart_idx, expected) in expected_redeliveries.iter().enumerate() {
         if expected.is_empty() {
             continue;
@@ -117,8 +123,8 @@ pub fn check_redelivery_after_restart(
             assert!(
                 post_restart.contains(&h.get()),
                 "marshal violated at-least-once across restart: height {} was \
-                 pending at restart #{} but was never redelivered \
-                 (post-restart deliveries={post_restart:?})",
+                 pending at restart #{} but was never delivered again \
+                 (deliveries after restart={post_restart:?})",
                 h.get(),
                 restart_idx + 1,
             );
@@ -128,25 +134,30 @@ pub fn check_redelivery_after_restart(
 
 /// Invariant: digest fidelity.
 ///
-/// Every finalized block surfaced in `application.blocks()` must match the
-/// canonical chain digest at its height. The height-0 genesis floor block
-/// (which marshal surfaces on a fresh start) is intentionally skipped: it is
-/// not part of the canonical chain, which is indexed from height 1. Re-emits
-/// after restart overwrite the prior `BTreeMap` entry, so the latest delivery
-/// at each height is the one we compare against canonical.
+/// Every finalized block surfaced by the application must match the canonical
+/// chain digest at its height. The height-0 genesis floor block (which marshal
+/// surfaces on a fresh start) is intentionally skipped: it is not part of the
+/// canonical chain, which is indexed from height 1. This checks the append-only
+/// delivery log so same-height re-emits cannot hide a bad earlier delivery.
 pub fn check_digest_fidelity<H: TestHarness>(
-    application_blocks: &BTreeMap<Height, H::ApplicationBlock>,
+    application_delivered: &[(Height, D)],
     canonical: &[H::TestBlock],
 ) {
-    for (height, block) in application_blocks.iter() {
+    for (height, digest) in application_delivered.iter() {
         // Height 0 is the genesis floor block, not part of the canonical chain
         // (which is indexed from height 1); marshal surfaces it on a fresh start.
         if height.get() == 0 {
             continue;
         }
-        let canonical_block = &canonical[(height.get() - 1) as usize];
+        let Some(canonical_block) = canonical.get((height.get() - 1) as usize) else {
+            panic!(
+                "marshal delivered unexpected height {} beyond canonical chain length {}",
+                height.get(),
+                canonical.len()
+            );
+        };
         assert_eq!(
-            block.digest(),
+            *digest,
             H::digest(canonical_block),
             "marshal delivered a block whose digest does not match the canonical \
              chain at height {}",
