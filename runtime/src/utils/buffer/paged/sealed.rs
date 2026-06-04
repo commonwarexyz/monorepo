@@ -110,9 +110,10 @@ impl<B: Blob> Sealed<B> {
 
     /// Read into `buf` if it can be done synchronously without I/O. Returns `true` only if all
     /// `buf.len()` bytes were satisfied from either the page cache or the in-memory partial page.
+    /// When `false` is returned, the contents of `buf` are unspecified.
     pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        // Reject out-of-bounds requests up front so we don't consult the cache (which may hold
-        // pages cached past `size` if a sibling Append handle wrote them).
+        // Reject out-of-bounds requests up front: the partial-page arithmetic below assumes
+        // `[offset, end_offset)` falls within the sealed view.
         let Some(end_offset) = offset.checked_add(buf.len() as u64) else {
             return false;
         };
@@ -125,10 +126,7 @@ impl<B: Blob> Sealed<B> {
 
         let partial_offset = self.partial_offset();
         if end_offset <= partial_offset {
-            return self
-                .inner
-                .cache_ref
-                .read_cached_exact(self.inner.id, buf, offset);
+            return self.inner.cache_ref.read_cached(self.inner.id, buf, offset) == buf.len();
         }
 
         let Some(partial) = self.inner.partial_page.as_ref() else {
@@ -142,10 +140,11 @@ impl<B: Blob> Sealed<B> {
 
         let prefix_len = (partial_offset - offset) as usize;
         let suffix_len = buf.len() - prefix_len;
-        if !self
+        if self
             .inner
             .cache_ref
-            .read_cached_exact(self.inner.id, &mut buf[..prefix_len], offset)
+            .read_cached(self.inner.id, &mut buf[..prefix_len], offset)
+            != prefix_len
         {
             return false;
         }
@@ -217,41 +216,22 @@ impl<B: Blob> Sealed<B> {
         &self,
         buf: &mut [u8],
         offsets: &[u64],
-        item_size: usize,
+        item_size: NonZeroUsize,
     ) -> Result<(), Error> {
         super::validate_read_many_into(buf.len(), offsets, item_size, self.inner.size)?;
-        if offsets.is_empty() || item_size == 0 {
+        if offsets.is_empty() {
             return Ok(());
         }
 
-        let partial_offset = self.partial_offset();
-        let mut cache_ranges: Vec<(&mut [u8], u64)> = Vec::new();
-        for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
-            let end = offset
-                .checked_add(item_size as u64)
-                .expect("offset overflow checked above");
-            if end <= partial_offset {
-                cache_ranges.push((item_buf, offset));
-            } else if offset >= partial_offset {
-                let partial = self
-                    .inner
-                    .partial_page
-                    .as_ref()
-                    .expect("partial bytes exist when end > partial_offset");
-                let src = (offset - partial_offset) as usize;
-                item_buf.copy_from_slice(&partial.as_ref()[src..src + item_size]);
-            } else {
-                let prefix_len = (partial_offset - offset) as usize;
-                let partial = self
-                    .inner
-                    .partial_page
-                    .as_ref()
-                    .expect("partial bytes exist when end > partial_offset");
-                item_buf[prefix_len..].copy_from_slice(&partial.as_ref()[..item_size - prefix_len]);
-                cache_ranges.push((&mut item_buf[..prefix_len], offset));
-            }
-        }
-
+        // Copy items overlapping the in-memory partial page into place and collect the rest as
+        // (slice, offset) pairs for cache/blob reads.
+        let partial = self
+            .inner
+            .partial_page
+            .as_ref()
+            .map_or(&[][..], |p| p.as_ref());
+        let mut cache_ranges =
+            super::split_read_many(buf, offsets, item_size, self.partial_offset(), partial);
         if cache_ranges.is_empty() {
             return Ok(());
         }
@@ -299,25 +279,11 @@ impl<B: Blob> Sealed<B> {
             .as_ref()
             .map_or(0, |p| p.len() as u64);
         let full_pages = (self.inner.size - partial_len) / logical_page_size;
-        let (physical_blob_size, logical_blob_size) = if partial_len > 0 {
-            let physical = full_pages
-                .checked_add(1)
-                .and_then(|pages| physical_page_size.checked_mul(pages))
-                .ok_or(Error::OffsetOverflow)?;
-            let logical = logical_page_size
-                .checked_mul(full_pages)
-                .and_then(|size| size.checked_add(partial_len))
-                .ok_or(Error::OffsetOverflow)?;
-            (physical, logical)
-        } else {
-            let physical = physical_page_size
-                .checked_mul(full_pages)
-                .ok_or(Error::OffsetOverflow)?;
-            let logical = logical_page_size
-                .checked_mul(full_pages)
-                .ok_or(Error::OffsetOverflow)?;
-            (physical, logical)
-        };
+        let pages = full_pages + u64::from(partial_len > 0);
+        let physical_blob_size = physical_page_size
+            .checked_mul(pages)
+            .ok_or(Error::OffsetOverflow)?;
+        let logical_blob_size = self.inner.size;
 
         let reader = PageReader::new(
             self.inner.blob.clone(),
@@ -624,7 +590,7 @@ mod tests {
             let item_size = 4usize;
             let mut out = vec![0u8; offsets.len() * item_size];
             sealed
-                .read_many_into(&mut out, &offsets, item_size)
+                .read_many_into(&mut out, &offsets, NZUsize!(item_size))
                 .await
                 .unwrap();
 
@@ -657,7 +623,7 @@ mod tests {
             let item_size = 4usize;
             let mut out = vec![0u8; offsets.len() * item_size];
             sealed
-                .read_many_into(&mut out, &offsets, item_size)
+                .read_many_into(&mut out, &offsets, NZUsize!(item_size))
                 .await
                 .unwrap();
 
@@ -686,19 +652,19 @@ mod tests {
 
             let mut out = vec![0u8; 8];
             let err = sealed
-                .read_many_into(&mut out, &[8, 4], 4)
+                .read_many_into(&mut out, &[8, 4], NZUsize!(4))
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::InvalidInput(_)));
 
             let err = sealed
-                .read_many_into(&mut out, &[u64::MAX - 1, 8], 4)
+                .read_many_into(&mut out, &[u64::MAX - 1, 8], NZUsize!(4))
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::OffsetOverflow));
 
             let err = sealed
-                .read_many_into(&mut out, &[28, 32], 4)
+                .read_many_into(&mut out, &[28, 32], NZUsize!(4))
                 .await
                 .unwrap_err();
             assert!(matches!(err, Error::BlobInsufficientLength));
@@ -764,9 +730,9 @@ mod tests {
         });
     }
 
-    /// Failed synchronous reads must not partially overwrite the caller's buffer.
+    /// Synchronous reads past the sealed size are rejected.
     #[test_traced("DEBUG")]
-    fn test_sealed_try_read_sync_failure_preserves_buffer() {
+    fn test_sealed_try_read_sync_out_of_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"trs_fail").await.unwrap();
@@ -783,7 +749,6 @@ mod tests {
 
             let mut buf = vec![9u8; 10];
             assert!(!sealed.try_read_sync(data.len() as u64, &mut buf));
-            assert_eq!(buf, vec![9u8; 10]);
         });
     }
 

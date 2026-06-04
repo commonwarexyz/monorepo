@@ -4,10 +4,10 @@
 //! ever receives new bytes; every historical section is full and immutable. This module encodes
 //! that invariant in two types:
 //!
-//! - [`SectionsInit`] — opened during recovery, holds every section as a writable
+//! - [`SectionsInit`]: opened during recovery, holds every section as a writable
 //!   [`Append`]. The caller can inspect sizes and truncate trailing bytes from any section before
 //!   transitioning to steady state.
-//! - [`Sections`] — steady state. Historical sections are [`Sealed`] (no `RwLock`, cheap clones);
+//! - [`Sections`]: steady state. Historical sections are [`Sealed`] (no `RwLock`, cheap clones);
 //!   at most one tail is [`Append`]. The type does not expose a method that would let the caller
 //!   mutate a sealed section.
 //!
@@ -377,7 +377,7 @@ impl<E: Context> Sections<E> {
         section: u64,
         buf: &mut [u8],
         offsets: &[u64],
-        item_size: usize,
+        item_size: NonZeroUsize,
     ) -> Result<(), Error> {
         self.core.prune_guard(section)?;
         if let Some(s) = self.sealed.get(&section) {
@@ -497,7 +497,7 @@ impl<E: Context> Sections<E> {
 
     /// Prune all sections strictly less than `min`. Returns `true` if any section was removed.
     ///
-    /// If the tail's section is below `min`, the tail is removed too — callers that maintain a
+    /// If the tail's section is below `min`, the tail is removed too; callers that maintain a
     /// tail invariant must re-install one via [`Self::install_tail`].
     pub(super) async fn prune(&mut self, min: u64) -> Result<bool, Error> {
         let mut pruned = false;
@@ -911,7 +911,7 @@ mod tests {
                 sections.destroy().await.unwrap();
             }
 
-            // Reopen — partition is gone, no sections.
+            // Reopen; partition is gone, no sections.
             let init = SectionsInit::open(context.child("b"), cfg).await.unwrap();
             assert!(init.sections().is_empty());
         });

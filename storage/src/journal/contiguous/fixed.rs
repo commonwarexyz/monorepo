@@ -107,6 +107,7 @@ use commonware_runtime::{
 use commonware_utils::{
     sequence::VecU64,
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
+    NZUsize,
 };
 use futures::{
     future::try_join_all,
@@ -422,7 +423,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
             let buf = &mut reusable_buf[..group_len * chunk_size];
             self.guard
                 .sections
-                .read_many_into(section, buf, &section_offsets, chunk_size)
+                .read_many_into(section, buf, &section_offsets, NZUsize!(chunk_size))
                 .await
                 .map_err(|e| match e {
                     Error::SectionOutOfRange(e) | Error::AlreadyPrunedToSection(e) => {
