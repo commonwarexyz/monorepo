@@ -480,11 +480,61 @@ macro_rules! impl_certificate_ed25519 {
             }
         }
 
-        impl $crate::certificate::Scheme for Scheme {
+        impl $crate::certificate::Verifier for Scheme {
             type Subject<'a, D: $crate::Digest> = $subject;
             type PublicKey = $crate::ed25519::PublicKey;
-            type Signature = $crate::ed25519::Signature;
             type Certificate = $crate::ed25519::certificate::Certificate;
+
+            fn verify_certificate<R, D, M>(
+                &self,
+                rng: &mut R,
+                subject: Self::Subject<'_, D>,
+                certificate: &Self::Certificate,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate, strategy)
+            }
+
+            fn verify_certificates<'a, R, D, I, M>(
+                &self,
+                rng: &mut R,
+                certificates: I,
+                strategy: &impl commonware_parallel::Strategy,
+            ) -> bool
+            where
+                R: rand_core::CryptoRngCore,
+                D: $crate::Digest,
+                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
+                M: commonware_utils::Faults,
+            {
+                self.generic
+                    .verify_certificates::<Self, _, D, _, M>(rng, certificates, strategy)
+            }
+
+            fn is_batchable() -> bool {
+                $crate::ed25519::certificate::Generic::<$namespace>::is_batchable()
+            }
+
+            fn certificate_codec_config(
+                &self,
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                self.generic.certificate_codec_config()
+            }
+
+            fn certificate_codec_config_unbounded(
+            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
+                $crate::ed25519::certificate::Generic::<$namespace>::certificate_codec_config_unbounded()
+            }
+        }
+
+        impl $crate::certificate::Scheme for Scheme {
+            type Signature = $crate::ed25519::Signature;
 
             fn me(&self) -> Option<commonware_utils::Participant> {
                 self.generic.me()
@@ -544,55 +594,8 @@ macro_rules! impl_certificate_ed25519 {
                 self.generic.assemble::<Self, _, M>(attestations)
             }
 
-            fn verify_certificate<R, D, M>(
-                &self,
-                rng: &mut R,
-                subject: Self::Subject<'_, D>,
-                certificate: &Self::Certificate,
-                strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand_core::CryptoRngCore,
-                D: $crate::Digest,
-                M: commonware_utils::Faults,
-            {
-                self.generic
-                    .verify_certificate::<Self, _, D, M>(rng, subject, certificate, strategy)
-            }
-
-            fn verify_certificates<'a, R, D, I, M>(
-                &self,
-                rng: &mut R,
-                certificates: I,
-                strategy: &impl commonware_parallel::Strategy,
-            ) -> bool
-            where
-                R: rand::Rng + rand::CryptoRng,
-                D: $crate::Digest,
-                I: Iterator<Item = (Self::Subject<'a, D>, &'a Self::Certificate)>,
-                M: commonware_utils::Faults,
-            {
-                self.generic
-                    .verify_certificates::<Self, _, D, _, M>(rng, certificates, strategy)
-            }
-
             fn is_attributable() -> bool {
                 $crate::ed25519::certificate::Generic::<$namespace>::is_attributable()
-            }
-
-            fn is_batchable() -> bool {
-                $crate::ed25519::certificate::Generic::<$namespace>::is_batchable()
-            }
-
-            fn certificate_codec_config(
-                &self,
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                self.generic.certificate_codec_config()
-            }
-
-            fn certificate_codec_config_unbounded(
-            ) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-                $crate::ed25519::certificate::Generic::<$namespace>::certificate_codec_config_unbounded()
             }
         }
     };
@@ -601,7 +604,10 @@ macro_rules! impl_certificate_ed25519 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{certificate::Scheme as _, sha256::Digest as Sha256Digest};
+    use crate::{
+        certificate::{Scheme as _, Verifier as _},
+        sha256::Digest as Sha256Digest,
+    };
     use bytes::Bytes;
     use commonware_codec::{Decode, Encode};
     use commonware_math::algebra::Random;

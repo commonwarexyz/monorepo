@@ -1,9 +1,9 @@
 use crate::{simplex::elector, types::Round};
-use commonware_codec::{types::lazy::Lazy, Encode};
+use commonware_codec::{types::lazy::Lazy, Encode, Read};
 use commonware_cryptography::{
-    certificate::{Attestation, Verification},
+    certificate::{Attestation, Scheme as CertificateScheme, Verification, Verifier},
     sha256::Sha256,
-    Hasher as _,
+    Digest, Hasher as _,
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{modulo, test_rng, Faults, Participant};
@@ -36,7 +36,7 @@ impl<S> Scheme<S> {
 
     fn to_inner_attestation(attestation: &Attestation<Self>) -> Attestation<S>
     where
-        S: commonware_cryptography::certificate::Scheme,
+        S: CertificateScheme,
     {
         Attestation {
             signer: attestation.signer,
@@ -46,7 +46,7 @@ impl<S> Scheme<S> {
 
     fn from_inner_attestation(attestation: Attestation<S>) -> Attestation<Self>
     where
-        S: commonware_cryptography::certificate::Scheme,
+        S: CertificateScheme,
     {
         Attestation {
             signer: attestation.signer,
@@ -56,13 +56,13 @@ impl<S> Scheme<S> {
 
     fn corrupt_signature<D>(
         inner: &S,
-        subject: <S as commonware_cryptography::certificate::Scheme>::Subject<'_, D>,
+        subject: <S as Verifier>::Subject<'_, D>,
         signer: Participant,
-        signature: &<S as commonware_cryptography::certificate::Scheme>::Signature,
-    ) -> Lazy<<S as commonware_cryptography::certificate::Scheme>::Signature>
+        signature: &<S as CertificateScheme>::Signature,
+    ) -> Lazy<<S as CertificateScheme>::Signature>
     where
-        S: commonware_cryptography::certificate::Scheme,
-        D: commonware_cryptography::Digest,
+        S: CertificateScheme,
+        D: Digest,
     {
         let encoded = signature.encode().to_vec();
         let bit_len = encoded.len() * 8;
@@ -110,16 +110,14 @@ impl<S> Scheme<S> {
 
 impl<S, L> elector::Config<Scheme<S>> for Config<L>
 where
-    S: commonware_cryptography::certificate::Scheme,
+    S: CertificateScheme,
     L: elector::Config<S>,
 {
     type Elector = Elector<L::Elector, S>;
 
     fn build(
         self,
-        participants: &commonware_utils::ordered::Set<
-            <Scheme<S> as commonware_cryptography::certificate::Scheme>::PublicKey,
-        >,
+        participants: &commonware_utils::ordered::Set<<Scheme<S> as Verifier>::PublicKey>,
     ) -> Self::Elector {
         Elector {
             inner: self.0.build(participants),
@@ -130,28 +128,60 @@ where
 
 impl<S, E> elector::Elector<Scheme<S>> for Elector<E, S>
 where
-    S: commonware_cryptography::certificate::Scheme,
+    S: CertificateScheme,
     E: elector::Elector<S>,
 {
     fn elect(
         &self,
         round: Round,
-        certificate: Option<
-            &<Scheme<S> as commonware_cryptography::certificate::Scheme>::Certificate,
-        >,
+        certificate: Option<&<Scheme<S> as Verifier>::Certificate>,
     ) -> Participant {
         self.inner.elect(round, certificate)
     }
 }
 
-impl<S> commonware_cryptography::certificate::Scheme for Scheme<S>
+impl<S> Verifier for Scheme<S>
 where
-    S: commonware_cryptography::certificate::Scheme,
+    S: CertificateScheme,
 {
-    type Subject<'a, D: commonware_cryptography::Digest> = S::Subject<'a, D>;
+    type Subject<'a, D: Digest> = S::Subject<'a, D>;
     type PublicKey = S::PublicKey;
-    type Signature = S::Signature;
     type Certificate = S::Certificate;
+
+    fn verify_certificate<R, D, M>(
+        &self,
+        rng: &mut R,
+        subject: Self::Subject<'_, D>,
+        certificate: &Self::Certificate,
+        strategy: &impl commonware_parallel::Strategy,
+    ) -> bool
+    where
+        R: rand_core::CryptoRngCore,
+        D: Digest,
+        M: Faults,
+    {
+        self.inner
+            .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
+    }
+
+    fn is_batchable() -> bool {
+        S::is_batchable()
+    }
+
+    fn certificate_codec_config(&self) -> <Self::Certificate as Read>::Cfg {
+        self.inner.certificate_codec_config()
+    }
+
+    fn certificate_codec_config_unbounded() -> <Self::Certificate as Read>::Cfg {
+        S::certificate_codec_config_unbounded()
+    }
+}
+
+impl<S> CertificateScheme for Scheme<S>
+where
+    S: CertificateScheme,
+{
+    type Signature = S::Signature;
 
     fn me(&self) -> Option<Participant> {
         self.inner.me()
@@ -161,10 +191,7 @@ where
         self.inner.participants()
     }
 
-    fn sign<D: commonware_cryptography::Digest>(
-        &self,
-        subject: Self::Subject<'_, D>,
-    ) -> Option<Attestation<Self>> {
+    fn sign<D: Digest>(&self, subject: Self::Subject<'_, D>) -> Option<Attestation<Self>> {
         let attestation = self.inner.sign(subject.clone())?;
         let signature = match self.behavior {
             Behavior::Honest => attestation.signature,
@@ -192,7 +219,7 @@ where
     ) -> bool
     where
         R: rand_core::CryptoRngCore,
-        D: commonware_cryptography::Digest,
+        D: Digest,
     {
         self.inner.verify_attestation(
             rng,
@@ -211,7 +238,7 @@ where
     ) -> Verification<Self>
     where
         R: rand_core::CryptoRngCore,
-        D: commonware_cryptography::Digest,
+        D: Digest,
         I: IntoIterator<Item = Attestation<Self>>,
         I::IntoIter: Send,
     {
@@ -254,35 +281,7 @@ where
         )
     }
 
-    fn verify_certificate<R, D, M>(
-        &self,
-        rng: &mut R,
-        subject: Self::Subject<'_, D>,
-        certificate: &Self::Certificate,
-        strategy: &impl commonware_parallel::Strategy,
-    ) -> bool
-    where
-        R: rand_core::CryptoRngCore,
-        D: commonware_cryptography::Digest,
-        M: Faults,
-    {
-        self.inner
-            .verify_certificate::<_, _, M>(rng, subject, certificate, strategy)
-    }
-
     fn is_attributable() -> bool {
         S::is_attributable()
-    }
-
-    fn is_batchable() -> bool {
-        S::is_batchable()
-    }
-
-    fn certificate_codec_config(&self) -> <Self::Certificate as commonware_codec::Read>::Cfg {
-        self.inner.certificate_codec_config()
-    }
-
-    fn certificate_codec_config_unbounded() -> <Self::Certificate as commonware_codec::Read>::Cfg {
-        S::certificate_codec_config_unbounded()
     }
 }
