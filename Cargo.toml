@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "actor",
+    "bench",
     "broadcast",
     "codec",
     "codec/macros",
@@ -66,7 +67,7 @@ homepage = "https://commonware.xyz"
 rust-version = "1.91.1"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(full_bench)', 'cfg(huge_bench)', 'cfg(benchmark_tracking)', 'cfg(generate_conformance_tests)', 'cfg(commonware_stability_BETA)', 'cfg(commonware_stability_GAMMA)', 'cfg(commonware_stability_DELTA)', 'cfg(commonware_stability_EPSILON)', 'cfg(commonware_stability_RESERVED)'] }
 unused-must-use = "deny"
 rust-2018-idioms = "deny"
 warnings = "deny"
@@ -112,6 +113,7 @@ chrono = "0.4.39"
 clap = "4.5.18"
 colored = "3.0.0"
 commonware-actor = { version = "2026.5.0", path = "actor" }
+commonware-bench = { version = "2026.5.0", path = "bench" }
 commonware-broadcast = { version = "2026.5.0", path = "broadcast" }
 commonware-codec = { version = "2026.5.0", path = "codec", default-features = false }
 commonware-codec-macros = { version = "2026.5.0", path = "codec/macros" }
@@ -155,7 +157,9 @@ fixedbitset = { version = "0.5.7", default-features = false }
 futures = "0.3.31"
 futures-timer = "3.0.3"
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+glob = "0.3.3"
 governor = "0.10.4"
+gungraun = "0.19.1"
 hashbrown = { version = "0.16.1", default-features = false, features = ["default-hasher"] }
 io-uring = "0.7.4"
 libc = "0.2.172"
@@ -192,6 +196,7 @@ serde = "1.0.218"
 serde_json = "1.0.122"
 serde_yaml = "0.9.34"
 sha2 = { version = "0.11.0", default-features = false }
+shlex = "1.3.0"
 syn = "2.0.0"
 sysinfo = "0.37.2"
 thiserror = { version = "2.0.12", default-features = false }
@@ -208,6 +213,8 @@ zstd = "0.13.2"
 [profile.bench]
 # Because we enable overflow checks in "release", we should benchmark with them.
 overflow-checks = true
+# Gungraun requires debug symbols for bench targets.
+debug = true
 
 [profile.dev]
 # Although overflow checks are enabled by default in "dev", we explicitly

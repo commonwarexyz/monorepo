@@ -35,6 +35,11 @@ jobs:
       continue-on-error: true
       env:
         CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    - name: Publish bench
+      run: cargo publish --manifest-path bench/Cargo.toml
+      continue-on-error: true
+      env:
+        CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     - name: Publish conformance-macros
       run: cargo publish --manifest-path conformance/macros/Cargo.toml
       continue-on-error: true
