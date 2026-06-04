@@ -1060,6 +1060,17 @@ if ! findmnt -rn --mountpoint "$NVME_MOUNT" >/dev/null; then
     NVME_STAGE=
     sudo mount "$NVME_TARGET" "$NVME_MOUNT"
 fi
+
+NVME_MOUNT_SOURCE="$(findmnt -rn --mountpoint "$NVME_MOUNT" -o SOURCE || true)"
+if [ -z "$NVME_MOUNT_SOURCE" ]; then
+    echo "ERROR: NVMe instance storage was not mounted at $NVME_MOUNT" >&2
+    exit 1
+fi
+if [ "$(readlink -f "$NVME_MOUNT_SOURCE")" != "$(readlink -f "$NVME_TARGET")" ]; then
+    echo "ERROR: $NVME_MOUNT is mounted from $NVME_MOUNT_SOURCE, expected $NVME_TARGET" >&2
+    exit 1
+fi
+
 sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
 "#,
         mount_directory = HOME_DIRECTORY,
