@@ -9,7 +9,6 @@ use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
-mod blobs;
 pub mod fixed;
 mod metrics;
 pub mod variable;

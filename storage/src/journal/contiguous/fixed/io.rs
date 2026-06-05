@@ -1,4 +1,4 @@
-//! Blob storage for contiguous journals.
+//! Maps blob indices to named blobs in the journal's partition.
 
 use crate::{
     journal::{contiguous::metrics::BlobsMetrics, Error},
@@ -7,7 +7,7 @@ use crate::{
 use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::paged::{AppendWriter, CacheRef},
-    Blob, Error as RError,
+    Error as RError,
 };
 use std::{collections::BTreeMap, num::NonZeroUsize};
 use tracing::debug;
@@ -100,10 +100,4 @@ impl<E: Context> BlobIo<E> {
             Err(err) => Err(Error::Runtime(err)),
         }
     }
-}
-
-/// The writable tail blob.
-pub(super) struct Tail<B: Blob> {
-    pub(super) blob: u64,
-    pub(super) writer: AppendWriter<B>,
 }
