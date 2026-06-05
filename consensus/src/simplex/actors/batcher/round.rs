@@ -302,6 +302,19 @@ impl<
         self.verifier.set_leader(leader);
     }
 
+    /// Returns true when the leader's proposal is ready to forward to the voter, if:
+    /// 1. We haven't already processed this (called at most once per round).
+    /// 2. The leader's proposal is known.
+    /// 3. We are not the leader (leaders don't need to forward their own proposal).
+    pub fn has_forwardable_proposal(&self, me: Participant) -> bool {
+        if self.proposal_sent {
+            return false;
+        }
+        self.verifier
+            .get_leader_proposal()
+            .is_some_and(|(leader, _)| leader != me)
+    }
+
     /// Returns the leader's proposal to forward to the voter, if:
     /// 1. We haven't already processed this (called at most once per round).
     /// 2. The leader's proposal is known.

@@ -31,7 +31,7 @@
 //! Upon entering view `v`:
 //! * Determine leader `l` for view `v`
 //! * Set timer for leader proposal `t_l = 2Δ` and advance `t_a = 3Δ`
-//!     * If leader `l` has not been active in last `r` views, set `t_l` to 0.
+//!     * If leader `l` has not been active for `skip_timeout`, set `t_l` to 0.
 //! * If leader `l`, broadcast `notarize(c,v)`
 //!   * If can't propose container in view `v` because missing notarization/nullification for a
 //!     previous view `v_m`, request `v_m`
@@ -39,7 +39,9 @@
 //! Upon receiving first `notarize(c,v)` from `l`:
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
-//!   and we have nullifications for all views between `v` and `v_parent`, verify `c` and broadcast `notarize(c,v)`
+//!   and we have required nullifications covering the skipped views between `v_parent` and `v`
+//!   (a nullification covers the rest of its term),
+//!   verify `c` and broadcast `notarize(c,v)`
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:
@@ -52,7 +54,7 @@
 //!
 //! Upon receiving `2f+1` `nullify(v)`:
 //! * Broadcast `nullification(v)`
-//! * Enter `v+1`
+//! * Enter `next_term_start(v)` (equivalent to `v+1` when `term_length = 1`)
 //!
 //! Upon receiving `2f+1` `finalize(c,v)`:
 //! * Mark `c` as finalized (and recursively finalize its parents)
@@ -61,9 +63,9 @@
 //! Upon `t_l` or `t_a` firing:
 //! * Broadcast `nullify(v)`
 //! * Every `t_r` after `nullify(v)` broadcast that we are still in view `v`:
-//!    * Rebroadcast `nullify(v)` and either `notarization(v-1)` or `nullification(v-1)`
+//!    * Rebroadcast `nullify(v)` and the certificate that advanced us into view `v`
 //!
-//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been have been collected
+//! _When `2f+1` votes of a given type (`notarize(c,v)`, `nullify(v)`, or `finalize(c,v)`) have been collected
 //! from unique participants, a certificate (`notarization(c,v)`, `nullification(v)`, or `finalization(c,v)`) can be assembled.
 //! These certificates serve as a standalone proof of consensus progress that downstream systems can ingest without executing
 //! the protocol._
@@ -71,7 +73,8 @@
 //! ### Joining Consensus
 //!
 //! As soon as `2f+1` nullifies or finalizes are observed for some view `v`, the `Voter` will
-//! enter `v+1`. Notarizations advance the view if-and-only-if the application certifies them.
+//! enter the corresponding successor view (`next_term_start(v)` for nullification, `v+1` for
+//! finalization). Notarizations advance the view if-and-only-if the application certifies them.
 //! This means that a new participant joining consensus will immediately jump ahead on the previous
 //! view's nullification or finalization and begin participating in consensus at the current view.
 //!
@@ -106,8 +109,8 @@
 //! * Introduce distinct messages for `notarize` and `nullify` rather than referring to both as a `vote` for
 //!   either a "block" or a "dummy block", respectively.
 //! * Introduce a "leader timeout" to trigger early view transitions for unresponsive leaders.
-//! * Skip "leader timeout" and "certification timeout" if a designated leader hasn't participated in
-//!   some number of views (again to trigger early view transition for an unresponsive leader).
+//! * Skip "leader timeout" and "certification timeout" if a designated leader has not participated
+//!   for `skip_timeout` (again to trigger early view transition for an unresponsive leader).
 //! * Introduce message rebroadcast to continue making progress if messages from a given view are dropped (only way
 //!   to ensure messages are reliably delivered is with a heavyweight reliable broadcast protocol).
 //! * Treat local proposal failure as immediate timeout expiry and broadcast `nullify(v)`.
@@ -116,25 +119,34 @@
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
+//! * With stable leaders (`term_length > 1`), if a participant has voted `nullify(v_n)` in a term, it will not vote
+//!   `finalize(c,v_f)` for later views in that same term.
+//! * With stable leaders, `term_stop_notarize_on_nullify` can additionally prevent voting `notarize(c,v_n)` for later
+//!   views in the same term after a local `nullify(v)` vote.
+//! * If an entered view remains unfinalized for `finalization_timeout` and we are still in the same term,
+//!   we locally time out the current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we
+//!   have entered in the current term.
 //!
 //! ## Protocol Properties
 //!
 //! ### Forced Inclusion (Tail-Forking Resistance)
 //!
 //! A notarized payload in view `v` must appear in the canonical chain if no nullification
-//! certificate exists for `v`. This follows directly from the protocol rules:
+//! certificate covers `v`. With stable leaders, a nullification covers the view it was created for
+//! and the rest of that term. This follows directly from the protocol rules:
 //!
 //! 1. To propose in view `v+k`, the leader must reference a certified parent in some view `v_p`
-//!    and possess nullification certificates for every view between `v_p` and `v+k`.
-//! 2. A nullification certificate for view `v` requires `2f+1` `nullify(v)` votes.
-//! 3. An honest participant only broadcasts `nullify(v)` when a timeout fires (`t_l` or `t_a`)
-//!    or when certification fails.
+//!    and possess required nullifications covering the skipped views from `v_p` to `v+k`.
+//! 2. A nullification certificate requires `2f+1` `nullify` votes for the covered view or an
+//!    earlier view in the same term.
+//! 3. An honest participant only broadcasts `nullify` when a timeout fires or when certification
+//!    fails.
 //!
 //! Therefore, if view `v` completes without timeout and certification succeeds, no honest
-//! participant has broadcast `nullify(v)`. With at most `f` Byzantine participants, at most `f`
-//! `nullify(v)` votes exist, which is insufficient to form a nullification certificate. Without
-//! that certificate, no future leader can skip view `v`, and the notarized payload must be
-//! included as an ancestor in all subsequent proposals.
+//! participant has broadcast a `nullify` that covers `v`. With at most `f` Byzantine participants,
+//! at most `f` covering `nullify` votes exist, which is insufficient to form a nullification
+//! certificate. Without that certificate, no future leader can skip view `v`, and the notarized
+//! payload must be included as an ancestor in all subsequent proposals.
 //!
 //! ### Optimistic Finality
 //!
@@ -344,6 +356,7 @@ cfg_if::cfg_if! {
         use crate::types::{Round, View, ViewDelta};
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
+        use std::num::NonZeroU64;
 
         mod actors;
         pub mod config;
@@ -357,15 +370,17 @@ cfg_if::cfg_if! {
             last_finalized.saturating_sub(activity_timeout)
         }
 
-        /// Whether or not a view is interesting to us. This is a function
-        /// of both `min_active` and whether or not the view is too far
-        /// in the future (based on the view we are currently in).
+        /// Whether or not a view is interesting to us.
+        ///
+        /// This is a function of both `min_active` and whether `pending` is too far in
+        /// the future relative to `current`.
         pub(crate) fn interesting(
             activity_timeout: ViewDelta,
             last_finalized: View,
             current: View,
             pending: View,
-            allow_future: bool,
+            allow_unbounded_future: bool,
+            term_length: NonZeroU64,
         ) -> bool {
             // If the view is genesis, skip it, genesis doesn't have votes
             if pending.is_zero() {
@@ -374,8 +389,16 @@ cfg_if::cfg_if! {
             if pending < min_active(activity_timeout, last_finalized) {
                 return false;
             }
-            if !allow_future && pending > current.next() {
-                return false;
+            // If we don't allow unbounded future views, we still find two future views interesting:
+            // - the next view
+            // - the first view of the next term (it may be the next view if the current view is nullified)
+            // For a term length of 1, these two views are the same
+            if !allow_unbounded_future && pending > current {
+                let next = current.next();
+                let next_term_start = current.next_term_start(term_length);
+                if pending != next && pending != next_term_start {
+                    return false;
+                }
             }
             true
         }
@@ -456,7 +479,9 @@ mod tests {
         buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
         IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
     };
-    use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
+    use commonware_utils::{
+        ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16, NZU64,
+    };
     use engine::Engine;
     use futures::future::join_all;
     use rand::{rngs::StdRng, Rng as _, SeedableRng};
@@ -531,85 +556,87 @@ mod tests {
     #[test]
     fn test_interesting() {
         let activity_timeout = ViewDelta::new(10);
+        let term_length = NZU64!(10);
 
-        // Genesis view is never interesting
         assert!(!interesting(
             activity_timeout,
             View::zero(),
             View::zero(),
             View::zero(),
-            false
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::new(1),
-            View::zero(),
-            true
+            false,
+            term_length,
         ));
 
-        // View below min_active is not interesting
+        // Below min_active
         assert!(!interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(5), // below min_active (10)
-            false
+            View::new(5),
+            false,
+            term_length,
         ));
 
-        // View at min_active boundary is interesting
+        // At min_active boundary
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(10), // exactly min_active
-            false
+            View::new(10),
+            false,
+            term_length,
         ));
 
-        // Future view beyond current.next() is not interesting when allow_future is false
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false
-        ));
-
-        // Future view beyond current.next() is interesting when allow_future is true
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            true
-        ));
-
-        // View at current.next() is interesting
+        // strict mode allows only current.next and current.next_term_start above current
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
             View::new(26),
-            false
+            false,
+            term_length,
         ));
-
-        // View within valid range is interesting
         assert!(interesting(
             activity_timeout,
             View::new(20),
             View::new(25),
-            View::new(22),
-            false
+            View::new(31),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(34),
+            false,
+            term_length,
         ));
 
-        // When last_finalized is 0 and activity_timeout would underflow
-        // min_active saturates at 0, so view 1 should still be interesting
+        // unbounded future still respects lower bound
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(9),
+            true,
+            term_length,
+        ));
         assert!(interesting(
             activity_timeout,
-            View::zero(),
-            View::new(5),
-            View::new(1),
-            false
+            View::new(20),
+            View::new(25),
+            View::new(10_000),
+            true,
+            term_length,
         ));
     }
 
@@ -798,7 +825,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -877,6 +904,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1033,7 +1063,8 @@ mod tests {
         let active_count = quorum(n) as usize;
         let initial_tip_target = View::new(15);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(5);
+        let timeout_retry = Duration::from_secs(1);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1109,11 +1140,14 @@ mod tests {
                     )),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
-                    timeout_retry: Duration::from_secs(10),
+                    timeout_retry,
                     fetch_timeout: Duration::from_secs(1),
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(
@@ -1216,11 +1250,14 @@ mod tests {
                 floor: config::Floor::Finalized(floor_finalization),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
-                timeout_retry: Duration::from_secs(10),
+                timeout_retry,
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1275,7 +1312,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1298,7 +1335,8 @@ mod tests {
 
             let elector = RoundRobin::default();
             let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
-            let built_elector = elector.clone().build(&participants_set);
+            let term_length = NZU64!(1);
+            let built_elector = elector.clone().build(&participants_set, term_length);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1356,6 +1394,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length,
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1369,7 +1410,9 @@ mod tests {
             }
 
             let mut finalizers = Vec::new();
-            for reporter in reporters.iter_mut() {
+            // Validator 0 is intentionally dishonest in this test. Require the honest
+            // validators to keep finalizing despite its uncertifiable proposals.
+            for reporter in reporters.iter_mut().skip(1) {
                 let (mut latest, mut monitor) = reporter.subscribe().await;
                 finalizers.push(context.child("finalizer").spawn(move |_| async move {
                     while latest < required_containers {
@@ -1417,7 +1460,7 @@ mod tests {
         let n_active = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -1518,6 +1561,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1570,7 +1616,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
 
         // Random restarts every x seconds
@@ -1664,13 +1710,18 @@ mod tests {
                         floor: config::Floor::Genesis(mocks::application::genesis::<Sha256>(
                             Epoch::new(333),
                         )),
-                        leader_timeout: Duration::from_secs(1),
-                        certification_timeout: Duration::from_secs(2),
-                        timeout_retry: Duration::from_secs(10),
+                        // Keep the progress timeouts and the timeout retry short to allow for quick
+                        // timeouts upon restart.
+                        leader_timeout: Duration::from_millis(500),
+                        certification_timeout: Duration::from_secs(1),
+                        timeout_retry: Duration::from_millis(500),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1757,7 +1808,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(240));
         executor.start(|mut context| async move {
@@ -1847,6 +1898,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1969,6 +2023,9 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2007,7 +2064,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let max_exceptions = 10;
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
@@ -2098,6 +2155,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2234,7 +2294,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -2325,6 +2385,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2406,7 +2469,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(2);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(1800));
         executor.start(|mut context| async move {
@@ -2485,6 +2548,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2573,7 +2639,7 @@ mod tests {
                             found += 1;
                         }
                     }
-                    let tolerated_missing = skip_timeout.get().saturating_add(1);
+                    let tolerated_missing = skip_timeout.as_secs().saturating_add(1);
                     assert!(
                         found >= activity_timeout.get().saturating_sub(tolerated_missing),
                         "found: {found}"
@@ -2599,7 +2665,7 @@ mod tests {
         let n = 10;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(900));
         executor.start(|mut context| async move {
@@ -2678,6 +2744,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2778,7 +2847,7 @@ mod tests {
         let n = 5;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -2866,6 +2935,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2969,7 +3041,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3062,6 +3134,9 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3135,7 +3210,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3231,6 +3306,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3300,7 +3378,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(0)
@@ -3396,6 +3474,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3581,8 +3662,11 @@ mod tests {
                 timeout_retry: Duration::from_secs(10),
                 fetch_timeout: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                skip_timeout: ViewDelta::new(5),
+                skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3609,7 +3693,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3705,6 +3789,9 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3759,7 +3846,7 @@ mod tests {
         let n = 7;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -3812,6 +3899,7 @@ mod tests {
                     let cfg = mocks::equivocator::Config {
                         scheme: schemes[idx_scheme].clone(),
                         epoch: Epoch::new(333),
+                        term_length: NZU64!(1),
                         relay: relay.clone(),
                         hasher: Sha256::default(),
                         elector: elector.clone(),
@@ -3859,6 +3947,9 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3953,6 +4044,9 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4011,7 +4105,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -4106,6 +4200,9 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4160,7 +4257,7 @@ mod tests {
         let n = 4;
         let required_containers = View::new(50);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -4252,6 +4349,9 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4322,11 +4422,11 @@ mod tests {
         let n = 4;
         let required_containers = View::new(100);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new()
             .with_seed(seed)
-            .with_timeout(Some(Duration::from_secs(30)));
+            .with_timeout(Some(Duration::from_secs(60)));
         let executor = deterministic::Runner::new(cfg);
         executor.start(|mut context| async move {
             // Register participants
@@ -4415,6 +4515,9 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4464,7 +4567,7 @@ mod tests {
         let n = 10;
         let required_containers = View::new(1_000);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new();
         let executor = deterministic::Runner::new(cfg);
@@ -4544,6 +4647,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4665,8 +4771,11 @@ mod tests {
                 timeout_retry: Duration::from_millis(250),
                 fetch_timeout: Duration::from_millis(50),
                 activity_timeout: ViewDelta::new(4),
-                skip_timeout: ViewDelta::new(2),
+                skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4754,7 +4863,7 @@ mod tests {
         let n = 3;
         let required_containers = View::new(10);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
@@ -4843,6 +4952,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4968,7 +5080,7 @@ mod tests {
         let quorum = quorum(n) as usize;
         assert_eq!(quorum, 7);
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(12);
         let namespace = b"consensus".to_vec();
         let executor = deterministic::Runner::timed(Duration::from_secs(300));
         executor.start(|mut context| async move {
@@ -5174,12 +5286,15 @@ mod tests {
                             Epoch::new(333),
                         )),
                         leader_timeout: Duration::from_secs(10),
-                        certification_timeout: Duration::from_secs(10),
+                        certification_timeout: Duration::from_secs(11),
                         timeout_retry: Duration::from_secs(10),
                         fetch_timeout: Duration::from_secs(1),
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length: NZU64!(1),
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5302,7 +5417,7 @@ mod tests {
         let n = 4;
         let namespace = b"consensus".to_vec();
         let activity_timeout = ViewDelta::new(100);
-        let skip_timeout = ViewDelta::new(50);
+        let skip_timeout = Duration::from_secs(50);
         let executor = deterministic::Runner::timed(Duration::from_secs(30));
         executor.start(|mut context| async move {
             // Register participants
@@ -5386,6 +5501,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length: NZU64!(1),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5442,6 +5560,7 @@ mod tests {
         seed: u64,
         shutdowns: usize,
         interval: ViewDelta,
+        term_length: NonZeroU64,
         mut fixture: F,
     ) -> String
     where
@@ -5452,7 +5571,7 @@ mod tests {
         // Create context
         let n = 5;
         let activity_timeout = ViewDelta::new(10);
-        let skip_timeout = ViewDelta::new(5);
+        let skip_timeout = Duration::from_secs(11);
         let namespace = b"consensus".to_vec();
         let cfg = deterministic::Config::new().with_seed(seed);
         let executor = deterministic::Runner::new(cfg);
@@ -5493,8 +5612,11 @@ mod tests {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                 };
-                let reporter =
-                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                let reporter = mocks::reporter::Reporter::new_with_term_length(
+                    context.child("reporter"),
+                    reporter_config,
+                    term_length,
+                );
                 reporters.insert(idx, reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -5532,6 +5654,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length,
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5634,6 +5759,9 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
+                    term_length,
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
                     page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5760,12 +5888,33 @@ mod tests {
         L: Elector<S>,
     {
         assert_eq!(
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), fixture),
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), NZU64!(1), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), NZU64!(1), fixture),
         );
     }
 
     test_for_all_fixtures!(hailstorm);
+
+    #[test_group("slow")]
+    #[test_traced]
+    fn test_hailstorm_stable_leader_ed25519() {
+        assert_eq!(
+            run_hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                NZU64!(3),
+                ed25519::fixture
+            ),
+            run_hailstorm::<_, _, RoundRobin>(
+                0,
+                10,
+                ViewDelta::new(15),
+                NZU64!(3),
+                ed25519::fixture
+            )
+        );
+    }
 
     /// Configuration for a Twins testing campaign.
     ///
@@ -5848,7 +5997,8 @@ mod tests {
             );
 
             let activity_timeout = ViewDelta::new(10);
-            let skip_timeout = ViewDelta::new(5);
+            let skip_timeout = Duration::from_secs(11);
+            let term_length = NZU64!(1);
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;
@@ -5895,8 +6045,11 @@ mod tests {
                         let scenario = scenario.clone();
                         move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                             let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                            let (primary, secondary) =
-                                scenario.partitions(msg.view(), participants.as_ref());
+                            let (primary, secondary) = scenario.partitions_with_term_length(
+                                msg.view(),
+                                term_length,
+                                participants.as_ref(),
+                            );
                             match origin {
                                 SplitOrigin::Primary => Some(Recipients::Some(primary)),
                                 SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -5910,8 +6063,11 @@ mod tests {
                         move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                             let msg: Certificate<S, D> =
                                 Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                            let (primary, secondary) =
-                                scenario.partitions(msg.view(), participants.as_ref());
+                            let (primary, secondary) = scenario.partitions_with_term_length(
+                                msg.view(),
+                                term_length,
+                                participants.as_ref(),
+                            );
                             match origin {
                                 SplitOrigin::Primary => Some(Recipients::Some(primary)),
                                 SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -5923,7 +6079,12 @@ mod tests {
                         let scenario = scenario.clone();
                         move |(sender, message): &(_, IoBuf)| {
                             let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                            scenario.route(msg.view(), sender, participants.as_ref())
+                            scenario.route_with_term_length(
+                                msg.view(),
+                                term_length,
+                                sender,
+                                participants.as_ref(),
+                            )
                         }
                     };
                     let make_certificate_router = || {
@@ -5933,7 +6094,12 @@ mod tests {
                         move |(sender, message): &(_, IoBuf)| {
                             let msg: Certificate<S, D> =
                                 Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                            scenario.route(msg.view(), sender, participants.as_ref())
+                            scenario.route_with_term_length(
+                                msg.view(),
+                                term_length,
+                                sender,
+                                participants.as_ref(),
+                            )
                         }
                     };
                     let (vote_sender_primary, vote_sender_secondary) =
@@ -5976,9 +6142,10 @@ mod tests {
                             scheme: schemes[idx].clone(),
                             elector: elector.clone(),
                         };
-                        let reporter = mocks::reporter::Reporter::new(
+                        let reporter = mocks::reporter::Reporter::new_with_term_length(
                             context.child("reporter"),
                             reporter_config,
+                            term_length,
                         );
                         reporters.push(reporter.clone());
 
@@ -6019,6 +6186,9 @@ mod tests {
                             activity_timeout,
                             skip_timeout,
                             fetch_concurrent: NZUsize!(4),
+                            term_length,
+                            term_stop_notarize_on_nullify: false,
+                            finalization_timeout: Duration::from_secs(12),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
                             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6048,8 +6218,11 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter =
-                        mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+                    let reporter = mocks::reporter::Reporter::new_with_term_length(
+                        context.child("reporter"),
+                        reporter_config,
+                        term_length,
+                    );
                     reporters.push(reporter.clone());
 
                     let application_cfg = mocks::application::Config {
@@ -6089,6 +6262,9 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
+                        term_length,
+                        term_stop_notarize_on_nullify: false,
+                        finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
                         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6161,21 +6337,21 @@ mod tests {
                 }
 
                 // Ensure no honest signer appears under multiple payloads for the same view.
-                let twin_identities: HashSet<_> = twin_indices
+                let twin_keys: HashSet<_> = twin_indices
                     .iter()
                     .map(|idx| participants[*idx].clone())
                     .collect();
-                let mut notarized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                let mut notarized_by_signer: BTreeMap<View, HashMap<PublicKey, D>> =
                     BTreeMap::new();
-                let mut finalized_by_honest_signer: BTreeMap<View, HashMap<PublicKey, D>> =
+                let mut finalized_by_signer: BTreeMap<View, HashMap<PublicKey, D>> =
                     BTreeMap::new();
                 for reporter in reporters.iter().skip(honest_start) {
                     let notarizes = reporter.notarizes.lock();
                     for (view, payloads) in notarizes.iter() {
-                        let signers = notarized_by_honest_signer.entry(*view).or_default();
+                        let signers = notarized_by_signer.entry(*view).or_default();
                         for (digest, payload_signers) in payloads.iter() {
                             for signer in payload_signers.iter() {
-                                if twin_identities.contains(signer) {
+                                if twin_keys.contains(signer) {
                                     continue;
                                 }
                                 if let Some(existing) = signers.insert(signer.clone(), *digest) {
@@ -6190,10 +6366,10 @@ mod tests {
 
                     let finalizes = reporter.finalizes.lock();
                     for (view, payloads) in finalizes.iter() {
-                        let signers = finalized_by_honest_signer.entry(*view).or_default();
+                        let signers = finalized_by_signer.entry(*view).or_default();
                         for (digest, payload_signers) in payloads.iter() {
                             for signer in payload_signers.iter() {
-                                if twin_identities.contains(signer) {
+                                if twin_keys.contains(signer) {
                                     continue;
                                 }
                                 if let Some(existing) = signers.insert(signer.clone(), *digest) {
@@ -6212,7 +6388,7 @@ mod tests {
                     let faults = reporter.faults.lock();
                     for (faulter, _) in faults.iter() {
                         assert!(
-                            twin_identities.contains(faulter),
+                            twin_keys.contains(faulter),
                             "fault from non-twin participant"
                         );
                     }
@@ -6221,7 +6397,7 @@ mod tests {
                 let blocked = oracle.blocked().await.unwrap();
                 for (_, faulter) in blocked {
                     assert!(
-                        twin_identities.contains(&faulter),
+                        twin_keys.contains(&faulter),
                         "blocked peer attributed to non-twin participant"
                     );
                 }
