@@ -3,6 +3,7 @@ set positional-arguments := true
 env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
 rustfmt := env("RUSTFMT", "rustfmt")
+partition := "1/1"
 
 alias f := fix-fmt
 alias l := lint
@@ -51,10 +52,18 @@ lint: check-fmt check-toml-fmt clippy check-docs check-features dylint check-pub
 # Fixes all lint issues in the workspace
 fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 
-# Tests benchmarks in a given crate
+# Tests benchmarks in a given crate.
+#
+# `partition` is "N/M", run partition N of M, where bench binaries are hash-distributed across M jobs.
 test-benches crate test_flags='' lint_flags='':
-    cargo test --benches -p {{ crate }} {{ test_flags }} -- --verbose
-    RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list | python3 .github/scripts/lint_benchmark_names.py -
+    #!/usr/bin/env bash
+    set -euo pipefail
+    list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
+    echo "$list" | python3 .github/scripts/lint_benchmark_names.py -
+    binaries=$(echo "$list" | sed -n 's|.*Running .*/deps/\(.*\)-[a-f0-9]*).*|\1|p' | python3 .github/scripts/hash_partition.py {{ partition }})
+    for bench in $binaries; do
+        cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
+    done
 
 # Run tests
 test *args='':
@@ -85,10 +94,14 @@ cooldown:
 dylint:
     cargo {{ nightly_version }} dylint --all --workspace -- --all-targets
 
-# Run all fuzz tests in a given directory
+# Run all fuzz tests in a given directory.
+#
+# `partition` is "N/M", run partition N of M, where targets are hash-distributed across M jobs.
 fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
-    for target in $(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}}); do
+    set -euo pipefail
+    targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
+    for target in $targets; do
         cargo {{nightly_version}} fuzz run $target --fuzz-dir {{fuzz_dir}} -- -max_total_time={{max_time}} -rss_limit_mb={{max_mem}}
         rm -f {{fuzz_dir}}/target/*/release/$target
     done

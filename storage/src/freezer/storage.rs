@@ -5,12 +5,11 @@ use crate::{
     },
     Context,
 };
-use commonware_codec::{
-    CodecShared, Encode, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
-};
+use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
 use commonware_runtime::{
     buffer,
+    iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, IoBuf,
 };
@@ -472,7 +471,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 "found invalid table entry"
             );
             *entry = Entry::new_empty();
-            let zero_buf = vec![0u8; Entry::SIZE];
+            let zero_buf = IoBuf::from(&[0u8; Entry::SIZE]);
             blob.write_at(entry_offset, zero_buf).await?;
             Ok(true)
         } else if max_valid_epoch.is_none() && entry.epoch > *max_epoch {
@@ -594,6 +593,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Write a table entry to the appropriate slot based on epoch.
     async fn update_head(
+        pooler: &impl BufferPooler,
         table: &E::Blob,
         table_index: u32,
         entry1: &Entry,
@@ -608,7 +608,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Write the new entry
         table
-            .write_at(table_offset + start, update.encode_mut())
+            .write_at(
+                table_offset + start,
+                update.encode_with_pool_mut(pooler.storage_buffer_pool()),
+            )
             .await
             .map_err(Error::Runtime)
     }
@@ -872,7 +875,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Update the old position
         self.modified_sections.insert(self.current_section);
         let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
-        Self::update_head(&self.table, table_index, &entry1, &entry2, new_entry).await?;
+        Self::update_head(
+            &self.context,
+            &self.table,
+            table_index,
+            &entry1,
+            &entry2,
+            new_entry,
+        )
+        .await?;
 
         // If we're mid-resize and this entry has already been processed, update the new position too
         if let Some(resize_progress) = self.resize_progress {
@@ -889,8 +900,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 // The entries are still identical to the old ones, so we don't need to read them again.
                 let new_table_index = self.table_size + table_index;
                 let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
-                Self::update_head(&self.table, new_table_index, &entry1, &entry2, new_entry)
-                    .await?;
+                Self::update_head(
+                    &self.context,
+                    &self.table,
+                    new_table_index,
+                    &entry1,
+                    &entry2,
+                    new_entry,
+                )
+                .await?;
             }
         }
 
@@ -976,13 +994,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Write a pair of entries to a buffer, replacing one slot with the new entry.
-    fn rewrite_entries(buf: &mut Vec<u8>, entry1: &Entry, entry2: &Entry, new_entry: &Entry) {
+    fn rewrite_entries(buf: &mut impl BufMut, entry1: &Entry, entry2: &Entry, new_entry: &Entry) {
         if Self::compute_write_offset(entry1, entry2, new_entry.epoch) == 0 {
-            buf.extend_from_slice(&new_entry.encode());
-            buf.extend_from_slice(&entry2.encode());
+            new_entry.write(buf);
+            entry2.write(buf);
         } else {
-            buf.extend_from_slice(&entry1.encode());
-            buf.extend_from_slice(&new_entry.encode());
+            entry1.write(buf);
+            new_entry.write(buf);
         }
     }
 
@@ -1003,7 +1021,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let mut read_buf = self.table.read_at(read_offset, chunk_bytes).await?;
 
         // Process each entry in the chunk
-        let mut writes = Vec::with_capacity(chunk_bytes);
+        let mut writes = self.context.storage_buffer_pool().alloc(chunk_bytes);
         for _ in 0..chunk_size {
             // Parse the next two slots directly from the read stream.
             let (entry1, entry2) = Self::parse_entries(&mut read_buf)?;
@@ -1028,7 +1046,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         }
 
         // Put the writes into the table.
-        let writes = IoBuf::from(writes);
+        let writes = writes.freeze();
         let old_write = self.table.write_at(read_offset, writes.clone());
         let new_offset = (old_size as usize * Entry::FULL_SIZE) as u64 + read_offset;
         let new_write = self.table.write_at(new_offset, writes);

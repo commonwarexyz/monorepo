@@ -20,13 +20,13 @@ env:
 
 jobs:
   Tests:
-    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/8)"
+    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/20)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
         flags:
           - "--features commonware-runtime/iouring-storage"
           - "--features commonware-runtime/iouring-network"
@@ -61,7 +61,7 @@ jobs:
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run slow tests
-      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/8 --verbose --profile slow
+      run: just test ${{ matrix.flags }} --partition hash:${{matrix.partition}}/20 --verbose --profile slow
 
   Tests-Gate:
     name: "Slow-Tests"
@@ -78,6 +78,7 @@ jobs:
           echo "All tests passed successfully!"
 
   Benchmarks:
+    name: "Benchmarks (${{ matrix.package }}${{ matrix.test_flags && format(', {0}', matrix.test_flags) }}${{ matrix.lint_flags && format(', {0}', matrix.lint_flags) }}) (partition: ${{ matrix.partition || '1/1' }})"
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -94,6 +95,19 @@ jobs:
           - package: commonware-coding
             test_flags: ""
             lint_flags: ""
+            partition: "1/4"
+          - package: commonware-coding
+            test_flags: ""
+            lint_flags: ""
+            partition: "2/4"
+          - package: commonware-coding
+            test_flags: ""
+            lint_flags: ""
+            partition: "3/4"
+          - package: commonware-coding
+            test_flags: ""
+            lint_flags: ""
+            partition: "4/4"
           - package: commonware-math
             test_flags: ""
             lint_flags: ""
@@ -110,14 +124,47 @@ jobs:
       with:
         tool: just@1.43.0
     - name: Test benchmarks
-      run: just test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
+      run: just partition=${{ matrix.partition || '1/1' }} test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
 
   Fuzz:
+    name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       matrix:
-        fuzz_dir: [broadcast/fuzz, codec/fuzz, coding/fuzz, collector/fuzz, consensus/fuzz, cryptography/fuzz, math/fuzz, p2p/fuzz, runtime/fuzz, storage/fuzz, stream/fuzz, utils/fuzz]
+        include:
+          - fuzz_dir: broadcast/fuzz
+          - fuzz_dir: codec/fuzz
+          - fuzz_dir: coding/fuzz
+          - fuzz_dir: collector/fuzz
+          - fuzz_dir: consensus/fuzz
+            partition: "1/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "2/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "3/4"
+          - fuzz_dir: consensus/fuzz
+            partition: "4/4"
+          - fuzz_dir: cryptography/fuzz
+            partition: "1/2"
+          - fuzz_dir: cryptography/fuzz
+            partition: "2/2"
+          - fuzz_dir: math/fuzz
+          - fuzz_dir: p2p/fuzz
+          - fuzz_dir: runtime/fuzz
+          - fuzz_dir: storage/fuzz
+            partition: "1/4"
+          - fuzz_dir: storage/fuzz
+            partition: "2/4"
+          - fuzz_dir: storage/fuzz
+            partition: "3/4"
+          - fuzz_dir: storage/fuzz
+            partition: "4/4"
+          - fuzz_dir: stream/fuzz
+          - fuzz_dir: utils/fuzz
+            partition: "1/2"
+          - fuzz_dir: utils/fuzz
+            partition: "2/2"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -149,7 +196,8 @@ jobs:
       id: fuzz-corpus-cache-key
       run: |
         sanitized_fuzz_dir="$(echo "${{ matrix.fuzz_dir }}" | tr '/' '-')"
-        echo "prefix=${{ runner.os }}-fuzz-corpus-${sanitized_fuzz_dir}" >> "$GITHUB_OUTPUT"
+        sanitized_partition="$(echo "${{ matrix.partition || '1/1' }}" | tr '/' '-')"
+        echo "prefix=${{ runner.os }}-fuzz-corpus-${sanitized_fuzz_dir}-${sanitized_partition}" >> "$GITHUB_OUTPUT"
     - name: Restore fuzz corpus
       id: fuzz-corpus-restore
       uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -159,7 +207,7 @@ jobs:
         restore-keys: |
           ${{ steps.fuzz-corpus-cache-key.outputs.prefix }}-
     - name: Test all targets
-      run: just fuzz ${{ matrix.fuzz_dir }} 60
+      run: just partition=${{ matrix.partition || '1/1' }} fuzz ${{ matrix.fuzz_dir }}
     - name: Save fuzz corpus
       if: success() && github.ref == 'refs/heads/main'
       uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4
@@ -168,12 +216,12 @@ jobs:
         key: ${{ steps.fuzz-corpus-restore.outputs.cache-primary-key }}
 
   Unsafe:
-    name: "Miri Tests (partition: ${{ matrix.partition }}/8)"
+    name: "Miri Tests (partition: ${{ matrix.partition }}/12)"
     runs-on: ubuntu-latest
     timeout-minutes: 120
     strategy:
       matrix:
-        partition: [1, 2, 3, 4, 5, 6, 7, 8]
+        partition: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -192,15 +240,15 @@ jobs:
     - name: Run miri tests for storage::index
       run: |
         cd storage
-        just miri index::tests --partition hash:${{matrix.partition}}/8
+        just miri index::tests --partition hash:${{matrix.partition}}/12
     - name: Run miri tests for runtime::iobuf
       run: |
         cd runtime
-        just miri iobuf:: --partition hash:${{matrix.partition}}/8
+        just miri iobuf:: --partition hash:${{matrix.partition}}/12
     - name: Run miri tests for runtime::buffer::paged::append
       run: |
         cd runtime
-        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/8
+        just miri utils::buffer::paged::append::tests:: --partition hash:${{matrix.partition}}/12 --no-tests=pass
 
   Unsafe-Tests-Gate:
     name: "Unsafe-Tests"
