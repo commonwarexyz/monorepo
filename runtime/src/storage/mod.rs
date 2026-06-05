@@ -374,6 +374,9 @@ pub(crate) mod tests {
     {
         test_open_and_write(&storage).await;
         test_remove(&storage).await;
+        test_read_after_remove_blob(&storage).await;
+        test_read_after_remove_partition(&storage).await;
+        test_recreate_after_remove(&storage).await;
         test_scan(&storage).await;
         test_concurrent_access(&storage).await;
         test_large_data(&storage).await;
@@ -430,6 +433,98 @@ pub(crate) mod tests {
 
         let blobs = storage.scan("partition").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
+    }
+
+    /// An already-open handle remains fully readable after the blob is removed by name.
+    async fn test_read_after_remove_blob<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
+        let data: Vec<u8> = (0u8..=255).collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        storage
+            .remove("read_after_remove", Some(b"by_name"))
+            .await
+            .unwrap();
+
+        // The name is gone but the open handle keeps reading the removed blob's bytes.
+        let blobs = storage.scan("read_after_remove").await.unwrap();
+        assert!(blobs.is_empty(), "Blob was not removed as expected");
+        let read = blob.read_at(0, data.len()).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            data.as_slice(),
+            "open handle must remain readable after blob removal"
+        );
+    }
+
+    /// An already-open handle remains fully readable after its entire partition is removed.
+    async fn test_read_after_remove_partition<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("read_after_remove_partition", b"victim")
+            .await
+            .unwrap();
+        let data: Vec<u8> = (0u8..=255).rev().collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        storage
+            .remove("read_after_remove_partition", None)
+            .await
+            .unwrap();
+
+        let read = blob.read_at(0, data.len()).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            data.as_slice(),
+            "open handle must remain readable after partition removal"
+        );
+    }
+
+    /// Re-opening a removed blob's name creates an independent blob; the pre-removal handle keeps
+    /// observing the removed blob's contents.
+    async fn test_recreate_after_remove<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (old, _) = storage
+            .open("recreate_after_remove", b"name")
+            .await
+            .unwrap();
+        old.write_at(0, b"old contents").await.unwrap();
+        old.sync().await.unwrap();
+
+        storage
+            .remove("recreate_after_remove", Some(b"name"))
+            .await
+            .unwrap();
+
+        // Re-creating the name yields a fresh, empty, independent blob.
+        let (new, len) = storage
+            .open("recreate_after_remove", b"name")
+            .await
+            .unwrap();
+        assert_eq!(len, 0, "recreated blob must start empty");
+        new.write_at(0, b"new contents").await.unwrap();
+        new.sync().await.unwrap();
+
+        let old_read = old.read_at(0, 12).await.unwrap();
+        assert_eq!(
+            old_read.coalesce().as_ref(),
+            b"old contents",
+            "pre-removal handle must keep observing the removed blob"
+        );
+        let new_read = new.read_at(0, 12).await.unwrap();
+        assert_eq!(new_read.coalesce().as_ref(), b"new contents");
     }
 
     /// Test scanning a partition for blobs.

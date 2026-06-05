@@ -714,6 +714,16 @@ stability_scope!(BETA {
         /// If no `name` is provided, the entire partition is removed.
         ///
         /// An Ok result indicates the blob is durably removed.
+        ///
+        /// # Read-after-remove
+        ///
+        /// Removal unlinks the blob's name but does not invalidate previously opened handles:
+        /// they remain fully readable until dropped, whether the blob was removed by name or by
+        /// removing its entire partition. Physical resources are reclaimed once the last handle
+        /// is dropped.
+        ///
+        /// Re-opening a removed blob's name creates a new, independent blob; handles opened
+        /// before the removal continue to observe the removed blob's contents.
         fn remove(
             &self,
             partition: &str,
