@@ -381,6 +381,47 @@ mod tests {
         });
     }
 
+    /// A reader created before sealing reads full pages and the partial page after the seal,
+    /// from both the page cache and the blob.
+    #[test_traced("DEBUG")]
+    fn test_reader_full_pages_after_seal() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"rdr_pages").await.unwrap();
+            // A single-page cache forces most full-page reads to miss and hit the blob.
+            let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            let reader = writer.reader();
+
+            let page_size = PAGE_SIZE.get() as usize;
+            let total = page_size * 3 + 7;
+            let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
+            writer.append(&data).await.unwrap();
+
+            let sealed = writer.seal().await.unwrap();
+            assert_eq!(reader.size().await, total as u64);
+
+            // Full range, a page-straddling range, and the partial page, each compared
+            // against the sealed view.
+            let cases = [
+                (0u64, total),
+                (page_size as u64 - 3, 6),
+                ((page_size * 3) as u64, 7),
+            ];
+            for (offset, len) in cases {
+                let via_reader = reader.read_at(offset, len).await.unwrap().coalesce();
+                let via_sealed = sealed.read_at(offset, len).await.unwrap().coalesce();
+                assert_eq!(
+                    via_reader.as_ref(),
+                    &data[offset as usize..offset as usize + len]
+                );
+                assert_eq!(via_sealed.as_ref(), via_reader.as_ref());
+            }
+        });
+    }
+
     /// `Sealed::sync` forwards to the underlying blob's sync, making prior writes durable.
     #[test_traced("DEBUG")]
     fn test_sealed_sync_makes_blob_durable() {

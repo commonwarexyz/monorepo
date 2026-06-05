@@ -83,8 +83,9 @@ fn validate_read_many_into(
 /// cache/blob reads.
 ///
 /// `buf` holds one `item_size` slot per offset (validated by [validate_read_many_into]). `tail`
-/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
-/// tip buffer, for [Sealed] the partial last page. Items entirely within `tail` are copied into
+/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] and
+/// [Reader] this is the tip buffer, for [Sealed] the partial last page. Items entirely within
+/// `tail` are copied into
 /// place. Items fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
 /// pairs for the caller to read from the page cache or blob. `chunks_exact_mut` yields disjoint
 /// per-item slots, so returned slices never alias.
@@ -378,7 +379,7 @@ mod tests {
         #[case] size: u64,
         #[case] expected: ValidationExpectation,
     ) {
-        // These cases pin the shared batch-read contract used by both Writer and Sealed:
+        // These cases pin the shared batch-read contract used by Writer, Reader, and Sealed:
         // the caller provides one fixed-size output slot per offset, offsets are monotonic and
         // non-overlapping, and every requested byte must be within the logical blob size.
         let result = validate_read_many_into(buf_len, &offsets, NZUsize!(item_size), size);

@@ -1,4 +1,4 @@
-//! Benchmarks for the page cache via the Writer blob wrapper.
+//! Benchmarks for the page cache via the Append blob wrapper.
 //!
 //! Includes both deterministic in-memory runs to isolate buffer/page-cache work
 //! and Tokio-backed runs to exercise real storage I/O paths.
