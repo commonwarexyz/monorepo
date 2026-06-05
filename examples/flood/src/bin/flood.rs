@@ -77,7 +77,7 @@ fn main() {
         // Configure telemetry
         let tracing = if config.instrument {
             Some(tokio::tracing::Config {
-                endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring),
+                endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
                 name: public_key.to_string(),
                 rate: 1.0,
             })
