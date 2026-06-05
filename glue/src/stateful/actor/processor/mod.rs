@@ -128,10 +128,11 @@ impl<T: Clone> Maintenance<T> {
     ///
     /// Persist maintenance triggers directly on the configured cadence.
     /// Prune maintenance first retains the last `max_pending_acks + 1`
-    /// finalized `(height, sync_targets)` pairs, then prunes only when that full window is
-    /// populated and the current finalized height matches the configured
-    /// cadence. The prune target is the oldest retained finalized target and
-    /// its corresponding finalized block height.
+    /// finalized `(height, sync_targets)` pairs, so the oldest retained target
+    /// stays `max_pending_acks` blocks behind the tip. It then prunes only
+    /// when that full window is populated and the current finalized height
+    /// matches the configured cadence. The prune target is the oldest retained
+    /// finalized target and its corresponding finalized block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
         if self.config.prune {
             self.retained_targets.push_back((height, targets));

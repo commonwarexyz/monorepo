@@ -170,7 +170,9 @@ where
     /// Holders must never manually prune these databases. Stateful glue uses
     /// [`MaintenanceConfig`](crate::stateful::MaintenanceConfig) to
     /// schedule safe maintenance without pruning past the rewind window needed
-    /// for crash reconciliation.
+    /// for crash reconciliation. With pruning enabled, glue keeps a
+    /// `max_pending_acks + 1` finalized-target window so the oldest retained
+    /// prune target stays `max_pending_acks` blocks behind the finalized tip.
     pub async fn subscribe_databases(&self) -> A::Databases {
         let (response, receiver) = oneshot::channel();
         let _ = self

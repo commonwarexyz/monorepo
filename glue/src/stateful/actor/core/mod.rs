@@ -47,8 +47,9 @@ pub struct MaintenanceConfig {
 
     /// Prune databases and marshal instead of only persisting committed state.
     ///
-    /// When `true`, glue retains enough finalized history to safely rewind
-    /// `max_pending_acks` blocks before pruning.
+    /// When `true`, glue retains a `max_pending_acks + 1` finalized-target
+    /// window before pruning, so the oldest retained target stays
+    /// `max_pending_acks` blocks behind the finalized tip.
     pub prune: bool,
 }
 
