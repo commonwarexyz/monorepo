@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{Writer, CacheRef},
+    buffer::paged::{CacheRef, Writer},
     Error as RError,
 };
 use std::{collections::BTreeMap, num::NonZeroUsize};
@@ -40,9 +40,7 @@ impl<E: Context> BlobIo<E> {
 
     /// Scan the partition and open every existing blob as a writable [`Writer`], keyed by
     /// blob number.
-    pub(super) async fn open_all(
-        &self,
-    ) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
+    pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
         let stored = match self.context.scan(&self.partition).await {
             Ok(names) => names,
             Err(RError::PartitionMissing(_)) => Vec::new(),
@@ -63,10 +61,9 @@ impl<E: Context> BlobIo<E> {
                 .await
                 .map_err(Error::Runtime)?;
             debug!(index, blob = hex_name, size, "loaded blob");
-            let writer =
-                Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
-                    .await
-                    .map_err(Error::Runtime)?;
+            let writer = Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
+                .await
+                .map_err(Error::Runtime)?;
             blobs.insert(index, writer);
         }
         Ok(blobs)

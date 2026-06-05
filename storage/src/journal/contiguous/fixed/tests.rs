@@ -736,9 +736,7 @@ fn test_fixed_journal_recover_sparse_blob_ids_repairs_at_gap() {
             .open(&blob_partition, &u64::MAX.to_be_bytes())
             .await
             .unwrap();
-        let append = Writer::new(blob, blob_size, 2048, cache_ref)
-            .await
-            .unwrap();
+        let append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
         let extra = test_digest(999);
         append.append(extra.as_ref()).await.unwrap();
         append.sync().await.unwrap();
@@ -1108,10 +1106,9 @@ fn test_fixed_journal_update_metadata_watermark_before_clear_lowers_only() {
             partition: format!("{}-metadata", cfg.partition),
             codec_config: (),
         };
-        let mut metadata =
-            Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
-                .await
-                .expect("failed to initialize metadata");
+        let mut metadata = Metadata::<_, u64, VecU64>::init(context.child("metadata"), meta_cfg)
+            .await
+            .expect("failed to initialize metadata");
         metadata.put(RECOVERY_WATERMARK_KEY, 7u64.into());
 
         let changed =
@@ -1376,10 +1373,9 @@ fn test_fixed_journal_rewinding() {
         drop(journal);
 
         // Make sure re-opened journal is as expected
-        let mut journal: Journal<_, Digest> =
-            Journal::init(context.child("third"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
+        let mut journal: Journal<_, Digest> = Journal::init(context.child("third"), cfg.clone())
+            .await
+            .expect("failed to re-initialize journal");
         assert_eq!(journal.size(), 10 * (100 - 49));
 
         // Make sure rewinding works after pruning
@@ -2238,10 +2234,9 @@ fn test_fixed_journal_init_at_size_persistence_without_data() {
         let cfg = test_cfg(&context, NZU64!(5));
 
         // Initialize at position 15
-        let journal =
-            Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 15)
-                .await
-                .unwrap();
+        let journal = Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 15)
+            .await
+            .unwrap();
 
         let bounds = journal.bounds();
         assert_eq!(bounds.end, 15);
@@ -3078,10 +3073,9 @@ fn test_fixed_journal_metrics() {
     let executor = deterministic::Runner::default();
     executor.start(|context| async move {
         let cfg = test_cfg(&context, NZU64!(2));
-        let mut journal =
-            Journal::<_, Digest>::init(context.child("fixed_metrics"), cfg.clone())
-                .await
-                .unwrap();
+        let mut journal = Journal::<_, Digest>::init(context.child("fixed_metrics"), cfg.clone())
+            .await
+            .unwrap();
 
         let items: Vec<_> = (0..5).map(test_digest).collect();
         journal.append_many(Many::Flat(&items)).await.unwrap();
@@ -3294,6 +3288,48 @@ fn test_snapshots_readable_during_concurrent_appends() {
         drop(tx);
         assert!(validator.await.unwrap() > 0);
 
+        journal.destroy().await.unwrap();
+    });
+}
+
+/// A snapshot taken before rolls and a prune replays its full frozen range, streaming its
+/// then-tail blob through the snapshot's own handle.
+#[test_traced]
+fn test_replay_from_stale_snapshot() {
+    let executor = deterministic::Runner::default();
+    executor.start(|context| async move {
+        let cfg = test_cfg(&context, NZU64!(5));
+        let mut journal = Journal::<_, Digest>::init(context.child("j"), cfg)
+            .await
+            .unwrap();
+        for i in 0..7u64 {
+            journal.append(&test_digest(i)).await.unwrap();
+        }
+
+        // Positions 5..7 live in the snapshot's tail blob.
+        let snapshot = journal.reader();
+        assert_eq!(snapshot.bounds(), 0..7);
+
+        // Roll the snapshot's tail into history, then prune both of its blobs away.
+        for i in 7..23u64 {
+            journal.append(&test_digest(i)).await.unwrap();
+        }
+        assert!(journal.prune(12).await.unwrap());
+
+        {
+            let stream = snapshot.replay(NZUsize!(1024), 0).await.unwrap();
+            pin_mut!(stream);
+            let mut expected = 0u64;
+            while let Some(result) = stream.next().await {
+                let (pos, item) = result.unwrap();
+                assert_eq!(pos, expected);
+                assert_eq!(item, test_digest(pos));
+                expected += 1;
+            }
+            assert_eq!(expected, 7);
+        }
+
+        drop(snapshot);
         journal.destroy().await.unwrap();
     });
 }

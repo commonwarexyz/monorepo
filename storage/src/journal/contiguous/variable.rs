@@ -1449,7 +1449,7 @@ mod tests {
     use crate::journal::contiguous::tests::{partition_sync_fault, run_contiguous_tests};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::{Writer, CacheRef},
+        buffer::paged::{CacheRef, Writer},
         deterministic, Blob as _, Metrics as _, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};

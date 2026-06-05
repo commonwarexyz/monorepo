@@ -5,10 +5,11 @@ use super::{
     state::{Shared, Snapshot},
     Journal,
 };
-use crate::journal::{contiguous::metrics::FixedMetrics as Metrics, Error};
-use std::sync::atomic::Ordering;
+use crate::{
+    journal::{contiguous::metrics::FixedMetrics as Metrics, Error},
+    Context,
+};
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
-use crate::Context;
 use commonware_runtime::{
     buffer::paged::{self, Replay},
     Blob, Buf,
@@ -18,7 +19,11 @@ use futures::{
     stream::{self, Stream},
     StreamExt,
 };
-use std::{marker::PhantomData, num::NonZeroUsize, sync::Arc};
+use std::{
+    marker::PhantomData,
+    num::NonZeroUsize,
+    sync::{atomic::Ordering, Arc},
+};
 
 /// An owned snapshot of the journal. Bounds are frozen at creation and every position within
 /// `bounds()` remains readable, including across a concurrent prune. A concurrent rewind below
@@ -446,4 +451,3 @@ struct TailReplayState<B: Blob> {
     /// First retained position in the tail; origin for byte offsets.
     tail_first: u64,
 }
-

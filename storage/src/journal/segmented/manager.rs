@@ -7,7 +7,7 @@ use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{
-        paged::{Writer, CacheRef},
+        paged::{CacheRef, Writer},
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},

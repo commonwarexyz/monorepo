@@ -87,7 +87,7 @@ use commonware_codec::{
     Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::paged::{Writer, CacheRef, Replay},
+    buffer::paged::{CacheRef, Replay, Writer},
     Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};

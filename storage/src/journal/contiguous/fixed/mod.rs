@@ -107,10 +107,7 @@
 use super::Reader as _;
 use crate::{
     journal::{
-        contiguous::{
-            metrics::FixedMetrics as Metrics,
-            Many, Mutable,
-        },
+        contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
         Error,
     },
     metadata::Metadata,
@@ -118,7 +115,7 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{
-    buffer::paged::{Writer, CacheRef, Sealed},
+    buffer::paged::{CacheRef, Sealed, Writer},
     telemetry::metrics::GaugeExt as _,
     Blob,
 };
@@ -142,16 +139,19 @@ mod state;
 #[cfg(test)]
 mod tests;
 
-pub use reader::Reader;
-
 use io::BlobIo;
+pub use reader::Reader;
 pub(super) use recovery::CLEAR_TARGET_KEY;
 use recovery::{PRUNING_BOUNDARY_KEY, RECOVERY_WATERMARK_KEY};
 use state::{BlobTable, Shared};
 
 /// Return the first retained logical position in `blob`.
 #[inline]
-pub(super) fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Result<u64, Error> {
+pub(super) fn first_in_blob(
+    pruning_boundary: u64,
+    blob: u64,
+    items_per_blob: u64,
+) -> Result<u64, Error> {
     let start = blob
         .checked_mul(items_per_blob)
         .ok_or(Error::OffsetOverflow)?;
@@ -1094,7 +1094,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let table = self.current_table();
         match table.handle(blob) {
             Some(state::BlobHandle::Sealed(sealed)) => sealed.sync().await.map_err(Error::Runtime),
-            Some(state::BlobHandle::Tail(_)) => self.tail.writer.sync().await.map_err(Error::Runtime),
+            Some(state::BlobHandle::Tail(_)) => {
+                self.tail.writer.sync().await.map_err(Error::Runtime)
+            }
             None => Ok(()),
         }
     }
@@ -1186,4 +1188,3 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
         .await
     }
 }
-

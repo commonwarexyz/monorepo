@@ -174,7 +174,11 @@ impl<B: Blob> Snapshot<B> {
     }
 
     /// Resolve `pos` to its read handle and byte offset within the blob.
-    pub(super) fn locate(&self, pos: u64, chunk_size: u64) -> Result<(BlobHandle<'_, B>, u64), Error> {
+    pub(super) fn locate(
+        &self,
+        pos: u64,
+        chunk_size: u64,
+    ) -> Result<(BlobHandle<'_, B>, u64), Error> {
         if pos >= self.size {
             return Err(Error::ItemOutOfRange(pos));
         }
@@ -194,4 +198,3 @@ impl<B: Blob> Snapshot<B> {
         Ok((handle, offset))
     }
 }
-

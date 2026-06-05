@@ -79,7 +79,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     ///
     /// This is used before blob state moves backward so external consumers never see a persisted
     /// recovery checkpoint beyond the rewind/clear target.
-    pub(super) fn lower_recovery_watermark(metadata: &mut Metadata<E, u64, VecU64>, limit: u64) -> bool {
+    pub(super) fn lower_recovery_watermark(
+        metadata: &mut Metadata<E, u64, VecU64>,
+        limit: u64,
+    ) -> bool {
         let Some(current) = metadata
             .get(&RECOVERY_WATERMARK_KEY)
             .copied()
@@ -118,7 +121,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Scan a partition and return blob names, treating a missing partition as empty.
-    pub(super) async fn scan_partition(context: &E, partition: &str) -> Result<Vec<Vec<u8>>, Error> {
+    pub(super) async fn scan_partition(
+        context: &E,
+        partition: &str,
+    ) -> Result<Vec<Vec<u8>>, Error> {
         match context.scan(partition).await {
             Ok(blobs) => Ok(blobs),
             Err(RuntimeError::PartitionMissing(_)) => Ok(Vec::new()),
