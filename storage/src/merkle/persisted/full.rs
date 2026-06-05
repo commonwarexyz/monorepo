@@ -154,8 +154,9 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strate
     /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// Serializes concurrent sync calls.
-    pub(crate) sync_lock: AsyncMutex<()>,
+    /// Serializes concurrent flush and sync calls. The guarded flag is true while the journal may
+    /// contain flushed nodes that have not yet been made durable.
+    pub(crate) sync_lock: AsyncMutex<bool>,
 
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
@@ -277,7 +278,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 }),
                 journal,
                 metadata,
-                sync_lock: AsyncMutex::new(()),
+                sync_lock: AsyncMutex::new(false),
                 strategy: cfg.strategy,
             });
         }
@@ -408,7 +409,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             }),
             journal,
             metadata,
-            sync_lock: AsyncMutex::new(()),
+            sync_lock: AsyncMutex::new(false),
             strategy: cfg.strategy,
         })
     }
@@ -528,7 +529,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             }),
             journal,
             metadata,
-            sync_lock: AsyncMutex::new(()),
+            sync_lock: AsyncMutex::new(false),
             strategy: cfg.config.strategy,
         })
     }
@@ -593,10 +594,34 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         futures::future::try_join_all(futs).await
     }
 
-    /// Sync the structure to disk.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
-        let _sync_guard = self.sync_lock.lock().await;
+    /// Flush all nodes cached in the in-memory structure to the journal without forcing them to
+    /// disk. Flushed nodes are pruned from the in-memory structure and remain readable through the
+    /// journal, but they are not guaranteed to survive a crash until [Self::sync] is called.
+    pub async fn flush(&self) -> Result<(), Error<F>> {
+        let mut journal_dirty = self.sync_lock.lock().await;
+        self.flush_internal(&mut journal_dirty).await
+    }
 
+    /// Flush all nodes cached in the in-memory structure to the journal and make them durable.
+    pub async fn sync(&self) -> Result<(), Error<F>> {
+        let mut journal_dirty = self.sync_lock.lock().await;
+        self.flush_internal(&mut journal_dirty).await?;
+
+        // Sync the journal while still holding the sync_lock to ensure durability before
+        // returning. This covers nodes appended by the flush above as well as nodes left
+        // non-durable by earlier [Self::flush] calls.
+        if *journal_dirty {
+            self.journal.sync().await?;
+            *journal_dirty = false;
+        }
+
+        Ok(())
+    }
+
+    /// Append nodes cached in the in-memory structure that are missing from the journal, then
+    /// prune them from the in-memory structure. Sets `journal_dirty` (the value guarded by
+    /// `sync_lock`, which the caller must hold) when nodes are appended.
+    async fn flush_internal(&self, journal_dirty: &mut bool) -> Result<(), Error<F>> {
         let journal_size = Position::<F>::new(self.journal.size().await);
 
         // Snapshot nodes in the mem that are missing from the journal, along with the pinned
@@ -634,12 +659,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
         // Append missing nodes to the journal without holding the mem read lock.
         self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+        *journal_dirty = true;
 
-        // Sync the journal while still holding the sync_lock to ensure durability before returning.
-        self.journal.sync().await?;
-
-        // Now that the missing nodes are in the journal, it's safe to prune them from the
-        // mem. We prune to the previously captured leaf count to avoid a race with concurrent
+        // Now that the missing nodes are readable from the journal, it's safe to prune them from
+        // the mem. We prune to the previously captured leaf count to avoid a race with concurrent
         // appends between the read lock above and this write lock.
         {
             let mut inner = self.inner.write();
@@ -1339,6 +1362,188 @@ mod tests {
     fn test_full_basic_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_basic_inner::<mmb::Family>);
+    }
+
+    /// Flush moves cached nodes into the journal and prunes them from memory, preserving reads,
+    /// proofs, and the root.
+    async fn full_flush_inner<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+            context.child("first"),
+            &hasher,
+            test_config(&context),
+        )
+        .await
+        .unwrap();
+
+        const LEAF_COUNT: usize = 100;
+        let mut leaves = Vec::with_capacity(LEAF_COUNT);
+        for i in 0..LEAF_COUNT {
+            leaves.push(test_digest(i));
+        }
+        let mut batch = mmr.new_batch();
+        for leaf in &leaves {
+            batch = batch.add(&hasher, leaf);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
+        let expected_size = Position::<F>::try_from(Location::<F>::new(LEAF_COUNT as u64)).unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
+
+        // Flush writes all cached nodes to the journal and prunes them from the mem.
+        mmr.flush().await.unwrap();
+        assert_eq!(Position::<F>::new(mmr.journal.size().await), expected_size);
+        assert_eq!(mmr.size(), expected_size);
+        assert_eq!(
+            mmr.with_mem(|mem| mem.bounds().start),
+            Location::<F>::new(LEAF_COUNT as u64)
+        );
+
+        // Flushing again is a no-op.
+        mmr.flush().await.unwrap();
+        assert_eq!(Position::<F>::new(mmr.journal.size().await), expected_size);
+
+        // Flushed nodes remain readable and provable, and the root is unchanged.
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
+        const TEST_ELEMENT: usize = 42;
+        let loc: Location<F> = Location::new(TEST_ELEMENT as u64);
+        let proof = mmr.proof(&hasher, loc, 0).await.unwrap();
+        assert!(proof.verify_element_inclusion(&hasher, &leaves[TEST_ELEMENT], loc, &root));
+
+        // Sync after flush succeeds (and must fsync the journal even though there is nothing
+        // left to flush).
+        mmr.sync().await.unwrap();
+
+        mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_flush_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_flush_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_flush_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_flush_inner::<mmb::Family>);
+    }
+
+    /// Flushed-but-unsynced nodes are lost on a crash, while synced nodes survive: the durability
+    /// barrier comes from `sync`, not `flush`.
+    fn full_flush_crash_inner<F: Family>() {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+
+        // Phase 1: durably sync a first batch of leaves, flush (but don't sync) a second batch,
+        // then simulate an unclean shutdown.
+        let executor = deterministic::Runner::default();
+        let (synced_size, checkpoint) = executor.start_and_recover(|context| async move {
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mmr = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("first"),
+                &hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+
+            let mut batch = mmr.new_batch();
+            for i in 0..50usize {
+                batch = batch.add(&hasher, &test_digest(i));
+            }
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap();
+            mmr.sync().await.unwrap();
+            let synced_size = mmr.size();
+
+            let mut batch = mmr.new_batch();
+            for i in 50..100usize {
+                batch = batch.add(&hasher, &test_digest(i));
+            }
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap();
+            mmr.flush().await.unwrap();
+            assert_eq!(Position::<F>::new(mmr.journal.size().await), mmr.size());
+
+            synced_size
+        });
+
+        // Phase 2: recover. Only the synced prefix survives.
+        let executor = deterministic::Runner::from(checkpoint);
+        executor.start(|context| async move {
+            let mmr = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("second"),
+                &hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(mmr.size(), synced_size);
+        });
+    }
+
+    #[test_traced]
+    fn test_full_flush_crash_recovery_mmr() {
+        full_flush_crash_inner::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_full_flush_crash_recovery_mmb() {
+        full_flush_crash_inner::<mmb::Family>();
+    }
+
+    /// A sync after a flush must make the flushed nodes durable, even though the flush left
+    /// nothing further to write from memory.
+    fn full_flush_then_sync_crash_inner<F: Family>() {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+
+        // Phase 1: flush a batch of leaves, then sync with nothing left to flush, then simulate
+        // an unclean shutdown.
+        let executor = deterministic::Runner::default();
+        let (full_size, checkpoint) = executor.start_and_recover(|context| async move {
+            let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+            let mmr = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("first"),
+                &hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+
+            let mut batch = mmr.new_batch();
+            for i in 0..100usize {
+                batch = batch.add(&hasher, &test_digest(i));
+            }
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap();
+            mmr.flush().await.unwrap();
+            mmr.sync().await.unwrap();
+
+            mmr.size()
+        });
+
+        // Phase 2: recover. Everything survives.
+        let executor = deterministic::Runner::from(checkpoint);
+        executor.start(|context| async move {
+            let mmr = Merkle::<F, _, Digest, Sequential>::init(
+                context.child("second"),
+                &hasher,
+                test_config(&context),
+            )
+            .await
+            .unwrap();
+            assert_eq!(mmr.size(), full_size);
+        });
+    }
+
+    #[test_traced]
+    fn test_full_flush_then_sync_crash_recovery_mmr() {
+        full_flush_then_sync_crash_inner::<mmr::Family>();
+    }
+
+    #[test_traced]
+    fn test_full_flush_then_sync_crash_recovery_mmb() {
+        full_flush_then_sync_crash_inner::<mmb::Family>();
     }
 
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent
