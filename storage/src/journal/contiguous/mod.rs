@@ -9,21 +9,21 @@ use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
+mod blobs;
 pub mod fixed;
 mod metrics;
+mod snapshot;
 pub mod variable;
 
 #[cfg(test)]
 mod tests;
 
-/// A reader guard that holds a consistent view of the journal.
+/// A consistent view of the journal.
 ///
-/// While this guard exists, the reader's logical bounds remain stable, and any position within
-/// `bounds()` remains readable through this guard.
-///
-/// Implementations may still make physical storage progress, such as unlinking backing blobs from
-/// future namespace lookups, but they must not invalidate reads within the captured bounds or
-/// change the bounds visible through this reader.
+/// Bounds are stable for the reader's lifetime, and any position within `bounds()` remains
+/// readable through it, including across a concurrent prune. A concurrent rewind below the
+/// reader's bounds may surface as an error ([Error::BlobInUse] for the rewinder, or a read
+/// error for the reader), never as torn data.
 pub trait Reader: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
@@ -63,10 +63,8 @@ pub trait Reader: Send + Sync {
         None
     }
 
-    /// Return a stream of all items starting from `start_pos`.
-    ///
-    /// Because the reader holds the lock, validation and stream setup happen
-    /// atomically with respect to `prune()`.
+    /// Return a stream of all items starting from `start_pos`, bounded by the reader's frozen
+    /// `bounds()`. `start_pos` may equal `bounds().end`, yielding an empty stream.
     fn replay(
         &self,
         buffer: NonZeroUsize,

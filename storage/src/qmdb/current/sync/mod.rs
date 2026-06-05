@@ -26,6 +26,7 @@
 //! height.
 
 use crate::{
+    journal::contiguous::Contiguous,
     index::Factory as IndexFactory,
     journal::{
         authenticated,
@@ -309,7 +310,7 @@ macro_rules! impl_current_sync_database {
                     return Ok(None);
                 }
 
-                let reader = journal.reader().await;
+                let reader = Contiguous::reader(journal).await;
                 let bounds = reader.bounds();
                 if Location::new(bounds.start) > target.range.start()
                     || Location::new(bounds.end) != target.range.end()

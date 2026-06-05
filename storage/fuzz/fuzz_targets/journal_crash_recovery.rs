@@ -341,13 +341,13 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     }
 
     async fn size(&self) -> u64 {
-        FixedJournal::size(self).await
+        FixedJournal::size(self)
     }
 
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn bounds(&self) -> impl Future<Output = Range<u64>> + Send {
-        async { self.reader().await.bounds() }
+        async { self.reader().bounds() }
     }
 
     async fn append(&mut self, item: Item) -> Result<u64, Error> {
@@ -357,7 +357,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     // Cannot use `async fn` here due to RPITIT Send auto-trait limitation.
     #[allow(clippy::manual_async_fn)]
     fn read(&self, pos: u64) -> impl Future<Output = Result<Item, Error>> + Send {
-        async move { self.reader().await.read(pos).await }
+        async move { self.reader().read(pos).await }
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -383,7 +383,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> impl Future<Output = Result<Vec<(u64, Item)>, Error>> + Send {
-        async move { collect_replay(self.reader().await, buffer, start_pos).await }
+        async move { collect_replay(self.reader(), buffer, start_pos).await }
     }
 
     async fn destroy(self) -> Result<(), Error> {

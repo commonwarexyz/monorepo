@@ -295,3 +295,4 @@ impl<E: Clock> Deref for VariableMetrics<E> {
         &self.common
     }
 }
+

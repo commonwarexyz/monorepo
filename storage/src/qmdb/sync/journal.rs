@@ -106,7 +106,7 @@ where
         config: Self::Config,
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
-        let journal = Self::init(context, config).await?;
+        let mut journal = Self::init(context, config).await?;
         let size = Contiguous::size(&journal).await;
 
         // Fresh journal already aligned with the sync start - nothing to do.
@@ -117,7 +117,7 @@ where
         // After a crash during a previous clear_to_size, the journal may recover empty at a stale
         // position ahead of the requested start (possibly even beyond range.end). Re-clear so the
         // sync engine starts from the correct location.
-        let bounds = journal.reader().await.bounds();
+        let bounds = journal.reader().bounds();
         if bounds.is_empty() && bounds.start > *range.start() {
             journal.clear_to_size(*range.start()).await?;
             return Ok(journal);
@@ -188,7 +188,7 @@ mod tests {
             let cfg = test_cfg(&context);
 
             // Create a journal at pruning_boundary=9 (mid-section in section 1).
-            let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
+            let mut journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -213,7 +213,7 @@ mod tests {
 
             let size = Contiguous::size(&journal).await;
             assert_eq!(size, 7);
-            let bounds = journal.reader().await.bounds();
+            let bounds = journal.reader().bounds();
             assert!(bounds.is_empty());
             assert_eq!(bounds.start, 7);
 
@@ -228,7 +228,7 @@ mod tests {
             let cfg = test_cfg(&context);
 
             // Create a journal at pruning_boundary=30, well beyond our intended range end.
-            let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)
+            let mut journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
@@ -246,7 +246,7 @@ mod tests {
 
             let size = Contiguous::size(&journal).await;
             assert_eq!(size, 7);
-            let bounds = journal.reader().await.bounds();
+            let bounds = journal.reader().bounds();
             assert!(bounds.is_empty());
             assert_eq!(bounds.start, 7);
 
