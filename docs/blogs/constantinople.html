@@ -136,7 +136,7 @@
             <div class="image-caption">Figure 3: Visualization of qmdb::any state sync.</div>
         </div>
         <h2>Deployment</h2>
-            <p>On a live deployment with 50 validators and 2 secondary nodes (relayer, indexer) across <code>us-west-2</code> and <code>us-east-1</code>, Constantinople achieves a throughput of ~70k TPS with a block time of ~250ms and finalization latency of ~385ms (p75). Every block is around 2.5MB in size, distributed across the network in <a href="https://commonware.xyz/blogs/coding">erasure coded chunks</a> by the proposer. To stress QMDB compaction in the worst case, each block deliberately updates ~2^14 <i>existing</i> accounts: every update supersedes a prior value, forcing the inactivity floor to climb and the database to compact aggressively.</p>
+            <p>On a live deployment with 50 validators and 2 secondary nodes (relayer, indexer) across <code>us-west-2</code> and <code>us-east-1</code>, Constantinople achieves a throughput of ~70k TPS with a block time of ~250ms and finalization latency of ~385ms (p75). Every block is around 2.5MB in size, distributed across the network in <a href="https://commonware.xyz/blogs/coding">erasure coded chunks</a> by the proposer. To stress QMDB compaction in the worst case, each block deliberately updates ~2^14 <i>existing</i> accounts: every update supersedes a prior value, forcing the inactivity floor to climb and the database to compact aggressively. In total, the chain has 2^14 * 50 accounts.</p>
         <div class="image-container">
             <img src="/imgs/constantinople-tps.png" alt="Chain performance over time">
             <div class="image-caption">Figure 4: Chain performance over time.</div>
