@@ -7,6 +7,7 @@ use commonware_cryptography::{
 };
 use commonware_parallel::Sequential;
 use commonware_utils::{modulo, test_rng, Faults, Participant};
+use std::num::NonZeroU64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Behavior {
@@ -118,9 +119,10 @@ where
     fn build(
         self,
         participants: &commonware_utils::ordered::Set<<Scheme<S> as Verifier>::PublicKey>,
+        term_length: NonZeroU64,
     ) -> Self::Elector {
         Elector {
-            inner: self.0.build(participants),
+            inner: self.0.build(participants, term_length),
             _phantom: std::marker::PhantomData,
         }
     }

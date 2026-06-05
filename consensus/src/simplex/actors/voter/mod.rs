@@ -13,10 +13,11 @@ pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::paged::CacheRef;
+use core::num::{NonZeroU64, NonZeroUsize};
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;
-use std::{num::NonZeroUsize, time::Duration};
+use std::time::Duration;
 
 pub struct Config<
     S: Scheme,
@@ -42,6 +43,9 @@ pub struct Config<
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub activity_timeout: ViewDelta,
+    pub term_length: NonZeroU64,
+    pub term_stop_notarize_on_nullify: bool,
+    pub finalization_timeout: Duration,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
     pub page_cache: CacheRef,
@@ -91,7 +95,7 @@ mod tests {
         Runner, Supervisor as _,
     };
     use commonware_storage::journal::segmented::variable::{Config as JConfig, Journal};
-    use commonware_utils::{sync::Mutex, NZUsize, NZU16};
+    use commonware_utils::{sync::Mutex, NZUsize, NZU16, NZU64};
     use futures::FutureExt;
     use std::{
         num::{NonZeroU16, NonZeroU32},
@@ -273,6 +277,9 @@ mod tests {
             certification_timeout,
             timeout_retry,
             activity_timeout: ViewDelta::new(10),
+            term_length: NZU64!(1),
+            term_stop_notarize_on_nullify: false,
+            finalization_timeout: Duration::from_secs(4),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
             page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -309,6 +316,105 @@ mod tests {
             relay,
             reporter,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn setup_voter_with_term_and_latency<S, L>(
+        context: &mut deterministic::Context,
+        oracle: &commonware_p2p::simulated::Oracle<S::PublicKey, deterministic::Context>,
+        participants: &[S::PublicKey],
+        schemes: &[S],
+        elector: L,
+        leader_timeout: Duration,
+        certification_timeout: Duration,
+        timeout_retry: Duration,
+        finalization_timeout: Duration,
+        term_length: NonZeroU64,
+        certify_latency_ms: f64,
+        should_certify: mocks::application::Certifier<Sha256Digest>,
+    ) -> (
+        Mailbox<S, Sha256Digest>,
+        mailbox::Receiver<batcher::Message<S, Sha256Digest>>,
+        Arc<mocks::relay::Relay<Sha256Digest, S::PublicKey>>,
+    )
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        L: ElectorConfig<S>,
+    {
+        let signing = schemes[0].clone();
+        let me = participants[0].clone();
+        let reporter_cfg = mocks::reporter::Config {
+            participants: participants.to_vec().try_into().unwrap(),
+            scheme: signing.clone(),
+            elector: elector.clone(),
+        };
+        let reporter = mocks::reporter::Reporter::new_with_term_length(
+            context.child("reporter"),
+            reporter_cfg,
+            term_length,
+        );
+        let relay = Arc::new(mocks::relay::Relay::new());
+
+        let application_cfg = mocks::application::Config {
+            hasher: Sha256::default(),
+            relay: relay.clone(),
+            me: me.clone(),
+            propose_latency: (1.0, 0.0),
+            verify_latency: (1.0, 0.0),
+            certify_latency: (certify_latency_ms, 0.0),
+            should_certify,
+        };
+        let (actor, application) =
+            mocks::application::Application::new(context.child("app"), application_cfg);
+        actor.start();
+
+        let voter_cfg = Config {
+            scheme: signing.clone(),
+            elector,
+            blocker: oracle.control(me.clone()),
+            automaton: application.clone(),
+            relay: application.clone(),
+            reporter,
+            partition: format!("voter_test_{me}"),
+            epoch: Epoch::new(333),
+            floor: Floor::Genesis(mocks::application::genesis::<Sha256>(Epoch::new(333))),
+            mailbox_size: NZUsize!(128),
+            leader_timeout,
+            certification_timeout,
+            timeout_retry,
+            activity_timeout: ViewDelta::new(10),
+            term_length,
+            term_stop_notarize_on_nullify: false,
+            finalization_timeout,
+            replay_buffer: NZUsize!(10240),
+            write_buffer: NZUsize!(10240),
+            page_cache: CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        };
+        let (voter, mailbox) = Actor::new(context.child("voter"), voter_cfg);
+
+        let (resolver_sender, _) = mailbox::new(context.child("resolver_mailbox"), NZUsize!(8));
+        let (batcher_sender, batcher_receiver) =
+            mailbox::new(context.child("batcher_mailbox"), NZUsize!(16));
+
+        let (vote_sender, _) = oracle
+            .control(me.clone())
+            .register(0, TEST_QUOTA)
+            .await
+            .unwrap();
+        let (certificate_sender, _) = oracle
+            .control(me.clone())
+            .register(1, TEST_QUOTA)
+            .await
+            .unwrap();
+
+        voter.start(
+            batcher::Mailbox::new(batcher_sender),
+            resolver::Mailbox::new(resolver_sender),
+            vote_sender,
+            certificate_sender,
+        );
+
+        (mailbox, batcher_receiver, relay)
     }
 
     async fn seed_voter_journal<S>(
@@ -434,9 +540,12 @@ mod tests {
             floor,
             mailbox_size: NZUsize!(128),
             leader_timeout: Duration::from_secs(5),
-            certification_timeout: Duration::from_secs(5),
+            certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
             activity_timeout: ViewDelta::new(10),
+            term_length: NZU64!(1),
+            term_stop_notarize_on_nullify: false,
+            finalization_timeout: Duration::from_secs(7),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
             page_cache,
@@ -863,6 +972,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1087,6 +1199,9 @@ mod tests {
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
                 activity_timeout,
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1713,6 +1828,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1851,8 +1969,9 @@ mod tests {
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
             let elector_config = RoundRobin::<Sha256>::default();
-            let temp_elector: RoundRobinElector<S> =
-                elector_config.clone().build(schemes[0].participants());
+            let temp_elector: RoundRobinElector<S> = elector_config
+                .clone()
+                .build(schemes[0].participants(), NZU64!(1));
             let leader_idx = temp_elector.elect(view2_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 
@@ -1898,6 +2017,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2091,6 +2213,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2181,6 +2306,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2322,6 +2450,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache,
@@ -2442,6 +2573,122 @@ mod tests {
         );
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(ed25519::fixture);
         startup_update_timeout_hint_nullifies_recovered_view::<_, _>(secp256r1::fixture);
+    }
+
+    fn finalization_timeout_nullifies_current_view<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"finalization_timeout_nullifies_current_view".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let elector = RoundRobin::<Sha256>::default();
+            let first_round = Round::new(Epoch::new(333), View::new(1));
+            let built_elector: RoundRobinElector<S> =
+                elector.clone().build(schemes[0].participants(), NZU64!(2));
+            let leader_idx = built_elector.elect(first_round, None);
+            let leader = participants[usize::from(leader_idx)].clone();
+            let (mut mailbox, mut batcher_receiver, relay) = setup_voter_with_term_and_latency(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(3),
+                Duration::from_secs(4),
+                Duration::from_secs(2),
+                Duration::from_secs(5),
+                NZU64!(2),
+                3500.0,
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { .. } => {}
+                _ => panic!("expected initial update"),
+            }
+
+            let view_1 = View::new(1);
+            let mut hasher = Sha256::default();
+            hasher.update(&(bytes::Bytes::from_static(b"genesis"), Epoch::new(333)).encode());
+            let genesis = hasher.finalize();
+            let proposal_1 = Proposal::new(
+                Round::new(Epoch::new(333), view_1),
+                View::zero(),
+                Sha256::hash(b"same_term_timeout_view_1"),
+            );
+            let contents = (proposal_1.round, genesis, 0u64).encode();
+            relay.broadcast(&leader, Recipients::All, (proposal_1.payload, contents));
+            mailbox.proposal(proposal_1.clone());
+
+            let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_1));
+
+            loop {
+                if let batcher::Message::Update { current, .. } =
+                    batcher_receiver.recv().await.unwrap()
+                {
+                    if current == View::new(2) {
+                        break;
+                    }
+                }
+            }
+
+            select! {
+                msg = batcher_receiver.recv() => match msg.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify)) => {
+                        assert_eq!(nullify.view(), View::new(2));
+                    }
+                    batcher::Message::Update { .. } => {
+                        panic!("expected current-view nullify before the next update");
+                    }
+                    batcher::Message::Constructed(Vote::Notarize(_)) => {
+                        panic!("expected same-term timeout nullify, got notarize");
+                    }
+                    batcher::Message::Constructed(Vote::Finalize(_)) => {
+                        panic!("expected same-term timeout nullify, got finalize");
+                    }
+                },
+                _ = context.sleep(Duration::from_secs(2)) => {
+                    panic!("expected current-view nullify before leader timeout expired");
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_finalization_timeout_nullifies_current_view() {
+        finalization_timeout_nullifies_current_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinPk, _>,
+        );
+        finalization_timeout_nullifies_current_view::<_, _>(
+            bls12381_threshold_vrf::fixture::<MinSig, _>,
+        );
+        finalization_timeout_nullifies_current_view::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        finalization_timeout_nullifies_current_view::<_, _>(
+            bls12381_multisig::fixture::<MinSig, _>,
+        );
+        finalization_timeout_nullifies_current_view::<_, _>(ed25519::fixture);
+        finalization_timeout_nullifies_current_view::<_, _>(secp256r1::fixture);
     }
 
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
@@ -2713,6 +2960,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout,
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -2860,8 +3110,8 @@ mod tests {
         verification_failure_emits_nullify_immediately::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
-    /// Tests that observing a leader's `nullify` vote fast-paths timeout for verifiers.
-    fn leader_nullify_fast_paths_timeout<S, F, L>(mut fixture: F)
+    /// Tests that a leader-nullify timeout hint fast-paths local nullify construction.
+    fn leader_nullify_timeout_hint_fast_paths_nullify<S, F, L>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -2869,7 +3119,7 @@ mod tests {
     {
         let n = 5;
         let quorum = quorum(n);
-        let namespace = b"leader_nullify_fast_paths_timeout".to_vec();
+        let namespace = b"leader_nullify_timeout_hint_fast_paths_nullify".to_vec();
         let epoch = Epoch::new(333);
         let executor = deterministic::Runner::timed(Duration::from_secs(5));
         executor.start(|mut context| async move {
@@ -2925,6 +3175,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3035,21 +3288,21 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_leader_nullify_fast_paths_timeout() {
-        leader_nullify_fast_paths_timeout::<_, _, Random>(
+    fn test_leader_nullify_timeout_hint_fast_paths_nullify() {
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, Random>(
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, Random>(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(ed25519::fixture);
-        leader_nullify_fast_paths_timeout::<_, _, RoundRobin>(secp256r1::fixture);
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(ed25519::fixture);
+        leader_nullify_timeout_hint_fast_paths_nullify::<_, _, RoundRobin>(secp256r1::fixture);
     }
 
     /// Tests that if the application drops proposal requests, the leader emits `nullify`
@@ -3118,6 +3371,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3283,6 +3539,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3625,6 +3884,9 @@ mod tests {
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -3909,6 +4171,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4035,6 +4300,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4174,6 +4442,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4334,6 +4605,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4435,6 +4709,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4605,6 +4882,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4717,6 +4997,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4884,6 +5167,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -4998,6 +5284,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5165,6 +5454,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5338,6 +5630,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5438,6 +5733,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5616,6 +5914,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5799,6 +6100,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -5983,6 +6287,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6213,7 +6520,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap());
+                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6329,7 +6636,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap());
+                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6478,7 +6785,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap());
+                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6797,6 +7104,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -6910,6 +7220,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -7929,7 +8242,7 @@ mod tests {
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let leader_idx = elector
                 .clone()
-                .build(schemes[0].participants())
+                .build(schemes[0].participants(), NZU64!(1))
                 .elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 
@@ -8137,6 +8450,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8262,6 +8578,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8408,6 +8727,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8519,6 +8841,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8660,6 +8985,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8777,6 +9105,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -8914,6 +9245,9 @@ mod tests {
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
+                term_length: NZU64!(1),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

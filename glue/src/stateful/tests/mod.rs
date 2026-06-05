@@ -504,13 +504,18 @@ where
 
     PlanBuilder::new(engine)
         .seeds(0..5)
+        .link(Link {
+            latency: Duration::from_millis(100),
+            jitter: Duration::from_millis(5),
+            success_rate: 1.0,
+        })
         .crash(Crash::Random {
-            frequency: Duration::from_millis(1750),
+            frequency: Duration::from_millis(5000),
             downtime: Duration::from_millis(500),
             count: total,
         })
-        .exit_condition(ProcessedHeightAtLeast::new(100))
-        .property(BlockAgreementAtHeight::new(100))
+        .exit_condition(ProcessedHeightAtLeast::new(2000))
+        .property(BlockAgreementAtHeight::new(2000))
         .run()
         .unwrap();
 }

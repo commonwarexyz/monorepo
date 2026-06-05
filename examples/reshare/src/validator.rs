@@ -1253,7 +1253,8 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: Some(Crash::Random {
-                frequency: Duration::from_secs(2),
+                // Keep crash frequency above timeout retry so restarted validators can retry nullify.
+                frequency: Duration::from_millis(4_000),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
@@ -1277,7 +1278,8 @@ mod test {
             },
             mode: Mode::Reshare(4),
             crash: Some(Crash::Random {
-                frequency: Duration::from_secs(2),
+                // Keep crash frequency above timeout retry so restarted validators can retry nullify.
+                frequency: Duration::from_secs(4),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),
@@ -1301,8 +1303,9 @@ mod test {
             },
             mode: Mode::Dkg,
             crash: Some(Crash::Random {
-                frequency: Duration::from_secs(2),
-                downtime: Duration::from_millis(500),
+                // Keep crash frequency above timeout retry so restarted validators can retry nullify.
+                frequency: Duration::from_secs(4),
+                downtime: Duration::from_secs(1),
                 count: 4,
             }),
             failures: HashSet::new(),

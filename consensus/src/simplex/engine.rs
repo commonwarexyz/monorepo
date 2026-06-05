@@ -70,8 +70,8 @@ impl<
                 strategy: cfg.strategy.clone(),
                 epoch: cfg.epoch,
                 mailbox_size: cfg.mailbox_size,
-                activity_timeout: cfg.activity_timeout,
                 skip_timeout: cfg.skip_timeout,
+                term_length: cfg.term_length,
                 forwarding: cfg.forwarding,
             },
         );
@@ -94,6 +94,9 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
+                term_length: cfg.term_length,
+                term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
+                finalization_timeout: cfg.finalization_timeout,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,
@@ -111,6 +114,7 @@ impl<
                 epoch: cfg.epoch,
                 fetch_concurrent: cfg.fetch_concurrent,
                 fetch_timeout: cfg.fetch_timeout,
+                term_length: cfg.term_length,
             },
         );
 
