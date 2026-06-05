@@ -37,7 +37,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{NZUsize, NZU32};
 use criterion::Criterion;
-use std::num::NonZeroUsize;
+use std::{hint::black_box, num::NonZeroUsize};
 const SIZES: &[usize] = &[256, 1024, 4096, 65536, 1024 * 1024, 8 * 1024 * 1024];
 
 #[derive(Clone, Copy)]
@@ -119,7 +119,7 @@ fn bench_case(
                         || {},
                         |_| {
                             let buffer = alloc();
-                            drop(buffer);
+                            drop(black_box(buffer));
                         },
                     )
                 });
@@ -135,7 +135,7 @@ fn bench_case(
                         |_| {
                             let mut buffer = alloc();
                             touch_pages(buffer.as_mut_ptr(), size, page_size);
-                            drop(buffer);
+                            drop(black_box(buffer));
                         },
                     )
                 });
