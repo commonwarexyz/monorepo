@@ -108,7 +108,7 @@ use super::Reader as _;
 use crate::{
     journal::{
         contiguous::{
-            blobs::{BlobIo, Blobs, RecoveryBlobs, Config as BlobsConfig, Tail},
+            blobs::{BlobIo, Tail},
             metrics::FixedMetrics as Metrics,
             Many, Mutable,
         },
@@ -119,7 +119,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{AppendReader, CacheRef, Replay, Sealed},
+    buffer::paged::{AppendReader, AppendWriter, CacheRef, Replay, Sealed},
     telemetry::metrics::GaugeExt as _,
     Blob, Buf, Error as RuntimeError, IoBufs,
 };
@@ -130,6 +130,7 @@ use futures::{
     StreamExt,
 };
 use std::{
+    collections::BTreeMap,
     future::Future,
     marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
@@ -1010,8 +1011,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Construct a journal from recovered blobs, publishing the initial table.
+    #[allow(clippy::too_many_arguments)]
     fn from_blobs(
-        blobs: Blobs<E>,
+        io: BlobIo<E>,
+        sealed: Vec<Sealed<E::Blob>>,
+        tail: Tail<E::Blob>,
         metadata: Metadata<E, u64, VecU64>,
         size: u64,
         pruning_boundary: u64,
@@ -1019,11 +1023,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         items_per_blob: NonZeroU64,
         metrics: Metrics<E>,
     ) -> Self {
+        let _ = io.metrics.tracked.try_set(sealed.len() + 1);
         let table = BlobTable {
             version: 0,
-            base_blob: blobs.base_blob,
-            sealed: blobs.sealed.into(),
-            tail_reader: blobs.tail.writer.reader(),
+            base_blob: tail.blob - sealed.len() as u64,
+            sealed: sealed.into(),
+            tail_reader: tail.writer.reader(),
             pruning_boundary,
         };
         let shared = Arc::new(Shared {
@@ -1032,8 +1037,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             readers: AtomicUsize::new(0),
         });
         Self {
-            io: blobs.io,
-            tail: blobs.tail,
+            io,
+            tail,
             metadata,
             size,
             pruning_boundary,
@@ -1071,13 +1076,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             Self::remove_blob_partition(&context, &cfg.partition).await?;
             Self::remove_blob_partition(&context, &new_partition).await?;
             let tail_blob = clear_target / items_per_blob;
-            let blobs_cfg = BlobsConfig {
-                partition: new_partition,
-                page_cache: cfg.page_cache,
-                write_buffer: cfg.write_buffer,
+            let io = BlobIo::new(
+                context.child("blobs"),
+                new_partition,
+                cfg.page_cache,
+                cfg.write_buffer,
+            );
+            let tail = Tail {
+                blob: tail_blob,
+                writer: io.open(tail_blob).await?,
             };
-            let init = RecoveryBlobs::open(context.child("blobs"), blobs_cfg).await?;
-            let blobs = init.reset(tail_blob).await?;
             Self::stage_pruning_boundary_metadata(&mut metadata, items_per_blob, clear_target);
             metadata.put(RECOVERY_WATERMARK_KEY, clear_target.into());
             metadata.remove(&CLEAR_TARGET_KEY);
@@ -1086,7 +1094,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             let metrics = Metrics::new(context);
             metrics.update(clear_target, clear_target, items_per_blob);
             return Ok(Self::from_blobs(
-                blobs,
+                io,
+                Vec::new(),
+                tail,
                 metadata,
                 clear_target,
                 clear_target,
@@ -1097,22 +1107,20 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
 
         let blob_partition = Self::select_blob_partition(&context, &cfg).await?;
-        let blobs_cfg = BlobsConfig {
-            partition: blob_partition,
-            page_cache: cfg.page_cache,
-            write_buffer: cfg.write_buffer,
-        };
-
-        let mut init = RecoveryBlobs::open(context.child("blobs"), blobs_cfg).await?;
+        let io = BlobIo::new(
+            context.child("blobs"),
+            blob_partition,
+            cfg.page_cache,
+            cfg.write_buffer,
+        );
+        let mut pending = io.open_all().await?;
 
         // Truncate any trailing non-chunk-aligned bytes on every blob before recovery. Items
         // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
         // from an incomplete write (the page-CRC layer surfaces it as a partial logical tail).
-        // `RecoveryBlobs::truncate_blob` syncs the repair before `recover_bounds` queries
-        // lengths.
-        let blobs_to_check: Vec<u64> = init.blobs();
-        for blob in blobs_to_check {
-            let size = init.blob_size(blob).await.expect("listed blob exists");
+        // The truncation is synced before `recover_bounds` queries lengths.
+        for (&blob, writer) in &pending {
+            let size = writer.size().await;
             if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
                 let valid_size = size - (size % Self::CHUNK_SIZE_U64);
                 warn!(
@@ -1121,7 +1129,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     new_size = valid_size,
                     "trailing bytes detected: truncating"
                 );
-                init.truncate_blob(blob, valid_size).await?;
+                writer.resize(valid_size).await.map_err(Error::Runtime)?;
+                writer.sync().await.map_err(Error::Runtime)?;
             }
         }
 
@@ -1132,7 +1141,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .map(u64::from);
 
         let (pruning_boundary, size, recovery_watermark, repair) = Self::recover_bounds(
-            &init,
+            &pending,
             items_per_blob,
             meta_pruning_boundary,
             meta_recovery_watermark,
@@ -1150,8 +1159,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         .await?;
 
         // Apply repair (if any). The repair blob becomes the new tail; blobs strictly newer
-        // than it are removed. `RecoveryBlobs::truncate_blob` syncs the blob, so the repair
-        // is durable before `into_blobs` runs.
+        // than it are removed (newest-first) and the repair truncation is synced, so the repair
+        // is durable before sealing.
         let tail_blob = size / items_per_blob;
         if let Some(repair) = repair {
             if repair.blob != tail_blob {
@@ -1160,20 +1169,53 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     repair.blob
                 )));
             }
-            // Remove any blobs strictly newer than the repair blob (newest-first).
-            let newer: Vec<u64> = init
-                .blobs()
-                .into_iter()
-                .filter(|&s| s > repair.blob)
-                .rev()
-                .collect();
-            for s in newer {
-                init.remove_blob(s).await?;
+            while let Some((&newest, _)) = pending.last_key_value() {
+                if newest <= repair.blob {
+                    break;
+                }
+                drop(pending.remove(&newest));
+                io.remove_blob(newest).await?;
             }
-            init.truncate_blob(repair.blob, repair.byte_offset).await?;
+            if let Some(writer) = pending.get(&repair.blob) {
+                if repair.byte_offset < writer.size().await {
+                    writer.resize(repair.byte_offset).await.map_err(Error::Runtime)?;
+                    writer.sync().await.map_err(Error::Runtime)?;
+                }
+            }
         }
 
-        let blobs = init.into_blobs(tail_blob).await?;
+        // Seal every blob below the tail. Retained blobs must be contiguous: positions map to
+        // blobs by arithmetic, so a gap would make some retained position unreadable.
+        if let Some(&newest) = pending.keys().next_back() {
+            if newest > tail_blob {
+                return Err(Error::Corruption(format!(
+                    "blobs > tail blob {tail_blob} exist (newest={newest})"
+                )));
+            }
+        }
+        let mut sealed = Vec::with_capacity(pending.len());
+        let mut tail = None;
+        let mut expected = pending.keys().next().copied();
+        for (blob, writer) in pending {
+            if expected != Some(blob) {
+                return Err(Error::Corruption(format!(
+                    "retained blobs must be contiguous (expected {expected:?}, got {blob})"
+                )));
+            }
+            expected = blob.checked_add(1);
+            if blob == tail_blob {
+                tail = Some(Tail { blob, writer });
+            } else {
+                sealed.push(writer.seal().await.map_err(Error::Runtime)?);
+            }
+        }
+        let tail = match tail {
+            Some(tail) => tail,
+            None => Tail {
+                blob: tail_blob,
+                writer: io.open(tail_blob).await?,
+            },
+        };
 
         // Bytes beyond the persisted recovery watermark may be readable after reopen without
         // being crash-durable, so the next commit/sync must force a data sync before advancing it.
@@ -1184,7 +1226,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         metrics.update(size, pruning_boundary, items_per_blob);
 
         Ok(Self::from_blobs(
-            blobs,
+            io,
+            sealed,
+            tail,
             metadata,
             size,
             pruning_boundary,
@@ -1218,19 +1262,19 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// ahead of blob state or a watermark beyond the recovered size is corruption. The caller
     /// persists metadata before applying the returned repair (see comment at the call site).
     async fn recover_bounds(
-        init: &RecoveryBlobs<E>,
+        pending: &BTreeMap<u64, AppendWriter<E::Blob>>,
         items_per_blob: u64,
         meta_pruning_boundary: Option<u64>,
         meta_recovery_watermark: Option<u64>,
     ) -> Result<(u64, u64, u64, Option<RecoveryRepair>), Error> {
         let pruning_boundary = Self::recover_pruning_boundary(
             meta_pruning_boundary,
-            init.oldest_blob(),
+            pending.keys().next().copied(),
             items_per_blob,
         )?;
 
         let (size, repair) =
-            Self::recover_by_walking_lengths(init, items_per_blob, pruning_boundary).await?;
+            Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary).await?;
 
         let recovery_watermark = match meta_recovery_watermark {
             Some(watermark) if watermark > size => {
@@ -1310,12 +1354,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     async fn blob_len_within_capacity(
-        init: &RecoveryBlobs<E>,
+        pending: &BTreeMap<u64, AppendWriter<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
         blob: u64,
     ) -> Result<(u64, u64), Error> {
-        let len = init.blob_size(blob).await.unwrap_or(0) / Self::CHUNK_SIZE_U64;
+        // A missing blob has zero length: that is what makes it a detectable gap.
+        let len = match pending.get(&blob) {
+            Some(writer) => writer.size().await,
+            None => 0,
+        } / Self::CHUNK_SIZE_U64;
         let capacity = blob_capacity(pruning_boundary, blob, items_per_blob)?;
         if len > capacity {
             return Err(Error::Corruption(format!(
@@ -1328,12 +1376,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Recover logical size by walking blob lengths from oldest to newest, truncating at the
     /// first short or missing non-tail blob.
     async fn recover_by_walking_lengths(
-        init: &RecoveryBlobs<E>,
+        pending: &BTreeMap<u64, AppendWriter<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
     ) -> Result<(u64, Option<RecoveryRepair>), Error> {
-        let oldest = init.oldest_blob();
-        let newest = init.newest_blob();
+        let oldest = pending.keys().next().copied();
+        let newest = pending.keys().next_back().copied();
 
         let (Some(oldest), Some(newest)) = (oldest, newest) else {
             return Ok((pruning_boundary, None));
@@ -1342,7 +1390,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let mut size = pruning_boundary;
         for blob in oldest..=newest {
             let (len, capacity) =
-                Self::blob_len_within_capacity(init, items_per_blob, pruning_boundary, blob)
+                Self::blob_len_within_capacity(pending, items_per_blob, pruning_boundary, blob)
                     .await?;
 
             size = size.checked_add(len).ok_or(Error::OffsetOverflow)?;
@@ -1636,7 +1684,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Seal the current tail (no fsync) and open `next_blob` as the new tail.
     async fn roll_tail(&mut self, next_blob: u64) -> Result<(), Error> {
         // Open the next tail first so a failure leaves the current tail untouched.
-        let new_writer = self.io.open_append(next_blob).await?;
+        let new_writer = self.io.open(next_blob).await?;
         self.io.metrics.tracked.inc();
         let new_reader = new_writer.reader();
         let old = std::mem::replace(
@@ -1748,7 +1796,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // Reopen the target as the writable tail and truncate in place. The fresh AppendWriter
         // gets a fresh page-cache id, so pages cached under the sealed handle's id are
         // unreachable.
-        let new_writer = self.io.open_append(blob).await?;
+        let new_writer = self.io.open(blob).await?;
         let current_bytes = new_writer.size().await;
         if byte_offset < current_bytes {
             new_writer
@@ -1893,7 +1941,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             self.io.remove_blob(blob).await?;
         }
         let _ = self.io.metrics.tracked.try_set(0);
-        let new_writer = self.io.open_append(new_tail_blob).await?;
+        let new_writer = self.io.open(new_tail_blob).await?;
         self.io.metrics.tracked.inc();
         let new_reader = new_writer.reader();
         self.tail = Tail {
