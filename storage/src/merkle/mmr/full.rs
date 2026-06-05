@@ -221,7 +221,7 @@ mod tests {
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
 
             // Build base full MMR with 10 elements.
-            let mmr = Mmr::init(
+            let mut mmr = Mmr::init(
                 context.child("storage"),
                 &Standard::<Sha256>::new(ForwardFold),
                 test_config(&context),
@@ -284,7 +284,7 @@ mod tests {
             let hasher = Standard::<Sha256>::new(ForwardFold);
 
             // Build an MMR with 5 leaves (size 8), sync, drop.
-            let mmr = Mmr::<_, Digest, Sequential>::init(
+            let mut mmr = Mmr::<_, Digest, Sequential>::init(
                 context.child("init"),
                 &hasher,
                 test_config(&context),

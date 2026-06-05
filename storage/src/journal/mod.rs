@@ -27,6 +27,8 @@ pub enum Error {
     Codec(#[from] commonware_codec::Error),
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
+    #[error("section in use by a reader: {0}")]
+    SectionInUse(u64),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
     #[error("invalid blob size: index={0} size={1}")]

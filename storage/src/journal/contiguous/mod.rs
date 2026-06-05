@@ -11,19 +11,18 @@ use tracing::warn;
 
 pub mod fixed;
 mod metrics;
+mod sections;
 pub mod variable;
 
 #[cfg(test)]
 mod tests;
 
-/// A reader guard that holds a consistent view of the journal.
+/// A consistent view of the journal.
 ///
-/// While this guard exists, the reader's logical bounds remain stable, and any position within
-/// `bounds()` remains readable through this guard.
-///
-/// Implementations may still make physical storage progress, such as unlinking backing blobs from
-/// future namespace lookups, but they must not invalidate reads within the captured bounds or
-/// change the bounds visible through this reader.
+/// Bounds are stable for the reader's lifetime, and any position within `bounds()` remains
+/// readable through it, including across a concurrent prune. A concurrent rewind below the
+/// reader's bounds may surface as an error ([Error::SectionInUse] for the rewinder, or a read
+/// error for the reader), never as torn data.
 pub trait Reader: Send + Sync {
     /// The type of items stored in the journal.
     type Item;

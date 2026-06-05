@@ -310,7 +310,7 @@ where
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root
     /// or current snapshot.
-    pub async fn prune(&self, prune_loc: Location) -> Result<(), Error> {
+    pub async fn prune(&mut self, prune_loc: Location) -> Result<(), Error> {
         if prune_loc > self.inactivity_floor_loc {
             return Err(Error::PruneBeyondMinRequired(
                 prune_loc,
@@ -394,7 +394,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&self) -> Result<(), Error> {
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.log.sync().await.map_err(Into::into)
     }
 
@@ -489,7 +489,7 @@ where
     }
 
     /// Durably commit the journal state published by prior [`Db::apply_batch`] calls.
-    pub async fn commit(&self) -> Result<(), Error> {
+    pub async fn commit(&mut self) -> Result<(), Error> {
         self.log.commit().await.map_err(Into::into)
     }
 }
@@ -503,11 +503,11 @@ where
 {
     type Error = Error;
 
-    async fn commit(&self) -> Result<(), Error> {
+    async fn commit(&mut self) -> Result<(), Error> {
         Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), Error> {
         self.sync().await
     }
 
@@ -752,7 +752,7 @@ mod test {
             drop(db);
 
             // Re-open the store, prune it, then ensure it replays the log correctly.
-            let db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
+            let mut db = create_test_store(ctx.child("store").with_attribute("index", 1)).await;
             db.prune(db.inactivity_floor_loc()).await.unwrap();
 
             let iter = db.snapshot.get(&k);
@@ -963,7 +963,7 @@ mod test {
             // Sync and reopen the store to ensure the state is preserved.
             db.sync().await.unwrap();
             drop(db);
-            let db = create_test_store(context.child("store").with_attribute("index", 2)).await;
+            let mut db = create_test_store(context.child("store").with_attribute("index", 2)).await;
             assert_eq!(db.bounds().await.end, final_count);
             assert_eq!(db.inactivity_floor_loc, final_floor);
 
@@ -1103,7 +1103,7 @@ mod test {
     }
 
     #[allow(dead_code)]
-    fn assert_commit_is_send(db: &Db<deterministic::Context, Digest, Vec<u8>, TwoCap>) {
+    fn assert_commit_is_send(db: &mut Db<deterministic::Context, Digest, Vec<u8>, TwoCap>) {
         is_send(db.commit());
     }
 }

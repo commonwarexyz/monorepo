@@ -746,7 +746,7 @@ where
             active_keys = self.active_keys as u64,
         ),
     )]
-    pub async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         let _timer = self.metrics.operations.sync_timer();
         self.metrics.operations.sync_calls.inc();
         self.log.sync().await?;
@@ -765,7 +765,7 @@ where
             active_keys = self.active_keys as u64,
         ),
     )]
-    pub async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         let _timer = self.metrics.operations.commit_timer();
         self.metrics.operations.commit_calls.inc();
         self.log.commit().await?;
@@ -791,11 +791,11 @@ where
 {
     type Error = crate::qmdb::Error<F>;
 
-    async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
+    async fn commit(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
+    async fn sync(&mut self) -> Result<(), crate::qmdb::Error<F>> {
         Self::sync(self).await
     }
 

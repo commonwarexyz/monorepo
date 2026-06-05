@@ -442,12 +442,12 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 impl<E: BufferPooler + Context, V: CodecFixedShared> Persistable for Ordinal<E, V> {
     type Error = Error;
 
-    async fn commit(&self) -> Result<(), Self::Error> {
-        self.sync().await
+    async fn commit(&mut self) -> Result<(), Self::Error> {
+        Self::sync(self).await
     }
 
-    async fn sync(&self) -> Result<(), Self::Error> {
-        self.sync().await
+    async fn sync(&mut self) -> Result<(), Self::Error> {
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Self::Error> {

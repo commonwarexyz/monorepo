@@ -344,12 +344,12 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
 impl<E: Context + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
     type Error = Error;
 
-    async fn commit(&self) -> Result<(), Error> {
+    async fn commit(&mut self) -> Result<(), Error> {
         self.journal.commit().await?;
         Ok(())
     }
 
-    async fn sync(&self) -> Result<(), Error> {
+    async fn sync(&mut self) -> Result<(), Error> {
         self.journal.sync().await?;
         self.journal.prune(self.ack_floor).await?;
         Ok(())

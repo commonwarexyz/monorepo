@@ -23,7 +23,7 @@ const ITEM_SIZE: usize = 32;
 
 /// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
-    let reader = journal.reader().await;
+    let reader = journal.reader();
     for pos in 0..items_to_read {
         black_box(reader.read(pos).await.expect("failed to read data"));
     }
@@ -43,7 +43,7 @@ fn bench_fixed_read_sequential(c: &mut Criterion) {
                     let mut j =
                         get_fixed_journal::<ITEM_SIZE>(ctx, PARTITION, ITEMS_PER_BLOB).await;
                     append_fixed_random_data::<_, ITEM_SIZE>(&mut j, items).await;
-                    let sz = j.size().await;
+                    let sz = j.size();
                     assert_eq!(sz, items);
 
                     // Run the benchmark

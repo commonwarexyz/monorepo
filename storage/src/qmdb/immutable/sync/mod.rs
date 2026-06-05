@@ -141,6 +141,7 @@ where
         };
         db.update_metrics().await;
 
+        let mut db = db;
         db.sync().await?;
         Ok(db)
     }
