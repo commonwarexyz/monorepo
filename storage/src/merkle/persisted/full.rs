@@ -653,6 +653,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         Ok(())
     }
 
+    /// Prune nodes after the caller has already synced appended state.
+    ///
+    /// When `sync_journal` is `true`, this also syncs the journal after the
+    /// prune metadata update so the new durable boundary is present on startup
+    /// without replay.
     async fn prune_synced(&mut self, loc: Location<F>, sync_journal: bool) -> Result<(), Error<F>> {
         let pos = Position::try_from(loc)?;
         {
