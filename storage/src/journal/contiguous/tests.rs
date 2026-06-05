@@ -312,7 +312,7 @@ impl RemoveHookContext {
     fn partition_matches(target: &Option<String>, partition: &str) -> bool {
         target
             .as_ref()
-            .map_or(true, |target| target.as_str() == partition)
+            .is_none_or(|target| target.as_str() == partition)
     }
 }
 
