@@ -4,7 +4,7 @@ use commonware_codec::FixedSize;
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_macros::test_traced;
 use commonware_runtime::{
-    buffer::paged::AppendWriter,
+    buffer::paged::Writer,
     deterministic::{self, Context},
     Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
     Supervisor as _,
@@ -620,7 +620,7 @@ fn test_fixed_journal_crash_during_recovery_repair() {
                 .open(&blob_partition(&cfg), &1u64.to_be_bytes())
                 .await
                 .expect("failed to open blob 1");
-            let append = AppendWriter::new(blob, blob_size, 2048, cache_ref)
+            let append = Writer::new(blob, blob_size, 2048, cache_ref)
                 .await
                 .expect("failed to wrap blob 1");
             append
@@ -736,7 +736,7 @@ fn test_fixed_journal_recover_sparse_blob_ids_repairs_at_gap() {
             .open(&blob_partition, &u64::MAX.to_be_bytes())
             .await
             .unwrap();
-        let append = AppendWriter::new(blob, blob_size, 2048, cache_ref)
+        let append = Writer::new(blob, blob_size, 2048, cache_ref)
             .await
             .unwrap();
         let extra = test_digest(999);
@@ -851,7 +851,7 @@ fn test_fixed_journal_stale_pruning_metadata_preserves_watermark() {
                 .open(&blob_partition(&cfg), &2u64.to_be_bytes())
                 .await
                 .expect("failed to open blob 2");
-            let append = AppendWriter::new(blob, blob_size, 2048, cache_ref)
+            let append = Writer::new(blob, blob_size, 2048, cache_ref)
                 .await
                 .expect("failed to wrap blob 2");
             append
@@ -1233,7 +1233,7 @@ fn test_fixed_journal_recover_rejects_overlong_blob() {
                 .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                 .await
                 .expect("failed to open blob 0");
-            let append = AppendWriter::new(blob, blob_size, 2048, cache_ref)
+            let append = Writer::new(blob, blob_size, 2048, cache_ref)
                 .await
                 .expect("failed to wrap blob 0");
             append

@@ -118,7 +118,7 @@ use crate::{
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::{
-    buffer::paged::{AppendWriter, CacheRef, Sealed},
+    buffer::paged::{Writer, CacheRef, Sealed},
     telemetry::metrics::GaugeExt as _,
     Blob,
 };
@@ -161,7 +161,7 @@ pub(super) fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u6
 /// The writable tail blob.
 pub(super) struct Tail<B: Blob> {
     pub(super) blob: u64,
-    pub(super) writer: AppendWriter<B>,
+    pub(super) writer: Writer<B>,
 }
 
 /// Configuration for `Journal` storage.
@@ -867,7 +867,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         target.sync().await.map_err(Error::Runtime)?;
         self.io.metrics.synced.inc();
 
-        // Reopen the target as the writable tail and truncate in place. The fresh AppendWriter
+        // Reopen the target as the writable tail and truncate in place. The fresh Writer
         // gets a fresh page-cache id, so pages cached under the sealed handle's id are
         // unreachable.
         let new_writer = self.io.open(blob).await?;

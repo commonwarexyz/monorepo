@@ -3,7 +3,7 @@
 use super::first_in_blob;
 use crate::journal::Error;
 use commonware_runtime::{
-    buffer::paged::{AppendReader, Sealed},
+    buffer::paged::{self, Sealed},
     Blob, IoBufs,
 };
 use commonware_utils::sync::RwLock;
@@ -18,7 +18,7 @@ use std::{
 /// A read handle for one blob, resolved from a [`BlobTable`].
 pub(super) enum BlobHandle<'a, B: Blob> {
     Sealed(&'a Sealed<B>),
-    Tail(&'a AppendReader<B>),
+    Tail(&'a paged::Reader<B>),
 }
 
 /// Maps each retained blob to its read handle. Immutable once published: operations that
@@ -36,7 +36,7 @@ pub(super) struct BlobTable<B: Blob> {
     pub(super) sealed: Arc<[Sealed<B>]>,
 
     /// Read capability for the live tail, blob [`Self::tail_blob`].
-    pub(super) tail_reader: AppendReader<B>,
+    pub(super) tail_reader: paged::Reader<B>,
 
     /// Items below this position are pruned.
     pub(super) pruning_boundary: u64,
@@ -122,7 +122,7 @@ pub(super) struct Shared<B: Blob> {
     /// The current blob table. Replaced whole; never modified in place.
     pub(super) table: RwLock<Arc<BlobTable<B>>>,
 
-    /// Number of live [Reader] snapshots. Gates in-place truncation during rewind.
+    /// Number of live [super::Reader] snapshots. Gates in-place truncation during rewind.
     pub(super) readers: AtomicUsize,
 }
 

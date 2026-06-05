@@ -1449,7 +1449,7 @@ mod tests {
     use crate::journal::contiguous::tests::{partition_sync_fault, run_contiguous_tests};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::{AppendWriter, CacheRef},
+        buffer::paged::{Writer, CacheRef},
         deterministic, Blob as _, Metrics as _, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -3309,7 +3309,7 @@ mod tests {
                     .open(&offsets_blob_partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let append = AppendWriter::new(
+                let append = Writer::new(
                     blob,
                     raw_size,
                     2048,
@@ -3336,7 +3336,7 @@ mod tests {
                 .open(&offsets_blob_partition, &0u64.to_be_bytes())
                 .await
                 .unwrap();
-            let append = AppendWriter::new(
+            let append = Writer::new(
                 blob,
                 raw_size,
                 2048,
@@ -3375,7 +3375,7 @@ mod tests {
                     .open(&data_partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let append = AppendWriter::new(
+                let append = Writer::new(
                     blob,
                     raw_size,
                     2048,
@@ -3402,7 +3402,7 @@ mod tests {
                 .open(&data_partition, &0u64.to_be_bytes())
                 .await
                 .unwrap();
-            let append = AppendWriter::new(
+            let append = Writer::new(
                 blob,
                 raw_size,
                 2048,

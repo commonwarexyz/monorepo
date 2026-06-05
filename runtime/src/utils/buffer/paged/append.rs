@@ -1,41 +1,36 @@
-//! Write-cached appending over a [Blob] with a page-oriented structure that provides integrity
-//! guarantees and page-cache managed read caching, split into write and read capabilities.
+//! Append-only access to a [Blob] through one write handle and any number of read handles.
 //!
-//! # Capabilities
+//! # Handles
 //!
-//! [AppendWriter] is the unique write capability: it owns appending, syncing, resizing,
-//! replaying, and sealing, and is not cloneable, so at most one write capability exists per
-//! wrapped blob. [AppendReader] is the cloneable read capability created via
-//! [AppendWriter::reader]: any number of readers may read concurrently with the writer, served
-//! from the shared write buffer, the page cache, or the underlying blob. The writer also exposes
-//! the read API directly.
+//! [Writer] is the unique write handle: it owns appending, syncing, resizing, replaying, and
+//! sealing, and is not cloneable, so at most one write handle exists per blob.
 //!
-//! [AppendWriter::seal] consumes the write capability and returns an immutable [super::Sealed]
-//! view. Outstanding [AppendReader]s remain valid after sealing: the shared state can no longer
-//! change because no write capability exists.
+//! [Reader] is a cloneable read handle over the same blob. Any number of readers may read
+//! concurrently with the writer. [Writer::seal] consumes the write handle and returns an
+//! immutable [super::Sealed] handle. Outstanding [Reader]s remain valid after sealing.
 //!
-//! # Recovery
+//! # Paging
 //!
-//! On `sync`, this wrapper will durably write buffered data to the underlying blob in pages. All
-//! pages have a [Checksum] at the end. If no CRC record existed before for the page being written,
-//! then one of the checksums will be all zero. If a checksum already existed for the page being
-//! written, then the write will overwrite only the checksum with the lesser length value. Should
-//! this write fail, the previously committed page state can still be recovered. Partial-page
-//! shrink makes the shorter checksum durable before invalidating the old longer checksum.
+//! Callers append and read logical bytes; the blob stores physical pages in the format described
+//! in [`super`]. Appends accumulate in a write buffer and reach the blob in pages. Buffered bytes
+//! are readable immediately but durable only after `sync`. Full pages read from the blob are
+//! cached in a shared page cache, so reads are served from the write buffer, the page cache, or
+//! the blob itself.
 //!
-//! During initialization, the wrapper will back up over any page that is not accompanied by a
-//! valid CRC, treating it as the result of an incomplete write that may be invalid.
+//! # Checksums
 //!
-//! # Blob Semantics
+//! Each physical page ends in a two-slot CRC record. The slots let a partial page be rewritten
+//! without clobbering its previously committed contents, so an interrupted write loses at most
+//! the bytes it was writing. [Writer::new] backs up over any trailing bytes not covered by a
+//! valid checksum, treating them as an incomplete write.
 //!
-//! [AppendWriter] owns the physical page layout, read cache, and durability bookkeeping for the
-//! wrapped [Blob]. Raw [Blob] handles cloned before wrapping operate on physical bytes, including
-//! checksum records, rather than the logical view, and they do not observe buffered data until it
-//! is flushed.
+//! # Raw [Blob] handles
 //!
-//! Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while an
-//! [AppendWriter] exists. Those mutations bypass the buffer and page cache, can invalidate
-//! checksum recovery, and are not covered by the [`Blob::write_at_sync`] fast paths.
+//! The [Writer] owns the page layout, page cache entries, and durability bookkeeping of its
+//! [Blob]. Raw handles cloned before the writer existed see physical bytes, including CRC
+//! records, and do not observe buffered bytes until they are flushed. They must not mutate the
+//! blob while a [Writer] exists: such writes bypass the write buffer and page cache and can
+//! invalidate checksum recovery.
 
 use super::read::{PageReader, Replay};
 use crate::{
@@ -140,8 +135,8 @@ impl<B: Blob> BlobState<B> {
     }
 }
 
-/// State shared between an [AppendWriter] and its [AppendReader]s.
-struct AppendShared<B: Blob> {
+/// State shared between a [Writer] and its [Reader]s.
+struct Shared<B: Blob> {
     /// The underlying blob being wrapped.
     blob_state: AsyncRwLock<BlobState<B>>,
 
@@ -156,48 +151,7 @@ struct AppendShared<B: Blob> {
     buffer: AsyncRwLock<Buffer>,
 }
 
-/// The unique write capability over a [Blob], with write-cached appending, page checksums, and
-/// page-cache read caching.
-///
-/// At most one [AppendWriter] exists per wrapped blob: it is not cloneable, and
-/// [AppendWriter::seal] consumes it. Shared read-only access is available through
-/// [AppendWriter::reader]; the writer also exposes the full read API.
-pub struct AppendWriter<B: Blob> {
-    shared: Arc<AppendShared<B>>,
-}
-
-/// A cloneable read-only capability over a blob managed by an [AppendWriter].
-///
-/// Readers observe bytes that are buffered but not yet flushed, and remain valid after
-/// [AppendWriter::seal] consumes the writer: the shared state is frozen from that point.
-pub struct AppendReader<B: Blob> {
-    shared: Arc<AppendShared<B>>,
-}
-
-impl<B: Blob> Clone for AppendReader<B> {
-    fn clone(&self) -> Self {
-        Self {
-            shared: self.shared.clone(),
-        }
-    }
-}
-
-/// Returns the capacity with a floor applied to ensure it can hold at least one full page of new
-/// data even when caching a nearly-full page of already written data.
-fn capacity_with_floor(capacity: usize, page_size: u64) -> usize {
-    let floor = page_size as usize * 2;
-    if capacity < floor {
-        warn!(
-            floor,
-            "requested buffer capacity is too low, increasing it to floor"
-        );
-        floor
-    } else {
-        capacity
-    }
-}
-
-impl<B: Blob> AppendShared<B> {
+impl<B: Blob> Shared<B> {
     /// Create the shared state for the provided `blob` that is known to have `blob_size`
     /// underlying physical bytes, using the provided `cache_ref` for read caching, and a write
     /// buffer with capacity `capacity`. Rewinds the blob if necessary to ensure it only contains
@@ -1045,7 +999,7 @@ impl<B: Blob> AppendShared<B> {
     }
 }
 
-impl<B: Blob> AppendShared<B> {
+impl<B: Blob> Shared<B> {
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there
@@ -1214,54 +1168,6 @@ impl<B: Blob> AppendShared<B> {
         Ok(())
     }
 
-    /// Consume this writable handle and return an immutable [`super::Sealed`] view of the same blob.
-    ///
-    /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
-    /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
-    /// [`super::Sealed::sync`].
-    ///
-    /// Once the unique [AppendWriter] is consumed, no write capability remains, so the shared
-    /// state observed by any outstanding [AppendReader]s is frozen.
-    async fn seal(&self) -> Result<super::Sealed<B>, Error> {
-        // Flush all buffered data (including the partial page) to the blob without an fsync. This
-        // mirrors the pre-flush done by [`Self::replay`].
-        {
-            let buf_guard = self.buffer.write().await;
-            self.flush_internal(buf_guard, true, false).await?;
-        }
-
-        // After flush, the buffer holds at most the partial-page logical bytes and `blob_state`
-        // reflects the on-disk state of that page.
-        let buffer = self.buffer.read().await;
-        let blob_state = self.blob_state.read().await;
-        let logical_page_size = self.cache_ref.page_size();
-        let full_pages = blob_state.current_page;
-        assert_eq!(
-            full_pages.checked_mul(logical_page_size),
-            Some(buffer.offset),
-            "flushed page count is inconsistent with the buffer offset"
-        );
-        // Copy the partial page into a precisely-sized allocation so the sealed handle does not
-        // keep the (much larger) append buffer alive.
-        let partial_page = if buffer.is_empty() {
-            None
-        } else {
-            let mut copy = self.cache_ref.pool().alloc(buffer.len());
-            copy.put_slice(buffer.as_ref());
-            Some(copy.freeze())
-        };
-        let size = buffer.size();
-        let blob = blob_state.blob.clone();
-
-        Ok(super::Sealed::from_parts(
-            blob,
-            size,
-            partial_page,
-            self.cache_ref.clone(),
-            self.id,
-        ))
-    }
-
     /// Page-cache id used for reads. Exposed for tests.
     #[cfg(test)]
     const fn cache_id(&self) -> u64 {
@@ -1269,8 +1175,84 @@ impl<B: Blob> AppendShared<B> {
     }
 }
 
-impl<B: Blob> AppendWriter<B> {
-    /// Create a new [AppendWriter] wrapping the provided `blob` that is known to have `blob_size`
+/// A reader from a cache-wrapped [Blob].
+/// Readers observe bytes that are buffered but not yet flushed, and remain valid after
+/// [Writer::seal] consumes the writer.
+pub struct Reader<B: Blob> {
+    shared: Arc<Shared<B>>,
+}
+
+impl<B: Blob> Clone for Reader<B> {
+    fn clone(&self) -> Self {
+        Self {
+            shared: self.shared.clone(),
+        }
+    }
+}
+
+impl<B: Blob> Reader<B> {
+    /// Returns the logical size of the blob. This accounts for both written and buffered data.
+    pub async fn size(&self) -> u64 {
+        self.shared.size().await
+    }
+
+    /// Returns the logical size of the blob if it can be observed without waiting.
+    pub fn try_size(&self) -> Option<u64> {
+        self.shared.try_size()
+    }
+
+    /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false`
+    /// otherwise.
+    ///
+    /// Returns `true` only if all `buf.len()` bytes were satisfied. When `false` is returned, the
+    /// contents of `buf` are unspecified.
+    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
+        self.shared.try_read_sync(offset, buf)
+    }
+
+    /// Read exactly `len` immutable bytes starting at `offset`.
+    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
+        self.shared.read_at(offset, len).await
+    }
+
+    /// Reads up to `len` bytes starting at `logical_offset`, but only as many as are available.
+    pub async fn read_up_to(
+        &self,
+        logical_offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        self.shared.read_up_to(logical_offset, len, bufs).await
+    }
+
+    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
+    ///
+    /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
+    /// non-overlapping, and within bounds.
+    pub async fn read_many_into(
+        &self,
+        buf: &mut [u8],
+        offsets: &[u64],
+        item_size: NonZeroUsize,
+    ) -> Result<(), Error> {
+        self.shared.read_many_into(buf, offsets, item_size).await
+    }
+
+    /// Reads bytes starting at `logical_offset` into `buf`.
+    pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
+        self.shared.read_into(buf, logical_offset).await
+    }
+}
+
+/// Unique writer to a cache-wrapped [Blob].
+/// At most one [Writer] exists per wrapped blob.
+/// Shared read-only access is available through [Writer::reader].
+pub struct Writer<B: Blob> {
+    shared: Arc<Shared<B>>,
+}
+
+impl<B: Blob> Writer<B> {
+    /// Create a new [Writer] wrapping the provided `blob` that is known to have `blob_size`
     /// underlying physical bytes, using the provided `cache_ref` for read caching, and a write
     /// buffer with capacity `capacity`. Rewinds the blob if necessary to ensure it only contains
     /// checksum-validated data.
@@ -1281,15 +1263,13 @@ impl<B: Blob> AppendWriter<B> {
         cache_ref: CacheRef,
     ) -> Result<Self, Error> {
         Ok(Self {
-            shared: Arc::new(
-                AppendShared::new(blob, original_blob_size, capacity, cache_ref).await?,
-            ),
+            shared: Arc::new(Shared::new(blob, original_blob_size, capacity, cache_ref).await?),
         })
     }
 
-    /// Create a read-only [AppendReader] sharing this writer's state.
-    pub fn reader(&self) -> AppendReader<B> {
-        AppendReader {
+    /// Create a read-only [Reader] sharing this writer's state.
+    pub fn reader(&self) -> Reader<B> {
+        Reader {
             shared: self.shared.clone(),
         }
     }
@@ -1320,17 +1300,53 @@ impl<B: Blob> AppendWriter<B> {
         self.shared.replay(buffer_size).await
     }
 
-    /// Consume the write capability and return an immutable [`super::Sealed`] view of the same
+    /// Consume the write handle and return an immutable [`super::Sealed`] handle for the same
     /// blob.
     ///
     /// Buffered bytes (full and partial pages) are written to the underlying blob, but the blob is
     /// not fsynced. The returned [`super::Sealed`] handle can be made durable later via
     /// [`super::Sealed::sync`].
     ///
-    /// Outstanding [AppendReader]s remain valid: they continue to read the now-frozen shared
-    /// state, which can no longer change because no write capability exists.
+    /// Outstanding [Reader]s remain valid: they continue to read the now-frozen shared
+    /// state, which can no longer change because no write handle exists.
     pub async fn seal(self) -> Result<super::Sealed<B>, Error> {
-        self.shared.seal().await
+        // Flush all buffered data (including the partial page) to the blob without an fsync. This
+        // mirrors the pre-flush done by [`Self::replay`].
+        {
+            let buf_guard = self.shared.buffer.write().await;
+            self.shared.flush_internal(buf_guard, true, false).await?;
+        }
+
+        // After flush, the buffer holds at most the partial-page logical bytes and `blob_state`
+        // reflects the on-disk state of that page.
+        let buffer = self.shared.buffer.read().await;
+        let blob_state = self.shared.blob_state.read().await;
+        let logical_page_size = self.shared.cache_ref.page_size();
+        let full_pages = blob_state.current_page;
+        assert_eq!(
+            full_pages.checked_mul(logical_page_size),
+            Some(buffer.offset),
+            "flushed page count is inconsistent with the buffer offset"
+        );
+        // Copy the partial page into a precisely-sized allocation so the sealed handle does not
+        // keep the (much larger) append buffer alive.
+        let partial_page = if buffer.is_empty() {
+            None
+        } else {
+            let mut copy = self.shared.cache_ref.pool().alloc(buffer.len());
+            copy.put_slice(buffer.as_ref());
+            Some(copy.freeze())
+        };
+        let size = buffer.size();
+        let blob = blob_state.blob.clone();
+
+        Ok(super::Sealed::new(
+            blob,
+            size,
+            partial_page,
+            self.shared.cache_ref.clone(),
+            self.shared.id,
+        ))
     }
 
     /// Returns the logical size of the blob. This accounts for both written and buffered data.
@@ -1392,57 +1408,18 @@ impl<B: Blob> AppendWriter<B> {
     }
 }
 
-impl<B: Blob> AppendReader<B> {
-    /// Returns the logical size of the blob. This accounts for both written and buffered data.
-    pub async fn size(&self) -> u64 {
-        self.shared.size().await
-    }
-
-    /// Returns the logical size of the blob if it can be observed without waiting.
-    pub fn try_size(&self) -> Option<u64> {
-        self.shared.try_size()
-    }
-
-    /// Read into `buf` if it can be done synchronously (e.g. without I/O), returning `false`
-    /// otherwise.
-    ///
-    /// Returns `true` only if all `buf.len()` bytes were satisfied. When `false` is returned, the
-    /// contents of `buf` are unspecified.
-    pub fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
-        self.shared.try_read_sync(offset, buf)
-    }
-
-    /// Read exactly `len` immutable bytes starting at `offset`.
-    pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
-        self.shared.read_at(offset, len).await
-    }
-
-    /// Reads up to `len` bytes starting at `logical_offset`, but only as many as are available.
-    pub async fn read_up_to(
-        &self,
-        logical_offset: u64,
-        len: usize,
-        bufs: impl Into<IoBufMut> + Send,
-    ) -> Result<(IoBufMut, usize), Error> {
-        self.shared.read_up_to(logical_offset, len, bufs).await
-    }
-
-    /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
-    ///
-    /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
-    /// non-overlapping, and within bounds.
-    pub async fn read_many_into(
-        &self,
-        buf: &mut [u8],
-        offsets: &[u64],
-        item_size: NonZeroUsize,
-    ) -> Result<(), Error> {
-        self.shared.read_many_into(buf, offsets, item_size).await
-    }
-
-    /// Reads bytes starting at `logical_offset` into `buf`.
-    pub async fn read_into(&self, buf: &mut [u8], logical_offset: u64) -> Result<(), Error> {
-        self.shared.read_into(buf, logical_offset).await
+/// Returns the capacity with a floor applied to ensure it can hold at least one full page of new
+/// data even when caching a nearly-full page of already written data.
+fn capacity_with_floor(capacity: usize, page_size: u64) -> usize {
+    let floor = page_size as usize * 2;
+    if capacity < floor {
+        warn!(
+            floor,
+            "requested buffer capacity is too low, increasing it to floor"
+        );
+        floor
+    } else {
+        capacity
     }
 }
 
@@ -1473,7 +1450,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1496,7 +1473,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1530,7 +1507,7 @@ mod tests {
                 .await
                 .unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1553,7 +1530,7 @@ mod tests {
                 .unwrap();
             // A one-page cache lets us prime the first page while leaving the second uncached.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1577,7 +1554,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1609,7 +1586,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1645,7 +1622,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1668,7 +1645,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1691,7 +1668,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1734,7 +1711,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1777,7 +1754,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             // Small cache: only 2 pages, so we can force eviction.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -1841,8 +1818,8 @@ mod tests {
             // Create a page cache reference.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
-            // Create an AppendWriter.
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            // Create a Writer.
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -1856,7 +1833,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0); // There was no need to write a crc since there was no data.
 
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -1875,8 +1852,8 @@ mod tests {
             // Create a page cache reference.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
-            // Create an AppendWriter.
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            // Create a Writer.
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -1917,7 +1894,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             // Physical page = 103 logical + 12 Checksum = 115 bytes (padded partial page)
             assert_eq!(blob_size, 115);
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 10); // CRC should be stripped after verification
@@ -1945,7 +1922,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             // 2 physical pages: 2 * 115 = 230 bytes
             assert_eq!(blob_size, 230);
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 110);
@@ -1970,7 +1947,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             // Physical size should be exactly 2 pages: 115 * 2 = 230 bytes
             assert_eq!(blob_size, 230);
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 206);
@@ -2000,7 +1977,7 @@ mod tests {
                 .unwrap();
             assert_eq!(blob_size, 0);
 
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -2034,7 +2011,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -2063,7 +2040,7 @@ mod tests {
             assert_eq!(range_syncs, 1);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = AppendWriter::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let read = reopened.read_at(0, data.len()).await.unwrap().coalesce();
@@ -2078,7 +2055,7 @@ mod tests {
             let name = b"failed_range_sync";
             let (blob, size) = context.open("test_partition", name).await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -2101,7 +2078,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -2134,7 +2111,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = AppendWriter::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let mut expected = data;
@@ -2154,7 +2131,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -2187,7 +2164,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -2206,7 +2183,7 @@ mod tests {
             assert_eq!(range_syncs, 0);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = AppendWriter::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(reopened.size().await, b"replayed".len() as u64);
@@ -2226,7 +2203,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -2237,7 +2214,7 @@ mod tests {
             blob.write_at(blob.size(), b"junk").await.unwrap();
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = AppendWriter::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(reopened.size().await, b"valid".len() as u64);
@@ -2262,7 +2239,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -2292,7 +2269,7 @@ mod tests {
             assert_eq!(range_syncs, 2);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = AppendWriter::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let read = reopened.read_at(0, 7).await.unwrap().coalesce();
@@ -2314,8 +2291,8 @@ mod tests {
             // Create a page cache reference.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
-            // Create an AppendWriter and write some data.
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            // Create a Writer and write some data.
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.append(&[1, 2, 3, 4]).await.unwrap();
@@ -2441,7 +2418,7 @@ mod tests {
         };
 
         let result =
-            AppendShared::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
+            Shared::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
         assert!(result.is_some());
         let (prefix_len, protected_crc) = result.unwrap();
         assert_eq!(prefix_len, 50);
@@ -2462,7 +2439,7 @@ mod tests {
         };
 
         let result =
-            AppendShared::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
+            Shared::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
         assert!(result.is_some());
         let (prefix_len, protected_crc) = result.unwrap();
         assert_eq!(prefix_len, 100);
@@ -2483,7 +2460,7 @@ mod tests {
         };
 
         let result =
-            AppendShared::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
+            Shared::<crate::storage::memory::Blob>::identify_protected_regions(Some(&record));
         assert!(result.is_some());
         let (prefix_len, protected_crc) = result.unwrap();
         assert_eq!(prefix_len, 100);
@@ -2515,8 +2492,8 @@ mod tests {
             // Create a page cache reference.
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
 
-            // Create an AppendWriter.
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+            // Create a Writer.
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -2603,7 +2580,7 @@ mod tests {
 
             // === Step 1: Write 10 bytes → slot 0 authoritative (len=10) ===
             let (blob, _) = context.open("test_partition", b"slot1_prot").await.unwrap();
-            let append = AppendWriter::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
@@ -2612,7 +2589,7 @@ mod tests {
 
             // === Step 2: Extend to 30 bytes → slot 1 authoritative (len=30) ===
             let (blob, size) = context.open("test_partition", b"slot1_prot").await.unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -2663,7 +2640,7 @@ mod tests {
             assert_eq!(slot0_mangled, DUMMY_MARKER, "Mangle failed");
 
             // === Step 4: Extend to 50 bytes → new CRC goes to slot 0, slot 1 protected ===
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -2729,7 +2706,7 @@ mod tests {
 
             // === Step 1: Write 10 bytes → slot 0 authoritative (len=10) ===
             let (blob, _) = context.open("test_partition", b"slot0_prot").await.unwrap();
-            let append = AppendWriter::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
@@ -2738,7 +2715,7 @@ mod tests {
 
             // === Step 2: Extend to 30 bytes → slot 1 authoritative (len=30) ===
             let (blob, size) = context.open("test_partition", b"slot0_prot").await.unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -2750,7 +2727,7 @@ mod tests {
 
             // === Step 3: Extend to 50 bytes → slot 0 authoritative (len=50) ===
             let (blob, size) = context.open("test_partition", b"slot0_prot").await.unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -2801,7 +2778,7 @@ mod tests {
             assert_eq!(slot1_mangled, DUMMY_MARKER, "Mangle failed");
 
             // === Step 5: Extend to 70 bytes → new CRC goes to slot 1, slot 0 protected ===
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -2868,7 +2845,7 @@ mod tests {
                 .open("test_partition", b"prefix_test")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             let data1: Vec<u8> = (1..=20).collect();
@@ -2896,7 +2873,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // === Step 3: Extend to 40 bytes ===
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -2954,7 +2931,7 @@ mod tests {
 
             // === Step 1: Write 50 bytes → slot 0 authoritative ===
             let (blob, _) = context.open("test_partition", b"boundary").await.unwrap();
-            let append = AppendWriter::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&(1..=50).collect::<Vec<u8>>()).await.unwrap();
@@ -2963,7 +2940,7 @@ mod tests {
 
             // === Step 2: Extend to 80 bytes → slot 1 authoritative ===
             let (blob, size) = context.open("test_partition", b"boundary").await.unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -2999,7 +2976,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // === Step 3: Extend past page boundary (80 + 40 = 120, PAGE_SIZE=103) ===
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -3053,7 +3030,7 @@ mod tests {
             );
 
             // Verify data integrity
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 120);
@@ -3085,7 +3062,7 @@ mod tests {
                 .open("test_partition", b"crc_fallback")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             let data1: Vec<u8> = (1..=10).collect();
@@ -3098,7 +3075,7 @@ mod tests {
                 .open("test_partition", b"crc_fallback")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append
@@ -3131,7 +3108,7 @@ mod tests {
             assert_eq!(crc.len1, 10, "Slot 0 should have len=10");
 
             // Verify we can read all 30 bytes before corruption
-            let append = AppendWriter::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 30);
@@ -3158,7 +3135,7 @@ mod tests {
             assert_eq!(crc.crc2, 0xDEADBEEF, "crc2 should be our corrupted value");
 
             // === Step 4: Re-open and verify fallback to slot 0's 10 bytes ===
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3207,7 +3184,7 @@ mod tests {
                 .open("test_partition", b"non_last_page")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, 0, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&(1..=10).collect::<Vec<u8>>()).await.unwrap();
@@ -3219,7 +3196,7 @@ mod tests {
                 .open("test_partition", b"non_last_page")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             // Add bytes 11 through 103 (93 more bytes)
@@ -3250,7 +3227,7 @@ mod tests {
             assert!(crc.len2 > crc.len1, "Slot 1 should be authoritative");
 
             // === Step 3: Extend past page boundary (add 10 more bytes for total of 113) ===
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             // Add bytes 104 through 113 (10 more bytes, now on page 1)
@@ -3273,7 +3250,7 @@ mod tests {
             );
 
             // Verify data is readable before corruption
-            let append = AppendWriter::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob.clone(), size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 113);
@@ -3305,7 +3282,7 @@ mod tests {
             // Since page 0 is not the last page, a partial fallback is invalid.
             // Reading from page 0 should fail because the fallback CRC indicates a partial
             // page, which is not allowed for non-last pages.
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3328,7 +3305,7 @@ mod tests {
                 .open("test_partition", b"non_last_page")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             let mut replay = append.replay(NZUsize!(1024)).await.unwrap();
@@ -3358,7 +3335,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3384,9 +3361,9 @@ mod tests {
                 .unwrap();
             blob.sync().await.unwrap();
 
-            // Open the blob - AppendWriter::new() validates the LAST page (page 2), which is still valid.
+            // Open the blob - Writer::new() validates the LAST page (page 2), which is still valid.
             // So it should open successfully with size 250.
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 250);
@@ -3415,7 +3392,7 @@ mod tests {
                 .open("test_partition", b"resize_invalidates_cache")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -3456,7 +3433,7 @@ mod tests {
                 .open("test_partition", b"resize_same_size")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -3485,7 +3462,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3501,7 +3478,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 45);
@@ -3522,7 +3499,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_interrupted")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data[..40]).await.unwrap();
@@ -3538,7 +3515,7 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 1, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let append = AppendWriter::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3554,7 +3531,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_interrupted")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 50);
@@ -3579,7 +3556,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_len_stage")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data[..255]).await.unwrap();
@@ -3595,7 +3572,7 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 2, 1);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let append = AppendWriter::new(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3611,7 +3588,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_len_stage")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, LARGE_BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 300);
@@ -3635,7 +3612,7 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob.clone(), 5, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let append = AppendWriter::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data[..48]).await.unwrap();
@@ -3672,7 +3649,7 @@ mod tests {
                 .open("test_partition", b"same_page_shrink_fallback_slot")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 50);
@@ -3695,7 +3672,7 @@ mod tests {
                 .open("test_partition", b"full_page_to_partial")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data).await.unwrap();
@@ -3708,7 +3685,7 @@ mod tests {
                 .open("test_partition", b"full_page_to_partial")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, target);
@@ -3731,7 +3708,7 @@ mod tests {
                 .open("test_partition", b"full_page_to_partial_interrupted")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             append.append(&data).await.unwrap();
@@ -3745,7 +3722,7 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 1, 3);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let append = AppendWriter::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(faulty_blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3761,7 +3738,7 @@ mod tests {
                 .open("test_partition", b"full_page_to_partial_interrupted")
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, page_size * 2);
@@ -3793,7 +3770,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             // Put the old authoritative CRC in slot 1, so the shorter CRC will be staged in slot
@@ -3814,7 +3791,7 @@ mod tests {
             let faulty_blob = PartialWriteBlob::new(blob, 3, 1);
             let write_count = faulty_blob.write_count();
             let failed_write_len = faulty_blob.failed_write_len();
-            let append = AppendWriter::new(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(faulty_blob, size, LARGE_BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3836,7 +3813,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, size, LARGE_BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob, size, LARGE_BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 40);
@@ -3851,7 +3828,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -3877,7 +3854,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -3918,7 +3895,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let blob = SyncTrackingBlob::new();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.sync().await.unwrap();
@@ -3941,7 +3918,7 @@ mod tests {
             assert_eq!(range_syncs, 1);
 
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let reopened = AppendWriter::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
+            let reopened = Writer::new(blob.clone(), blob.size(), BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             assert_eq!(reopened.size().await, PAGE_SIZE.get() as u64);
@@ -3965,7 +3942,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -3980,7 +3957,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 5);
@@ -4008,7 +3985,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -4040,7 +4017,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Step 3: Try to open the blob - should NOT panic, should return error or handle gracefully
-            let result = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
+            let result = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
 
             // Either returns InvalidChecksum error OR truncates the corrupted data
             // (both are acceptable behaviors - panicking is NOT acceptable)
@@ -4078,7 +4055,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let append = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+            let append = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone())
                 .await
                 .unwrap();
 
@@ -4107,7 +4084,7 @@ mod tests {
             blob.sync().await.unwrap();
 
             // Step 3: Try to open - should NOT panic
-            let result = AppendWriter::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
+            let result = Writer::new(blob, size, BUFFER_SIZE, cache_ref.clone()).await;
 
             match result {
                 Ok(append) => {
@@ -4132,7 +4109,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rdr_buf").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let writer = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let reader = writer.reader();
@@ -4159,7 +4136,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rdr_rsz").await.unwrap();
             let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let writer = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let reader = writer.reader();

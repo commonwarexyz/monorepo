@@ -10,7 +10,7 @@ use std::sync::atomic::Ordering;
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use crate::Context;
 use commonware_runtime::{
-    buffer::paged::{AppendReader, Replay},
+    buffer::paged::{self, Replay},
     Blob, Buf,
 };
 use commonware_utils::NZUsize;
@@ -438,7 +438,7 @@ struct BlobReplayState<B: Blob> {
 
 /// State for the `unfold` that replays the tail through the snapshot's read handle.
 struct TailReplayState<B: Blob> {
-    reader: AppendReader<B>,
+    reader: paged::Reader<B>,
     /// Next position to emit.
     next_pos: u64,
     /// One past the last position to emit: the snapshot's size.

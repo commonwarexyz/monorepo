@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{
     buffer::{
-        paged::{AppendWriter, CacheRef},
+        paged::{CacheRef, Writer},
         Read, Write,
     },
     deterministic, Blob, BufferPooler, Runner, Storage,
@@ -190,14 +190,10 @@ fn fuzz(input: FuzzInput) {
                     }
 
                     if let Some(ref cache) = cache_ref {
-                        append_buffer = AppendWriter::new(
-                            blob,
-                            initial_size as u64,
-                            buffer_size,
-                            cache.clone(),
-                        )
-                        .await
-                        .ok();
+                        append_buffer =
+                            Writer::new(blob, initial_size as u64, buffer_size, cache.clone())
+                                .await
+                                .ok();
                     }
                 }
 

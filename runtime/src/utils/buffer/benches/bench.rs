@@ -1,4 +1,4 @@
-//! Benchmarks for the page cache via the AppendWriter blob wrapper.
+//! Benchmarks for the page cache via the Append blob wrapper.
 //!
 //! Includes both deterministic in-memory runs to isolate buffer/page-cache work
 //! and Tokio-backed runs to exercise real storage I/O paths.
@@ -6,7 +6,7 @@
 //! Run with: `cargo bench --bench buffer_paged -p commonware-runtime`
 
 use commonware_runtime::{
-    buffer::paged::{AppendWriter, CacheRef},
+    buffer::paged::{CacheRef, Writer},
     Storage,
 };
 use commonware_utils::NZU16;
@@ -21,19 +21,15 @@ const PAGE_SIZE_USIZE: usize = PAGE_SIZE.get() as usize;
 const WRITE_BUFFER_SIZE: usize = PAGE_SIZE_USIZE * 4;
 const CACHE_SIZE: usize = 10_000;
 
-/// Create a new AppendWriter for benchmarking.
-async fn create_append<C: Storage>(
-    ctx: &C,
-    name: &[u8],
-    cache_ref: CacheRef,
-) -> AppendWriter<C::Blob> {
+/// Create a new Writer for benchmarking.
+async fn create_append<C: Storage>(ctx: &C, name: &[u8], cache_ref: CacheRef) -> Writer<C::Blob> {
     let (blob, size) = ctx.open("bench_partition", name).await.unwrap();
-    AppendWriter::new(blob, size, WRITE_BUFFER_SIZE, cache_ref)
+    Writer::new(blob, size, WRITE_BUFFER_SIZE, cache_ref)
         .await
         .unwrap()
 }
 
-async fn destroy_append<C: Storage>(ctx: &C, append: AppendWriter<C::Blob>, name: &[u8]) {
+async fn destroy_append<C: Storage>(ctx: &C, append: Writer<C::Blob>, name: &[u8]) {
     drop(append);
     ctx.remove("bench_partition", Some(name)).await.unwrap();
 }

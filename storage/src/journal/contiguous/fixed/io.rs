@@ -6,7 +6,7 @@ use crate::{
 };
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{AppendWriter, CacheRef},
+    buffer::paged::{Writer, CacheRef},
     Error as RError,
 };
 use std::{collections::BTreeMap, num::NonZeroUsize};
@@ -38,11 +38,11 @@ impl<E: Context> BlobIo<E> {
         }
     }
 
-    /// Scan the partition and open every existing blob as a writable [`AppendWriter`], keyed by
+    /// Scan the partition and open every existing blob as a writable [`Writer`], keyed by
     /// blob number.
     pub(super) async fn open_all(
         &self,
-    ) -> Result<BTreeMap<u64, AppendWriter<E::Blob>>, Error> {
+    ) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
         let stored = match self.context.scan(&self.partition).await {
             Ok(names) => names,
             Err(RError::PartitionMissing(_)) => Vec::new(),
@@ -64,7 +64,7 @@ impl<E: Context> BlobIo<E> {
                 .map_err(Error::Runtime)?;
             debug!(index, blob = hex_name, size, "loaded blob");
             let writer =
-                AppendWriter::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
+                Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
                     .await
                     .map_err(Error::Runtime)?;
             blobs.insert(index, writer);
@@ -72,15 +72,15 @@ impl<E: Context> BlobIo<E> {
         Ok(blobs)
     }
 
-    /// Open the given blob as a writable [`AppendWriter`], creating it if it does not exist.
-    pub(super) async fn open(&self, blob: u64) -> Result<AppendWriter<E::Blob>, Error> {
+    /// Open the given blob as a writable [`Writer`], creating it if it does not exist.
+    pub(super) async fn open(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
         let name = blob.to_be_bytes();
         let (blob, size) = self
             .context
             .open(&self.partition, &name)
             .await
             .map_err(Error::Runtime)?;
-        AppendWriter::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
+        Writer::new(blob, size, self.write_buffer.get(), self.page_cache.clone())
             .await
             .map_err(Error::Runtime)
     }

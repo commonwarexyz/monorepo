@@ -7,7 +7,7 @@ use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{
-        paged::{AppendWriter, CacheRef},
+        paged::{Writer, CacheRef},
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
@@ -29,7 +29,7 @@ pub trait SectionBuffer: Send + Sync {
     fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
-impl<B: Blob> SectionBuffer for AppendWriter<B> {
+impl<B: Blob> SectionBuffer for Writer<B> {
     async fn size(&self) -> u64 {
         Self::size(self).await
     }
@@ -70,7 +70,7 @@ pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     ) -> impl Future<Output = Result<Self::Buffer, RError>> + Send;
 }
 
-/// Factory for creating [`AppendWriter`] buffers with page caching.
+/// Factory for creating [`Writer`] buffers with page caching.
 #[derive(Clone)]
 pub struct AppendFactory {
     /// The size of the write buffer.
@@ -80,10 +80,10 @@ pub struct AppendFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for AppendFactory {
-    type Buffer = AppendWriter<B>;
+    type Buffer = Writer<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        AppendWriter::new(
+        Writer::new(
             blob,
             size,
             self.write_buffer.get(),

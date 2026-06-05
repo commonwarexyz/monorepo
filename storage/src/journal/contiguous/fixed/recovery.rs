@@ -7,7 +7,7 @@ use crate::{
     Context,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::{buffer::paged::AppendWriter, Error as RuntimeError};
+use commonware_runtime::{buffer::paged::Writer, Error as RuntimeError};
 use commonware_utils::sequence::VecU64;
 use std::collections::BTreeMap;
 use tracing::warn;
@@ -198,7 +198,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// ahead of blob state or a watermark beyond the recovered size is corruption. The caller
     /// persists metadata before applying the returned repair (see comment at the call site).
     pub(super) async fn recover_bounds(
-        pending: &BTreeMap<u64, AppendWriter<E::Blob>>,
+        pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         meta_pruning_boundary: Option<u64>,
         meta_recovery_watermark: Option<u64>,
@@ -290,7 +290,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     async fn blob_len_within_capacity(
-        pending: &BTreeMap<u64, AppendWriter<E::Blob>>,
+        pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
         blob: u64,
@@ -312,7 +312,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Recover logical size by walking blob lengths from oldest to newest, truncating at the
     /// first short or missing non-tail blob.
     async fn recover_by_walking_lengths(
-        pending: &BTreeMap<u64, AppendWriter<E::Blob>>,
+        pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
     ) -> Result<(u64, Option<RecoveryRepair>), Error> {

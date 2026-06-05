@@ -87,7 +87,7 @@ use commonware_codec::{
     Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::paged::{AppendWriter, CacheRef, Replay},
+    buffer::paged::{Writer, CacheRef, Replay},
     Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -180,7 +180,7 @@ fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> 
 /// invalid trailing data and sync) when it encounters torn items.
 struct ReplayState<'a, B: Blob, C> {
     section: u64,
-    blob: &'a AppendWriter<B>,
+    blob: &'a Writer<B>,
     replay: Replay<B>,
     skip_bytes: u64,
     offset: u64,
@@ -251,7 +251,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     async fn read(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &AppendWriter<E::Blob>,
+        blob: &Writer<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
         // Read varint header (max 5 bytes for u32)
