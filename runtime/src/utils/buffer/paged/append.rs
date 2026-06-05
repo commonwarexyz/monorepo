@@ -156,21 +156,20 @@ struct AppendShared<B: Blob> {
     buffer: AsyncRwLock<Buffer>,
 }
 
-/// The unique write capability over a [Blob] that supports write-cached appending of data, with
-/// checksums for data integrity and page cache managed caching.
+/// The unique write capability over a [Blob], with write-cached appending, page checksums, and
+/// page-cache read caching.
 ///
-/// At most one [AppendWriter] exists per wrapped blob: it is not cloneable, and consuming it via
-/// [AppendWriter::seal] revokes the ability to mutate the blob entirely. Shared read-only access
-/// is available through [AppendWriter::reader]. The writer exposes the full read API as well.
+/// At most one [AppendWriter] exists per wrapped blob: it is not cloneable, and
+/// [AppendWriter::seal] consumes it. Shared read-only access is available through
+/// [AppendWriter::reader]; the writer also exposes the full read API.
 pub struct AppendWriter<B: Blob> {
     shared: Arc<AppendShared<B>>,
 }
 
 /// A cloneable read-only capability over a blob managed by an [AppendWriter].
 ///
-/// Readers observe buffered (not yet flushed) bytes and remain valid after the writer is consumed
-/// by [AppendWriter::seal]: from that point the shared state is frozen, and reads continue to be
-/// served from the shared buffer, the page cache, or the underlying blob.
+/// Readers observe bytes that are buffered but not yet flushed, and remain valid after
+/// [AppendWriter::seal] consumes the writer: the shared state is frozen from that point.
 pub struct AppendReader<B: Blob> {
     shared: Arc<AppendShared<B>>,
 }
