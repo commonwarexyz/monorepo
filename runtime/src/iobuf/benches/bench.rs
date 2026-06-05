@@ -14,7 +14,7 @@
 //!
 //! Shared threading and measurement helpers live in [`utils`].
 //!
-//! Run with: `cargo bench --bench buffer_pool -p commonware-runtime --features bench`
+//! Run with: `cargo bench --bench iobuf -p commonware-runtime --features bench`
 
 use criterion::{criterion_group, criterion_main};
 
