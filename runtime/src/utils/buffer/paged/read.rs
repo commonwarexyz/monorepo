@@ -366,7 +366,7 @@ impl<B: Blob> Buf for Replay<B> {
 
 #[cfg(test)]
 mod tests {
-    use super::{super::append::Append, *};
+    use super::{super::append::Writer, *};
     use crate::{deterministic, Runner as _, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
@@ -383,7 +383,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -421,7 +421,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -450,7 +450,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -506,7 +506,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 
@@ -545,7 +545,7 @@ mod tests {
 
             let cache_ref =
                 super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
-            let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
+            let append = Writer::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
 

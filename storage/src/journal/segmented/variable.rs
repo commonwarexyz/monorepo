@@ -87,7 +87,7 @@ use commonware_codec::{
     Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
-    buffer::paged::{Append, CacheRef, Replay},
+    buffer::paged::{CacheRef, Replay, Writer},
     Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
@@ -175,9 +175,10 @@ fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> 
 }
 
 /// State for replaying a single section's blob.
-struct ReplayState<B: Blob, C> {
+struct ReplayState<'a, B: Blob, C> {
     section: u64,
-    blob: Append<B>,
+    // Need a [Writer] because replay may repair the blob by rewinding invalid trailing data.
+    blob: &'a Writer<B>,
     replay: Replay<B>,
     skip_bytes: u64,
     offset: u64,
@@ -248,7 +249,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     async fn read(
         compressed: bool,
         cfg: &V::Cfg,
-        blob: &Append<E::Blob>,
+        blob: &Writer<E::Blob>,
         offset: u64,
     ) -> Result<(u64, u32, V), Error> {
         // Read varint header (max 5 bytes for u32)
@@ -310,7 +311,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         for (&section, blob) in self.manager.sections_from(start_section) {
             blobs.push((
                 section,
-                blob.clone(),
+                blob,
                 blob.replay(buffer).await?,
                 codec_config.clone(),
                 compressed,
