@@ -29,10 +29,7 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
 use rand::Rng;
-use std::{
-    num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
-};
+use std::{num::NonZeroUsize, sync::Arc};
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -44,13 +41,15 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
 /// Periodic database maintenance performed after finalization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaintenanceInterval {
-    /// Persist in-memory database state every `interval` finalized blocks.
-    Persist(NonZeroU64),
+pub struct MaintenanceConfig {
+    /// Run maintenance every `interval` finalized blocks.
+    pub interval: NonZeroUsize,
 
-    /// Prune databases and marshal every `interval` finalized blocks, keeping
-    /// enough finalized history to safely rewind `max_pending_acks` blocks.
-    Prune(NonZeroU64),
+    /// Prune databases and marshal instead of only persisting committed state.
+    ///
+    /// When `true`, glue retains enough finalized history to safely rewind
+    /// `max_pending_acks` blocks before pruning.
+    pub prune: bool,
 }
 
 /// Configuration for constructing a [`Stateful`] application.
@@ -92,14 +91,8 @@ where
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
-    /// Periodic database maintenance.
-    ///
-    /// - Use [`MaintenanceInterval::Persist`] to periodically sync the current
-    ///   committed state to disk without pruning.
-    /// - Use [`MaintenanceInterval::Prune`] to periodically prune to the oldest
-    ///   safe finalized target derived from `max_pending_acks`. This routine
-    ///   will prune both marshal and application databases.
-    pub maintenance_interval: MaintenanceInterval,
+    /// Periodic database maintenance configuration.
+    pub maintenance: MaintenanceConfig,
 }
 
 /// Stateful application that manages the pending-tip DAG of merkleized
@@ -143,7 +136,7 @@ where
     max_pending_acks: NonZeroUsize,
 
     /// Periodic database maintenance.
-    maintenance_interval: MaintenanceInterval,
+    maintenance: MaintenanceConfig,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -176,7 +169,7 @@ where
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 max_pending_acks: config.max_pending_acks,
-                maintenance_interval: config.maintenance_interval,
+                maintenance: config.maintenance,
             },
             Mailbox::new(sender),
         )
@@ -225,7 +218,7 @@ where
             resolvers: self.resolvers,
             sync_completed,
             max_pending_acks: self.max_pending_acks,
-            maintenance_interval: self.maintenance_interval,
+            maintenance: self.maintenance,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -254,7 +247,7 @@ where
             anchor,
             processor_metrics,
             self.max_pending_acks,
-            self.maintenance_interval,
+            self.maintenance,
         );
         Processing {
             context: self.context,
@@ -272,7 +265,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, MaintenanceInterval, Stateful};
+    use super::{Config, MaintenanceConfig, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
@@ -431,7 +424,10 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
-                    maintenance_interval: MaintenanceInterval::Persist(NZU64!(u64::MAX)),
+                    maintenance: MaintenanceConfig {
+                        interval: NZUsize!(usize::MAX),
+                        prune: false,
+                    },
                 },
             );
             let handle = stateful.start();

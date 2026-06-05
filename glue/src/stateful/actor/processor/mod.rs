@@ -22,7 +22,7 @@
 //! response channel, in-progress work stops at the next await point via
 //! [`await_or_cancel`].
 
-use super::core::MaintenanceInterval;
+use super::core::MaintenanceConfig;
 use crate::stateful::{
     db::{Anchor, DatabaseSet},
     Application, Proposed,
@@ -105,19 +105,19 @@ pub(super) enum MaintenanceAction<T> {
 /// Tracks the configured finalized-block maintenance policy and any retained
 /// finalized sync targets needed to make pruning safe.
 struct Maintenance<T> {
-    interval: MaintenanceInterval,
+    config: MaintenanceConfig,
     prune_retention_window: usize,
     retained_targets: VecDeque<(Height, T)>,
 }
 
 impl<T: Clone> Maintenance<T> {
-    const fn new(interval: MaintenanceInterval, max_pending_acks: NonZeroUsize) -> Self {
+    const fn new(config: MaintenanceConfig, max_pending_acks: NonZeroUsize) -> Self {
         let prune_retention_window = max_pending_acks
             .get()
             .checked_add(1)
             .expect("max_pending_acks retention window overflowed");
         Self {
-            interval,
+            config,
             prune_retention_window,
             retained_targets: VecDeque::new(),
         }
@@ -133,38 +133,35 @@ impl<T: Clone> Maintenance<T> {
     /// cadence. The prune target is the oldest retained finalized target and
     /// its corresponding finalized block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
-        match self.interval {
-            MaintenanceInterval::Persist(interval) => {
-                if height.get().is_multiple_of(interval.get()) {
-                    MaintenanceAction::Persist
-                } else {
-                    MaintenanceAction::None
-                }
-            }
-            MaintenanceInterval::Prune(interval) => {
-                self.retained_targets.push_back((height, targets));
-                if self.retained_targets.len() > self.prune_retention_window {
-                    self.retained_targets.pop_front();
-                }
-
-                // Do not prune until we've observed a full rewind-safe window
-                // of finalized blocks after startup.
-                if self.retained_targets.len() < self.prune_retention_window {
-                    return MaintenanceAction::None;
-                }
-
-                if !height.get().is_multiple_of(interval.get()) {
-                    return MaintenanceAction::None;
-                }
-
-                let (height, targets) = self
-                    .retained_targets
-                    .front()
-                    .cloned()
-                    .expect("retained prune targets must exist");
-                MaintenanceAction::Prune { height, targets }
+        if self.config.prune {
+            self.retained_targets.push_back((height, targets));
+            if self.retained_targets.len() > self.prune_retention_window {
+                self.retained_targets.pop_front();
             }
         }
+
+        let interval = u64::try_from(self.config.interval.get())
+            .expect("maintenance interval should fit in u64");
+        if !height.get().is_multiple_of(interval) {
+            return MaintenanceAction::None;
+        }
+
+        if !self.config.prune {
+            return MaintenanceAction::Persist;
+        }
+
+        // Do not prune until we've observed a full rewind-safe window
+        // of finalized blocks after startup.
+        if self.retained_targets.len() < self.prune_retention_window {
+            return MaintenanceAction::None;
+        }
+
+        let (height, targets) = self
+            .retained_targets
+            .front()
+            .cloned()
+            .expect("retained prune targets must exist");
+        MaintenanceAction::Prune { height, targets }
     }
 }
 
@@ -195,7 +192,7 @@ where
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: ProcessorMetrics,
         max_pending_acks: NonZeroUsize,
-        maintenance_interval: MaintenanceInterval,
+        maintenance: MaintenanceConfig,
     ) -> Self {
         Self {
             app,
@@ -203,7 +200,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
-            maintenance: Maintenance::new(maintenance_interval, max_pending_acks),
+            maintenance: Maintenance::new(maintenance, max_pending_acks),
         }
     }
 
@@ -885,7 +882,7 @@ where
 mod tests {
     use super::{
         await_or_cancel, next_or_cancel, FinalizeStatus, Maintenance, MaintenanceAction,
-        MaintenanceInterval, PrepareBatchesError, Processor,
+        MaintenanceConfig, PrepareBatchesError, Processor,
     };
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
@@ -1278,7 +1275,10 @@ mod tests {
                     },
                     metrics,
                     NZUsize!(1),
-                    MaintenanceInterval::Persist(NZU64!(u64::MAX)),
+                    MaintenanceConfig {
+                        interval: NZUsize!(usize::MAX),
+                        prune: false,
+                    },
                 ),
                 provider,
                 db_config: config,
@@ -1562,8 +1562,13 @@ mod tests {
 
     #[test]
     fn maintenance_persist_runs_on_interval() {
-        let mut maintenance =
-            Maintenance::new(MaintenanceInterval::Persist(NZU64!(2)), NZUsize!(1));
+        let mut maintenance = Maintenance::new(
+            MaintenanceConfig {
+                interval: NZUsize!(2),
+                prune: false,
+            },
+            NZUsize!(1),
+        );
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
@@ -1577,7 +1582,13 @@ mod tests {
 
     #[test]
     fn maintenance_prune_waits_for_full_retention_window() {
-        let mut maintenance = Maintenance::new(MaintenanceInterval::Prune(NZU64!(1)), NZUsize!(2));
+        let mut maintenance = Maintenance::new(
+            MaintenanceConfig {
+                interval: NZUsize!(1),
+                prune: true,
+            },
+            NZUsize!(2),
+        );
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
@@ -1598,7 +1609,13 @@ mod tests {
 
     #[test]
     fn maintenance_prune_uses_oldest_retained_target() {
-        let mut maintenance = Maintenance::new(MaintenanceInterval::Prune(NZU64!(1)), NZUsize!(1));
+        let mut maintenance = Maintenance::new(
+            MaintenanceConfig {
+                interval: NZUsize!(1),
+                prune: true,
+            },
+            NZUsize!(1),
+        );
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
@@ -1637,7 +1654,10 @@ mod tests {
                 },
                 ProcessorMetrics::new(harness.context_cell.child("staged_processor_metrics")),
                 NZUsize!(1),
-                MaintenanceInterval::Persist(NZU64!(1)),
+                MaintenanceConfig {
+                    interval: NZUsize!(1),
+                    prune: false,
+                },
             );
 
             let genesis = Block::genesis();

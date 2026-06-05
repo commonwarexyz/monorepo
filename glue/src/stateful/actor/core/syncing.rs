@@ -3,7 +3,7 @@ use crate::stateful::{
         core::{
             mailbox::{ErasedAncestorStream, Message},
             processing::Processing,
-            MaintenanceInterval,
+            MaintenanceConfig,
         },
         processor::{
             run_maintenance, FinalizeStatus, MaintenanceAction, Processor, ProcessorMetrics,
@@ -93,7 +93,7 @@ where
     pub(super) max_pending_acks: NonZeroUsize,
 
     /// Periodic database maintenance.
-    pub(super) maintenance_interval: MaintenanceInterval,
+    pub(super) maintenance: MaintenanceConfig,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -235,7 +235,7 @@ where
             artifact.anchor,
             metrics,
             self.max_pending_acks,
-            self.maintenance_interval,
+            self.maintenance,
         );
 
         self.sync_metadata
@@ -305,7 +305,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{super::MaintenanceInterval, Syncing};
+    use super::{super::MaintenanceConfig, Syncing};
     use crate::stateful::{
         actor::syncer::{self, StateSyncMetadata, SyncResult},
         db::{Anchor, AttachableResolver},
@@ -372,7 +372,10 @@ mod tests {
                     resolvers: NoopResolver,
                     sync_completed,
                     max_pending_acks: NZUsize!(1),
-                    maintenance_interval: MaintenanceInterval::Persist(NZU64!(u64::MAX)),
+                    maintenance: MaintenanceConfig {
+                        interval: NZUsize!(usize::MAX),
+                        prune: false,
+                    },
                 },
             }
         }

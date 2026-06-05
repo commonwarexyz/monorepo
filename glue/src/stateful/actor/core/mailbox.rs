@@ -168,7 +168,7 @@ where
     /// immediately.
     ///
     /// Holders must never manually prune these databases. Stateful glue uses
-    /// [`MaintenanceInterval`](crate::stateful::MaintenanceInterval) to
+    /// [`MaintenanceConfig`](crate::stateful::MaintenanceConfig) to
     /// schedule safe maintenance without pruning past the rewind window needed
     /// for crash reconciliation.
     pub async fn subscribe_databases(&self) -> A::Databases {

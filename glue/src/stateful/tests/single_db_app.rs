@@ -10,7 +10,7 @@ use crate::{
             Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, MaintenanceInterval, Proposed,
+        Application, Config as StatefulConfig, MaintenanceConfig, Proposed,
         Stateful as StatefulActor, SyncPlan,
     },
 };
@@ -519,7 +519,10 @@ impl EngineDefinition for SingleDbEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
-                maintenance_interval: MaintenanceInterval::Prune(NZU64!(10)),
+                maintenance: MaintenanceConfig {
+                    interval: NZUsize!(10),
+                    prune: true,
+                },
             },
         );
 
