@@ -10,8 +10,7 @@ use crate::{
             Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, MaintenanceConfig, Proposed,
-        Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
     },
 };
 use commonware_broadcast::buffered;
@@ -519,10 +518,7 @@ impl EngineDefinition for SingleDbEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
-                maintenance: MaintenanceConfig {
-                    interval: NZUsize!(10),
-                    prune: true,
-                },
+                prune_interval: Some(NZUsize!(10)),
             },
         );
 

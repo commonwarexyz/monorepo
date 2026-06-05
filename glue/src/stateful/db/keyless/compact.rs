@@ -240,11 +240,6 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
-        self.commit().await?;
-        Ok(())
-    }
-
-    async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
     }
 
@@ -305,11 +300,6 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
-        self.commit().await?;
-        Ok(())
-    }
-
-    async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
     }
 

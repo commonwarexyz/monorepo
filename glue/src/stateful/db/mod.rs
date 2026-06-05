@@ -194,20 +194,12 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Apply a merkleized batch's changeset to the underlying database.
     ///
     /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
-    /// a `Changeset`, then `db.apply_batch(changeset)` and `db.commit()`.
-    ///
-    /// This call makes changes durable, but may still require replay on startup.
+    /// a `Changeset`, then `db.apply_batch(changeset)` and the database's
+    /// durable finalize step.
     fn finalize(
         &mut self,
         batch: Self::Merkleized,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
-    /// Persist the database's current in-memory state.
-    ///
-    /// This is heavier than [`finalize`](Self::finalize) and is intended for
-    /// periodic maintenance rather than every finalized block. This call makes
-    /// changes durable and ensures they will be present on startup without replay.
-    fn persist(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
     /// Prune the database to a previously finalized sync target.
     ///
@@ -284,17 +276,10 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Return true if merkleized batches match the committed sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
-    /// Apply each merkleized batch's changeset to its underlying database. This call makes
-    /// changes durable, but may still require replay on startup.
+    /// Apply each merkleized batch's changeset to its underlying database.
     ///
     /// Acquires a write lock on each database.
     fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
-
-    /// Persist each database's current in-memory state. This call makes changes durable
-    /// and ensures they will be present on startup without replay.
-    ///
-    /// Acquires a write lock on each database.
-    fn persist(&self) -> impl Future<Output = ()> + Send;
 
     /// Prune each database to the provided per-database targets.
     ///
@@ -495,11 +480,6 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
     async fn finalize(&self, batches: Self::Merkleized) {
         let mut database = self.write().await;
         finalize_or_panic(&mut *database, batches, None).await;
-    }
-
-    async fn persist(&self) {
-        let mut database = self.write().await;
-        persist_or_panic(&mut *database, None).await;
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
@@ -732,15 +712,6 @@ macro_rules! impl_database_set {
                     async {
                         let mut database = self.$idx.write().await;
                         finalize_or_panic(&mut *database, batches.$idx, Some($idx)).await;
-                    },
-                )+);
-            }
-
-            async fn persist(&self) {
-                join!($(
-                    async {
-                        let mut database = self.$idx.write().await;
-                        persist_or_panic(&mut *database, Some($idx)).await;
                     },
                 )+);
             }
@@ -1439,24 +1410,6 @@ async fn rewind_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-async fn persist_or_panic<E, T: ManagedDb<E>>(database: &mut T, index: Option<usize>) {
-    // Explicit persistence failures are fatal for the same reason as finalize
-    // failures: the database may already have partially advanced its durable
-    // maintenance state.
-    if let Err(err) = database.persist().await {
-        match index {
-            Some(index) => panic!(
-                "database persist failed (index {index}, type {}): {err:?}",
-                core::any::type_name::<T>(),
-            ),
-            None => panic!(
-                "database persist failed (type {}): {err:?}",
-                core::any::type_name::<T>(),
-            ),
-        }
-    }
-}
-
 async fn prune_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: &T::SyncTarget,
@@ -1595,10 +1548,6 @@ mod tests {
         rewind_count: usize,
     }
 
-    struct SyncCountingDb {
-        sync_count: Arc<AtomicUsize>,
-    }
-
     struct PruneCountingDb {
         prune_count: Arc<AtomicUsize>,
     }
@@ -1624,10 +1573,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1658,10 +1603,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1699,10 +1640,6 @@ mod tests {
             Ok(())
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1737,10 +1674,6 @@ mod tests {
             Ok(())
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {
             self.current_target
         }
@@ -1748,41 +1681,6 @@ mod tests {
         async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Self::Error> {
             self.current_target = target;
             self.rewind_count += 1;
-            Ok(())
-        }
-    }
-
-    impl<E: Send> ManagedDb<E> for SyncCountingDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-        type Config = Arc<AtomicUsize>;
-        type SyncTarget = ();
-
-        async fn init(_context: E, sync_count: Self::Config) -> Result<Self, Self::Error> {
-            Ok(Self { sync_count })
-        }
-
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            self.sync_count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
-        async fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
         }
     }
@@ -1807,10 +1705,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -1919,10 +1813,6 @@ mod tests {
             Err(TestFinalizeError)
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -2004,23 +1894,6 @@ mod tests {
     }
 
     #[test]
-    fn database_set_persist_calls_managed_db_persist() {
-        deterministic::Runner::default().start(|_context| async move {
-            let sync_count = Arc::new(AtomicUsize::new(0));
-            let database = Arc::new(AsyncRwLock::new(SyncCountingDb {
-                sync_count: sync_count.clone(),
-            }));
-
-            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::persist(
-                &database,
-            )
-            .await;
-
-            assert_eq!(sync_count.load(Ordering::SeqCst), 1);
-        });
-    }
-
-    #[test]
     fn database_set_prune_calls_managed_db_prune() {
         deterministic::Runner::default().start(|_context| async move {
             let prune_count = Arc::new(AtomicUsize::new(0));
@@ -2067,10 +1940,6 @@ mod tests {
             Ok(())
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -2098,10 +1967,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2139,10 +2004,6 @@ mod tests {
             Ok(())
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
@@ -2172,10 +2033,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2211,10 +2068,6 @@ mod tests {
             Ok(())
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {
             0
         }
@@ -2244,10 +2097,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2283,10 +2132,6 @@ mod tests {
             Ok(())
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {
             0
         }
@@ -2316,10 +2161,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2355,10 +2196,6 @@ mod tests {
             Ok(())
         }
 
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
         async fn sync_target(&self) -> Self::SyncTarget {
             self.final_target
         }
@@ -2388,10 +2225,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2426,10 +2259,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 
@@ -2571,10 +2400,6 @@ mod tests {
         }
 
         async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
 

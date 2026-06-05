@@ -3,11 +3,8 @@ use crate::stateful::{
         core::{
             mailbox::{ErasedAncestorStream, Message},
             processing::Processing,
-            MaintenanceConfig,
         },
-        processor::{
-            run_maintenance, FinalizeStatus, MaintenanceAction, Processor, ProcessorMetrics,
-        },
+        processor::{run_prune, FinalizeStatus, Processor, ProcessorMetrics},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -92,8 +89,8 @@ where
     /// Marshal ack window, used to derive automatic prune retention.
     pub(super) max_pending_acks: NonZeroUsize,
 
-    /// Periodic database maintenance.
-    pub(super) maintenance: MaintenanceConfig,
+    /// Periodic prune cadence.
+    pub(super) prune_interval: Option<NonZeroUsize>,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -235,7 +232,7 @@ where
             artifact.anchor,
             metrics,
             self.max_pending_acks,
-            self.maintenance,
+            self.prune_interval,
         );
 
         self.sync_metadata
@@ -245,16 +242,11 @@ where
             .await;
 
         if let Some((handoff_finalized, acknowledgement)) = handoff {
-            let (status, maintenance) = processor
+            let (status, prune) = processor
                 .finalize(self.context.as_present(), handoff_finalized)
                 .await;
-            if !matches!(maintenance, MaintenanceAction::None) {
-                run_maintenance::<E, _, _, _>(
-                    processor.databases().clone(),
-                    self.marshal.clone(),
-                    maintenance,
-                )
-                .await;
+            if let Some(prune) = prune {
+                run_prune(processor.databases().clone(), self.marshal.clone(), prune).await;
             }
             if let FinalizeStatus::Persisted { height } = status {
                 debug!(
@@ -305,7 +297,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{super::MaintenanceConfig, Syncing};
+    use super::Syncing;
     use crate::stateful::{
         actor::syncer::{self, StateSyncMetadata, SyncResult},
         db::{Anchor, AttachableResolver},
@@ -372,10 +364,7 @@ mod tests {
                     resolvers: NoopResolver,
                     sync_completed,
                     max_pending_acks: NZUsize!(1),
-                    maintenance: MaintenanceConfig {
-                        interval: NZUsize!(usize::MAX),
-                        prune: false,
-                    },
+                    prune_interval: None,
                 },
             }
         }

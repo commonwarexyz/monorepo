@@ -39,20 +39,6 @@ mod syncing;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Periodic database maintenance performed after finalization.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MaintenanceConfig {
-    /// Run maintenance every `interval` finalized blocks.
-    pub interval: NonZeroUsize,
-
-    /// Prune databases and marshal instead of only persisting committed state.
-    ///
-    /// When `true`, glue retains a `max_pending_acks + 1` finalized-target
-    /// window before pruning, so the oldest retained target stays
-    /// `max_pending_acks` blocks behind the finalized tip.
-    pub prune: bool,
-}
-
 /// Configuration for constructing a [`Stateful`] application.
 pub struct Config<E, A, S, V, R>
 where
@@ -92,8 +78,12 @@ where
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
-    /// Periodic database maintenance configuration.
-    pub maintenance: MaintenanceConfig,
+    /// Prune databases and marshal every `interval` finalized blocks.
+    ///
+    /// When enabled, glue retains a `max_pending_acks + 1` finalized-target
+    /// window before pruning, so the oldest retained target stays
+    /// `max_pending_acks` blocks behind the finalized tip.
+    pub prune_interval: Option<NonZeroUsize>,
 }
 
 /// Stateful application that manages the pending-tip DAG of merkleized
@@ -136,8 +126,8 @@ where
     /// Marshal ack window, used to derive automatic prune retention.
     max_pending_acks: NonZeroUsize,
 
-    /// Periodic database maintenance.
-    maintenance: MaintenanceConfig,
+    /// Periodic prune cadence.
+    prune_interval: Option<NonZeroUsize>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -170,7 +160,7 @@ where
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
                 max_pending_acks: config.max_pending_acks,
-                maintenance: config.maintenance,
+                prune_interval: config.prune_interval,
             },
             Mailbox::new(sender),
         )
@@ -219,7 +209,7 @@ where
             resolvers: self.resolvers,
             sync_completed,
             max_pending_acks: self.max_pending_acks,
-            maintenance: self.maintenance,
+            prune_interval: self.prune_interval,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -248,7 +238,7 @@ where
             anchor,
             processor_metrics,
             self.max_pending_acks,
-            self.maintenance,
+            self.prune_interval,
         );
         Processing {
             context: self.context,
@@ -266,7 +256,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, MaintenanceConfig, Stateful};
+    use super::{Config, Stateful};
     use crate::stateful::{
         actor::syncer::SyncPlan,
         db::{AttachableResolver, StateSyncDb, SyncEngineConfig},
@@ -425,10 +415,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
-                    maintenance: MaintenanceConfig {
-                        interval: NZUsize!(usize::MAX),
-                        prune: false,
-                    },
+                    prune_interval: None,
                 },
             );
             let handle = stateful.start();

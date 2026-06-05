@@ -682,48 +682,6 @@ where
     }
 }
 
-impl<F, E, C, H, S> Journal<F, E, C, H, S>
-where
-    F: Family,
-    E: Context,
-    C: Mutable<Item: EncodeShared> + Persistable<Error = JournalError>,
-    H: Hasher,
-    S: Strategy,
-{
-    /// Prune both the Merkle structure and journal to the given location, then sync the journal.
-    ///
-    /// # Returns
-    /// The new pruning boundary, which may be less than the requested `prune_loc`.
-    pub async fn prune_and_sync(
-        &mut self,
-        prune_loc: Location<F>,
-    ) -> Result<Location<F>, Error<F>> {
-        if self.merkle.size() == 0 {
-            self.merkle.sync().await?;
-            self.journal.sync().await?;
-            return Ok(Location::new(self.reader().await.bounds().start));
-        }
-
-        // Sync the Merkle structure before pruning the journal, otherwise its last element could
-        // end up behind the journal's first element after a crash, and there would be no way to
-        // replay the items between the structure's last element and the journal's first element.
-        self.merkle.sync().await?;
-
-        self.journal.prune(*prune_loc).await?;
-        let bounds = self.reader().await.bounds();
-        let boundary = Location::new(bounds.start);
-        let merkle_boundary = self.merkle.bounds().start;
-
-        if boundary > merkle_boundary {
-            debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
-            self.merkle.prune_synced_and_sync(boundary).await?;
-        }
-        self.journal.sync().await?;
-
-        Ok(boundary)
-    }
-}
-
 /// The number of items to apply to the Merkle structure in a single batch.
 const APPLY_BATCH_SIZE: u64 = 1 << 16;
 

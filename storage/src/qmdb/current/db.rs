@@ -773,37 +773,6 @@ where
         Ok(())
     }
 
-    /// Prune historical operations prior to `prune_loc` and sync all database state to disk.
-    ///
-    /// This preserves the prune ordering that makes recovery safe and avoids syncing Current
-    /// metadata twice when callers need both operations.
-    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
-        let _prune_timer = self.metrics.prune_timer();
-        let _sync_timer = self.metrics.sync_timer();
-        self.metrics.prune_calls.inc();
-        self.metrics.sync_calls.inc();
-        let sync_boundary = self.sync_boundary();
-        if prune_loc > sync_boundary {
-            return Err(Error::PruneBeyondMinRequired(prune_loc, sync_boundary));
-        }
-
-        // Prune the bitmap to the sync boundary (most aggressive safe location).
-        self.any.prune_bitmap(sync_boundary);
-        self.prune_grafted_tree_to_bitmap()?;
-
-        // Persist grafted tree pruning state before pruning the ops log. If the subsequent
-        // `any.prune_log_and_sync` fails, the metadata is ahead of the log, which is safe: on
-        // recovery, `build_grafted_tree` will recompute from the (un-pruned) log and the metadata
-        // simply records peaks that haven't been pruned yet. The reverse order would be unsafe:
-        // a pruned log with stale metadata would lose peak digests permanently.
-        self.sync_metadata().await?;
-
-        self.any.prune_log_and_sync(prune_loc).await?;
-        self.any.update_metrics().await;
-        self.update_metrics();
-        Ok(())
-    }
-
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.metadata.into_inner().destroy().await?;

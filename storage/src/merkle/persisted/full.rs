@@ -653,41 +653,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         Ok(())
     }
 
-    /// Prune nodes after the caller has already synced appended state.
-    ///
-    /// When `sync_journal` is `true`, this also syncs the journal after the
-    /// prune metadata update so the new durable boundary is present on startup
-    /// without replay.
-    async fn prune_synced(&mut self, loc: Location<F>, sync_journal: bool) -> Result<(), Error<F>> {
-        let pos = Position::try_from(loc)?;
-        {
-            let inner = self.inner.get_mut();
-            if loc > inner.mem.leaves() {
-                return Err(Error::LeafOutOfBounds(loc));
-            }
-            if pos <= inner.pruned_to_pos {
-                if sync_journal {
-                    self.journal.sync().await?;
-                }
-                return Ok(());
-            }
-        }
-
-        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
-        // event of a pruning failure.
-        let pinned_nodes = self.update_metadata(pos).await?;
-
-        self.journal.prune(*pos).await?;
-        if sync_journal {
-            self.journal.sync().await?;
-        }
-        let inner = self.inner.get_mut();
-        inner.mem.add_pinned_nodes(pinned_nodes);
-        inner.pruned_to_pos = pos;
-
-        Ok(())
-    }
-
     /// Prune all nodes up to but not including the given leaf location and update the pinned nodes.
     ///
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
@@ -696,14 +661,30 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+        let pos = Position::try_from(loc)?;
+        {
+            let inner = self.inner.get_mut();
+            if loc > inner.mem.leaves() {
+                return Err(Error::LeafOutOfBounds(loc));
+            }
+            if pos <= inner.pruned_to_pos {
+                return Ok(());
+            }
+        }
+
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
         self.sync().await?;
-        self.prune_synced(loc, false).await
-    }
 
-    /// Prune nodes after the caller has already synced appended nodes, then persist pruning state.
-    pub(crate) async fn prune_synced_and_sync(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        self.prune_synced(loc, true).await
+        // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
+        // event of a pruning failure.
+        let pinned_nodes = self.update_metadata(pos).await?;
+
+        self.journal.prune(*pos).await?;
+        let inner = self.inner.get_mut();
+        inner.mem.add_pinned_nodes(pinned_nodes);
+        inner.pruned_to_pos = pos;
+
+        Ok(())
     }
 
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.

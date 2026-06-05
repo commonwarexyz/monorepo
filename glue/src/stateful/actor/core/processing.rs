@@ -1,7 +1,7 @@
 use crate::stateful::{
     actor::{
         core::mailbox::Message,
-        processor::{run_maintenance, FinalizeStatus, MaintenanceAction, Processor},
+        processor::{run_prune, FinalizeStatus, Processor},
     },
     Application,
 };
@@ -17,14 +17,21 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, futures::OptionFuture, Acknowledgement};
+use commonware_utils::{channel::fallible::OneshotExt, Acknowledgement};
 use futures::{
-    future::{self, BoxFuture, Either},
-    FutureExt as _,
+    future::{ready, Either},
+    FutureExt,
 };
 use rand::Rng;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, sync::mpsc::TryRecvError};
 use tracing::debug;
+
+/// A single unit of work for the processing loop: either a mailbox message to
+/// handle or a deferred prune to run while the mailbox is idle.
+enum Step<M, P> {
+    Message(M),
+    Prune(P),
+}
 
 pub(super) struct Processing<E, A, S, V, R>
 where
@@ -69,36 +76,40 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
-        let mut pending_maintenance = VecDeque::new();
-        let mut maintenance_task: OptionFuture<BoxFuture<'static, ()>> = None.into();
-
+        let mut pending_prunes = VecDeque::new();
         select_loop! {
             self.context,
             on_start => {
-                let mailbox_message = if maintenance_task.is_some() {
-                    Either::Left(future::pending())
-                } else {
-                    Either::Right(self.mailbox.recv())
-                };
-
-                let start_maintenance = if maintenance_task.is_none() && !pending_maintenance.is_empty() {
-                    Either::Left(future::ready(()))
-                } else {
-                    Either::Right(future::pending())
+                // Pruning is non-critical work. We only run it when the mailbox is idle, and
+                // it is never raced against the mailbox due to its internal lock acquisition.
+                // If a message is ready, it is always processed immediately.
+                let next = match self.mailbox.try_recv() {
+                    // A message is ready: handle it now, regardless of any queued prune.
+                    Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
+                    Err(TryRecvError::Empty) => match pending_prunes.pop_front() {
+                        // No message, but a prune is queued: run it.
+                        Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
+                        // No message and nothing to prune: wait on the mailbox as normal.
+                        None => Either::Right(self.mailbox.recv().map(|m| m.map(Step::Message))),
+                    },
+                    Err(TryRecvError::Disconnected) => {
+                        debug!("mailbox closed, stopping processing");
+                        return;
+                    }
                 };
             },
             on_stopped => {
-                debug!("processor received shutdown signal");
+                debug!("shutdown signal received, stopping processing");
             },
-            Some(message) = mailbox_message else {
-                debug!("mailbox closed, shutting down processor");
+            Some(step) = next else {
+                debug!("mailbox closed, stopping processing");
                 break;
-            } => match message {
-                Message::Propose {
+            } => match step {
+                Step::Message(Message::Propose {
                     context,
                     ancestry,
                     response,
-                } => {
+                }) => {
                     self.processor
                         .propose(
                             self.context.as_present(),
@@ -110,11 +121,11 @@ where
                         )
                         .await;
                 }
-                Message::Verify {
+                Step::Message(Message::Verify {
                     context,
                     ancestry,
                     response,
-                } => {
+                }) => {
                     self.processor
                         .verify(
                             self.context.as_present(),
@@ -125,40 +136,35 @@ where
                         )
                         .await;
                 }
-                Message::Finalized {
+                Step::Message(Message::Finalized {
                     block,
                     acknowledgement,
-                } => {
+                }) => {
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                         acknowledgement.acknowledge();
                         continue;
                     }
-                    let (status, maintenance) = self.processor.finalize(&self.context, block).await;
-                    if !matches!(maintenance, MaintenanceAction::None) {
-                        pending_maintenance.push_back(maintenance);
+                    let (status, prune) = self.processor.finalize(&self.context, block).await;
+                    if let Some(prune) = prune {
+                        pending_prunes.push_back(prune);
                     }
                     if let FinalizeStatus::Persisted { height } = status {
                         debug!(height = height.get(), "persisted finalized database batch");
                     }
                     acknowledgement.acknowledge();
                 }
-                Message::SubscribeDatabases { response } => {
+                Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());
                 }
+                Step::Prune(prune) => {
+                    run_prune::<E, _, _, _>(
+                        self.processor.databases().clone(),
+                        self.marshal.clone(),
+                        prune,
+                    )
+                    .await;
+                }
             },
-            _ = start_maintenance => {
-                let maintenance = pending_maintenance
-                    .pop_front()
-                    .expect("start_maintenance should only run when work is queued");
-                let databases = self.processor.databases().clone();
-                let marshal = self.marshal.clone();
-                maintenance_task = Some(
-                    run_maintenance::<E, _, _, _>(databases, marshal, maintenance).boxed()
-                ).into();
-            },
-            _ = &mut maintenance_task => {
-                maintenance_task = None.into();
-            }
         }
     }
 }

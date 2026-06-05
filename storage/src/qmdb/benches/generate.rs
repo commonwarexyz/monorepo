@@ -43,7 +43,8 @@ async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
         make_value,
     )
     .await;
-    db.prune_and_sync(db.sync_boundary().await).await.unwrap();
+    db.prune(db.sync_boundary().await).await.unwrap();
+    db.sync().await.unwrap();
     let elapsed = start.elapsed();
     db.destroy().await.unwrap();
     elapsed

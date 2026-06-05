@@ -354,25 +354,6 @@ where
         Ok(self.log.prune(prune_loc).await?)
     }
 
-    /// Prune the operations log to `prune_loc` and sync the retained journal state. Does not touch
-    /// the bitmap.
-    pub(crate) async fn prune_log_and_sync(
-        &mut self,
-        prune_loc: Location<F>,
-    ) -> Result<Location<F>, crate::qmdb::Error<F>>
-    where
-        C: Persistable<Error = JournalError>,
-    {
-        if prune_loc > self.inactivity_floor_loc {
-            return Err(crate::qmdb::Error::PruneBeyondMinRequired(
-                prune_loc,
-                self.inactivity_floor_loc,
-            ));
-        }
-
-        Ok(self.log.prune_and_sync(prune_loc).await?)
-    }
-
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     #[tracing::instrument(
@@ -769,30 +750,6 @@ where
         let _timer = self.metrics.operations.sync_timer();
         self.metrics.operations.sync_calls.inc();
         self.log.sync().await?;
-        Ok(())
-    }
-
-    /// Prune historical operations prior to `prune_loc` and sync all database state to disk.
-    #[tracing::instrument(
-        name = "qmdb::any::Db::prune_and_sync",
-        level = "info",
-        skip_all,
-        fields(
-            requested_loc = *prune_loc,
-            inactivity_floor = *self.inactivity_floor_loc,
-        ),
-    )]
-    pub async fn prune_and_sync(
-        &mut self,
-        prune_loc: Location<F>,
-    ) -> Result<(), crate::qmdb::Error<F>> {
-        let _prune_timer = self.metrics.operations.prune_timer();
-        let _sync_timer = self.metrics.operations.sync_timer();
-        self.metrics.operations.prune_calls.inc();
-        self.metrics.operations.sync_calls.inc();
-        let actual_pruned = self.prune_log_and_sync(prune_loc).await?;
-        self.prune_bitmap(actual_pruned);
-        self.update_metrics().await;
         Ok(())
     }
 
