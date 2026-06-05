@@ -719,11 +719,14 @@ stability_scope!(BETA {
         ///
         /// Removal unlinks the blob's name but does not invalidate previously opened handles:
         /// they remain fully readable until dropped, whether the blob was removed by name or by
-        /// removing its entire partition. Physical resources are reclaimed once the last handle
-        /// is dropped.
+        /// removing its entire partition. This includes bytes written but never synced. Physical
+        /// resources are reclaimed once the last handle is dropped.
         ///
         /// Re-opening a removed blob's name creates a new, independent blob; handles opened
         /// before the removal continue to observe the removed blob's contents.
+        ///
+        /// Writing to or syncing a removed blob is unspecified: implementations may succeed or
+        /// return an error.
         fn remove(
             &self,
             partition: &str,
