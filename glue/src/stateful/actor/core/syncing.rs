@@ -3,6 +3,7 @@ use crate::stateful::{
         core::{
             mailbox::{ErasedAncestorStream, Message},
             processing::Processing,
+            MaintenanceInterval,
         },
         processor::{FinalizeStatus, Processor, ProcessorMetrics},
         syncer::{self, StateSyncMetadata, SyncResult},
@@ -89,8 +90,8 @@ where
     /// Marshal ack window, used to derive automatic prune retention.
     pub(super) max_pending_acks: NonZeroUsize,
 
-    /// Periodic finalized-block database maintenance.
-    pub(super) maintenance_interval: super::MaintenanceInterval,
+    /// Periodic database maintenance.
+    pub(super) maintenance_interval: MaintenanceInterval,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>

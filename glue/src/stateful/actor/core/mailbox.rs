@@ -166,6 +166,11 @@ where
     /// This resolves once startup handoff has attached the database set to the
     /// serving actor. Late callers receive the current database set
     /// immediately.
+    ///
+    /// Holders must never manually prune these databases. Stateful glue uses
+    /// [`MaintenanceInterval`](crate::stateful::MaintenanceInterval) to
+    /// schedule safe maintenance without pruning past the rewind window needed
+    /// for crash reconciliation.
     pub async fn subscribe_databases(&self) -> A::Databases {
         let (response, receiver) = oneshot::channel();
         let _ = self

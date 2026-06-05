@@ -92,13 +92,13 @@ where
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
 
-    /// Periodic finalized-block database maintenance.
+    /// Periodic database maintenance.
     ///
     /// - Use [`MaintenanceInterval::Persist`] to periodically sync the current
     ///   committed state to disk without pruning.
     /// - Use [`MaintenanceInterval::Prune`] to periodically prune to the oldest
-    ///   safe finalized target derived from `max_pending_acks`. This pruning
-    ///   routine will prune both marshal and application databases.
+    ///   safe finalized target derived from `max_pending_acks`. This routine
+    ///   will prune both marshal and application databases.
     pub maintenance_interval: MaintenanceInterval,
 }
 
@@ -142,7 +142,7 @@ where
     /// Marshal ack window, used to derive automatic prune retention.
     max_pending_acks: NonZeroUsize,
 
-    /// Periodic finalized-block database maintenance.
+    /// Periodic database maintenance.
     maintenance_interval: MaintenanceInterval,
 }
 
