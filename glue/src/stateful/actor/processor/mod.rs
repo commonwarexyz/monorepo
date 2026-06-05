@@ -91,7 +91,7 @@ pub(super) enum FinalizeStatus {
 
 /// The maintenance work, if any, that should run for a finalized block.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum MaintenanceAction<T> {
+pub(super) enum MaintenanceAction<T> {
     /// No maintenance should run for this finalized block.
     None,
 
@@ -651,16 +651,11 @@ where
     }
 
     /// Persist finalized state and prune dead in-memory forks.
-    pub(super) async fn finalize<S, V>(
+    pub(super) async fn finalize(
         &mut self,
         context: &E,
-        marshal: &MarshalMailbox<S, V>,
         block: A::Block,
-    ) -> FinalizeStatus
-    where
-        S: Scheme,
-        V: MarshalVariant<ApplicationBlock = A::Block>,
-    {
+    ) -> (FinalizeStatus, MaintenanceAction<PendingSyncTargets<A, E>>) {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -674,7 +669,7 @@ where
                 digest, self.last_processed.digest,
                 "received conflicting finalized block at processed height",
             );
-            return FinalizeStatus::Duplicate;
+            return (FinalizeStatus::Duplicate, MaintenanceAction::None);
         }
 
         let timer = self.metrics.finalize_duration.timer(context);
@@ -708,16 +703,7 @@ where
         };
 
         self.databases.finalize(batch).await;
-        match self.maintenance.observe_finalized(height, sync_targets) {
-            MaintenanceAction::None => {}
-            MaintenanceAction::Persist => {
-                self.databases.persist().await;
-            }
-            MaintenanceAction::Prune { height, targets } => {
-                self.databases.prune(&targets).await;
-                marshal.prune(height);
-            }
-        }
+        let maintenance = self.maintenance.observe_finalized(height, sync_targets);
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor {
             height,
@@ -726,7 +712,7 @@ where
         };
         timer.observe(context);
 
-        FinalizeStatus::Persisted { height }
+        (FinalizeStatus::Persisted { height }, maintenance)
     }
 
     /// Remove pending state that is not compatible with the finalized winner.
@@ -794,6 +780,39 @@ where
                 merkleized,
             },
         );
+    }
+}
+
+/// Run deferred finalized-block maintenance outside the finalize critical path.
+///
+/// `Processor::finalize` returns one of these maintenance actions after it has
+/// already committed the finalized batch and advanced the in-memory anchor.
+/// Callers can then schedule this work separately so routine persistence or
+/// pruning does not delay subsequent mailbox handling.
+///
+/// Prune maintenance always runs database pruning before marshal pruning so the
+/// actor never drops marshal history ahead of the corresponding durable
+/// database boundary.
+/// [`MaintenanceAction::None`] is a no-op.
+pub(super) async fn run_maintenance<E, DBs, S, V>(
+    databases: DBs,
+    marshal: MarshalMailbox<S, V>,
+    maintenance: MaintenanceAction<DBs::SyncTargets>,
+) where
+    E: Rng + Spawner + Metrics + Clock,
+    DBs: DatabaseSet<E>,
+    S: Scheme,
+    V: MarshalVariant,
+{
+    match maintenance {
+        MaintenanceAction::None => {}
+        MaintenanceAction::Persist => {
+            databases.persist().await;
+        }
+        MaintenanceAction::Prune { height, targets } => {
+            databases.prune(&targets).await;
+            marshal.prune(height);
+        }
     }
 }
 
@@ -875,11 +894,7 @@ mod tests {
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
-        marshal::{
-            self,
-            ancestry::BlockProvider,
-            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
-        },
+        marshal::{self, ancestry::BlockProvider, core::Actor as MarshalActor},
         simplex::{
             mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
             types::Context as ConsensusContext,
@@ -1229,7 +1244,6 @@ mod tests {
         context_cell: ContextCell<deterministic::Context>,
         processor: Processor<deterministic::Context, ExecutionApp>,
         provider: MapProvider,
-        marshal: MarshalMailbox<MockScheme<ed25519::PublicKey>, marshal::standard::Standard<Block>>,
         db_config: any::FixedConfig<TwoCap, Sequential>,
     }
 
@@ -1250,7 +1264,7 @@ mod tests {
                 deterministic::Context,
             >>::init(context.child("db_set"), config.clone())
             .await;
-            let marshal = init_marshal_mailbox(context.child("marshal")).await;
+            let _marshal = init_marshal_mailbox(context.child("marshal")).await;
             let metrics = ProcessorMetrics::new(context.child("processor_metrics"));
             Self {
                 context_cell: ContextCell::new(context),
@@ -1267,7 +1281,6 @@ mod tests {
                     MaintenanceInterval::Persist(NZU64!(u64::MAX)),
                 ),
                 provider,
-                marshal,
                 db_config: config,
             }
         }
@@ -1390,7 +1403,22 @@ mod tests {
 
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
             self.processor
-                .finalize(self.context_cell.as_present(), &self.marshal, block)
+                .finalize(self.context_cell.as_present(), block)
+                .await
+                .0
+        }
+
+        async fn finalize_with_maintenance(
+            &mut self,
+            block: Block,
+        ) -> (
+            FinalizeStatus,
+            MaintenanceAction<
+                <DbSet<deterministic::Context> as DatabaseSet<deterministic::Context>>::SyncTargets,
+            >,
+        ) {
+            self.processor
+                .finalize(self.context_cell.as_present(), block)
                 .await
         }
 
@@ -1590,6 +1618,44 @@ mod tests {
                 targets: 20,
             },
         );
+    }
+
+    #[test]
+    fn execution_finalization_stages_maintenance() {
+        deterministic::Runner::default().start(|context| async move {
+            let provider = MapProvider::default();
+            let config = qmdb_config("db_config", &context);
+            let app = ExecutionApp::new();
+            let mut harness = Harness::with_app(context, provider, config, app).await;
+            harness.processor = Processor::new(
+                ExecutionApp::new(),
+                harness.processor.databases().clone(),
+                Anchor {
+                    height: Height::zero(),
+                    round: Block::genesis().context().round,
+                    digest: Block::genesis().digest(),
+                },
+                ProcessorMetrics::new(harness.context_cell.child("staged_processor_metrics")),
+                NZUsize!(1),
+                MaintenanceInterval::Persist(NZU64!(1)),
+            );
+
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let (status, maintenance) = harness.finalize_with_maintenance(block1).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+            assert_eq!(
+                maintenance,
+                MaintenanceAction::Persist,
+                "maintenance should be returned to the control loop",
+            );
+        });
     }
 
     #[test]

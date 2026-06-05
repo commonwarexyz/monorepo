@@ -5,7 +5,9 @@ use crate::stateful::{
             processing::Processing,
             MaintenanceInterval,
         },
-        processor::{FinalizeStatus, Processor, ProcessorMetrics},
+        processor::{
+            run_maintenance, FinalizeStatus, MaintenanceAction, Processor, ProcessorMetrics,
+        },
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -243,10 +245,18 @@ where
             .await;
 
         if let Some((handoff_finalized, acknowledgement)) = handoff {
-            if let FinalizeStatus::Persisted { height } = processor
-                .finalize(self.context.as_present(), &self.marshal, handoff_finalized)
-                .await
-            {
+            let (status, maintenance) = processor
+                .finalize(self.context.as_present(), handoff_finalized)
+                .await;
+            if !matches!(maintenance, MaintenanceAction::None) {
+                run_maintenance::<E, _, _, _>(
+                    processor.databases().clone(),
+                    self.marshal.clone(),
+                    maintenance,
+                )
+                .await;
+            }
+            if let FinalizeStatus::Persisted { height } = status {
                 debug!(
                     height = height.get(),
                     "persisted finalized database batch during sync handoff"

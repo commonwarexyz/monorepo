@@ -1,7 +1,7 @@
 use crate::stateful::{
     actor::{
         core::mailbox::Message,
-        processor::{FinalizeStatus, Processor},
+        processor::{run_maintenance, FinalizeStatus, MaintenanceAction, Processor},
     },
     Application,
 };
@@ -17,8 +17,13 @@ use commonware_consensus::{
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
 use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, Acknowledgement};
+use commonware_utils::{channel::fallible::OneshotExt, futures::OptionFuture, Acknowledgement};
+use futures::{
+    future::{self, BoxFuture, Either},
+    FutureExt as _,
+};
 use rand::Rng;
+use std::collections::VecDeque;
 use tracing::debug;
 
 pub(super) struct Processing<E, A, S, V, R>
@@ -64,12 +69,28 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
+        let mut pending_maintenance = VecDeque::new();
+        let mut maintenance_task: OptionFuture<BoxFuture<'static, ()>> = None.into();
+
         select_loop! {
             self.context,
+            on_start => {
+                let mailbox_message = if maintenance_task.is_some() {
+                    Either::Left(future::pending())
+                } else {
+                    Either::Right(self.mailbox.recv())
+                };
+
+                let start_maintenance = if maintenance_task.is_none() && !pending_maintenance.is_empty() {
+                    Either::Left(future::ready(()))
+                } else {
+                    Either::Right(future::pending())
+                };
+            },
             on_stopped => {
                 debug!("processor received shutdown signal");
             },
-            Some(message) = self.mailbox.recv() else {
+            Some(message) = mailbox_message else {
                 debug!("mailbox closed, shutting down processor");
                 break;
             } => match message {
@@ -112,9 +133,11 @@ where
                         acknowledgement.acknowledge();
                         continue;
                     }
-                    if let FinalizeStatus::Persisted { height } =
-                        self.processor.finalize(&self.context, &self.marshal, block).await
-                    {
+                    let (status, maintenance) = self.processor.finalize(&self.context, block).await;
+                    if !matches!(maintenance, MaintenanceAction::None) {
+                        pending_maintenance.push_back(maintenance);
+                    }
+                    if let FinalizeStatus::Persisted { height } = status {
                         debug!(height = height.get(), "persisted finalized database batch");
                     }
                     acknowledgement.acknowledge();
@@ -123,6 +146,19 @@ where
                     response.send_lossy(self.processor.databases().clone());
                 }
             },
+            _ = start_maintenance => {
+                let maintenance = pending_maintenance
+                    .pop_front()
+                    .expect("start_maintenance should only run when work is queued");
+                let databases = self.processor.databases().clone();
+                let marshal = self.marshal.clone();
+                maintenance_task = Some(
+                    run_maintenance::<E, _, _, _>(databases, marshal, maintenance).boxed()
+                ).into();
+            },
+            _ = &mut maintenance_task => {
+                maintenance_task = None.into();
+            }
         }
     }
 }
