@@ -9,9 +9,9 @@ use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
+mod blobs;
 pub mod fixed;
 mod metrics;
-mod sections;
 pub mod variable;
 
 #[cfg(test)]
@@ -21,7 +21,7 @@ mod tests;
 ///
 /// Bounds are stable for the reader's lifetime, and any position within `bounds()` remains
 /// readable through it, including across a concurrent prune. A concurrent rewind below the
-/// reader's bounds may surface as an error ([Error::SectionInUse] for the rewinder, or a read
+/// reader's bounds may surface as an error ([Error::BlobInUse] for the rewinder, or a read
 /// error for the reader), never as torn data.
 pub trait Reader: Send + Sync {
     /// The type of items stored in the journal.
