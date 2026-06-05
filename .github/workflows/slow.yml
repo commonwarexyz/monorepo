@@ -124,7 +124,7 @@ jobs:
       with:
         tool: just@1.43.0
     - name: Test benchmarks
-      run: just test-benches ${{ matrix.package }} ${{ matrix.partition || '1/1' }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
+      run: just partition=${{ matrix.partition || '1/1' }} test-benches ${{ matrix.package }} '${{ matrix.test_flags }}' '${{ matrix.lint_flags }}'
 
   Fuzz:
     name: "Fuzz (${{ matrix.fuzz_dir }}) (partition: ${{ matrix.partition || '1/1' }})"
@@ -207,7 +207,7 @@ jobs:
         restore-keys: |
           ${{ steps.fuzz-corpus-cache-key.outputs.prefix }}-
     - name: Test all targets
-      run: just fuzz ${{ matrix.fuzz_dir }} ${{ matrix.partition || '1/1' }}
+      run: just partition=${{ matrix.partition || '1/1' }} fuzz ${{ matrix.fuzz_dir }}
     - name: Save fuzz corpus
       if: success() && github.ref == 'refs/heads/main'
       uses: actions/cache/save@0400d5f644dc74513175e3cd8d07132dd4860809 # v4.2.4

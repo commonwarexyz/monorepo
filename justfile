@@ -3,6 +3,7 @@ set positional-arguments := true
 env_nightly_version := env("NIGHTLY_VERSION", "nightly")
 nightly_version := if env_nightly_version != "" { "+" + env_nightly_version } else { "" }
 rustfmt := env("RUSTFMT", "rustfmt")
+partition := "1/1"
 
 alias f := fix-fmt
 alias l := lint
@@ -54,7 +55,7 @@ fix: fix-clippy fix-fmt fix-toml-fmt fix-features
 # Tests benchmarks in a given crate.
 #
 # `partition` is "N/M", run partition N of M, where bench binaries are hash-distributed across M jobs.
-test-benches crate partition='1/1' test_flags='' lint_flags='':
+test-benches crate test_flags='' lint_flags='':
     #!/usr/bin/env bash
     set -euo pipefail
     list=$(RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list 2>&1)
@@ -96,7 +97,7 @@ dylint:
 # Run all fuzz tests in a given directory.
 #
 # `partition` is "N/M", run partition N of M, where targets are hash-distributed across M jobs.
-fuzz fuzz_dir partition='1/1' max_time='60' max_mem='4000':
+fuzz fuzz_dir max_time='60' max_mem='4000':
     #!/usr/bin/env bash
     set -euo pipefail
     targets=$(cargo {{nightly_version}} fuzz list --fuzz-dir {{fuzz_dir}} | python3 .github/scripts/hash_partition.py {{partition}})
