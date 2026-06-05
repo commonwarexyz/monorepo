@@ -75,6 +75,10 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(())
     }
 
+    async fn persist(&mut self) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
     async fn sync_target(&self) -> Self::SyncTarget {
         0
     }

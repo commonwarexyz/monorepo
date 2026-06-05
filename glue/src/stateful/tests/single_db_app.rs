@@ -518,6 +518,7 @@ impl EngineDefinition for SingleDbEngine {
                 plan,
                 resolvers: qmdb_sync_resolver,
                 sync_config: self.sync_config,
+                finalize_sync_interval: None,
             },
         );
 

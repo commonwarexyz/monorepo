@@ -28,7 +28,7 @@ use commonware_utils::{
     Acknowledgement,
 };
 use rand::Rng;
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, error};
 
 /// Verify request buffered while state sync is still in progress.
@@ -85,6 +85,9 @@ where
 
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
+
+    /// Period for explicit database syncs during finalization.
+    pub(super) finalize_sync_interval: Option<NonZeroU64>,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -225,6 +228,7 @@ where
             artifact.databases,
             artifact.anchor,
             metrics,
+            self.finalize_sync_interval,
         );
 
         self.sync_metadata
@@ -352,6 +356,7 @@ mod tests {
                     }),
                     resolvers: NoopResolver,
                     sync_completed,
+                    finalize_sync_interval: None,
                 },
             }
         }

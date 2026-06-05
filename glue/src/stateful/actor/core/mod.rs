@@ -29,7 +29,10 @@ use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawne
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
 use rand::Rng;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::{
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
+};
 
 mod mailbox;
 pub use mailbox::Mailbox;
@@ -77,6 +80,12 @@ where
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
+
+    /// Period for explicit database syncs during finalization.
+    ///
+    /// Set this to [`None`] if you manually prune the databases on a known
+    /// cadence instead. Pruning already syncs the underlying QMDB state.
+    pub finalize_sync_interval: Option<NonZeroU64>,
 }
 
 /// Stateful application that manages the pending-tip DAG of merkleized
@@ -115,6 +124,9 @@ where
 
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
+
+    /// Period for explicit database syncs during finalization.
+    finalize_sync_interval: Option<NonZeroU64>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -146,6 +158,7 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
+                finalize_sync_interval: config.finalize_sync_interval,
             },
             Mailbox::new(sender),
         )
@@ -193,6 +206,7 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
+            finalize_sync_interval: self.finalize_sync_interval,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -215,7 +229,13 @@ where
         self.resolvers.attach_databases(databases.clone()).await;
 
         let processor_metrics = ProcessorMetrics::new(self.context.child("processor"));
-        let processor = Processor::new(self.application, databases, anchor, processor_metrics);
+        let processor = Processor::new(
+            self.application,
+            databases,
+            anchor,
+            processor_metrics,
+            self.finalize_sync_interval,
+        );
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -391,6 +411,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
+                    finalize_sync_interval: None,
                 },
             );
             let handle = stateful.start();

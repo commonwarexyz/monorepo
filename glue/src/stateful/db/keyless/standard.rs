@@ -281,6 +281,10 @@ where
         Ok(())
     }
 
+    async fn persist(&mut self) -> Result<(), Error<F>> {
+        self.sync().await
+    }
+
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
         AnySyncTarget::new(
@@ -354,6 +358,10 @@ where
         self.apply_batch(batch.inner).await?;
         self.commit().await?;
         Ok(())
+    }
+
+    async fn persist(&mut self) -> Result<(), Error<F>> {
+        self.sync().await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {

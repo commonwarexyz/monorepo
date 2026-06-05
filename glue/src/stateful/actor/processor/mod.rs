@@ -44,6 +44,7 @@ use rand::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
+    num::NonZeroU64,
 };
 use tracing::{debug, warn};
 
@@ -97,6 +98,7 @@ where
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
     metrics: ProcessorMetrics,
+    finalize_sync_interval: Option<NonZeroU64>,
 }
 
 impl<E, A> Processor<E, A>
@@ -111,6 +113,7 @@ where
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: ProcessorMetrics,
+        finalize_sync_interval: Option<NonZeroU64>,
     ) -> Self {
         Self {
             app,
@@ -118,6 +121,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
+            finalize_sync_interval,
         }
     }
 
@@ -612,6 +616,12 @@ where
         };
 
         self.databases.finalize(batch).await;
+        if self
+            .finalize_sync_interval
+            .is_some_and(|interval| height.get() % interval.get() == 0)
+        {
+            self.databases.persist().await;
+        }
         self.app
             .finalized(
                 (context.child("finalized"), block.context()),
@@ -1217,6 +1227,7 @@ mod tests {
                         digest: Block::genesis().digest(),
                     },
                     metrics,
+                    None,
                 ),
                 provider,
                 db_config: config,

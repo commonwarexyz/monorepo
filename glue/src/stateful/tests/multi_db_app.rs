@@ -627,6 +627,7 @@ impl EngineDefinition for MultiDbEngine {
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: self.sync_config,
+                finalize_sync_interval: None,
             },
         );
 

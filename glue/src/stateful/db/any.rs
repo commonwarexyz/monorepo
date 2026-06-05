@@ -385,8 +385,12 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
+        self.commit().await?;
         Ok(())
+    }
+
+    async fn persist(&mut self) -> Result<(), Error<F>> {
+        Db::sync(self).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -479,8 +483,12 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
+        self.commit().await?;
         Ok(())
+    }
+
+    async fn persist(&mut self) -> Result<(), Error<F>> {
+        Db::sync(self).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
