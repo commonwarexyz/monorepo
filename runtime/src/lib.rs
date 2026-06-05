@@ -725,8 +725,8 @@ stability_scope!(BETA {
         /// Re-opening a removed blob's name creates a new, independent blob; handles opened
         /// before the removal continue to observe the removed blob's contents.
         ///
-        /// Writing to or syncing a removed blob is unspecified: implementations may succeed or
-        /// return an error.
+        /// Mutating a removed blob (e.g. via [`Blob::write_at`], [`Blob::resize`], or
+        /// [`Blob::sync`]) is unspecified: implementations may succeed or return an error.
         fn remove(
             &self,
             partition: &str,
