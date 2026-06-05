@@ -144,7 +144,6 @@ fn fuzz(input: FuzzInput) {
                     let digest = Sha256::hash(&value.to_be_bytes());
                     match journal.append(&digest).await {
                         Ok(_pos) => journal_size += 1,
-                        // At the representable limit the append is rejected instead of panicking.
                         Err(Error::SizeOverflow) => {}
                         Err(e) => panic!("unexpected append error: {e:?}"),
                     }
