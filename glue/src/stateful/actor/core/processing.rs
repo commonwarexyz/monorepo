@@ -113,7 +113,7 @@ where
                         continue;
                     }
                     if let FinalizeStatus::Persisted { height } =
-                        self.processor.finalize(&self.context, block).await
+                        self.processor.finalize(&self.context, &self.marshal, block).await
                     {
                         debug!(height = height.get(), "persisted finalized database batch");
                     }

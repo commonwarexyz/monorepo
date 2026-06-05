@@ -243,7 +243,7 @@ where
 
         if let Some((handoff_finalized, acknowledgement)) = handoff {
             if let FinalizeStatus::Persisted { height } = processor
-                .finalize(self.context.as_present(), handoff_finalized)
+                .finalize(self.context.as_present(), &self.marshal, handoff_finalized)
                 .await
             {
                 debug!(

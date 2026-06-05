@@ -98,8 +98,8 @@ enum MaintenanceAction<T> {
     /// Persist the current committed database state.
     Persist,
 
-    /// Prune databases to the provided finalized sync targets.
-    Prune(T),
+    /// Prune databases and marshal to the provided finalized boundary.
+    Prune { height: Height, targets: T },
 }
 
 /// Tracks the configured finalized-block maintenance policy and any retained
@@ -107,7 +107,7 @@ enum MaintenanceAction<T> {
 struct Maintenance<T> {
     interval: MaintenanceInterval,
     prune_retention_window: usize,
-    retained_targets: VecDeque<T>,
+    retained_targets: VecDeque<(Height, T)>,
 }
 
 impl<T: Clone> Maintenance<T> {
@@ -128,9 +128,10 @@ impl<T: Clone> Maintenance<T> {
     ///
     /// Persist maintenance triggers directly on the configured cadence.
     /// Prune maintenance first retains the last `max_pending_acks + 1`
-    /// finalized sync targets, then prunes only when that full window is
+    /// finalized `(height, sync_targets)` pairs, then prunes only when that full window is
     /// populated and the current finalized height matches the configured
-    /// cadence. The prune target is the oldest retained finalized target.
+    /// cadence. The prune target is the oldest retained finalized target and
+    /// its corresponding finalized block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
         match self.interval {
             MaintenanceInterval::Persist(interval) => {
@@ -141,11 +142,13 @@ impl<T: Clone> Maintenance<T> {
                 }
             }
             MaintenanceInterval::Prune(interval) => {
-                self.retained_targets.push_back(targets);
-                while self.retained_targets.len() > self.prune_retention_window {
+                self.retained_targets.push_back((height, targets));
+                if self.retained_targets.len() > self.prune_retention_window {
                     self.retained_targets.pop_front();
                 }
 
+                // Do not prune until we've observed a full rewind-safe window
+                // of finalized blocks after startup.
                 if self.retained_targets.len() < self.prune_retention_window {
                     return MaintenanceAction::None;
                 }
@@ -154,12 +157,12 @@ impl<T: Clone> Maintenance<T> {
                     return MaintenanceAction::None;
                 }
 
-                MaintenanceAction::Prune(
-                    self.retained_targets
-                        .front()
-                        .cloned()
-                        .expect("retained prune targets must exist"),
-                )
+                let (height, targets) = self
+                    .retained_targets
+                    .front()
+                    .cloned()
+                    .expect("retained prune targets must exist");
+                MaintenanceAction::Prune { height, targets }
             }
         }
     }
@@ -648,7 +651,16 @@ where
     }
 
     /// Persist finalized state and prune dead in-memory forks.
-    pub(super) async fn finalize(&mut self, context: &E, block: A::Block) -> FinalizeStatus {
+    pub(super) async fn finalize<S, V>(
+        &mut self,
+        context: &E,
+        marshal: &MarshalMailbox<S, V>,
+        block: A::Block,
+    ) -> FinalizeStatus
+    where
+        S: Scheme,
+        V: MarshalVariant<ApplicationBlock = A::Block>,
+    {
         let (height, digest) = (block.height(), block.digest());
         if height < self.last_processed.height {
             panic!(
@@ -695,16 +707,15 @@ where
             }
         };
 
-        let maintenance_action = self.maintenance.observe_finalized(height, sync_targets);
-
         self.databases.finalize(batch).await;
-        match maintenance_action {
+        match self.maintenance.observe_finalized(height, sync_targets) {
             MaintenanceAction::None => {}
             MaintenanceAction::Persist => {
                 self.databases.persist().await;
             }
-            MaintenanceAction::Prune(targets) => {
+            MaintenanceAction::Prune { height, targets } => {
                 self.databases.prune(&targets).await;
+                marshal.prune(height);
             }
         }
         self.prune_pending_after_finalize(&digest, round);
@@ -864,19 +875,28 @@ mod tests {
     };
     use commonware_codec::{Encode, EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
-        marshal::ancestry::BlockProvider,
-        simplex::{mocks::scheme::Scheme as MockScheme, types::Context as ConsensusContext},
-        types::{Epoch, Height, Round, View},
+        marshal::{
+            self,
+            ancestry::BlockProvider,
+            core::{Actor as MarshalActor, Mailbox as MarshalMailbox},
+        },
+        simplex::{
+            mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
+            types::Context as ConsensusContext,
+        },
+        types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
         Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
     };
     use commonware_cryptography::{
-        ed25519, sha256::Digest, Digest as _, Digestible, Hasher, Sha256, Signer as _,
+        certificate::ConstantProvider, ed25519, sha256::Digest, Digest as _, Digestible, Hasher,
+        Sha256, Signer as _,
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
     };
     use commonware_storage::{
+        archive::immutable,
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, full::Config as MmrJournalConfig, Location},
         qmdb::{any, sync::Target},
@@ -1209,6 +1229,7 @@ mod tests {
         context_cell: ContextCell<deterministic::Context>,
         processor: Processor<deterministic::Context, ExecutionApp>,
         provider: MapProvider,
+        marshal: MarshalMailbox<MockScheme<ed25519::PublicKey>, marshal::standard::Standard<Block>>,
         db_config: any::FixedConfig<TwoCap, Sequential>,
     }
 
@@ -1229,6 +1250,7 @@ mod tests {
                 deterministic::Context,
             >>::init(context.child("db_set"), config.clone())
             .await;
+            let marshal = init_marshal_mailbox(context.child("marshal")).await;
             let metrics = ProcessorMetrics::new(context.child("processor_metrics"));
             Self {
                 context_cell: ContextCell::new(context),
@@ -1245,6 +1267,7 @@ mod tests {
                     MaintenanceInterval::Persist(NZU64!(u64::MAX)),
                 ),
                 provider,
+                marshal,
                 db_config: config,
             }
         }
@@ -1367,7 +1390,7 @@ mod tests {
 
         async fn finalize(&mut self, block: Block) -> FinalizeStatus {
             self.processor
-                .finalize(self.context_cell.as_present(), block)
+                .finalize(self.context_cell.as_present(), &self.marshal, block)
                 .await
         }
 
@@ -1434,12 +1457,85 @@ mod tests {
         }
     }
 
+    fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
+        immutable::Config {
+            metadata_partition: format!("{partition}-metadata"),
+            freezer_table_partition: format!("{partition}-table"),
+            freezer_table_initial_size: 4,
+            freezer_table_resize_frequency: 2,
+            freezer_table_resize_chunk_size: 2,
+            freezer_key_partition: format!("{partition}-key"),
+            freezer_key_page_cache: page_cache,
+            freezer_value_partition: format!("{partition}-value"),
+            freezer_value_target_size: 128,
+            freezer_value_compression: None,
+            ordinal_partition: format!("{partition}-ordinal"),
+            items_per_section: NZU64!(4),
+            codec_config: (),
+            replay_buffer: NZUsize!(64),
+            freezer_key_write_buffer: NZUsize!(64),
+            freezer_value_write_buffer: NZUsize!(64),
+            ordinal_write_buffer: NZUsize!(64),
+        }
+    }
+
+    async fn init_marshal_mailbox(
+        mut context: deterministic::Context,
+    ) -> commonware_consensus::marshal::core::Mailbox<
+        MockScheme<ed25519::PublicKey>,
+        marshal::standard::Standard<Block>,
+    > {
+        let fixture = scheme_mocks::fixture(&mut context, b"processor-harness", 1);
+        let provider = ConstantProvider::new(fixture.schemes[0].clone());
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let partition_prefix = next_partition_prefix();
+        let finalizations_by_height = immutable::Archive::init(
+            context.child("finalizations_by_height"),
+            archive_config(
+                page_cache.clone(),
+                &format!("{partition_prefix}-finalizations"),
+            ),
+        )
+        .await
+        .expect("failed to initialize finalizations archive");
+        let finalized_blocks = immutable::Archive::init(
+            context.child("finalized_blocks"),
+            archive_config(page_cache.clone(), &format!("{partition_prefix}-blocks")),
+        )
+        .await
+        .expect("failed to initialize finalized blocks archive");
+
+        let (_actor, mailbox, _height) =
+            MarshalActor::<_, marshal::standard::Standard<Block>, _, _, _, _, _>::init(
+                context.child("marshal_actor"),
+                finalizations_by_height,
+                finalized_blocks,
+                marshal::Config {
+                    provider,
+                    epocher: FixedEpocher::new(NZU64!(u64::MAX)),
+                    start: marshal::Start::Genesis(Block::genesis()),
+                    partition_prefix,
+                    mailbox_size: NZUsize!(8),
+                    view_retention_timeout: ViewDelta::new(1),
+                    prunable_items_per_section: NZU64!(4),
+                    page_cache,
+                    replay_buffer: NZUsize!(64),
+                    key_write_buffer: NZUsize!(64),
+                    value_write_buffer: NZUsize!(64),
+                    block_codec_config: (),
+                    max_repair: NZUsize!(1),
+                    max_pending_acks: NZUsize!(1),
+                    strategy: Sequential,
+                },
+            )
+            .await;
+        mailbox
+    }
+
     #[test]
     fn maintenance_persist_runs_on_interval() {
-        let mut maintenance = Maintenance::new(
-            MaintenanceInterval::Persist(NZU64!(2)),
-            NZUsize!(1),
-        );
+        let mut maintenance =
+            Maintenance::new(MaintenanceInterval::Persist(NZU64!(2)), NZUsize!(1));
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
@@ -1453,10 +1549,7 @@ mod tests {
 
     #[test]
     fn maintenance_prune_waits_for_full_retention_window() {
-        let mut maintenance = Maintenance::new(
-            MaintenanceInterval::Prune(NZU64!(1)),
-            NZUsize!(2),
-        );
+        let mut maintenance = Maintenance::new(MaintenanceInterval::Prune(NZU64!(1)), NZUsize!(2));
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
@@ -1468,16 +1561,16 @@ mod tests {
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(3), 30_u64),
-            MaintenanceAction::Prune(10),
+            MaintenanceAction::Prune {
+                height: Height::new(1),
+                targets: 10,
+            },
         );
     }
 
     #[test]
     fn maintenance_prune_uses_oldest_retained_target() {
-        let mut maintenance = Maintenance::new(
-            MaintenanceInterval::Prune(NZU64!(1)),
-            NZUsize!(1),
-        );
+        let mut maintenance = Maintenance::new(MaintenanceInterval::Prune(NZU64!(1)), NZUsize!(1));
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
@@ -1485,11 +1578,17 @@ mod tests {
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
-            MaintenanceAction::Prune(10),
+            MaintenanceAction::Prune {
+                height: Height::new(1),
+                targets: 10,
+            },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(3), 30_u64),
-            MaintenanceAction::Prune(20),
+            MaintenanceAction::Prune {
+                height: Height::new(2),
+                targets: 20,
+            },
         );
     }
 

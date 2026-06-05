@@ -48,8 +48,8 @@ pub enum MaintenanceInterval {
     /// Persist in-memory database state every `interval` finalized blocks.
     Persist(NonZeroU64),
 
-    /// Prune databases every `interval` finalized blocks, keeping enough
-    /// finalized history to safely rewind `max_pending_acks` blocks.
+    /// Prune databases and marshal every `interval` finalized blocks, keeping
+    /// enough finalized history to safely rewind `max_pending_acks` blocks.
     Prune(NonZeroU64),
 }
 
@@ -97,7 +97,8 @@ where
     /// - Use [`MaintenanceInterval::Persist`] to periodically sync the current
     ///   committed state to disk without pruning.
     /// - Use [`MaintenanceInterval::Prune`] to periodically prune to the oldest
-    ///   safe finalized target derived from `max_pending_acks`.
+    ///   safe finalized target derived from `max_pending_acks`. This pruning
+    ///   routine will prune both marshal and application databases.
     pub maintenance_interval: MaintenanceInterval,
 }
 
