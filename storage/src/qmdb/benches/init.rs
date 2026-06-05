@@ -38,8 +38,7 @@ async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
     make_value: impl Fn(&mut rand::rngs::StdRng) -> C::Value,
 ) {
     gen_random_kv::<F, _>(db, elements, operations, Some(COMMIT_FREQUENCY), make_value).await;
-    db.prune(db.sync_boundary().await).await.unwrap();
-    db.sync().await.unwrap();
+    db.prune_and_sync(db.sync_boundary().await).await.unwrap();
 }
 
 // -- Fixed-value variants (16 = 8 db shapes x 2 merkle families) --

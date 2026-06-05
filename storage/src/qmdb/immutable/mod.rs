@@ -509,6 +509,23 @@ where
         Ok(())
     }
 
+    /// Prune operations prior to `prune_loc` and sync all database state to disk.
+    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+        let _prune_timer = self.metrics.operations.prune_timer();
+        let _sync_timer = self.metrics.operations.sync_timer();
+        self.metrics.operations.prune_calls.inc();
+        self.metrics.operations.sync_calls.inc();
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+        self.journal.prune_and_sync(prune_loc).await?;
+        self.update_metrics().await;
+        Ok(())
+    }
+
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
     ///
     /// This rewinds both the operations journal and its Merkle structure to the historical

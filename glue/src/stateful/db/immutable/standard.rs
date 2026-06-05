@@ -314,7 +314,7 @@ where
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
-        self.prune((*target.range.start()).into()).await
+        self.prune_and_sync((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -404,7 +404,7 @@ where
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
-        self.prune((*target.range.start()).into()).await
+        self.prune_and_sync((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
