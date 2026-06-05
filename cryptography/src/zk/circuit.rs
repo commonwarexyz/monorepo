@@ -8,10 +8,10 @@ use std::{
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CircuitIdx {
-    Witness(u32),
     Constant(u32),
+    Witness(u32),
     Node(u32),
 }
 
@@ -67,6 +67,18 @@ pub struct ValuedCircuit<F> {
     pub circuit: Circuit<F>,
     pub witnesses: Vec<F>,
     pub nodes: Vec<F>,
+}
+
+impl<F> Index<CircuitIdx> for ValuedCircuit<F> {
+    type Output = F;
+
+    fn index(&self, index: CircuitIdx) -> &Self::Output {
+        match index {
+            CircuitIdx::Constant(i) => &self.circuit.constants[i as usize],
+            CircuitIdx::Witness(i) => &self.witnesses[i as usize],
+            CircuitIdx::Node(i) => &self.nodes[i as usize],
+        }
+    }
 }
 
 struct ValuesBuilder<F> {

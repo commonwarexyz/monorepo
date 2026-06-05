@@ -551,6 +551,383 @@ pub fn r1cs_to_circuit_and_witness<F: Ring + Random>(
     (circuit, witness)
 }
 
+mod zkc {
+    use crate::zk::circuit as zk;
+    use commonware_math::algebra::{Field, Random, Ring};
+    use commonware_utils::ordered::Set;
+    use rand_core::CryptoRngCore;
+    use std::{borrow::Cow, collections::BTreeMap};
+
+    #[derive(Clone, Copy)]
+    enum Location {
+        One,
+        Witness(usize),
+        Left(usize),
+        Right(usize),
+        Output(usize),
+        Committed(usize),
+    }
+
+    #[derive(Clone)]
+    enum LinComb<F> {
+        Location(Location),
+        Constant(F),
+        General(Vec<(F, Location)>),
+    }
+
+    impl<F: Ring> LinComb<F> {
+        fn mul(&self, other: &Self) -> Option<Self> {
+            let (constant, other) = match (self, other) {
+                (Self::Constant(c), other) => (c.clone(), other),
+                (other, Self::Constant(c)) => (c.clone(), other),
+                _ => return None,
+            };
+            let out = match other {
+                Self::Location(location) => Self::General(vec![(constant, *location)]),
+                Self::Constant(other_constant) => Self::Constant(constant * other_constant),
+                Self::General(items) => Self::General(
+                    items
+                        .iter()
+                        .map(|(w, loc)| (w.clone() * &constant, *loc))
+                        .collect(),
+                ),
+            };
+            Some(out)
+        }
+
+        fn iter(&self) -> impl Iterator<Item = (Cow<'_, F>, Location)> {
+            enum LinCombIter<'a, F: Clone> {
+                Single(Option<(Cow<'a, F>, Location)>),
+                General(std::slice::Iter<'a, (F, Location)>),
+            }
+
+            impl<'a, F: Clone> Iterator for LinCombIter<'a, F> {
+                type Item = (Cow<'a, F>, Location);
+
+                fn next(&mut self) -> Option<Self::Item> {
+                    match self {
+                        LinCombIter::Single(item) => item.take(),
+                        LinCombIter::General(items) => {
+                            items.next().map(|(w, loc)| (Cow::Borrowed(w), *loc))
+                        }
+                    }
+                }
+            }
+
+            match self {
+                Self::Location(loc) => LinCombIter::Single(Some((Cow::Owned(F::one()), *loc))),
+                Self::Constant(w) => LinCombIter::Single(Some((Cow::Borrowed(w), Location::One))),
+                Self::General(items) => LinCombIter::General(items.iter()),
+            }
+        }
+
+        const fn witness(&self) -> Option<usize> {
+            match self {
+                Self::Location(Location::Witness(w)) => Some(*w),
+                _ => None,
+            }
+        }
+    }
+
+    pub struct ZKCConverter<F> {
+        linearize_queue: Vec<zk::CircuitIdx>,
+        linearize_cache: BTreeMap<zk::CircuitIdx, LinComb<F>>,
+        assertions: Vec<(zk::CircuitIdx, zk::CircuitIdx)>,
+        extra_assertions: Vec<(zk::CircuitIdx, Location)>,
+        witness_locations: BTreeMap<usize, Location>,
+        committed_indices: Set<zk::CircuitIdx>,
+        internal_vars: Vec<(
+            zk::CircuitIdx,
+            Option<zk::CircuitIdx>,
+            Option<zk::CircuitIdx>,
+        )>,
+    }
+
+    impl<F: Field + Random> ZKCConverter<F> {
+        pub fn new(committed_indices: Set<zk::CircuitIdx>) -> Self {
+            Self {
+                linearize_queue: Vec::new(),
+                linearize_cache: BTreeMap::new(),
+                assertions: Vec::new(),
+                extra_assertions: Vec::new(),
+                witness_locations: BTreeMap::new(),
+                committed_indices,
+                internal_vars: Default::default(),
+            }
+        }
+
+        pub fn circuit(mut self, zkc: zk::Circuit<F>) -> super::Circuit<F> {
+            self.populate(&zkc);
+            self.reckon_circuit()
+        }
+
+        pub fn circuit_and_witness(
+            mut self,
+            blinding_rng: Option<&mut impl CryptoRngCore>,
+            zkc: zk::ValuedCircuit<F>,
+        ) -> (super::Circuit<F>, super::Witness<F>) {
+            self.populate(&zkc.circuit);
+            let blinding = blinding_rng.map_or_else(
+                || vec![F::zero(); self.committed_indices.len()],
+                |rng| {
+                    (0..self.committed_indices.len())
+                        .map(|_| F::random(&mut *rng))
+                        .collect::<Vec<_>>()
+                },
+            );
+            let values = self
+                .committed_indices
+                .iter()
+                .map(|&i| zkc[i].clone())
+                .collect::<Vec<_>>();
+            let mut left = Vec::with_capacity(self.internal_vars.len());
+            let mut right = Vec::with_capacity(self.internal_vars.len());
+            let mut out = Vec::with_capacity(self.internal_vars.len());
+            for &(l_i, r_i, o_i) in &self.internal_vars {
+                left.push(zkc[l_i].clone());
+                match (r_i, o_i) {
+                    (None, _) => {
+                        right.push(F::zero());
+                        out.push(F::zero());
+                    }
+                    (Some(r_i), None) => {
+                        right.push(zkc[r_i].clone());
+                        out.push(zkc[l_i].clone() * &zkc[r_i]);
+                    }
+                    (Some(r_i), Some(o_i)) => {
+                        right.push(zkc[r_i].clone());
+                        out.push(zkc[o_i].clone());
+                    }
+                }
+            }
+            let witness = super::Witness {
+                values,
+                blinding,
+                left,
+                right,
+                out,
+            };
+            (self.reckon_circuit(), witness)
+        }
+
+        fn populate(&mut self, zkc: &zk::Circuit<F>) {
+            for &(l, r) in &zkc.assertions {
+                self.assertions.push((l, r));
+                self.linearize(zkc, l);
+                self.linearize(zkc, r);
+            }
+            // Now, assign a non-witness location to any discovered witnesses.
+            {
+                let mut left = true;
+
+                for loc in self.witness_locations.values_mut() {
+                    let &mut Location::Witness(w) = loc else {
+                        continue;
+                    };
+                    if left {
+                        *loc = Location::Left(self.internal_vars.len());
+                        self.internal_vars
+                            .push((zk::CircuitIdx::Witness(w as u32), None, None));
+                        left = false;
+                    } else {
+                        let i = self.internal_vars.len() - 1;
+                        *loc = Location::Right(i);
+                        self.internal_vars[i].1 = Some(zk::CircuitIdx::Witness(w as u32));
+                        left = true;
+                    }
+                }
+            }
+            // Add extra assertions for each committed index.
+            for (i, &c_pos) in self.committed_indices.iter().enumerate() {
+                self.extra_assertions.push((c_pos, Location::Committed(i)));
+            }
+        }
+
+        fn location_to_col(&self, loc: Location) -> usize {
+            fn inner<F>(this: &ZKCConverter<F>, loc: Location, no_witness: bool) -> usize {
+                match loc {
+                    Location::One => 0,
+                    Location::Left(i) => 1 + this.committed_indices.len() + i,
+                    Location::Right(i) => {
+                        1 + this.committed_indices.len() + this.internal_vars.len() + i
+                    }
+                    Location::Output(i) => {
+                        1 + this.committed_indices.len() + 2 * this.internal_vars.len() + i
+                    }
+                    Location::Committed(i) => 1 + i,
+                    Location::Witness(i) => {
+                        if no_witness {
+                            unreachable!("unexpected witness location")
+                        } else {
+                            inner(this, this.witness_locations[&i], true)
+                        }
+                    }
+                }
+            }
+
+            inner(self, loc, false)
+        }
+
+        fn reckon_circuit(&self) -> super::Circuit<F> {
+            let mut weights = super::SparseMatrix::default();
+            for (row, (l, r)) in self
+                .assertions
+                .iter()
+                .map(|(l, r)| {
+                    (
+                        Cow::Borrowed(
+                            self.linearize_cache
+                                .get(l)
+                                .expect("linearize_cache_should_be_populated"),
+                        ),
+                        Cow::Borrowed(
+                            self.linearize_cache
+                                .get(r)
+                                .expect("linearize_cache should be populated"),
+                        ),
+                    )
+                })
+                .chain(self.extra_assertions.iter().map(|(cidx, loc)| {
+                    (
+                        Cow::Borrowed(
+                            self.linearize_cache
+                                .get(cidx)
+                                .expect("linearize_cache should be populated"),
+                        ),
+                        Cow::Owned(LinComb::Location(*loc)),
+                    )
+                }))
+                .enumerate()
+            {
+                for (w, loc) in l.iter() {
+                    weights[(row, self.location_to_col(loc))] += w.as_ref();
+                }
+                for (w, loc) in r.iter() {
+                    weights[(row, self.location_to_col(loc))] -= w.as_ref();
+                }
+            }
+            super::Circuit {
+                committed_vars: self.committed_indices.len(),
+                internal_vars: self.internal_vars.len(),
+                weights,
+            }
+        }
+
+        fn assign_witness_location(&mut self, witness: usize, loc: Location) -> Location {
+            *self
+                .witness_locations
+                .entry(witness)
+                .and_modify(|current_loc| {
+                    if let Location::Witness(_) = *current_loc {
+                        *current_loc = loc;
+                    }
+                })
+                .or_insert(loc)
+        }
+
+        fn linearize(&mut self, zkc: &zk::Circuit<F>, i: zk::CircuitIdx) {
+            self.linearize_queue.clear();
+            self.linearize_queue.push(i);
+            while let Some(i) = self.linearize_queue.pop() {
+                if self.linearize_cache.contains_key(&i) {
+                    continue;
+                }
+                let comb = match i {
+                    zk::CircuitIdx::Constant(i) => {
+                        LinComb::Constant(zkc.constants[i as usize].clone())
+                    }
+                    this @ zk::CircuitIdx::Witness(i) => {
+                        let i_usize = i as usize;
+                        let w_loc = self
+                            .committed_indices
+                            .position(&this)
+                            .map_or(Location::Witness(i_usize), Location::Committed);
+                        let loc = self.assign_witness_location(i_usize, w_loc);
+                        LinComb::Location(loc)
+                    }
+                    this @ zk::CircuitIdx::Node(i) => {
+                        let this_node = &zkc.nodes[i as usize];
+                        let (l, r) = match *this_node {
+                            zk::CircuitNode::Add(l, r) => (l, r),
+                            zk::CircuitNode::Mul(l, r) => (l, r),
+                        };
+                        let (l_comb, r_comb) =
+                            match (self.linearize_cache.get(&l), self.linearize_cache.get(&r)) {
+                                (None, None) => {
+                                    self.linearize_queue.extend([this, r, l]);
+                                    continue;
+                                }
+                                (Some(_), None) => {
+                                    self.linearize_queue.extend([this, r]);
+                                    continue;
+                                }
+                                (None, Some(_)) => {
+                                    self.linearize_queue.extend([this, l]);
+                                    continue;
+                                }
+                                (Some(l_comb), Some(r_comb)) => (l_comb, r_comb),
+                            };
+                        match *this_node {
+                            zk::CircuitNode::Add(_, _) => LinComb::General(
+                                l_comb
+                                    .iter()
+                                    .map(|(w, loc)| (w.into_owned(), loc))
+                                    .chain(r_comb.iter().map(|(w, loc)| (w.into_owned(), loc)))
+                                    .collect(),
+                            ),
+                            zk::CircuitNode::Mul(l, r) => {
+                                if let Some(out) = l_comb.mul(r_comb) {
+                                    out
+                                } else {
+                                    let i = self.internal_vars.len();
+                                    self.internal_vars.push((l, Some(r), Some(this)));
+                                    self.extra_assertions.push((l, Location::Left(i)));
+                                    self.extra_assertions.push((r, Location::Right(i)));
+
+                                    // Borrow checker shenanigans
+                                    let w_l = l_comb.witness();
+                                    let w_r = r_comb.witness();
+                                    if let Some(w) = w_l {
+                                        self.assign_witness_location(w, Location::Left(i));
+                                    }
+                                    if let Some(w) = w_r {
+                                        self.assign_witness_location(w, Location::Right(i));
+                                    }
+                                    LinComb::Location(Location::Output(i))
+                                }
+                            }
+                        }
+                    }
+                };
+                self.linearize_cache.insert(i, comb);
+            }
+        }
+    }
+}
+
+/// Convert a ZK circuit into a bulletproofs circuit, treating the witness
+/// positions named by `committed_indices` as committed values.
+pub fn zkc_to_circuit<F: Field + Random>(
+    zkc: crate::zk::circuit::Circuit<F>,
+    committed_indices: &[crate::zk::circuit::CircuitIdx],
+) -> Circuit<F> {
+    zkc::ZKCConverter::new(Set::from_iter_dedup(committed_indices.iter().copied())).circuit(zkc)
+}
+
+/// Convert a ZK circuit and witness assignment into a bulletproofs circuit and
+/// witness.
+///
+/// `committed_indices` names the witness slots that should become
+/// bulletproofs committed values.
+pub fn zkc_to_circuit_and_witness<F: Field + Random>(
+    blinding_rng: Option<&mut impl CryptoRngCore>,
+    zkc: crate::zk::circuit::ValuedCircuit<F>,
+    committed_indices: &[crate::zk::circuit::CircuitIdx],
+) -> (Circuit<F>, Witness<F>) {
+    zkc::ZKCConverter::new(Set::from_iter_dedup(committed_indices.iter().copied()))
+        .circuit_and_witness(blinding_rng, zkc)
+}
+
 /// Generators used by the circuit proof system.
 ///
 /// This wraps the underlying IPA setup and adds two Pedersen generators used
