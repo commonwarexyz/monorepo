@@ -16,8 +16,9 @@
 //! - **Ready-prefix delivery (anchor-based, chain-aware repair).**
 //!   When a `ReportFinalization` at height `h` arrives while block
 //!   `h` is locally available (durable or variant), marshal stores a
-//!   finalized anchor at `h` in its finalized archive. The driver
-//!   mirrors this with a persistent `finalized_anchors` set.
+//!   finalized anchor at `h` in its finalized archive. The driver mirrors this
+//!   with a persistent `finalized_available` set that also includes repaired
+//!   ancestors written into the finalized archive.
 //!
 //!   A `ReportFinalization` only triggers a repair wake when its
 //!   height is strictly above marshal's `processed_height` AND the
@@ -32,29 +33,24 @@
 //!   On each repair wake (every above-floor `ReportFinalization`
 //!   that found its block, and every `Restart` after the variant
 //!   cache is cleared, since marshal's startup path runs
-//!   `try_repair_gaps` unconditionally) the driver finds the largest
-//!   anchor `a` for which every height `1..=a` is currently
-//!   available in (`durable_available` union `variant_available`).
-//!   If `a > ready_prefix`, the gap is repairable: marshal can walk
-//!   the chain from `a` back to 1 and deliver. The driver bumps
-//!   `ready_prefix = a` and promotes heights `prev_ready+1..=a` into
-//!   `durable_available` (marshal moves them to the finalized
-//!   archive, so they survive future restarts even if originally
-//!   sourced from the variant cache).
+//!   `try_repair_gaps` unconditionally) the driver mirrors marshal's
+//!   backward gap repair. Repair can write ancestors above a lower missing gap
+//!   into the finalized archive. Those ancestors survive future restarts even
+//!   if they were originally sourced from the variant cache. The driver advances
+//!   `ready_prefix` when `finalized_available` is contiguous from height 1.
 //!
 //!   Availability state:
 //!     - `durable_available`: heights set by Propose / Verify /
 //!       Certify (marshal persists them), anchor blocks persisted by
 //!       `ReportFinalization` when the block was locally available
 //!       at that moment (marshal writes the block to
-//!       `finalized_blocks` alongside the finalization), plus
-//!       heights promoted by `ready_prefix` advances. Survives
-//!       restart.
+//!       `finalized_blocks` alongside the finalization), plus ancestors
+//!       repaired into `finalized_blocks`. Survives restart.
 //!     - `variant_available`: heights set by `PublishViaVariant`
 //!       after confirmed local availability. Lives only in the
 //!       in-memory buffered / shards cache; cleared on `Restart`.
-//!     - `finalized_anchors`: heights at which a usable finalization
-//!       is stored. Survives restart.
+//!     - `finalized_available`: heights stored in `finalized_blocks` by
+//!       finalization or repair. Survives restart.
 //! - **At-least-once across restart.** Heights pending ack at the moment
 //!   of restart are tracked. A later actor instance must redeliver each
 //!   of them at least once before the run ends.

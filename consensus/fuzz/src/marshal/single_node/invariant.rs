@@ -33,10 +33,9 @@ pub fn check_all<H: TestHarness>(
 /// Invariant: ready-prefix delivery.
 ///
 /// Every height in `1..=ready_prefix` must appear at least once in
-/// `delivery_log`. The driver advances `ready_prefix` only when an
-/// above-floor `ReportFinalization` (or restart-triggered repair)
-/// observes a complete chain back to height 1, which is precisely when
-/// marshal is obliged to deliver the prefix.
+/// `delivery_log`. The driver advances `ready_prefix` only when mirrored
+/// repair makes marshal's finalized archive contiguous from height 1, which is
+/// precisely when marshal is obliged to deliver the prefix.
 pub fn check_ready_prefix_delivered(ready_prefix: u64, delivery_log: &[Height]) {
     let delivered_set: BTreeSet<u64> = delivery_log.iter().map(|h| h.get()).collect();
     for h in 1..=ready_prefix {

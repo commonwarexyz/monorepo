@@ -76,7 +76,7 @@ fn apply_pending_floor(
     pending_floor: &mut Option<u64>,
     height: Height,
     durable_available: &mut HashSet<u64>,
-    finalized_anchors: &mut HashSet<u64>,
+    finalized_available: &mut HashSet<u64>,
     processed_height: &mut u64,
     segment_starts: &mut [u64],
 ) -> bool {
@@ -85,13 +85,72 @@ fn apply_pending_floor(
         return false;
     }
     durable_available.insert(h);
-    finalized_anchors.insert(h);
+    finalized_available.insert(h);
     *processed_height = h.saturating_sub(1);
     if let Some(start) = segment_starts.last_mut() {
         *start = h;
     }
     *pending_floor = None;
     true
+}
+
+fn block_available(
+    durable_available: &HashSet<u64>,
+    variant_available: &HashSet<u64>,
+    height: u64,
+) -> bool {
+    durable_available.contains(&height) || variant_available.contains(&height)
+}
+
+fn advance_ready_prefix(finalized_available: &HashSet<u64>, ready_prefix: &mut u64) {
+    while *ready_prefix < NUM_BLOCKS && finalized_available.contains(&(*ready_prefix + 1)) {
+        *ready_prefix += 1;
+    }
+}
+
+fn shadow_repair(
+    processed_height: u64,
+    durable_available: &mut HashSet<u64>,
+    variant_available: &HashSet<u64>,
+    finalized_available: &mut HashSet<u64>,
+    ready_prefix: &mut u64,
+) {
+    // Marshal also has a trailing-anchor repair path for a stored finalization
+    // whose anchor block is not yet in `finalized_blocks`. This driver records
+    // finalizations only when the block is locally available, so that path is
+    // unreachable and every recorded anchor is immediately finalized_available.
+    let start = processed_height.saturating_add(1);
+    let mut cursor = start;
+    while cursor <= NUM_BLOCKS {
+        if finalized_available.contains(&cursor) {
+            cursor += 1;
+            continue;
+        }
+
+        let Some(gap_end) =
+            ((cursor + 1)..=NUM_BLOCKS).find(|height| finalized_available.contains(height))
+        else {
+            break;
+        };
+
+        let mut repair = gap_end - 1;
+        loop {
+            if block_available(durable_available, variant_available, repair) {
+                durable_available.insert(repair);
+                finalized_available.insert(repair);
+            } else {
+                advance_ready_prefix(finalized_available, ready_prefix);
+                return;
+            }
+
+            if repair == cursor {
+                break;
+            }
+            repair -= 1;
+        }
+    }
+
+    advance_ready_prefix(finalized_available, ready_prefix);
 }
 
 fn assert_ready_delivery(ready_prefix: u64, height: Height) {
@@ -181,23 +240,24 @@ where
         // Shadow state for the invariant check.
         //
         // - `durable_available`: blocks marshal has persisted to disk
-        //   (via Propose / Verify / Certify, or via delivery on a
-        //   ready_prefix advance). Survives restart.
+        //   (via Propose / Verify / Certify, notarization, finalization,
+        //   floor application, or finalized-archive repair). Survives restart.
         // - `variant_available`: blocks confirmed in the in-memory variant
         //   cache via PublishViaVariant. Cleared on Restart, and FIFO-evicted
         //   per the variant's `VariantPublish::CACHE_CAPACITY` to
         //   mirror a bounded broadcast cache (otherwise the shadow would think
         //   an evicted block is still repairable and assert a delivery that
         //   cannot happen).
-        // - `finalized_anchors`: heights at which marshal has stored
-        //   a usable finalization. Survives restart.
+        // - `finalized_available`: blocks in marshal's finalized archive,
+        //   either as direct anchors or as ancestors repaired from a later
+        //   anchor. Survives restart.
         let mut durable_available: HashSet<u64> = HashSet::new();
         let mut variant_available: HashSet<u64> = HashSet::new();
+        let mut finalized_available: HashSet<u64> = HashSet::new();
         // Publish order backing `variant_available`'s FIFO eviction.
         let mut variant_order: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
-        let mut finalized_anchors: HashSet<u64> = HashSet::new();
-        // ready_prefix is monotone non-decreasing. It advances when
-        // an anchor's chain becomes complete (chain-walk repair).
+        // ready_prefix is monotone non-decreasing. It advances when the
+        // finalized archive becomes contiguous from height 1.
         let mut ready_prefix: u64 = 0;
         // Shadow of marshal's persistent processed_height. Mirrors
         // marshal's `store_finalization` floor check: a finalization
@@ -239,7 +299,7 @@ where
                         &mut pending_floor,
                         height,
                         &mut durable_available,
-                        &mut finalized_anchors,
+                        &mut finalized_available,
                         &mut processed_height,
                         &mut segment_starts,
                     );
@@ -254,7 +314,7 @@ where
                         &mut pending_floor,
                         height,
                         &mut durable_available,
-                        &mut finalized_anchors,
+                        &mut finalized_available,
                         &mut processed_height,
                         &mut segment_starts,
                     );
@@ -271,7 +331,7 @@ where
                         &mut pending_floor,
                         height,
                         &mut durable_available,
-                        &mut finalized_anchors,
+                        &mut finalized_available,
                         &mut processed_height,
                         &mut segment_starts,
                     );
@@ -296,20 +356,22 @@ where
                     // writes the block into the finalized_blocks
                     // archive, making it durable.
                     let h = height.get();
-                    let block_available =
-                        durable_available.contains(&h) || variant_available.contains(&h);
-                    if block_available && pending_floor == Some(h) {
+                    if block_available(&durable_available, &variant_available, h)
+                        && pending_floor == Some(h)
+                    {
                         repair_wake |= apply_pending_floor(
                             &mut pending_floor,
                             height,
                             &mut durable_available,
-                            &mut finalized_anchors,
+                            &mut finalized_available,
                             &mut processed_height,
                             &mut segment_starts,
                         );
-                    } else if block_available && h > processed_height {
-                        finalized_anchors.insert(h);
+                    } else if block_available(&durable_available, &variant_available, h)
+                        && h > processed_height
+                    {
                         durable_available.insert(h);
+                        finalized_available.insert(h);
                         repair_wake = true;
                     }
                 }
@@ -332,19 +394,19 @@ where
                     // restart does not forget a variant-sourced
                     // block.
                     let h = height.get();
-                    if (durable_available.contains(&h) || variant_available.contains(&h))
+                    if block_available(&durable_available, &variant_available, h)
                         && pending_floor == Some(h)
                     {
                         repair_wake |= apply_pending_floor(
                             &mut pending_floor,
                             height,
                             &mut durable_available,
-                            &mut finalized_anchors,
+                            &mut finalized_available,
                             &mut processed_height,
                             &mut segment_starts,
                         );
                     }
-                    if (durable_available.contains(&h) || variant_available.contains(&h))
+                    if block_available(&durable_available, &variant_available, h)
                         && h > processed_height
                     {
                         durable_available.insert(h);
@@ -417,12 +479,12 @@ where
                         handle.mailbox.set_floor(finalization);
                         stale_to_skip.extend(live_pending_acks.iter().copied());
                         pending_floor = Some(h);
-                        if durable_available.contains(&h) || variant_available.contains(&h) {
+                        if block_available(&durable_available, &variant_available, h) {
                             repair_wake |= apply_pending_floor(
                                 &mut pending_floor,
                                 height,
                                 &mut durable_available,
-                                &mut finalized_anchors,
+                                &mut finalized_available,
                                 &mut processed_height,
                                 &mut segment_starts,
                             );
@@ -562,34 +624,20 @@ where
                 MarshalEvent::Idle => {}
             }
 
-            // Repair wake: an above-floor ReportFinalization that
-            // found its block (mirrored by `repair_wake`), or a
-            // Restart (marshal runs try_repair_gaps on startup
-            // unconditionally). Both can deliver up to the highest
-            // anchor whose chain is now fully populated. Newly
-            // delivered heights are promoted into durable_available
-            // because marshal moves them into the finalized archive
-            // on delivery.
+            // Repair wake: an above-floor ReportFinalization that found its
+            // block (mirrored by `repair_wake`), or a Restart (marshal runs
+            // try_repair_gaps on startup unconditionally). Gap repair can
+            // persist ancestors above an unrepaired lower gap; those ancestors
+            // survive restart even if they came from the variant cache. Delivery
+            // is ready once the finalized archive is contiguous from height 1.
             if pending_floor.is_none() && (repair_wake || matches!(event, MarshalEvent::Restart)) {
-                let mut best: u64 = 0;
-                for &anchor in finalized_anchors.iter() {
-                    let mut chain_complete = true;
-                    for hh in 1..=anchor {
-                        if !durable_available.contains(&hh) && !variant_available.contains(&hh) {
-                            chain_complete = false;
-                            break;
-                        }
-                    }
-                    if chain_complete {
-                        best = best.max(anchor);
-                    }
-                }
-                if best > ready_prefix {
-                    for hh in (ready_prefix + 1)..=best {
-                        durable_available.insert(hh);
-                    }
-                    ready_prefix = best;
-                }
+                shadow_repair(
+                    processed_height,
+                    &mut durable_available,
+                    &variant_available,
+                    &mut finalized_available,
+                    &mut ready_prefix,
+                );
             }
 
             context.sleep(EVENT_SETTLE).await;
