@@ -637,6 +637,23 @@ where
         Ok(())
     }
 
+    /// Prune operations prior to `prune_loc` and sync all database state to disk.
+    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+        let _prune_timer = self.metrics.operations.prune_timer();
+        let _sync_timer = self.metrics.operations.sync_timer();
+        self.metrics.operations.prune_calls.inc();
+        self.metrics.operations.sync_calls.inc();
+        if prune_loc > self.inactivity_floor_loc {
+            return Err(Error::PruneBeyondMinRequired(
+                prune_loc,
+                self.inactivity_floor_loc,
+            ));
+        }
+        self.journal.prune_and_sync(prune_loc).await?;
+        self.update_metrics().await;
+        Ok(())
+    }
+
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
     pub async fn commit(&self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.commit_timer();

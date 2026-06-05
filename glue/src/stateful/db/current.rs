@@ -383,7 +383,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
+        self.commit().await?;
         Ok(())
     }
 
@@ -474,7 +474,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
+        self.commit().await?;
         Ok(())
     }
 
@@ -642,7 +642,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
+        self.commit().await?;
         Ok(())
     }
 
@@ -738,7 +738,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
+        self.commit().await?;
         Ok(())
     }
 
@@ -1139,6 +1139,11 @@ mod tests {
                     .unwrap();
             }
 
+            let metrics = context.encode();
+            assert!(metrics.contains("db_any_commit_calls_total 1"), "{metrics}");
+            assert!(metrics.contains("db_sync_calls_total 0"), "{metrics}");
+            assert!(metrics.contains("db_any_sync_calls_total 0"), "{metrics}");
+
             let guard = db.read().await;
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get(&key).await.unwrap(), Some(value));
@@ -1182,6 +1187,11 @@ mod tests {
                     .await
                     .unwrap();
             }
+
+            let metrics = context.encode();
+            assert!(metrics.contains("db_any_commit_calls_total 1"), "{metrics}");
+            assert!(metrics.contains("db_sync_calls_total 0"), "{metrics}");
+            assert!(metrics.contains("db_any_sync_calls_total 0"), "{metrics}");
 
             let guard = db.read().await;
             assert_eq!(guard.root(), expected_root);

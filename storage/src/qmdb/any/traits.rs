@@ -119,6 +119,12 @@ pub trait DbAny<F: Family>:
     /// Prune historical operations prior to `loc`.
     fn prune(&mut self, loc: Location<F>) -> impl Future<Output = Result<(), Error<F>>> + Send;
 
+    /// Prune historical operations prior to `loc` and sync all database state to disk.
+    fn prune_and_sync(
+        &mut self,
+        loc: Location<F>,
+    ) -> impl Future<Output = Result<(), Error<F>>> + Send;
+
     /// The location before which all operations can be pruned.
     fn inactivity_floor_loc(&self) -> impl Future<Output = Location<F>> + Send;
 
@@ -207,6 +213,13 @@ macro_rules! impl_db_any {
                 loc: $crate::merkle::Location<$fam>,
             ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
                 <$ty>::prune(self, loc).await
+            }
+
+            async fn prune_and_sync(
+                &mut self,
+                loc: $crate::merkle::Location<$fam>,
+            ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+                <$ty>::prune_and_sync(self, loc).await
             }
 
             async fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {
