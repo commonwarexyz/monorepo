@@ -268,9 +268,7 @@ impl<B: Blob> SectionTable<B> {
             return Some(SectionHandle::Tail(&self.tail_reader));
         }
         let idx = section.checked_sub(self.base_section)?;
-        self.sealed
-            .get(idx as usize)
-            .map(SectionHandle::Sealed)
+        self.sealed.get(idx as usize).map(SectionHandle::Sealed)
     }
 }
 
@@ -343,7 +341,11 @@ impl<B: Blob> Shared<B> {
     /// Publish a new section table. Writer-only.
     fn publish_table(&self, new: SectionTable<B>) {
         let mut current = self.table.write();
-        assert_eq!(new.version, current.version + 1, "table versions must be sequential");
+        assert_eq!(
+            new.version,
+            current.version + 1,
+            "table versions must be sequential"
+        );
         *current = Arc::new(new);
     }
 
@@ -380,9 +382,10 @@ impl<B: Blob> Snapshot<B> {
         let offset = pos_in_section
             .checked_mul(chunk_size)
             .ok_or(Error::OffsetOverflow)?;
-        let handle = self.table.handle(section).ok_or_else(|| {
-            Error::Corruption(format!("section {section} missing from snapshot"))
-        })?;
+        let handle = self
+            .table
+            .handle(section)
+            .ok_or_else(|| Error::Corruption(format!("section {section} missing from snapshot")))?;
         Ok((handle, offset))
     }
 }
@@ -1484,12 +1487,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             let idx = (section - table.base_section) as usize;
             dirty_sealed.push(table.sealed[idx].clone());
         }
-        try_join_all(dirty_sealed.iter().map(|sealed| sealed.sync())).await
+        try_join_all(dirty_sealed.iter().map(|sealed| sealed.sync()))
+            .await
             .map_err(Error::Runtime)?;
-        self.io
-            .metrics
-            .synced
-            .inc_by(dirty_sealed.len() as u64);
+        self.io.metrics.synced.inc_by(dirty_sealed.len() as u64);
 
         // Sync the tail.
         self.tail.writer.sync().await.map_err(Error::Runtime)?;
@@ -1862,6 +1863,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Remove any persisted data created by the journal.
+    ///
+    /// # Crash Safety
+    ///
+    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
+    /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
+    /// for a recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
         // Remove section blobs and the blob partition itself.
         let current = self.shared.table.read().clone();
@@ -1920,7 +1927,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.dirty_from_section = None;
 
         // Complete the clear in metadata.
-        Self::stage_pruning_boundary_metadata(&mut self.metadata, self.items_per_blob.get(), new_size);
+        Self::stage_pruning_boundary_metadata(
+            &mut self.metadata,
+            self.items_per_blob.get(),
+            new_size,
+        );
         self.metadata.put(RECOVERY_WATERMARK_KEY, new_size.into());
         self.metadata.remove(&CLEAR_TARGET_KEY);
         self.metadata.sync().await?;
@@ -1975,16 +1986,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let table = self.current_table();
         match table.handle(section) {
             Some(SectionHandle::Sealed(sealed)) => sealed.sync().await.map_err(Error::Runtime),
-            Some(SectionHandle::Tail(_)) => {
-                self.tail.writer.sync().await.map_err(Error::Runtime)
-            }
+            Some(SectionHandle::Tail(_)) => self.tail.writer.sync().await.map_err(Error::Runtime),
             None => Ok(()),
         }
     }
 
     /// Test helper: Set and persist the recovery watermark directly.
     #[cfg(test)]
-    pub(crate) async fn test_set_recovery_watermark(&mut self, watermark: u64) -> Result<(), Error> {
+    pub(crate) async fn test_set_recovery_watermark(
+        &mut self,
+        watermark: u64,
+    ) -> Result<(), Error> {
         self.metadata.put(RECOVERY_WATERMARK_KEY, watermark.into());
         self.metadata.sync().await?;
         Ok(())
@@ -2318,14 +2330,8 @@ mod tests {
 
             // Check no-op pruning
             journal.prune(0).await.expect("no-op pruning failed");
-            assert_eq!(
-                journal.test_oldest_section(),
-                Some(1)
-            );
-            assert_eq!(
-                journal.test_newest_section(),
-                Some(5)
-            );
+            assert_eq!(journal.test_oldest_section(), Some(1));
+            assert_eq!(journal.test_newest_section(), Some(5));
             assert_eq!(journal.bounds().start, 2);
 
             // Prune first 3 blobs (6 items)
@@ -2333,14 +2339,8 @@ mod tests {
                 .prune(3 * cfg.items_per_blob.get())
                 .await
                 .expect("failed to prune journal 2");
-            assert_eq!(
-                journal.test_oldest_section(),
-                Some(3)
-            );
-            assert_eq!(
-                journal.test_newest_section(),
-                Some(5)
-            );
+            assert_eq!(journal.test_oldest_section(), Some(3));
+            assert_eq!(journal.test_newest_section(), Some(5));
             assert_eq!(journal.bounds().start, 6);
 
             // Try pruning (more than) everything in the journal.
@@ -2818,7 +2818,9 @@ mod tests {
                 .open(&blob_partition, &u64::MAX.to_be_bytes())
                 .await
                 .unwrap();
-            let append = AppendWriter::new(blob, blob_size, 2048, cache_ref).await.unwrap();
+            let append = AppendWriter::new(blob, blob_size, 2048, cache_ref)
+                .await
+                .unwrap();
             let extra = test_digest(999);
             append.append(extra.as_ref()).await.unwrap();
             append.sync().await.unwrap();
@@ -2886,10 +2888,7 @@ mod tests {
                 Err(Error::ItemOutOfRange(9))
             ));
             assert_eq!(journal.test_oldest_section(), Some(1));
-            assert_eq!(
-                journal.test_newest_section(),
-                Some(1)
-            );
+            assert_eq!(journal.test_newest_section(), Some(1));
 
             journal.destroy().await.unwrap();
         });
@@ -3462,9 +3461,10 @@ mod tests {
             drop(journal);
 
             // Make sure re-opened journal is as expected
-            let mut journal: Journal<_, Digest> = Journal::init(context.child("third"), cfg.clone())
-                .await
-                .expect("failed to re-initialize journal");
+            let mut journal: Journal<_, Digest> =
+                Journal::init(context.child("third"), cfg.clone())
+                    .await
+                    .expect("failed to re-initialize journal");
             assert_eq!(journal.size(), 10 * (100 - 49));
 
             // Make sure rewinding works after pruning
@@ -5163,9 +5163,10 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(2));
-            let mut journal = Journal::<_, Digest>::init(context.child("fixed_metrics"), cfg.clone())
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, Digest>::init(context.child("fixed_metrics"), cfg.clone())
+                    .await
+                    .unwrap();
 
             let items: Vec<_> = (0..5).map(test_digest).collect();
             journal.append_many(Many::Flat(&items)).await.unwrap();
@@ -5384,5 +5385,4 @@ mod tests {
             journal.destroy().await.unwrap();
         });
     }
-
 }

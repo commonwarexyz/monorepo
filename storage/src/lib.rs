@@ -69,6 +69,12 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         ///
         /// This method consumes the structure and deletes all persisted data, leaving behind no storage
         /// artifacts. This can be used to clean up disk resources in tests.
+        ///
+        /// # Crash Safety
+        ///
+        /// This operation is intended for final teardown and is not crash-safe. If interrupted,
+        /// reopening the same storage may observe partially removed state. Use a reset operation
+        /// provided by the concrete type when the structure must remain recoverable.
         fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
     }
 });

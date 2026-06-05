@@ -4182,7 +4182,11 @@ mod tests {
             assert!(matches!(err, crate::Error::BlobInsufficientLength));
 
             // Reads within the new size return the retained prefix, not stale cached bytes.
-            let read = reader.read_at(0, new_size as usize).await.unwrap().coalesce();
+            let read = reader
+                .read_at(0, new_size as usize)
+                .await
+                .unwrap()
+                .coalesce();
             assert_eq!(read.as_ref(), &data[..new_size as usize]);
         });
     }

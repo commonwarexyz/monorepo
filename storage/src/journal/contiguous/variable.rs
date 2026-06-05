@@ -21,7 +21,10 @@ use commonware_utils::{
 #[commonware_macros::stability(ALPHA)]
 use core::ops::Range;
 use futures::{future::try_join_all, stream, Stream, StreamExt as _};
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::{
+    cmp::Ordering,
+    num::{NonZeroU64, NonZeroUsize},
+};
 #[commonware_macros::stability(ALPHA)]
 use tracing::debug;
 use tracing::warn;
@@ -209,9 +212,9 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// * If offsets.bounds().start < data.bounds().start: Prune offsets to match
 ///   (This can happen if we crash after pruning data journal but before pruning offsets journal)
 ///
-/// Note that we don't recover from the case where offsets.bounds().start >
-/// data.bounds().start. This should never occur because we always prune the data journal
-/// before the offsets journal.
+/// Offsets may start after the data journal's section-aligned start when both are in the same
+/// section, as in a mid-section `init_at_size`. Offsets starting in a later section imply
+/// corruption because we always prune the data journal before the offsets journal.
 ///
 /// ## 2. Offsets Recovery Watermark
 ///
@@ -226,7 +229,6 @@ pub struct Journal<E: Context, V: Codec> {
     ///
     /// Reads can proceed during `commit()` and `sync()`, while mutators take the write side.
     inner: AsyncRwLock<Inner<E, V>>,
-
 
     /// Index mapping positions to byte offsets within the data journal.
     /// The section can be calculated from the position using items_per_section.
@@ -578,13 +580,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// requested range.
     ///
     /// Behavior by existing on-disk state:
-    /// - Fresh (no data): returns an empty journal.
-    /// - Stale (all data strictly before `range.start`): destroys existing data and returns an
-    ///   empty journal.
+    /// - Fresh (no data): returns an empty journal, resetting to `range.start` if needed.
+    /// - Stale (all data strictly before `range.start`): resets to `range.start` using the
+    ///   crash-safe clear path and returns an empty journal.
     /// - Overlap within [`range.start`, `range.end`]:
     ///   - Prunes toward `range.start` (section-aligned, so some items before
     ///     `range.start` may be retained)
-    /// - Unexpected data beyond `range.end`: returns [crate::qmdb::Error::UnexpectedData].
+    /// - Data beyond `range.end`: returns [Error::ItemOutOfRange].
     ///
     /// # Arguments
     /// - `context`: storage context
@@ -595,7 +597,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// A contiguous journal ready for sync operations. The journal's size will be within the range.
     ///
     /// # Errors
-    /// Returns [crate::qmdb::Error::UnexpectedData] if existing data extends beyond `range.end`.
+    /// Returns [Error::ItemOutOfRange] if existing data extends beyond `range.end`.
     #[commonware_macros::stability(ALPHA)]
     pub(crate) async fn init_sync(
         context: E,
@@ -616,7 +618,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let size = journal.size().await;
 
-        // No existing data - initialize at the start of the sync range if needed
+        // No existing data - reset to sync range start if needed
         if size == 0 {
             if range.start == 0 {
                 debug!("no existing journal data, returning empty journal");
@@ -624,10 +626,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             } else {
                 debug!(
                     range.start,
-                    "no existing journal data, initializing at sync range start"
+                    "no existing journal data, resetting to sync range start"
                 );
-                journal.destroy().await?;
-                return Self::init_at_size(context, cfg, range.start).await;
+                journal.clear_to_size(range.start).await?;
+                return Ok(journal);
             }
         }
 
@@ -644,15 +646,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Err(Error::ItemOutOfRange(size));
         }
 
-        // If all existing data is before our sync range, destroy and recreate fresh
+        // If all existing data is before our sync range, reset to range start
         if size <= range.start {
-            // All data is stale (ends at or before range.start)
             debug!(
                 size,
-                range.start, "existing journal data is stale, re-initializing at start position"
+                range.start, "existing journal data is stale, resetting to start position"
             );
-            journal.destroy().await?;
-            return Self::init_at_size(context, cfg, range.start).await;
+            journal.clear_to_size(range.start).await?;
+            return Ok(journal);
         }
 
         // Prune to lower bound if needed
@@ -773,7 +774,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 }
             }
         }
-
 
         // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
@@ -924,6 +924,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Remove any underlying blobs created by the journal.
     ///
     /// This destroys both the data journal and the offsets journal.
+    ///
+    /// # Crash Safety
+    ///
+    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
+    /// reopening the same partitions may observe partially removed state. Use [Self::init_at_size]
+    /// for a recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
         let inner = self.inner.into_inner();
         inner.data.destroy().await?;
@@ -1011,8 +1017,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // After trimming empty trailing sections, a zero item count means the data journal is
         // empty: either no sections remain, or one empty section remains for repair below.
-        let data_empty = data.is_empty() || items_in_last_section == 0;
-        if data_empty {
+        if items_in_last_section == 0 {
             let offsets_bounds = {
                 let offsets_reader = offsets.reader();
                 offsets_reader.bounds()
@@ -1038,7 +1043,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             // 1. We completely pruned the data journal but crashed before pruning
             //    the offsets journal.
             // 2. The data journal was never opened.
-            if !offsets_bounds.is_empty() && offsets_bounds.start < size {
+            if !offsets_bounds.is_empty() {
                 // Offsets has unpruned entries but data is gone - clear to match empty state.
                 // We use clear_to_size (not prune) to ensure bounds.start == bounds.end,
                 // even when size is mid-section.
@@ -1051,52 +1056,39 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         // === Handle non-empty data journal case ===
         let data_first_section = data.oldest_section().unwrap();
-
-        // data_oldest_pos is ALWAYS section-aligned because it's computed from the section index.
-        // This differs from offsets bounds start which can be mid-section after init_at_size.
         let data_oldest_pos = data_first_section * items_per_section;
 
-        // Align pruning state
-        // We always prune data before offsets, so offsets should never be "ahead" by a section.
+        // Align pruning state at the section level. After alignment,
+        // position_to_section(offsets_bounds.start) == data_first_section.
+        // Mid-section offsets start (from init_at_size) is valid within the same section.
         {
             let offsets_bounds = {
                 let offsets_reader = offsets.reader();
                 offsets_reader.bounds()
             };
-            match (
-                offsets_bounds.is_empty(),
-                offsets_bounds.start.cmp(&data_oldest_pos),
-            ) {
-                (true, _) => {
-                    // Offsets journal is empty but data journal isn't.
-                    // It should always be in the same section as the data journal, though.
-                    let offsets_first_section = offsets_bounds.start / items_per_section;
-                    if offsets_first_section != data_first_section {
-                        return Err(Error::Corruption(format!(
-                            "offsets journal empty at section {offsets_first_section} != data section {data_first_section}"
-                        )));
-                    }
-                    warn!(
-                        "crash repair: offsets journal empty at {}, will rebuild from data",
-                        offsets_bounds.start
-                    );
-                }
-                (false, std::cmp::Ordering::Less) => {
-                    // Offsets behind on pruning -- prune to catch up
+
+            // Offsets journal ending before the oldest retained data section represents an
+            // impossible state under normal crash/prune sequences, indicating external corruption.
+            if offsets_bounds.end < data_oldest_pos {
+                return Err(Error::Corruption(format!(
+                    "offsets journal size {} is behind data oldest position {}",
+                    offsets_bounds.end, data_oldest_pos
+                )));
+            }
+            let offsets_start_section = offsets_bounds.start / items_per_section;
+            match offsets_start_section.cmp(&data_first_section) {
+                Ordering::Less => {
                     warn!("crash repair: pruning offsets journal to {data_oldest_pos}");
                     offsets.prune(data_oldest_pos).await?;
                 }
-                (false, std::cmp::Ordering::Greater) => {
-                    // Compare sections: same section = valid, different section = corruption.
-                    if offsets_bounds.start / items_per_section > data_first_section {
-                        return Err(Error::Corruption(format!(
-                            "offsets oldest pos ({}) > data oldest pos ({data_oldest_pos})",
-                            offsets_bounds.start
-                        )));
-                    }
-                }
-                (false, std::cmp::Ordering::Equal) => {
-                    // Both journals are pruned to the same position.
+                Ordering::Equal => {}
+                Ordering::Greater => {
+                    // Prune always removes data before offsets, so offsets should never be
+                    // ahead by a section.
+                    return Err(Error::Corruption(format!(
+                        "offsets start section {offsets_start_section} ahead of \
+                         data start section {data_first_section}"
+                    )));
                 }
             }
         }
@@ -1120,8 +1112,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             .ok_or(Error::OffsetOverflow)?;
 
         let recovery_watermark = offsets.recovery_watermark();
+
+        if recovery_watermark > offsets_bounds.end {
+            // This condition should be unreachable (fixed-journal init rejects watermark > size),
+            // so if it were reachable it would indicate external corruption.
+            return Err(Error::Corruption(format!(
+                "offsets recovery watermark {recovery_watermark} exceeds offsets size {}",
+                offsets_bounds.end
+            )));
+        }
         let recovery_start = if recovery_watermark < offsets_bounds.start
-            || recovery_watermark > offsets_bounds.end
             || recovery_watermark > retained_data_end_bound
         {
             warn!(
@@ -1136,40 +1136,39 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             recovery_watermark
         };
 
-        let (data_size, data_sync_start) = match Self::rebuild_offsets_from_anchor(
+        let mut data_sync_start = recovery_start;
+        let mut data_size = Self::rebuild_offsets_from_anchor(
             data,
             offsets,
             items_per_section,
             offsets_bounds.start,
             recovery_start,
         )
-        .await?
-        {
-            Some(size) => (size, recovery_start),
-            None if recovery_start != offsets_bounds.start => {
-                warn!(
-                    recovery_watermark = recovery_start,
-                    pruning_boundary = offsets_bounds.start,
-                    "crash repair: data journal shorter than offsets recovery watermark, rebuilding from pruning boundary"
-                );
-                Self::rebuild_offsets_from_anchor(
-                    data,
-                    offsets,
-                    items_per_section,
-                    offsets_bounds.start,
-                    offsets_bounds.start,
-                )
-                .await?
-                .map(|size| (size, offsets_bounds.start))
-                .expect("rebuild from pruning boundary should succeed after pruning alignment")
-            }
-            None => {
-                return Err(Error::Corruption(format!(
-                    "data journal shorter than pruning boundary {}",
-                    offsets_bounds.start
-                )))
-            }
-        };
+        .await?;
+
+        if data_size.is_none() && recovery_start != offsets_bounds.start {
+            warn!(
+                recovery_watermark = recovery_start,
+                pruning_boundary = offsets_bounds.start,
+                "crash repair: data journal shorter than offsets recovery watermark, rebuilding from pruning boundary"
+            );
+            data_sync_start = offsets_bounds.start;
+            data_size = Self::rebuild_offsets_from_anchor(
+                data,
+                offsets,
+                items_per_section,
+                offsets_bounds.start,
+                offsets_bounds.start,
+            )
+            .await?;
+        }
+
+        let data_size = data_size.ok_or_else(|| {
+            Error::Corruption(format!(
+                "data journal shorter than pruning boundary {}",
+                offsets_bounds.start
+            ))
+        })?;
 
         // Final invariant checks
         let pruning_boundary = {
@@ -1237,23 +1236,20 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             let stream = data.replay(start_section, 0, REPLAY_BUFFER_SIZE).await?;
             futures::pin_mut!(stream);
 
-            let mut skipped = 0;
-            while skipped < skip {
+            for _ in 0..skip {
                 let Some(result) = stream.next().await else {
                     return Ok(None);
                 };
-                let (section, _offset, _size, _item) = result?;
-                let position = first_position + skipped;
-                let expected_section = position_to_section(position, items_per_section);
-                if section != expected_section {
-                    if section > expected_section {
+                let (section, ..) = result?;
+                if section != start_section {
+                    if section > start_section {
                         return Ok(None);
                     }
+                    // section < start_section: replay-order or manager invariant violation.
                     return Err(Error::Corruption(format!(
-                        "data section {section} contains logical position {position}, expected section {expected_section}"
+                        "data section {section} out of order, expected section {start_section}"
                     )));
                 }
-                skipped += 1;
             }
 
             let mut size = anchor;
@@ -1267,8 +1263,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                         repair = Some((expected_section, section, size, byte_offset));
                         break;
                     }
+                    // section < expected_section: over-capacity data section.
                     return Err(Error::Corruption(format!(
-                        "data section {section} contains logical position {size}, expected section {expected_section}"
+                        "data section {section} over capacity at logical position {size}, \
+                         expected section {expected_section}"
                     )));
                 }
                 offsets.append(&offset).await?;
@@ -1412,7 +1410,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Test helper: Rewind the internal data journal to the item at `position`.
-    pub(crate) async fn test_rewind_data_to_position(&mut self, position: u64) -> Result<(), Error> {
+    pub(crate) async fn test_rewind_data_to_position(
+        &mut self,
+        position: u64,
+    ) -> Result<(), Error> {
         let offset = {
             let offsets_reader = self.offsets.reader();
             offsets_reader.read(position).await?
@@ -1475,9 +1476,10 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
             journal.append(&FixedBytes::new([1; 32])).await.unwrap();
             journal.append(&FixedBytes::new([2; 32])).await.unwrap();
             journal.sync().await.unwrap();
@@ -2143,6 +2145,156 @@ mod tests {
         });
     }
 
+    /// Offsets journal is empty but in a different section than data. This is an impossible state:
+    /// both journals are always created in the same section by init or init_at_size.
+    #[test_traced]
+    fn test_variable_recovery_offsets_empty_different_section_is_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "offsets-empty-diff-section".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..15u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Clear offsets to section 2 (position 20) while data starts at section 0.
+            // This puts them in different sections with offsets empty (bounds 20..20).
+            journal.offsets.clear_to_size(20).await.unwrap();
+            drop(journal);
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Offsets journal ends before data oldest position (offsets_bounds.end < data_oldest_pos).
+    /// This is an impossible/corrupted state.
+    #[test_traced]
+    fn test_variable_recovery_offsets_end_behind_data_oldest_is_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "offsets-end-behind-data-oldest".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..15u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Prune data to section 1 (position 10), but rewind offsets to 5 (so offsets_bounds is 0..5).
+            // offsets_bounds.end = 5 < data_oldest_pos = 10.
+            journal.test_prune_data(1).await.unwrap();
+            journal.test_rewind_offsets(5).await.unwrap();
+            drop(journal);
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Offsets start is mid-section ahead of data's section-aligned start, but in the same
+    /// section. This is the valid state left by init_at_size.
+    #[test_traced]
+    fn test_variable_recovery_offsets_start_mid_section_ahead_of_data() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "offsets-mid-section-ahead".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // init_at_size(7) creates offsets starting at position 7 (mid-section 0), while
+            // data's first section is section 0 (position 0). offsets.start > data_oldest_pos
+            // but same section.
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
+            for i in 0..5u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 7..12);
+            assert_eq!(journal.read(7).await.unwrap(), 0);
+            assert_eq!(journal.read(11).await.unwrap(), 400);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    /// The offsets recovery watermark is below the offsets pruning boundary. This can happen if
+    /// prune moved the boundary forward but sync (which advances the watermark) didn't run.
+    /// Recovery falls back to rebuilding from the offsets start.
+    #[test_traced]
+    fn test_variable_recovery_watermark_below_offsets_start() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "watermark-below-start".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..25u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Prune to section 1 (position 10), then set watermark below the new start.
+            journal.prune(10).await.unwrap();
+            journal
+                .test_set_offsets_recovery_watermark(5)
+                .await
+                .unwrap();
+            drop(journal);
+
+            // Recovery detects stale watermark and rebuilds from offsets start.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 10..25);
+            assert_eq!(journal.read(10).await.unwrap(), 1000);
+            assert_eq!(journal.read(24).await.unwrap(), 2400);
+            journal.destroy().await.unwrap();
+        });
+    }
+
     /// Test recovery from crash after appending to data journal but before appending to offsets journal.
     #[test_traced]
     fn test_variable_recovery_append_crash_offsets_behind() {
@@ -2221,6 +2373,47 @@ mod tests {
                 journal.test_append_data(0, i * 100).await.unwrap();
             }
             journal.test_sync_data().await.unwrap();
+            drop(journal);
+
+            let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
+            assert!(matches!(result, Err(Error::Corruption(_))));
+        });
+    }
+
+    /// Over-capacity non-newest data section detected during offset rebuild replay.
+    /// The preflight check (items_in_last_section) only validates the newest section. This test
+    /// overfills section 0, adds a valid section 1, and leaves offsets empty so rebuild_offsets
+    /// replays from section 0 and hits the over-capacity branch.
+    #[test_traced]
+    fn test_variable_recovery_rejects_over_capacity_non_newest_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-over-capacity-non-newest".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Overfill section 0 with 11 items (capacity is 10).
+            for i in 0..11u64 {
+                journal.test_append_data(0, i * 100).await.unwrap();
+            }
+            // Add one valid item in section 1 so section 0 is not the newest.
+            journal.test_append_data(1, 9999).await.unwrap();
+            // Sync both sections so the data survives reopen.
+            {
+                let inner = journal.inner.read().await;
+                inner.data.sync(0).await.unwrap();
+                inner.data.sync(1).await.unwrap();
+            }
+            // Offsets is empty, so rebuild replays from section 0.
             drop(journal);
 
             let result = Journal::<_, u64>::init(context.child("second"), cfg.clone()).await;
@@ -2516,9 +2709,10 @@ mod tests {
 
             // Build two durable data sections. Section 1 is only reachable if replay incorrectly
             // skips the missing tail of section 0.
-            let mut journal = Journal::<_, FixedBytes<31>>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, FixedBytes<31>>::init(context.child("first"), cfg.clone())
+                    .await
+                    .unwrap();
             for i in 0..128u8 {
                 journal.append(&FixedBytes::new([i; 31])).await.unwrap();
             }
@@ -2554,9 +2748,10 @@ mod tests {
 
             // Recovery must stop at the short non-tail section rather than accepting section 1's
             // items as later logical positions.
-            let mut journal = Journal::<_, FixedBytes<31>>::init(context.child("second"), cfg.clone())
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, FixedBytes<31>>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
             assert_eq!(journal.bounds().await, 0..items_in_page);
             assert_eq!(
                 journal.read(items_in_page - 1).await.unwrap(),
@@ -2876,6 +3071,68 @@ mod tests {
                 journal.read(12).await,
                 Err(Error::ItemOutOfRange(12))
             ));
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_recovery_retries_from_pruning_boundary_after_short_middle_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "recovery-short-middle-retry".into(),
+                items_per_section: NZU64!(10),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            let mut journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            for i in 0..30u64 {
+                journal.append(&(i * 100)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // Keep the offsets watermark in bounds and within the retained data end bound, but make
+            // the data section that contains the watermark too short to reach it.
+            journal
+                .test_set_offsets_recovery_watermark(15)
+                .await
+                .unwrap();
+            journal.test_rewind_data_to_position(12).await.unwrap();
+            journal.test_sync_data().await.unwrap();
+            journal.test_append_data(2, 9999).await.unwrap();
+            journal.test_sync_data().await.unwrap();
+            drop(journal);
+
+            // The first rebuild from watermark 15 starts in section 1 and tries to skip five items,
+            // but section 1 contains only positions 10 and 11 before replay jumps to section 2.
+            // That should return Ok(None), retry from the pruning boundary, and then truncate the
+            // orphaned section 2.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..12);
+            assert_eq!(journal.test_offsets_size(), 12);
+            for i in 0..12u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+            assert!(matches!(
+                journal.read(12).await,
+                Err(Error::ItemOutOfRange(12))
+            ));
+
+            let data_blobs = context.scan(&cfg.data_partition()).await.unwrap();
+            assert_eq!(
+                data_blobs.len(),
+                2,
+                "orphaned section 2 should be truncated away"
+            );
 
             journal.destroy().await.unwrap();
         });
@@ -3284,9 +3541,10 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
             assert_eq!(journal.append(&700).await.unwrap(), 7);
             journal.sync().await.unwrap();
 
@@ -3321,9 +3579,10 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 0)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 0)
+                    .await
+                    .unwrap();
 
             // Size should be 0
             assert_eq!(journal.size().await, 0);
@@ -3396,9 +3655,10 @@ mod tests {
             };
 
             // Initialize at position 7 (middle of section 1 with items_per_section=5)
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Size should be 7
             let bounds = journal.bounds().await;
@@ -3431,9 +3691,10 @@ mod tests {
             };
 
             // Initialize at position 15
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 15)
+                    .await
+                    .unwrap();
 
             // Append some items
             for i in 0..5u64 {
@@ -3535,9 +3796,10 @@ mod tests {
             journal.sync().await.unwrap();
             drop(journal);
 
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
             assert_eq!(journal.bounds().await, 7..7);
             assert_eq!(journal.append(&700).await.unwrap(), 7);
             journal.sync().await.unwrap();
@@ -3874,9 +4136,10 @@ mod tests {
             drop(stale_metadata);
 
             // init_at_size(10) overwrites the pending target of 5 and resets to 10.
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 10)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("reset"), cfg.clone(), 10)
+                    .await
+                    .unwrap();
             assert_eq!(journal.bounds().await, 10..10);
             assert_eq!(journal.append(&700).await.unwrap(), 10);
             journal.sync().await.unwrap();
@@ -3906,9 +4169,10 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 5)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 5)
+                    .await
+                    .unwrap();
             for i in 0..4u64 {
                 assert_eq!(journal.append(&(500 + i)).await.unwrap(), 5 + i);
             }
@@ -3962,9 +4226,10 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section, 7 % 5 = 2)
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Append 3 items at positions 7, 8, 9 (fills rest of section 1)
             for i in 0..3u64 {
@@ -4017,9 +4282,10 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Append 8 items: positions 7-14 (section 1: 3 items, section 2: 5 items)
             for i in 0..8u64 {
@@ -4135,9 +4401,10 @@ mod tests {
             };
 
             // Initialize at position 7 (mid-section)
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Append 3 items
             for i in 0..3u64 {
@@ -4181,9 +4448,10 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             };
 
-            let mut journal = Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
-                .await
-                .unwrap();
+            let mut journal =
+                Journal::<_, u64>::init_at_size(context.child("first"), cfg.clone(), 7)
+                    .await
+                    .unwrap();
 
             // Append a few items at positions 7..9
             for i in 0..3u64 {
@@ -4485,7 +4753,7 @@ mod tests {
     }
 
     /// Test `init_sync` when existing data exceeds the sync target range.
-    /// This tests that UnexpectedData error is returned when existing data goes beyond the upper bound.
+    /// This tests that ItemOutOfRange is returned when existing data goes beyond the upper bound.
     #[test_traced]
     fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();

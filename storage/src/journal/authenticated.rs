@@ -1134,7 +1134,8 @@ mod tests {
 
     /// Verify that align() replays journal operations when journal is ahead of Merkle.
     async fn test_align_when_journal_ahead_inner<F: Family + PartialEq>(context: Context) {
-        let (mut merkle, mut journal, hasher) = create_components::<F>(context, "journal-ahead").await;
+        let (mut merkle, mut journal, hasher) =
+            create_components::<F>(context, "journal-ahead").await;
 
         // Add 20 operations to journal only
         for i in 0..20 {

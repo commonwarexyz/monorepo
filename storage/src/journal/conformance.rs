@@ -64,9 +64,10 @@ impl Conformance for ContiguousVariable {
                 compression: None,
                 codec_config: (RangeCfg::new(0..256), ()),
             };
-            let mut journal = variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
-                .await
-                .unwrap();
+            let mut journal =
+                variable::Journal::<_, Vec<u8>>::init(context.child("journal"), config)
+                    .await
+                    .unwrap();
 
             let mut data_to_write =
                 vec![Vec::new(); context.gen_range(0..(ITEMS_PER_BLOB.get() as usize) * 4)];
