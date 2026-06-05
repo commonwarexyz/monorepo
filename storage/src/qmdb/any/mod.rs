@@ -2588,16 +2588,13 @@ pub(crate) mod test {
                 db.apply_batch(merkleized).await.unwrap();
             }
 
-            let (child_merkleized, commit_result) = futures::join!(
-                async {
-                    assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
-                    let mut child = db.new_batch();
-                    child = child.write(key(1), Some(val(1)));
-                    child.merkleize(&db, None).await.unwrap()
-                },
-                db.commit(),
-            );
-            commit_result.unwrap();
+            let child_merkleized = {
+                assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+                let mut child = db.new_batch();
+                child = child.write(key(1), Some(val(1)));
+                child.merkleize(&db, None).await.unwrap()
+            };
+            db.commit().await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
             db.commit().await.unwrap();
@@ -2642,7 +2639,7 @@ mod bitmap_tests {
     }
 
     /// Commit, drop, reopen, and assert the rebuilt bitmap matches the in-memory bitmap.
-    async fn assert_oracle_round_trip(db: AnyTest, context: Context, label: &str) -> AnyTest {
+    async fn assert_oracle_round_trip(mut db: AnyTest, context: Context, label: &str) -> AnyTest {
         let pre_active = bitmap_active_locs(&db);
         let pre_len = db.bitmap.len();
         let pre_pruned = db.bitmap.pruned_bits();

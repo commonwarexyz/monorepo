@@ -630,7 +630,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.sync_timer();
         self.metrics.operations.sync_calls.inc();
         self.journal.sync().await?;
@@ -638,7 +638,7 @@ where
     }
 
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.commit_timer();
         self.metrics.operations.commit_calls.inc();
         self.journal.commit().await?;

@@ -55,7 +55,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// Durably persist the structure, guaranteeing the current state will survive a crash.
         ///
         /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-        fn commit(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
+        fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
             self.sync()
         }
 
@@ -63,7 +63,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         /// no recovery will be needed on startup.
         ///
         /// This provides a stronger guarantee than [Self::commit] but may be slower.
-        fn sync(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
+        fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
 
         /// Destroy the structure, removing all associated storage.
         ///

@@ -131,7 +131,7 @@ where
         let root = journal.root(inactive_peaks)?;
 
         let metrics = Metrics::new(context);
-        let db = Self {
+        let mut db = Self {
             journal,
             root,
             snapshot,

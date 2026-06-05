@@ -2983,16 +2983,13 @@ pub mod tests {
             let parent_merkleized = batch.merkleize(&db, None).await.unwrap();
             db.apply_batch(parent_merkleized).await.unwrap();
 
-            let (child_merkleized, commit_result) = futures::join!(
-                async {
-                    assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
-                    let mut child = db.new_batch();
-                    child = child.write(key(1), Some(val(1)));
-                    child.merkleize(&db, None).await.unwrap()
-                },
-                db.commit(),
-            );
-            commit_result.unwrap();
+            let child_merkleized = {
+                assert_eq!(db.get(&key(0)).await.unwrap(), Some(val(0)));
+                let mut child = db.new_batch();
+                child = child.write(key(1), Some(val(1)));
+                child.merkleize(&db, None).await.unwrap()
+            };
+            db.commit().await.unwrap();
 
             db.apply_batch(child_merkleized).await.unwrap();
             db.commit().await.unwrap();

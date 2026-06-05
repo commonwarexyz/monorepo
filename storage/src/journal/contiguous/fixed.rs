@@ -1411,12 +1411,12 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
 impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
     type Error = Error;
 
-    async fn commit(&self) -> Result<(), Error> {
-        self.commit().await
+    async fn commit(&mut self) -> Result<(), Error> {
+        Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), Error> {
-        self.sync().await
+    async fn sync(&mut self) -> Result<(), Error> {
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {

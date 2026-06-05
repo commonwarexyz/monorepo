@@ -1338,12 +1338,12 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
 impl<E: Context, V: CodecShared> Persistable for Journal<E, V> {
     type Error = Error;
 
-    async fn commit(&self) -> Result<(), Error> {
-        self.commit().await
+    async fn commit(&mut self) -> Result<(), Error> {
+        Self::commit(self).await
     }
 
-    async fn sync(&self) -> Result<(), Error> {
-        self.sync().await
+    async fn sync(&mut self) -> Result<(), Error> {
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {

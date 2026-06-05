@@ -358,7 +358,7 @@ where
 {
     /// Durably persist the journal. This is faster than `sync()` but does not persist the Merkle
     /// structure, meaning recovery will be required on startup if we crash before `sync()`.
-    pub async fn commit(&self) -> Result<(), Error<F>> {
+    pub async fn commit(&mut self) -> Result<(), Error<F>> {
         self.journal.commit().await.map_err(Error::Journal)
     }
 }
@@ -672,7 +672,7 @@ where
     }
 
     /// Durably persist the journal, ensuring no recovery is required on startup.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         try_join!(
             self.journal.sync().map_err(Error::Journal),
             self.merkle.sync().map_err(Error::Merkle)
@@ -812,11 +812,11 @@ where
 {
     type Error = JournalError;
 
-    async fn commit(&self) -> Result<(), JournalError> {
+    async fn commit(&mut self) -> Result<(), JournalError> {
         self.commit().await.map_err(Self::map_error)
     }
 
-    async fn sync(&self) -> Result<(), JournalError> {
+    async fn sync(&mut self) -> Result<(), JournalError> {
         self.sync().await.map_err(Self::map_error)
     }
 
