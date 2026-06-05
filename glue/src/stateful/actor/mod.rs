@@ -1,5 +1,5 @@
 mod core;
-pub use core::{Config, Mailbox, Stateful};
+pub use core::{Config, Mailbox, MaintenanceInterval, Stateful};
 
 mod syncer;
 pub use syncer::SyncPlan;

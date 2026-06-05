@@ -10,7 +10,8 @@ use crate::{
             Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
-        Application, Config as StatefulConfig, Proposed, Stateful as StatefulActor, SyncPlan,
+        Application, Config as StatefulConfig, MaintenanceInterval, Proposed,
+        Stateful as StatefulActor, SyncPlan,
     },
 };
 use commonware_broadcast::buffered;
@@ -627,7 +628,7 @@ impl EngineDefinition for MultiDbEngine {
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: self.sync_config,
-                finalize_sync_interval: None,
+                maintenance_interval: MaintenanceInterval::Prune(NZU64!(10)),
             },
         );
 

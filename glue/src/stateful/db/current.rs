@@ -391,6 +391,10 @@ where
         self.sync().await
     }
 
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
+    }
+
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
         CurrentSyncTarget::new(
@@ -484,6 +488,10 @@ where
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -658,6 +666,10 @@ where
         self.sync().await
     }
 
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
+    }
+
     async fn sync_target(&self) -> Self::SyncTarget {
         let bounds = self.bounds().await;
         CurrentSyncTarget::new(
@@ -756,6 +768,10 @@ where
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {

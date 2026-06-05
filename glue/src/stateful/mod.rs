@@ -98,7 +98,7 @@ use rand::Rng;
 use std::future::Future;
 
 mod actor;
-pub use actor::{Config, Mailbox, Stateful, SyncPlan};
+pub use actor::{Config, Mailbox, MaintenanceInterval, Stateful, SyncPlan};
 
 pub mod db;
 pub mod probe;
@@ -255,20 +255,4 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
 
-    /// Observe a block after its database batches have been durably finalized.
-    ///
-    /// Called only after [`DatabaseSet::finalize`] succeeds. Implementations
-    /// may use this to run post-finalization maintenance such as pruning.
-    ///
-    /// # Panics
-    ///
-    /// Implementations should panic if post-finalization maintenance fails.
-    fn finalized(
-        &mut self,
-        _context: (E, Self::Context),
-        _block: &Self::Block,
-        _databases: &Self::Databases,
-    ) -> impl Future<Output = ()> + Send {
-        async {}
-    }
 }

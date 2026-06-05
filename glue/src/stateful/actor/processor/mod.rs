@@ -22,6 +22,7 @@
 //! response channel, in-progress work stops at the next await point via
 //! [`await_or_cancel`].
 
+use super::core::MaintenanceInterval;
 use crate::stateful::{
     db::{Anchor, DatabaseSet},
     Application, Proposed,
@@ -44,7 +45,7 @@ use rand::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
-    num::NonZeroU64,
+    num::NonZeroUsize,
 };
 use tracing::{debug, warn};
 
@@ -54,6 +55,7 @@ pub(crate) use metrics::Metrics as ProcessorMetrics;
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
 type PendingMap<A, E> = BTreeMap<PendingDigest<A, E>, PendingEntry<A, E>>;
+type PendingSyncTargets<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::SyncTargets;
 
 /// Cached speculative state for a block digest.
 struct PendingEntry<A, E>
@@ -87,6 +89,82 @@ pub(super) enum FinalizeStatus {
     Persisted { height: Height },
 }
 
+/// The maintenance work, if any, that should run for a finalized block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MaintenanceAction<T> {
+    /// No maintenance should run for this finalized block.
+    None,
+
+    /// Persist the current committed database state.
+    Persist,
+
+    /// Prune databases to the provided finalized sync targets.
+    Prune(T),
+}
+
+/// Tracks the configured finalized-block maintenance policy and any retained
+/// finalized sync targets needed to make pruning safe.
+struct Maintenance<T> {
+    interval: MaintenanceInterval,
+    prune_retention_window: usize,
+    retained_targets: VecDeque<T>,
+}
+
+impl<T: Clone> Maintenance<T> {
+    const fn new(interval: MaintenanceInterval, max_pending_acks: NonZeroUsize) -> Self {
+        let prune_retention_window = max_pending_acks
+            .get()
+            .checked_add(1)
+            .expect("max_pending_acks retention window overflowed");
+        Self {
+            interval,
+            prune_retention_window,
+            retained_targets: VecDeque::new(),
+        }
+    }
+
+    /// Observe a newly finalized block and decide whether maintenance should
+    /// run for it.
+    ///
+    /// Persist maintenance triggers directly on the configured cadence.
+    /// Prune maintenance first retains the last `max_pending_acks + 1`
+    /// finalized sync targets, then prunes only when that full window is
+    /// populated and the current finalized height matches the configured
+    /// cadence. The prune target is the oldest retained finalized target.
+    fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
+        match self.interval {
+            MaintenanceInterval::Persist(interval) => {
+                if height.get().is_multiple_of(interval.get()) {
+                    MaintenanceAction::Persist
+                } else {
+                    MaintenanceAction::None
+                }
+            }
+            MaintenanceInterval::Prune(interval) => {
+                self.retained_targets.push_back(targets);
+                while self.retained_targets.len() > self.prune_retention_window {
+                    self.retained_targets.pop_front();
+                }
+
+                if self.retained_targets.len() < self.prune_retention_window {
+                    return MaintenanceAction::None;
+                }
+
+                if !height.get().is_multiple_of(interval.get()) {
+                    return MaintenanceAction::None;
+                }
+
+                MaintenanceAction::Prune(
+                    self.retained_targets
+                        .front()
+                        .cloned()
+                        .expect("retained prune targets must exist"),
+                )
+            }
+        }
+    }
+}
+
 /// Owns speculative execution and state persistence for a running stateful actor.
 pub(super) struct Processor<E, A>
 where
@@ -98,7 +176,7 @@ where
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
     metrics: ProcessorMetrics,
-    finalize_sync_interval: Option<NonZeroU64>,
+    maintenance: Maintenance<PendingSyncTargets<A, E>>,
 }
 
 impl<E, A> Processor<E, A>
@@ -113,7 +191,8 @@ where
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: ProcessorMetrics,
-        finalize_sync_interval: Option<NonZeroU64>,
+        max_pending_acks: NonZeroUsize,
+        maintenance_interval: MaintenanceInterval,
     ) -> Self {
         Self {
             app,
@@ -121,7 +200,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
-            finalize_sync_interval,
+            maintenance: Maintenance::new(maintenance_interval, max_pending_acks),
         }
     }
 
@@ -589,6 +668,7 @@ where
         let timer = self.metrics.finalize_duration.timer(context);
         let block_context = block.context();
         let round = block_context.round();
+        let sync_targets = A::sync_targets(&block);
 
         // Marshal finalization is ordered. A pending miss means we can replay
         // this block on top of finalized state.
@@ -608,27 +688,25 @@ where
                     )
                     .await;
                 assert!(
-                    A::Databases::matches_sync_targets(&batch, &A::sync_targets(&block)),
+                    A::Databases::matches_sync_targets(&batch, &sync_targets),
                     "finalize replay state root must match block commitments",
                 );
                 batch
             }
         };
 
+        let maintenance_action = self.maintenance.observe_finalized(height, sync_targets);
+
         self.databases.finalize(batch).await;
-        if self
-            .finalize_sync_interval
-            .is_some_and(|interval| height.get() % interval.get() == 0)
-        {
-            self.databases.persist().await;
+        match maintenance_action {
+            MaintenanceAction::None => {}
+            MaintenanceAction::Persist => {
+                self.databases.persist().await;
+            }
+            MaintenanceAction::Prune(targets) => {
+                self.databases.prune(&targets).await;
+            }
         }
-        self.app
-            .finalized(
-                (context.child("finalized"), block.context()),
-                &block,
-                &self.databases,
-            )
-            .await;
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor {
             height,
@@ -775,7 +853,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{await_or_cancel, next_or_cancel, FinalizeStatus, PrepareBatchesError, Processor};
+    use super::{
+        await_or_cancel, next_or_cancel, FinalizeStatus, Maintenance, MaintenanceAction,
+        MaintenanceInterval, PrepareBatchesError, Processor,
+    };
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
@@ -954,40 +1035,15 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct FinalizedObserver {
-        db_config: any::FixedConfig<TwoCap, Sequential>,
-        reopened_counters: Arc<Mutex<Vec<u64>>>,
-    }
-
-    #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
-        finalized_observer: Option<FinalizedObserver>,
     }
 
     impl ExecutionApp {
         fn new() -> Self {
             Self {
                 genesis: Block::genesis(),
-                finalized_observer: None,
             }
-        }
-
-        fn with_finalized_observer(
-            db_config: any::FixedConfig<TwoCap, Sequential>,
-        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
-            let reopened_counters = Arc::new(Mutex::new(Vec::new()));
-            let observer = FinalizedObserver {
-                db_config,
-                reopened_counters: reopened_counters.clone(),
-            };
-            (
-                Self {
-                    genesis: Block::genesis(),
-                    finalized_observer: Some(observer),
-                },
-                reopened_counters,
-            )
         }
 
         async fn execute(
@@ -1074,31 +1130,6 @@ mod tests {
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
             Target::new(block.state_root, block.range.clone())
         }
-
-        async fn finalized(
-            &mut self,
-            context: (deterministic::Context, Self::Context),
-            _block: &Self::Block,
-            _databases: &Self::Databases,
-        ) {
-            let Some(observer) = &self.finalized_observer else {
-                return;
-            };
-
-            let reopened = Qmdb::init(
-                context.0.child("finalized_observer_reopen"),
-                observer.db_config.clone(),
-            )
-            .await
-            .expect("database reopen inside finalized hook should succeed");
-            let counter = reopened
-                .get(&counter_key())
-                .await
-                .expect("reopened counter read should succeed")
-                .map(|value| digest_to_u64(&value))
-                .unwrap_or(0);
-            observer.reopened_counters.lock().push(counter);
-        }
     }
 
     #[derive(Clone, Default)]
@@ -1179,29 +1210,13 @@ mod tests {
         processor: Processor<deterministic::Context, ExecutionApp>,
         provider: MapProvider,
         db_config: any::FixedConfig<TwoCap, Sequential>,
-        finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
     }
 
     impl Harness {
         async fn new(context: deterministic::Context) -> Self {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
-            Self::with_app(context, provider, config.clone(), ExecutionApp::new(), None).await
-        }
-
-        async fn new_with_finalized_observer(context: deterministic::Context) -> Self {
-            let provider = MapProvider::default();
-            let config = qmdb_config(&next_partition_prefix(), &context);
-            let (app, finalized_reopened_counters) =
-                ExecutionApp::with_finalized_observer(config.clone());
-            Self::with_app(
-                context,
-                provider,
-                config,
-                app,
-                Some(finalized_reopened_counters),
-            )
-            .await
+            Self::with_app(context, provider, config.clone(), ExecutionApp::new()).await
         }
 
         async fn with_app(
@@ -1209,7 +1224,6 @@ mod tests {
             provider: MapProvider,
             config: any::FixedConfig<TwoCap, Sequential>,
             app: ExecutionApp,
-            finalized_reopened_counters: Option<Arc<Mutex<Vec<u64>>>>,
         ) -> Self {
             let databases = <DbSet<deterministic::Context> as DatabaseSet<
                 deterministic::Context,
@@ -1227,11 +1241,11 @@ mod tests {
                         digest: Block::genesis().digest(),
                     },
                     metrics,
-                    None,
+                    NZUsize!(1),
+                    MaintenanceInterval::Persist(NZU64!(u64::MAX)),
                 ),
                 provider,
                 db_config: config,
-                finalized_reopened_counters,
             }
         }
 
@@ -1388,14 +1402,6 @@ mod tests {
                 .expect("reopened db read should succeed")
                 .map(|value| digest_to_u64(&value))
         }
-
-        fn finalized_reopened_counters(&self) -> Vec<u64> {
-            self.finalized_reopened_counters
-                .as_ref()
-                .expect("finalized observer should be configured")
-                .lock()
-                .clone()
-        }
     }
 
     fn next_partition_prefix() -> String {
@@ -1426,6 +1432,65 @@ mod tests {
             },
             translator: TwoCap,
         }
+    }
+
+    #[test]
+    fn maintenance_persist_runs_on_interval() {
+        let mut maintenance = Maintenance::new(
+            MaintenanceInterval::Persist(NZU64!(2)),
+            NZUsize!(1),
+        );
+
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(1), 10_u64),
+            MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(2), 20_u64),
+            MaintenanceAction::Persist,
+        );
+    }
+
+    #[test]
+    fn maintenance_prune_waits_for_full_retention_window() {
+        let mut maintenance = Maintenance::new(
+            MaintenanceInterval::Prune(NZU64!(1)),
+            NZUsize!(2),
+        );
+
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(1), 10_u64),
+            MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(2), 20_u64),
+            MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(3), 30_u64),
+            MaintenanceAction::Prune(10),
+        );
+    }
+
+    #[test]
+    fn maintenance_prune_uses_oldest_retained_target() {
+        let mut maintenance = Maintenance::new(
+            MaintenanceInterval::Prune(NZU64!(1)),
+            NZUsize!(1),
+        );
+
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(1), 10_u64),
+            MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(2), 20_u64),
+            MaintenanceAction::Prune(10),
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(3), 30_u64),
+            MaintenanceAction::Prune(20),
+        );
     }
 
     #[test]
@@ -1753,28 +1818,6 @@ mod tests {
             harness.processor.pending.clear();
 
             let _ = harness.finalize(block1.clone()).await;
-        });
-    }
-
-    #[test]
-    fn execution_finalized_hook_runs_after_durable_finalize() {
-        deterministic::Runner::default().start(|context| async move {
-            let mut harness = Harness::new_with_finalized_observer(context).await;
-            let genesis = Block::genesis();
-            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
-
-            let status = harness.finalize(block1).await;
-            assert_eq!(
-                status,
-                FinalizeStatus::Persisted {
-                    height: Height::new(1)
-                }
-            );
-            assert_eq!(
-                harness.finalized_reopened_counters(),
-                vec![1],
-                "finalized hook should observe the durably committed state",
-            );
         });
     }
 

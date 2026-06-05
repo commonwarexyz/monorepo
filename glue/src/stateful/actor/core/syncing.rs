@@ -28,7 +28,7 @@ use commonware_utils::{
     Acknowledgement,
 };
 use rand::Rng;
-use std::{num::NonZeroU64, sync::Arc};
+use std::{num::NonZeroUsize, sync::Arc};
 use tracing::{debug, error};
 
 /// Verify request buffered while state sync is still in progress.
@@ -86,8 +86,11 @@ where
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
 
-    /// Period for explicit database syncs during finalization.
-    pub(super) finalize_sync_interval: Option<NonZeroU64>,
+    /// Marshal ack window, used to derive automatic prune retention.
+    pub(super) max_pending_acks: NonZeroUsize,
+
+    /// Periodic finalized-block database maintenance.
+    pub(super) maintenance_interval: super::MaintenanceInterval,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -228,7 +231,8 @@ where
             artifact.databases,
             artifact.anchor,
             metrics,
-            self.finalize_sync_interval,
+            self.max_pending_acks,
+            self.maintenance_interval,
         );
 
         self.sync_metadata
@@ -290,7 +294,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Syncing;
+    use super::{super::MaintenanceInterval, Syncing};
     use crate::stateful::{
         actor::syncer::{self, StateSyncMetadata, SyncResult},
         db::{Anchor, AttachableResolver},
@@ -356,7 +360,8 @@ mod tests {
                     }),
                     resolvers: NoopResolver,
                     sync_completed,
-                    finalize_sync_interval: None,
+                    max_pending_acks: NZUsize!(1),
+                    maintenance_interval: MaintenanceInterval::Persist(NZU64!(u64::MAX)),
                 },
             }
         }

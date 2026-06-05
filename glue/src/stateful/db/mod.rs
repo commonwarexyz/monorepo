@@ -209,6 +209,18 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// changes durable and ensures they will be present on startup without replay.
     fn persist(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
+    /// Prune the database to a previously finalized sync target.
+    ///
+    /// Databases that do not retain pruneable operation history may keep the
+    /// default no-op implementation. This call makes changes durable and
+    /// ensures they will be present on startup without replay.
+    fn prune(
+        &mut self,
+        _target: &Self::SyncTarget,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        async { Ok(()) }
+    }
+
     /// Return the sync target for this database's current committed state.
     fn sync_target(&self) -> impl Future<Output = Self::SyncTarget> + Send;
 
@@ -283,6 +295,14 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     ///
     /// Acquires a write lock on each database.
     fn persist(&self) -> impl Future<Output = ()> + Send;
+
+    /// Prune each database to the provided per-database targets.
+    ///
+    /// This call makes changes durable and ensures they will be present on
+    /// startup without replay.
+    ///
+    /// Acquires a write lock on each database.
+    fn prune(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Return sync targets for the set's current committed state.
     fn committed_targets(&self) -> impl Future<Output = Self::SyncTargets> + Send;
@@ -480,6 +500,11 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
     async fn persist(&self) {
         let mut database = self.write().await;
         persist_or_panic(&mut *database, None).await;
+    }
+
+    async fn prune(&self, target: &Self::SyncTargets) {
+        let mut database = self.write().await;
+        prune_or_panic(&mut *database, target, None).await;
     }
 
     async fn committed_targets(&self) -> Self::SyncTargets {
@@ -716,6 +741,15 @@ macro_rules! impl_database_set {
                     async {
                         let mut database = self.$idx.write().await;
                         persist_or_panic(&mut *database, Some($idx)).await;
+                    },
+                )+);
+            }
+
+            async fn prune(&self, targets: &Self::SyncTargets) {
+                join!($(
+                    async {
+                        let mut database = self.$idx.write().await;
+                        prune_or_panic(&mut *database, &targets.$idx, Some($idx)).await;
                     },
                 )+);
             }
@@ -1423,6 +1457,27 @@ async fn persist_or_panic<E, T: ManagedDb<E>>(database: &mut T, index: Option<us
     }
 }
 
+async fn prune_or_panic<E, T: ManagedDb<E>>(
+    database: &mut T,
+    target: &T::SyncTarget,
+    index: Option<usize>,
+) {
+    // Prune failures are fatal because pruning may already have discarded part
+    // of the retained history before the error surfaced.
+    if let Err(err) = database.prune(target).await {
+        match index {
+            Some(index) => panic!(
+                "database prune failed (index {index}, type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+            None => panic!(
+                "database prune failed (type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+        }
+    }
+}
+
 /// A resolver that can attach a database at runtime.
 ///
 /// Implementations receive a database handle after startup so they can
@@ -1542,6 +1597,10 @@ mod tests {
 
     struct SyncCountingDb {
         sync_count: Arc<AtomicUsize>,
+    }
+
+    struct PruneCountingDb {
+        prune_count: Arc<AtomicUsize>,
     }
 
     impl<E: Send> ManagedDb<E> for TestDb {
@@ -1718,6 +1777,45 @@ mod tests {
 
         async fn persist(&mut self) -> Result<(), Self::Error> {
             self.sync_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for PruneCountingDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = Arc<AtomicUsize>;
+        type SyncTarget = ();
+
+        async fn init(_context: E, prune_count: Self::Config) -> Result<Self, Self::Error> {
+            Ok(Self { prune_count })
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn persist(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            self.prune_count.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -1919,6 +2017,24 @@ mod tests {
             .await;
 
             assert_eq!(sync_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn database_set_prune_calls_managed_db_prune() {
+        deterministic::Runner::default().start(|_context| async move {
+            let prune_count = Arc::new(AtomicUsize::new(0));
+            let database = Arc::new(AsyncRwLock::new(PruneCountingDb {
+                prune_count: prune_count.clone(),
+            }));
+
+            <Arc<AsyncRwLock<PruneCountingDb>> as DatabaseSet<deterministic::Context>>::prune(
+                &database,
+                &(),
+            )
+            .await;
+
+            assert_eq!(prune_count.load(Ordering::SeqCst), 1);
         });
     }
 
