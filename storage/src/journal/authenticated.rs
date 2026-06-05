@@ -340,10 +340,18 @@ where
     H: Hasher,
     S: Strategy,
 {
-    /// Durably persist the journal. This is faster than `sync()` but does not persist the Merkle
-    /// structure, meaning recovery will be required on startup if we crash before `sync()`.
+    /// Durably persist the journal. This is faster than `sync()` but does not guarantee that the
+    /// Merkle structure is durably persisted, meaning recovery may be required on startup in the
+    /// event of a crash.
     pub async fn commit(&self) -> Result<(), Error<F>> {
-        self.journal.commit().await.map_err(Error::Journal)
+        // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
+        // limit memory bloat.
+        try_join!(
+            self.journal.commit().map_err(Error::Journal),
+            self.merkle.flush().map_err(Error::Merkle)
+        )?;
+
+        Ok(())
     }
 }
 
