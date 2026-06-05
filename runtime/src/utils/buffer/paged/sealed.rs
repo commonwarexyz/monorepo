@@ -1,10 +1,10 @@
-//! Read-only counterpart to [`super::Append`] for blobs whose logical content will no longer
+//! Read-only counterpart to [`super::AppendWriter`] for blobs whose logical content will no longer
 //! change. The wrapper provides page-cache-backed read APIs for immutable views and cannot be
 //! mutated.
 //!
 //! # Sealing and durability
 //!
-//! [`super::Append::seal`] consumes a writable handle and returns a [`Sealed`] handle without
+//! [`super::AppendWriter::seal`] consumes the write capability and returns a [`Sealed`] handle without
 //! fsyncing the underlying blob. Buffered logical bytes are flushed to the blob (so subsequent
 //! reads observe them), but a crash before [`Sealed::sync`] may lose the most recently sealed
 //! bytes. Callers that need durability must invoke [`Sealed::sync`] (typically driven from a
@@ -25,7 +25,7 @@ use std::{
 };
 
 /// A [Blob] wrapper that provides immutable, page-cache-backed reads. The read-only counterpart
-/// to [`super::Append`].
+/// to [`super::AppendWriter`].
 pub struct Sealed<B: Blob> {
     inner: Arc<SealedInner<B>>,
 }
@@ -53,13 +53,13 @@ struct SealedInner<B: Blob> {
     /// Reference to the page cache used for reads of full pages.
     cache_ref: CacheRef,
 
-    /// Page-cache id. Inherited from the originating [`super::Append`] when constructed via
-    /// [`super::Append::seal`], so hot full pages remain valid across the transition.
+    /// Page-cache id. Inherited from the originating [`super::AppendWriter`] when constructed via
+    /// [`super::AppendWriter::seal`], so hot full pages remain valid across the transition.
     id: u64,
 }
 
 impl<B: Blob> Sealed<B> {
-    /// Construct a [`Sealed`] from already-validated parts. Invoked by [`super::Append::seal`].
+    /// Construct a [`Sealed`] from already-validated parts. Invoked by [`super::AppendWriter::seal`].
     pub(super) fn from_parts(
         blob: B,
         size: u64,
@@ -262,7 +262,7 @@ impl<B: Blob> Sealed<B> {
 
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
     ///
-    /// Sealed values have no write buffer to flush, so unlike [`super::Append::replay`] this method
+    /// Sealed values have no write buffer to flush, so unlike [`super::AppendWriter::replay`] this method
     /// is not async.
     pub fn replay(&self, buffer_size: NonZeroUsize) -> Result<Replay<B>, Error> {
         let logical_page_size = self.inner.cache_ref.page_size();
@@ -296,7 +296,7 @@ impl<B: Blob> Sealed<B> {
     }
 
     /// Page-cache id used for reads. Exposed for tests that verify the id is preserved across
-    /// [`super::Append::seal`].
+    /// [`super::AppendWriter::seal`].
     #[cfg(test)]
     pub(super) fn cache_id(&self) -> u64 {
         self.inner.id
@@ -307,7 +307,7 @@ impl<B: Blob> Sealed<B> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::{paged::Append, tests::SyncTrackingBlob},
+        buffer::{paged::AppendWriter, tests::SyncTrackingBlob},
         deterministic, Buf, Runner as _, Storage as _,
     };
     use commonware_macros::test_traced;
@@ -316,7 +316,7 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky page size to test alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
 
-    /// Seal an [Append] and assert no fsync (full or range) occurred during the seal itself.
+    /// Seal an [AppendWriter] and assert no fsync (full or range) occurred during the seal itself.
     #[test_traced("DEBUG")]
     fn test_seal_no_fsync() {
         let executor = deterministic::Runner::default();
@@ -324,7 +324,7 @@ mod tests {
             let blob = SyncTrackingBlob::new();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -348,29 +348,37 @@ mod tests {
         });
     }
 
-    /// Sealing requires unique ownership of the writable handle's shared state.
+    /// Sealing consumes the unique write capability; outstanding readers remain valid and agree
+    /// with the sealed view.
     #[test_traced("DEBUG")]
-    fn test_seal_rejects_cloned_append() {
+    fn test_seal_succeeds_with_readers() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
-            let (blob, blob_size) = context.open("test_partition", b"cloned").await.unwrap();
+            let (blob, blob_size) = context.open("test_partition", b"readers").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let writer = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            let clone = append.clone();
-            append.append(b"hello").await.unwrap();
+            let reader = writer.reader();
+            let reader_clone = reader.clone();
+            writer.append(b"hello world").await.unwrap();
 
-            let err = match append.seal().await {
-                Ok(_) => panic!("seal with cloned Append should fail"),
-                Err(err) => err,
-            };
-            assert!(matches!(err, Error::NotUnique));
+            // Readers observe buffered bytes before the seal.
+            assert_eq!(reader.size().await, 11);
 
-            clone.append(b" world").await.unwrap();
-            let sealed = clone.seal().await.unwrap();
+            // Seal succeeds while readers exist.
+            let sealed = writer.seal().await.unwrap();
             assert_eq!(sealed.size(), 11);
+
+            // Both reader handles keep reading the frozen state and agree with the sealed view.
+            for r in [&reader, &reader_clone] {
+                assert_eq!(r.size().await, 11);
+                let via_reader = r.read_at(0, 11).await.unwrap().coalesce();
+                let via_sealed = sealed.read_at(0, 11).await.unwrap().coalesce();
+                assert_eq!(via_reader.as_ref(), b"hello world");
+                assert_eq!(via_sealed.as_ref(), via_reader.as_ref());
+            }
         });
     }
 
@@ -382,7 +390,7 @@ mod tests {
             let blob = SyncTrackingBlob::new();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -412,7 +420,7 @@ mod tests {
         });
     }
 
-    /// Sealing preserves the originating [Append]'s page-cache id.
+    /// Sealing preserves the originating [AppendWriter]'s page-cache id.
     #[test_traced("DEBUG")]
     fn test_seal_preserves_cache_id() {
         let executor = deterministic::Runner::default();
@@ -420,7 +428,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"cache_id").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let append_id = append.cache_id();
@@ -437,7 +445,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"empty").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let sealed = append.seal().await.unwrap();
@@ -459,7 +467,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"full").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -486,7 +494,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"partial").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -511,7 +519,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"straddle").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -552,7 +560,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"read_at").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -574,7 +582,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -610,7 +618,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany_miss").await.unwrap();
             let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -644,7 +652,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"rmany_bad").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.append(&[7; 32]).await.unwrap();
@@ -682,7 +690,7 @@ mod tests {
                 .unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -714,7 +722,7 @@ mod tests {
                 .unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -738,7 +746,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"trs_fail").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -760,7 +768,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"replay").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -796,7 +804,7 @@ mod tests {
             let blob = SyncTrackingBlob::new();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -840,7 +848,7 @@ mod tests {
                 .collect();
             {
                 let (blob, blob_size) = context.open("test_partition", b"reopen").await.unwrap();
-                let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                     .await
                     .unwrap();
                 append.append(&data).await.unwrap();
@@ -849,7 +857,7 @@ mod tests {
             }
 
             let (blob, blob_size) = context.open("test_partition", b"reopen").await.unwrap();
-            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let append = AppendWriter::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             let mut buf = vec![0; data.len()];

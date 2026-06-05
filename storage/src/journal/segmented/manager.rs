@@ -7,7 +7,7 @@ use crate::journal::Error;
 use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::{
-        paged::{Append, CacheRef},
+        paged::{AppendWriter, CacheRef},
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
-pub trait SectionBuffer: Clone + Send + Sync {
+pub trait SectionBuffer: Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> impl Future<Output = u64> + Send;
 
@@ -29,7 +29,7 @@ pub trait SectionBuffer: Clone + Send + Sync {
     fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
-impl<B: Blob> SectionBuffer for Append<B> {
+impl<B: Blob> SectionBuffer for AppendWriter<B> {
     async fn size(&self) -> u64 {
         Self::size(self).await
     }
@@ -70,7 +70,7 @@ pub trait BufferFactory<B: Blob>: Clone + Send + Sync {
     ) -> impl Future<Output = Result<Self::Buffer, RError>> + Send;
 }
 
-/// Factory for creating [`Append`] buffers with page caching.
+/// Factory for creating [`AppendWriter`] buffers with page caching.
 #[derive(Clone)]
 pub struct AppendFactory {
     /// The size of the write buffer.
@@ -80,10 +80,10 @@ pub struct AppendFactory {
 }
 
 impl<B: Blob> BufferFactory<B> for AppendFactory {
-    type Buffer = Append<B>;
+    type Buffer = AppendWriter<B>;
 
     async fn create(&self, blob: B, size: u64) -> Result<Self::Buffer, RError> {
-        Append::new(
+        AppendWriter::new(
             blob,
             size,
             self.write_buffer.get(),
