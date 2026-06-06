@@ -143,7 +143,7 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
 }
 
 /// Opaque token for sections unlinked from storage and ready to finish pruning.
-pub(in crate::journal) struct Unlinked {
+pub(in crate::journal) struct PendingPrune {
     min: u64,
 }
 
@@ -245,7 +245,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     /// sections until [Self::finish_prune] publishes the prune.
     ///
     /// Returns a token if any sections were unlinked.
-    pub(super) async fn begin_prune(&self, min: u64) -> Result<Option<Unlinked>, Error> {
+    pub(super) async fn begin_prune(&self, min: u64) -> Result<Option<PendingPrune>, Error> {
         let mut unlinked = false;
         for (&section, _) in self.blobs.range(..min) {
             self.context
@@ -255,15 +255,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
             debug!(section, "unlinked blob");
         }
-        Ok(unlinked.then_some(Unlinked { min }))
+        Ok(unlinked.then_some(PendingPrune { min }))
     }
 
     /// Finish a successful unlink by removing unlinked sections from the in-memory map.
-    pub(super) fn finish_prune(&mut self, unlinked: Unlinked) {
-        let min = unlinked.min;
+    pub(super) fn finish_prune(&mut self, pending: PendingPrune) {
+        let min = pending.min;
         let retained = self.blobs.split_off(&min);
         let pruned = std::mem::replace(&mut self.blobs, retained);
-        assert!(!pruned.is_empty(), "unlinked token must prune sections");
+        assert!(!pruned.is_empty(), "pending prune must remove sections");
         for (section, blob) in pruned {
             drop(blob);
             debug!(section, "pruned blob");

@@ -20,7 +20,8 @@
 //! All data must be assigned to a `section`. This allows pruning entire sections
 //! (and their corresponding blobs) independently.
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager, Unlinked};
+pub(in crate::journal) use super::manager::PendingPrune;
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
@@ -71,11 +72,6 @@ pub struct Config {
 pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     manager: Manager<E, AppendFactory>,
     _array: PhantomData<A>,
-}
-
-/// Opaque token for sections unlinked from storage and ready to finish pruning.
-pub(in crate::journal) struct PendingPrune {
-    unlinked: Unlinked,
 }
 
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
@@ -398,16 +394,12 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         &self,
         min: u64,
     ) -> Result<Option<PendingPrune>, Error> {
-        Ok(self
-            .manager
-            .begin_prune(min)
-            .await?
-            .map(|unlinked| PendingPrune { unlinked }))
+        self.manager.begin_prune(min).await
     }
 
     /// Finish pruning sections described by `pending` by removing them from memory.
     pub(in crate::journal) fn finish_prune(&mut self, pending: PendingPrune) {
-        self.manager.finish_prune(pending.unlinked)
+        self.manager.finish_prune(pending)
     }
 
     /// Returns the oldest section number, if any blobs exist.

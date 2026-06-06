@@ -80,7 +80,8 @@
 //! });
 //! ```
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager, Unlinked};
+pub(in crate::journal) use super::manager::PendingPrune;
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{
     varint::{UInt, MAX_U32_VARINT_SIZE},
@@ -219,11 +220,6 @@ pub struct Journal<E: Storage + Metrics, V: Codec> {
 
     /// Codec configuration.
     codec_config: V::Cfg,
-}
-
-/// Opaque token for sections unlinked from storage and ready to finish pruning.
-pub(in crate::journal) struct PendingPrune {
-    unlinked: Unlinked,
 }
 
 impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
@@ -856,16 +852,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         &self,
         min: u64,
     ) -> Result<Option<PendingPrune>, Error> {
-        Ok(self
-            .manager
-            .begin_prune(min)
-            .await?
-            .map(|unlinked| PendingPrune { unlinked }))
+        self.manager.begin_prune(min).await
     }
 
     /// Finish pruning sections described by `pending` by removing them from memory.
     pub(in crate::journal) fn finish_prune(&mut self, pending: PendingPrune) {
-        self.manager.finish_prune(pending.unlinked)
+        self.manager.finish_prune(pending)
     }
 
     /// Returns the number of the oldest section in the journal.
