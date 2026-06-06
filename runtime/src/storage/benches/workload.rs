@@ -1,13 +1,15 @@
 //! Benchmark workload orchestration.
 
 use crate::{
-    config::{CacheMode, Config, SyncMode, Workload},
+    config::{CacheMode, Config, PendingMode, SyncMode, Workload},
     error::Result,
-    filesystem::{drop_page_cache, prepare_blob, prepare_filled_blob, random_write_payload},
+    filesystem::{
+        drop_page_cache, open_blob_file, prepare_blob, prepare_filled_blob, random_write_payload,
+    },
     report::Report,
     runner::{
-        random_blocks, run_read_loop, run_sync_write_loop, run_write_loop, sequential_blocks,
-        warm_read_loop,
+        random_blocks, run_pending_sync_loop, run_read_loop, run_sync_write_loop, run_write_loop,
+        sequential_blocks, warm_read_loop, PendingSyncLoop,
     },
 };
 use commonware_runtime::{tokio::Context, Blob as _, Storage as _};
@@ -38,6 +40,7 @@ pub async fn run_benchmark(cfg: &Config, context: Context) -> Result<Report> {
         Workload::WriteSeq | Workload::WriteRand => run_overwrite(cfg, &context).await,
         Workload::WriteAppend => run_write_append(cfg, &context).await,
         Workload::WriteSync => run_write_sync(cfg, &context).await,
+        Workload::SyncPending => run_sync_pending(cfg, &context).await,
         Workload::ReadWriteAppend => run_read_write_append(cfg, &context).await,
     };
     let _ = context.remove(PARTITION, None).await;
@@ -230,6 +233,46 @@ async fn run_write_sync(cfg: &Config, context: &Context) -> Result<Report> {
         .await?;
 
     Ok(Report::new(start.elapsed(), None, Some(workers), file_size))
+}
+
+/// Run a loop that accumulates pending writes before each sync operation.
+async fn run_sync_pending(cfg: &Config, context: &Context) -> Result<Report> {
+    let initial_file_size = cfg.file_size.unwrap_or(0);
+    let pending_size = cfg.pending_size.expect("validated");
+
+    let blob = prepare_blob(context, &cfg.root, PARTITION, BLOB_NAME, initial_file_size).await?;
+    let file = open_blob_file(&cfg.root, PARTITION, BLOB_NAME)?;
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let payload = random_write_payload(&mut rng, cfg.io_size, cfg.write_shape);
+
+    let start = Instant::now();
+    let deadline = start + cfg.duration();
+
+    let stats = run_pending_sync_loop(
+        blob,
+        file,
+        payload,
+        PendingSyncLoop {
+            deadline,
+            io_size: cfg.io_size,
+            pending_size,
+            sync_kind: cfg.sync_kind,
+            pending_mode: cfg.pending_mode,
+            initial_file_size,
+        },
+    )
+    .await?;
+
+    let final_file_size = match cfg.pending_mode {
+        PendingMode::Overwrite => initial_file_size,
+        PendingMode::Append => initial_file_size + stats.bytes,
+    };
+    Ok(Report::new(
+        start.elapsed(),
+        None,
+        Some(vec![stats]),
+        final_file_size,
+    ))
 }
 
 /// Run one append writer plus concurrent random readers.

@@ -24,6 +24,9 @@ pub enum Workload {
     /// Sequential durable positioned writes over a fixed-size file.
     #[value(name = "write_sync")]
     WriteSync,
+    /// Dirty a fixed amount of data, then compare file sync methods.
+    #[value(name = "sync_pending")]
+    SyncPending,
     /// One append writer plus many random readers of the visible prefix.
     #[value(name = "read_write_append")]
     ReadWriteAppend,
@@ -38,6 +41,7 @@ impl Workload {
                 | Self::WriteRand
                 | Self::WriteAppend
                 | Self::WriteSync
+                | Self::SyncPending
                 | Self::ReadWriteAppend
         )
     }
@@ -84,6 +88,28 @@ pub enum SyncMethod {
     WriteAtSync,
 }
 
+/// Filesystem sync operation to benchmark.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum SyncKind {
+    /// Persist file data and metadata.
+    #[value(name = "full")]
+    Full,
+    /// Persist file data and the metadata required to retrieve it.
+    #[value(name = "data")]
+    Data,
+}
+
+/// Dirty-data shape for the `sync_pending` workload.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub enum PendingMode {
+    /// Modify existing bytes within a fixed-size file.
+    #[value(name = "overwrite")]
+    Overwrite,
+    /// Extend the file with newly written bytes before syncing.
+    #[value(name = "append")]
+    Append,
+}
+
 /// Write durability policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SyncMode {
@@ -118,7 +144,15 @@ macro_rules! display_value_enum {
     )+};
 }
 
-display_value_enum!(Workload, CacheMode, WriteShape, SyncMethod, OutputFormat);
+display_value_enum!(
+    Workload,
+    CacheMode,
+    WriteShape,
+    SyncMethod,
+    SyncKind,
+    PendingMode,
+    OutputFormat
+);
 
 impl fmt::Display for SyncMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -187,6 +221,18 @@ pub struct Config {
     #[arg(long, value_enum, default_value = "write_then_sync")]
     pub sync_method: SyncMethod,
 
+    /// Filesystem sync method for the sync_pending workload.
+    #[arg(long, value_enum, default_value = "full")]
+    pub sync_kind: SyncKind,
+
+    /// Dirty bytes to accumulate before each sync_pending sync.
+    #[arg(long, value_parser = parse_byte_size)]
+    pub pending_size: Option<u64>,
+
+    /// Whether sync_pending dirties existing bytes or extends the file.
+    #[arg(long, value_enum, default_value = "overwrite")]
+    pub pending_mode: PendingMode,
+
     /// Durability cadence: `end` or a positive integer per writer stream.
     #[arg(long = "sync-every", default_value = "end", value_parser = parse_sync_mode)]
     pub sync_mode: SyncMode,
@@ -252,6 +298,47 @@ impl Config {
                     return Err("--cache is only valid for read-heavy workloads".into());
                 }
             }
+            Workload::SyncPending => {
+                let pending_size = self
+                    .pending_size
+                    .ok_or_else(|| "--pending-size is required for sync_pending".to_string())?;
+                let io_size = self.io_size as u64;
+                if pending_size < io_size {
+                    return Err("--pending-size must be at least --io-size".into());
+                }
+                if !pending_size.is_multiple_of(io_size) {
+                    return Err("--pending-size must be a multiple of --io-size".into());
+                }
+                if self.inflight != 1 {
+                    return Err("sync_pending only supports --inflight 1".into());
+                }
+                if self.cache.is_some() {
+                    return Err("--cache is only valid for read-heavy workloads".into());
+                }
+                match self.pending_mode {
+                    PendingMode::Overwrite => {
+                        let file_size = self.file_size.ok_or_else(|| {
+                            "--file-size is required for sync_pending overwrite".to_string()
+                        })?;
+                        if file_size < pending_size {
+                            return Err(
+                                "--file-size must be at least --pending-size for sync_pending overwrite"
+                                    .into(),
+                            );
+                        }
+                        if !file_size.is_multiple_of(io_size) {
+                            return Err("--file-size must be a multiple of --io-size".into());
+                        }
+                    }
+                    PendingMode::Append => {
+                        if let Some(file_size) = self.file_size {
+                            if !file_size.is_multiple_of(io_size) {
+                                return Err("--file-size must be a multiple of --io-size".into());
+                            }
+                        }
+                    }
+                }
+            }
             _ => {
                 let file_size = self
                     .file_size
@@ -304,6 +391,15 @@ impl Config {
             if self.sync_method != SyncMethod::WriteThenSync {
                 return Err("--sync-method is only valid for write_sync".into());
             }
+            if self.sync_kind != SyncKind::Full {
+                return Err("--sync-kind is only valid for sync_pending".into());
+            }
+            if self.pending_size.is_some() {
+                return Err("--pending-size is only valid for sync_pending".into());
+            }
+            if self.pending_mode != PendingMode::Overwrite {
+                return Err("--pending-mode is only valid for sync_pending".into());
+            }
             if self.sync_mode != SyncMode::End {
                 return Err("--sync-every is only valid for write-heavy workloads".into());
             }
@@ -311,8 +407,34 @@ impl Config {
             if self.sync_mode != SyncMode::End {
                 return Err("--sync-every is not used by write_sync".into());
             }
+            if self.sync_kind != SyncKind::Full {
+                return Err("--sync-kind is only valid for sync_pending".into());
+            }
+            if self.pending_size.is_some() {
+                return Err("--pending-size is only valid for sync_pending".into());
+            }
+            if self.pending_mode != PendingMode::Overwrite {
+                return Err("--pending-mode is only valid for sync_pending".into());
+            }
+        } else if self.workload == Workload::SyncPending {
+            if self.sync_mode != SyncMode::End {
+                return Err("--sync-every is not used by sync_pending".into());
+            }
+            if self.sync_method != SyncMethod::WriteThenSync {
+                return Err("--sync-method is only valid for write_sync".into());
+            }
         } else if self.sync_method != SyncMethod::WriteThenSync {
             return Err("--sync-method is only valid for write_sync".into());
+        } else {
+            if self.sync_kind != SyncKind::Full {
+                return Err("--sync-kind is only valid for sync_pending".into());
+            }
+            if self.pending_size.is_some() {
+                return Err("--pending-size is only valid for sync_pending".into());
+            }
+            if self.pending_mode != PendingMode::Overwrite {
+                return Err("--pending-mode is only valid for sync_pending".into());
+            }
         }
 
         Ok(())
