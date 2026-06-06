@@ -102,12 +102,15 @@ pub enum SyncKind {
 /// Dirty-data shape for the `sync_pending` workload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum PendingMode {
-    /// Modify existing bytes within a fixed-size file.
+    /// Modify the same existing bytes within a fixed-size file.
     #[value(name = "overwrite")]
     Overwrite,
     /// Extend the file with newly written bytes before syncing.
     #[value(name = "append")]
     Append,
+    /// Write sequentially inside a preallocated fixed-size file.
+    #[value(name = "preallocated")]
+    Preallocated,
 }
 
 /// Write durability policy.
@@ -316,13 +319,14 @@ impl Config {
                     return Err("--cache is only valid for read-heavy workloads".into());
                 }
                 match self.pending_mode {
-                    PendingMode::Overwrite => {
+                    PendingMode::Overwrite | PendingMode::Preallocated => {
                         let file_size = self.file_size.ok_or_else(|| {
-                            "--file-size is required for sync_pending overwrite".to_string()
+                            "--file-size is required for sync_pending overwrite and preallocated"
+                                .to_string()
                         })?;
                         if file_size < pending_size {
                             return Err(
-                                "--file-size must be at least --pending-size for sync_pending overwrite"
+                                "--file-size must be at least --pending-size for sync_pending overwrite and preallocated"
                                     .into(),
                             );
                         }

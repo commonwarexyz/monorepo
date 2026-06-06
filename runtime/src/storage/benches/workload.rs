@@ -264,7 +264,7 @@ async fn run_sync_pending(cfg: &Config, context: &Context) -> Result<Report> {
     .await?;
 
     let final_file_size = match cfg.pending_mode {
-        PendingMode::Overwrite => initial_file_size,
+        PendingMode::Overwrite | PendingMode::Preallocated => initial_file_size,
         PendingMode::Append => initial_file_size + stats.bytes,
     };
     Ok(Report::new(

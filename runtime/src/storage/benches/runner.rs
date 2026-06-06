@@ -180,14 +180,26 @@ pub async fn run_pending_sync_loop(
     let mut stats = Stats::default();
     let io_size = cfg.io_size as u64;
     let writes_per_sync = cfg.pending_size / io_size;
-    let mut append_offset = cfg.initial_file_size;
+    let mut next_offset = match cfg.pending_mode {
+        PendingMode::Append => cfg.initial_file_size,
+        PendingMode::Overwrite | PendingMode::Preallocated => 0,
+    };
 
     while should_continue(cfg.deadline, stats.ops) {
         let base_offset = match cfg.pending_mode {
             PendingMode::Overwrite => 0,
             PendingMode::Append => {
-                let offset = append_offset;
-                append_offset += cfg.pending_size;
+                let offset = next_offset;
+                next_offset += cfg.pending_size;
+                offset
+            }
+            PendingMode::Preallocated => {
+                let offset = next_offset;
+                next_offset = if next_offset + cfg.pending_size >= cfg.initial_file_size {
+                    0
+                } else {
+                    next_offset + cfg.pending_size
+                };
                 offset
             }
         };

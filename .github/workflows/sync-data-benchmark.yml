@@ -1,14 +1,16 @@
 name: Sync Data Benchmark
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
     inputs:
       duration:
         description: Duration in seconds for each full/data run
         default: "10"
         required: true
-      overwrite_file_size:
-        description: Existing file size for overwrite runs
+      file_size:
+        description: Existing/preallocated file size for non-append runs
         default: "64M"
         required: true
 
@@ -24,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         pending_size: [4K, 64K, 1M, 16M]
-        pending_mode: [overwrite, append]
+        pending_mode: [overwrite, append, preallocated]
     steps:
       - name: Checkout
         uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -37,8 +39,8 @@ jobs:
 
       - name: Run sync benchmarks
         env:
-          DURATION: ${{ inputs.duration }}
-          OVERWRITE_FILE_SIZE: ${{ inputs.overwrite_file_size }}
+          DURATION: ${{ github.event_name == 'workflow_dispatch' && inputs.duration || '10' }}
+          FILE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.file_size || '64M' }}
           PENDING_SIZE: ${{ matrix.pending_size }}
           PENDING_MODE: ${{ matrix.pending_mode }}
         run: |
@@ -58,8 +60,8 @@ jobs:
               --sync-kind "$sync_kind"
               --output json
             )
-            if [ "$PENDING_MODE" = "overwrite" ]; then
-              args+=(--file-size "$OVERWRITE_FILE_SIZE")
+            if [ "$PENDING_MODE" != "append" ]; then
+              args+=(--file-size "$FILE_SIZE")
             fi
 
             echo "::group::sync_kind=${sync_kind}"
