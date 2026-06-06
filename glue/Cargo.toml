@@ -44,7 +44,13 @@ commonware-p2p.workspace = true
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-storage.workspace = true
+criterion.workspace = true
 tracing-subscriber.workspace = true
+
+[[bench]]
+name = "stateful"
+harness = false
+path = "src/stateful/benches/bench.rs"
 
 [features]
 test-utils = []

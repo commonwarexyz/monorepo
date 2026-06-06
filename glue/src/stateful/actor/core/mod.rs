@@ -10,10 +10,7 @@ use crate::stateful::{
         processor::{Processor, ProcessorMetrics},
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{
-        assert_rewind_window_safety, AttachableResolverSet, DatabaseSet, StateSyncSet,
-        SyncEngineConfig,
-    },
+    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
@@ -42,14 +39,15 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Periodic database maintenance performed after finalization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaintenanceConfig {
-    /// Run maintenance every `interval` finalized blocks.
+    /// Run prune maintenance every `interval` finalized blocks.
     pub interval: NonZeroUsize,
 
-    /// Prune databases and marshal instead of only persisting committed state.
+    /// Prune databases and marshal history on the configured interval.
     ///
     /// When `true`, glue retains a `max_pending_acks + 1` finalized-target
     /// window before pruning, so the oldest retained target stays
-    /// `max_pending_acks` blocks behind the finalized tip.
+    /// `max_pending_acks` blocks behind the finalized tip. When `false`, no
+    /// periodic durable database maintenance is scheduled.
     pub prune: bool,
 }
 
@@ -155,8 +153,6 @@ where
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
     pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
-        assert_rewind_window_safety::<E, A::Databases>(config.max_pending_acks);
-
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
             Self {
@@ -225,12 +221,13 @@ where
     }
 
     /// Starts the application by initializing the database set at marshal's current floor.
-    async fn start_from_marshal(self) {
+    async fn start_from_marshal(mut self) {
         let syncer::StartupResult {
             sync: SyncResult { databases, anchor },
             skip_finalized_until,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
+            &mut self.application,
             &self.marshal,
             self.db_config,
             self.plan.into_sync_metadata(),

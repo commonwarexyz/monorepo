@@ -277,12 +277,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        self.write_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -360,12 +364,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        self.write_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -528,7 +536,7 @@ mod tests {
     }
 
     #[test]
-    fn managed_db_finalize_commits_fixed_keyless_batches() {
+    fn managed_db_finalize_writes_pending_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();

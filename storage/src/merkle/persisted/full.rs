@@ -34,7 +34,10 @@ use commonware_utils::{
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tracing::{debug, error, warn};
 
@@ -157,6 +160,9 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strate
     /// Serializes concurrent sync calls.
     pub(crate) sync_lock: AsyncMutex<()>,
 
+    /// Whether nodes have been written to the journal without a subsequent sync.
+    needs_sync: AtomicBool,
+
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
 }
@@ -278,6 +284,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 journal,
                 metadata,
                 sync_lock: AsyncMutex::new(()),
+                needs_sync: AtomicBool::new(false),
                 strategy: cfg.strategy,
             });
         }
@@ -409,6 +416,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             journal,
             metadata,
             sync_lock: AsyncMutex::new(()),
+            needs_sync: AtomicBool::new(false),
             strategy: cfg.strategy,
         })
     }
@@ -529,6 +537,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             journal,
             metadata,
             sync_lock: AsyncMutex::new(()),
+            needs_sync: AtomicBool::new(false),
             strategy: cfg.config.strategy,
         })
     }
@@ -593,63 +602,91 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         futures::future::try_join_all(futs).await
     }
 
+    fn snapshot_missing(
+        &self,
+        journal_size: Position<F>,
+    ) -> Option<(Location<F>, Vec<D>, BTreeMap<Position<F>, D>)> {
+        let inner = self.inner.read();
+        let size = inner.mem.size();
+        let sync_target_leaves = inner.mem.leaves();
+
+        assert!(
+            journal_size <= size,
+            "journal size should never exceed in-memory structure size"
+        );
+        if journal_size == size {
+            return None;
+        }
+
+        let mut missing_nodes = Vec::with_capacity((*size - *journal_size) as usize);
+        for pos in *journal_size..*size {
+            let node = *inner.mem.get_node_unchecked(Position::new(pos));
+            missing_nodes.push(node);
+        }
+
+        let prune_loc = Location::try_from(inner.pruned_to_pos).expect("valid pruned_to_pos");
+        let mut pinned_nodes = BTreeMap::new();
+        for pos in F::nodes_to_pin(prune_loc) {
+            let digest = inner.mem.get_node_unchecked(pos);
+            pinned_nodes.insert(pos, *digest);
+        }
+
+        Some((sync_target_leaves, missing_nodes, pinned_nodes))
+    }
+
+    fn prune_committed_mem(
+        &self,
+        sync_target_leaves: Location<F>,
+        pinned_nodes: BTreeMap<Position<F>, D>,
+    ) {
+        let mut inner = self.inner.write();
+        inner
+            .mem
+            .prune(sync_target_leaves)
+            .expect("captured leaves is in bounds");
+        inner.mem.add_pinned_nodes(pinned_nodes);
+    }
+
+    /// Write missing Merkle nodes to the backing journal without waiting for durability.
+    ///
+    /// This keeps later [`Self::sync`] calls from having to append a large backlog while still
+    /// allowing recovery from the operation log if these node writes are lost before the next sync.
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+
+        let journal_size = Position::<F>::new(self.journal.size().await);
+        let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
+            self.snapshot_missing(journal_size)
+        else {
+            return Ok(());
+        };
+
+        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+        self.needs_sync.store(true, Ordering::Release);
+        self.prune_committed_mem(sync_target_leaves, pinned_nodes);
+        Ok(())
+    }
+
     /// Sync the structure to disk.
     pub async fn sync(&self) -> Result<(), Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
 
         let journal_size = Position::<F>::new(self.journal.size().await);
-
-        // Snapshot nodes in the mem that are missing from the journal, along with the pinned
-        // node set for the current pruning boundary.
-        let (sync_target_leaves, missing_nodes, pinned_nodes) = {
-            let inner = self.inner.read();
-            let size = inner.mem.size();
-            let sync_target_leaves = inner.mem.leaves();
-
-            assert!(
-                journal_size <= size,
-                "journal size should never exceed in-memory structure size"
-            );
-            if journal_size == size {
-                return Ok(());
+        let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
+            self.snapshot_missing(journal_size)
+        else {
+            if self.needs_sync.load(Ordering::Acquire) {
+                self.journal.sync().await?;
+                self.needs_sync.store(false, Ordering::Release);
             }
-
-            let mut missing_nodes = Vec::with_capacity((*size - *journal_size) as usize);
-            for pos in *journal_size..*size {
-                let node = *inner.mem.get_node_unchecked(Position::new(pos));
-                missing_nodes.push(node);
-            }
-
-            // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
-            // by pruning the mem.
-            let prune_loc = Location::try_from(inner.pruned_to_pos).expect("valid pruned_to_pos");
-            let mut pinned_nodes = BTreeMap::new();
-            for pos in F::nodes_to_pin(prune_loc) {
-                let digest = inner.mem.get_node_unchecked(pos);
-                pinned_nodes.insert(pos, *digest);
-            }
-
-            (sync_target_leaves, missing_nodes, pinned_nodes)
+            return Ok(());
         };
 
-        // Append missing nodes to the journal without holding the mem read lock.
         self.journal.append_many(Many::Flat(&missing_nodes)).await?;
-
-        // Sync the journal while still holding the sync_lock to ensure durability before returning.
+        self.needs_sync.store(true, Ordering::Release);
         self.journal.sync().await?;
-
-        // Now that the missing nodes are in the journal, it's safe to prune them from the
-        // mem. We prune to the previously captured leaf count to avoid a race with concurrent
-        // appends between the read lock above and this write lock.
-        {
-            let mut inner = self.inner.write();
-            inner
-                .mem
-                .prune(sync_target_leaves)
-                .expect("captured leaves is in bounds");
-            inner.mem.add_pinned_nodes(pinned_nodes);
-        }
-
+        self.needs_sync.store(false, Ordering::Release);
+        self.prune_committed_mem(sync_target_leaves, pinned_nodes);
         Ok(())
     }
 
@@ -668,6 +705,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             if pos <= inner.pruned_to_pos {
                 if sync_journal {
                     self.journal.sync().await?;
+                    self.needs_sync.store(false, Ordering::Release);
                 }
                 return Ok(());
             }
@@ -680,6 +718,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         self.journal.prune(*pos).await?;
         if sync_journal {
             self.journal.sync().await?;
+            self.needs_sync.store(false, Ordering::Release);
         }
         let inner = self.inner.get_mut();
         inner.mem.add_pinned_nodes(pinned_nodes);
@@ -1339,6 +1378,105 @@ mod tests {
     fn test_full_basic_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_basic_inner::<mmb::Family>);
+    }
+
+    async fn full_write_pending_marks_unsynced_nodes_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
+            .await
+            .unwrap();
+
+        let mut batch = mmr.new_batch();
+        for i in 0..16 {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
+        assert!(!mmr.needs_sync.load(std::sync::atomic::Ordering::Acquire));
+
+        mmr.write_pending().await.unwrap();
+        assert!(mmr.needs_sync.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(Position::<F>::new(mmr.journal.size().await), mmr.size());
+
+        mmr.sync().await.unwrap();
+        assert!(!mmr.needs_sync.load(std::sync::atomic::Ordering::Acquire));
+        assert_eq!(Position::<F>::new(mmr.journal.size().await), mmr.size());
+
+        mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_write_pending_marks_unsynced_nodes_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_write_pending_marks_unsynced_nodes_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_write_pending_marks_unsynced_nodes_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_write_pending_marks_unsynced_nodes_inner::<mmb::Family>);
+    }
+
+    async fn full_write_pending_preflushes_prune_boundary_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
+            .await
+            .unwrap();
+
+        for batch_idx in 0..4 {
+            let mut batch = mmr.new_batch();
+            for leaf_idx in 0..16 {
+                batch = batch.add(&hasher, &test_digest(batch_idx * 16 + leaf_idx));
+            }
+            let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+            mmr.apply_batch(&batch).unwrap();
+
+            let expected_size = mmr.size();
+            mmr.write_pending().await.unwrap();
+            assert_eq!(
+                Position::<F>::new(mmr.journal.size().await),
+                expected_size,
+                "write_pending should append Merkle nodes before the durable boundary",
+            );
+        }
+
+        assert!(mmr.needs_sync.load(std::sync::atomic::Ordering::Acquire));
+        let pre_boundary_size = Position::<F>::new(mmr.journal.size().await);
+
+        mmr.sync().await.unwrap();
+        assert_eq!(
+            Position::<F>::new(mmr.journal.size().await),
+            pre_boundary_size,
+            "boundary sync should not append a backlog of Merkle nodes",
+        );
+
+        mmr.prune(Location::new(32)).await.unwrap();
+        assert_eq!(
+            Position::<F>::new(mmr.journal.size().await),
+            pre_boundary_size,
+            "prune boundary should not append a backlog of Merkle nodes",
+        );
+        assert!(!mmr.needs_sync.load(std::sync::atomic::Ordering::Acquire));
+
+        mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_write_pending_preflushes_prune_boundary_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_write_pending_preflushes_prune_boundary_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_write_pending_preflushes_prune_boundary_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_write_pending_preflushes_prune_boundary_inner::<mmb::Family>);
     }
 
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent

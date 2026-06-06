@@ -772,6 +772,11 @@ where
         Ok(())
     }
 
+    /// Write pending Merkle nodes without waiting for durable sync.
+    pub async fn write_pending(&self) -> Result<(), crate::qmdb::Error<F>> {
+        self.log.write_pending().await.map_err(Into::into)
+    }
+
     /// Prune historical operations prior to `prune_loc` and sync all database state to disk.
     #[tracing::instrument(
         name = "qmdb::any::Db::prune_and_sync",

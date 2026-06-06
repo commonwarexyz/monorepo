@@ -175,9 +175,12 @@ where
     /// drained by the observer. The engine awaits send capacity on this channel before
     /// proceeding, so backpressure can pause progress at target.
     pub reached_target_tx: Option<mpsc::Sender<Target<DB::Family, DB::Digest>>>,
-    /// Maximum number of previous roots to retain for verifying in-flight
-    /// requests after target updates. Set to 0 to disable (all retained
-    /// requests will be re-fetched).
+    /// Maximum number of previous target roots to retain for verifying
+    /// in-flight requests after target updates.
+    ///
+    /// This only bounds reuse of stale responses during sync target churn. It
+    /// does not control local replay, rewind, or prune-boundary retention.
+    /// Set to 0 to disable reuse of stale responses.
     pub max_retained_roots: usize,
 }
 /// A shared sync engine that manages the core synchronization state and operations.
@@ -211,7 +214,7 @@ where
     /// used for FIFO eviction when retained_roots exceeds capacity.
     retained_roots_order: VecDeque<Location<DB::Family>>,
 
-    /// Maximum number of historical roots to retain
+    /// Maximum number of previous target roots to retain for stale response reuse.
     max_retained_roots: usize,
 
     /// The current sync target (root digest and operation bounds)
@@ -432,8 +435,8 @@ where
     ///
     /// Only cancels requests that cover ranges before the new target range
     /// start. Requests at or after the new start are retained; their proofs
-    /// will be verified against the saved historical root (see
-    /// `retained_roots`) so the fetched operations can still be used.
+    /// will be verified against the saved historical root so the fetched
+    /// operations can still be used.
     pub async fn reset_for_target_update(
         mut self,
         new_target: Target<DB::Family, DB::Digest>,
@@ -676,15 +679,15 @@ where
 
         // Look up the root to verify against using the tree size the request
         // asked for. Fresh requests match the current target; retained
-        // requests match a historical root that was explicitly retained.
+        // requests match a historical root saved before a target update.
         let is_current_target = request.target_size == self.target.range.end();
         let target_root = if is_current_target {
             &self.target.root
         } else {
             let Some(root) = self.retained_roots.get(&request.target_size) else {
-                // No historical root to verify against (evicted or
-                // max_retained_roots is 0). Drop the result without
-                // penalizing the resolver — the data may be valid.
+                // No historical root to verify against (disabled or evicted).
+                // Drop the result without penalizing the resolver because the
+                // data may be valid.
                 return Ok(());
             };
             root

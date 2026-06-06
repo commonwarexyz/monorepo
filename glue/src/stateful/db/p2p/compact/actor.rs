@@ -351,7 +351,7 @@ mod tests {
     use commonware_cryptography::{ed25519, sha256, Sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
     use commonware_storage::{
         merkle::Proof,
         mmr,
@@ -361,9 +361,11 @@ mod tests {
         channel::{mpsc, oneshot},
         sequence::U64,
         sync::AsyncRwLock,
-        NZUsize,
+        NZUsize, NZU16, NZU64,
     };
-    use std::{sync::Arc, time::Duration};
+    use std::{num::NonZeroU16, sync::Arc, time::Duration};
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(101);
 
     #[derive(Clone, Debug)]
     struct DummyProvider;
@@ -423,11 +425,15 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context) -> TestDb {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(11));
         TestDb::init(
             context,
             keyless_fixed::CompactConfig {
                 merkle: commonware_storage::merkle::compact::Config {
                     partition: "compact-p2p-test".into(),
+                    items_per_section: NZU64!(7),
+                    page_cache,
+                    write_buffer: NZUsize!(1024),
                     strategy: Sequential,
                 },
                 commit_codec_config: (),

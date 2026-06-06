@@ -320,8 +320,8 @@ where
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// committed state.
 ///
-/// `finalize` applies the merkleized batch's changeset and durably
-/// commits it to disk.
+/// `finalize` applies the merkleized batch's changeset and writes pending
+/// Merkle nodes without waiting for durable sync.
 impl<F, E, K, V, H, T, S> ManagedDb<E>
     for Db<
         F,
@@ -385,12 +385,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         Db::sync(self).await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        Db::write_pending(self).await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -487,12 +491,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         Db::sync(self).await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        Db::write_pending(self).await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {

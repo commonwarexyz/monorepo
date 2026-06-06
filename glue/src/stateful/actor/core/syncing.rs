@@ -248,7 +248,7 @@ where
             let (status, maintenance) = processor
                 .finalize(self.context.as_present(), handoff_finalized)
                 .await;
-            if !matches!(maintenance, MaintenanceAction::None) {
+            if let MaintenanceAction::Prune { .. } = maintenance {
                 run_maintenance::<E, _, _, _>(
                     processor.databases().clone(),
                     self.marshal.clone(),
@@ -256,10 +256,10 @@ where
                 )
                 .await;
             }
-            if let FinalizeStatus::Persisted { height } = status {
+            if let FinalizeStatus::Applied { height } = status {
                 debug!(
                     height = height.get(),
-                    "persisted finalized database batch during sync handoff"
+                    "applied finalized database batch during sync handoff"
                 );
             }
             acknowledgement.acknowledge();

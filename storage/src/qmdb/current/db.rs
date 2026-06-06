@@ -773,6 +773,11 @@ where
         Ok(())
     }
 
+    /// Write pending Merkle nodes without waiting for durable sync.
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+        self.any.write_pending().await
+    }
+
     /// Prune historical operations prior to `prune_loc` and sync all database state to disk.
     ///
     /// This preserves the prune ordering that makes recovery safe and avoids syncing Current

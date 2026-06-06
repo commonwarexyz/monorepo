@@ -85,8 +85,8 @@ pub(super) enum FinalizeStatus {
     /// The finalized digest was already processed.
     Duplicate,
 
-    /// The finalized state was persisted and in-memory forks were pruned.
-    Persisted { height: Height },
+    /// The finalized state was applied and in-memory forks were pruned.
+    Applied { height: Height },
 }
 
 /// The maintenance work, if any, that should run for a finalized block.
@@ -95,8 +95,12 @@ pub(super) enum MaintenanceAction<T> {
     /// No maintenance should run for this finalized block.
     None,
 
-    /// Persist the current committed database state.
-    Persist,
+    /// Best-effort background durability preflush.
+    ///
+    /// This is coalesced by the actor loop and skips databases that are already
+    /// busy. Prune remains the authoritative durable boundary before marshal
+    /// history is discarded.
+    Preflush,
 
     /// Prune databases and marshal to the provided finalized boundary.
     Prune { height: Height, targets: T },
@@ -126,13 +130,13 @@ impl<T: Clone> Maintenance<T> {
     /// Observe a newly finalized block and decide whether maintenance should
     /// run for it.
     ///
-    /// Persist maintenance triggers directly on the configured cadence.
-    /// Prune maintenance first retains the last `max_pending_acks + 1`
+    /// When pruning is enabled, non-boundary finalizations request a coalesced
+    /// preflush. Prune maintenance first retains the last `max_pending_acks + 1`
     /// finalized `(height, sync_targets)` pairs, so the oldest retained target
-    /// stays `max_pending_acks` blocks behind the tip. It then prunes only
-    /// when that full window is populated and the current finalized height
-    /// matches the configured cadence. The prune target is the oldest retained
-    /// finalized target and its corresponding finalized block height.
+    /// stays `max_pending_acks` blocks behind the tip. It then prunes only when
+    /// that full window is populated and the current finalized height matches
+    /// the configured cadence. The prune target is the oldest retained finalized
+    /// target and its corresponding finalized block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
         if self.config.prune {
             self.retained_targets.push_back((height, targets));
@@ -141,20 +145,20 @@ impl<T: Clone> Maintenance<T> {
             }
         }
 
-        let interval = u64::try_from(self.config.interval.get())
-            .expect("maintenance interval should fit in u64");
-        if !height.get().is_multiple_of(interval) {
+        if !self.config.prune {
             return MaintenanceAction::None;
         }
 
-        if !self.config.prune {
-            return MaintenanceAction::Persist;
+        let interval = u64::try_from(self.config.interval.get())
+            .expect("maintenance interval should fit in u64");
+        if !height.get().is_multiple_of(interval) {
+            return MaintenanceAction::Preflush;
         }
 
         // Do not prune until we've observed a full rewind-safe window
         // of finalized blocks after startup.
         if self.retained_targets.len() < self.prune_retention_window {
-            return MaintenanceAction::None;
+            return MaintenanceAction::Preflush;
         }
 
         let (height, targets) = self
@@ -648,7 +652,7 @@ where
         Ok(())
     }
 
-    /// Persist finalized state and prune dead in-memory forks.
+    /// Apply finalized state and prune dead in-memory forks.
     pub(super) async fn finalize(
         &mut self,
         context: &E,
@@ -710,7 +714,7 @@ where
         };
         timer.observe(context);
 
-        (FinalizeStatus::Persisted { height }, maintenance)
+        (FinalizeStatus::Applied { height }, maintenance)
     }
 
     /// Remove pending state that is not compatible with the finalized winner.
@@ -784,13 +788,14 @@ where
 /// Run deferred finalized-block maintenance outside the finalize critical path.
 ///
 /// `Processor::finalize` returns one of these maintenance actions after it has
-/// already committed the finalized batch and advanced the in-memory anchor.
-/// Callers can then schedule this work separately so routine persistence or
-/// pruning does not delay subsequent mailbox handling.
+/// already applied the finalized batch and advanced the in-memory anchor.
+/// Callers can then schedule this work separately so preflushes and pruning do
+/// not delay subsequent mailbox polling.
 ///
-/// Prune maintenance always runs database pruning before marshal pruning so the
-/// actor never drops marshal history ahead of the corresponding durable
-/// database boundary.
+/// Preflush maintenance is best effort and may be coalesced or skipped when a
+/// database is already busy. Prune maintenance always runs database pruning
+/// before marshal pruning so the actor never drops marshal history ahead of the
+/// corresponding durable database boundary.
 /// [`MaintenanceAction::None`] is a no-op.
 pub(super) async fn run_maintenance<E, DBs, S, V>(
     databases: DBs,
@@ -804,10 +809,9 @@ pub(super) async fn run_maintenance<E, DBs, S, V>(
 {
     match maintenance {
         MaintenanceAction::None => {}
-        MaintenanceAction::Persist => {
-            databases.persist().await;
-        }
+        MaintenanceAction::Preflush => databases.preflush().await,
         MaintenanceAction::Prune { height, targets } => {
+            databases.preflush().await;
             databases.prune(&targets).await;
             marshal.prune(height);
         }
@@ -882,7 +886,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        await_or_cancel, next_or_cancel, FinalizeStatus, Maintenance, MaintenanceAction,
+        await_or_cancel, next_or_cancel, run_maintenance, FinalizeStatus, Maintenance, MaintenanceAction,
         MaintenanceConfig, PrepareBatchesError, Processor,
     };
     use crate::stateful::{
@@ -942,6 +946,49 @@ mod tests {
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
     type DbSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+
+    #[derive(Clone, Default)]
+    struct MaintenanceOrderDbSet {
+        events: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl DatabaseSet<deterministic::Context> for MaintenanceOrderDbSet {
+        type Unmerkleized = ();
+        type Merkleized = ();
+        type Config = ();
+        type SyncTargets = ();
+
+        async fn init(_context: deterministic::Context, _config: Self::Config) -> Self {
+            Self::default()
+        }
+
+        async fn new_batches(&self) -> Self::Unmerkleized {}
+
+        fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
+
+        fn matches_sync_targets(
+            _batches: &Self::Merkleized,
+            _targets: &Self::SyncTargets,
+        ) -> bool {
+            true
+        }
+
+        async fn finalize(&self, _batches: Self::Merkleized) {}
+
+        async fn persist(&self) {}
+
+        async fn preflush(&self) {
+            self.events.lock().push("preflush");
+        }
+
+        async fn prune(&self, _targets: &Self::SyncTargets) {
+            self.events.lock().push("prune");
+        }
+
+        async fn committed_targets(&self) -> Self::SyncTargets {}
+
+        async fn rewind_to_targets(&self, _targets: Self::SyncTargets) {}
+    }
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1562,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_persist_runs_on_interval() {
+    fn maintenance_does_not_persist_without_pruning() {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(2),
@@ -1577,7 +1624,7 @@ mod tests {
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
-            MaintenanceAction::Persist,
+            MaintenanceAction::None,
         );
     }
 
@@ -1593,17 +1640,44 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::None,
+            MaintenanceAction::Preflush,
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
-            MaintenanceAction::None,
+            MaintenanceAction::Preflush,
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(3), 30_u64),
             MaintenanceAction::Prune {
                 height: Height::new(1),
                 targets: 10,
+            },
+        );
+    }
+
+    #[test]
+    fn maintenance_preflushes_between_prune_intervals() {
+        let mut maintenance = Maintenance::new(
+            MaintenanceConfig {
+                interval: NZUsize!(3),
+                prune: true,
+            },
+            NZUsize!(1),
+        );
+
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(1), 10_u64),
+            MaintenanceAction::Preflush,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(2), 20_u64),
+            MaintenanceAction::Preflush,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(3), 30_u64),
+            MaintenanceAction::Prune {
+                height: Height::new(2),
+                targets: 20,
             },
         );
     }
@@ -1620,7 +1694,7 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::None,
+            MaintenanceAction::Preflush,
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
@@ -1636,6 +1710,25 @@ mod tests {
                 targets: 20,
             },
         );
+    }
+
+    #[test]
+    fn prune_maintenance_preflushes_before_pruning() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = init_marshal_mailbox(context.child("marshal")).await;
+            let databases = MaintenanceOrderDbSet::default();
+            run_maintenance::<deterministic::Context, _, _, _>(
+                databases.clone(),
+                marshal,
+                MaintenanceAction::Prune {
+                    height: Height::zero(),
+                    targets: (),
+                },
+            )
+            .await;
+
+            assert_eq!(&*databases.events.lock(), &["preflush", "prune"]);
+        });
     }
 
     #[test]
@@ -1667,14 +1760,14 @@ mod tests {
             let (status, maintenance) = harness.finalize_with_maintenance(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
             assert_eq!(
                 maintenance,
-                MaintenanceAction::Persist,
-                "maintenance should be returned to the control loop",
+                MaintenanceAction::None,
+                "non-prune maintenance should not force a durable sync",
             );
         });
     }
@@ -1694,7 +1787,7 @@ mod tests {
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(2)
                 },
                 "finalization should persist winner state",
@@ -1728,7 +1821,7 @@ mod tests {
             let status = harness.finalize(winner.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(2)
                 },
                 "finalization should persist winner state",
@@ -1756,7 +1849,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -1796,7 +1889,7 @@ mod tests {
                 let status = harness.finalize(block.clone()).await;
                 assert_eq!(
                     status,
-                    FinalizeStatus::Persisted {
+                    FinalizeStatus::Applied {
                         height: Height::new(view),
                     }
                 );
@@ -1835,7 +1928,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -1872,7 +1965,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -1934,7 +2027,7 @@ mod tests {
             let status = harness.finalize(canonical).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1),
                 }
             );
@@ -1959,7 +2052,7 @@ mod tests {
             let status = harness.finalize(canonical).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1),
                 }
             );
@@ -1978,7 +2071,7 @@ mod tests {
             let status = harness.finalize(block1).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -2027,7 +2120,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );
@@ -2062,7 +2155,7 @@ mod tests {
             let status = harness.finalize(block1.clone()).await;
             assert_eq!(
                 status,
-                FinalizeStatus::Persisted {
+                FinalizeStatus::Applied {
                     height: Height::new(1)
                 }
             );

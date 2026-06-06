@@ -10,13 +10,14 @@ use commonware_consensus::{
     },
     simplex::types::Finalization,
     types::Height,
-    CertifiableBlock, Heightable, Roundable,
+    Block as ConsensusBlock, CertifiableBlock, Heightable, Roundable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest, Digestible};
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Spawner, Storage};
 use commonware_storage::metadata::{self, Metadata};
 use commonware_utils::{fixed_bytes, sequence::FixedBytes};
 use rand::Rng;
+use std::future::Future;
 
 mod actor;
 pub(crate) use actor::{Config, Syncer};
@@ -376,6 +377,7 @@ where
 /// databases are entirely inconsistent, this function will panic.
 pub(crate) async fn init_databases_from_marshal<E, A, S, V>(
     context: &E,
+    application: &mut A,
     marshal: &MarshalMailbox<S, V>,
     db_config: <A::Databases as DatabaseSet<E>>::Config,
     mut sync_metadata: StateSyncMetadata<E, V::Commitment>,
@@ -409,21 +411,25 @@ where
     };
 
     let databases = A::Databases::init(context.child("db_set"), db_config).await;
-    let processed_targets = A::sync_targets(&floor_block);
-
-    // In the case that the committed targets do not match the marshal floor, we may
-    // have suffered a crash that left the set in an inconsistent state. In this case,
-    // we attempt to repair by rewinding the databases back to the marshal floor. If
-    // the rewind fails to produce a consistent state, we must crash. This can occur
-    // if the databases were corrupted or pruned to aggressively.
-    if databases.committed_targets().await != processed_targets {
-        databases.rewind_to_targets(processed_targets.clone()).await;
-        let rewound_targets = databases.committed_targets().await;
-        assert!(
-            rewound_targets == processed_targets,
-            "databases must be consistent with marshal floor after rewind"
-        );
-    }
+    let floor_block = replay_databases_to_marshal_floor::<E, A, _, _>(
+        context,
+        application,
+        &databases,
+        floor_block,
+        {
+            let marshal = marshal.clone();
+            move |height| {
+                let marshal = marshal.clone();
+                async move {
+                    marshal
+                        .get_block(Identifier::Height(height))
+                        .await
+                        .map(V::into_inner)
+                }
+            }
+        },
+    )
+    .await;
 
     // Once startup has aligned databases with marshal, future boots should skip peer
     // state sync and recover from the later of this anchor and marshal's durable
@@ -438,5 +444,573 @@ where
     StartupResult {
         sync: SyncResult { databases, anchor },
         skip_finalized_until,
+    }
+}
+
+async fn replay_databases_to_marshal_floor<E, A, G, Fut>(
+    context: &E,
+    application: &mut A,
+    databases: &A::Databases,
+    floor_block: A::Block,
+    mut get_block: G,
+) -> A::Block
+where
+    E: Rng + Storage + Spawner + Clock + Metrics,
+    A: Application<E>,
+    G: FnMut(Height) -> Fut,
+    Fut: Future<Output = Option<A::Block>> + Send,
+{
+    let floor_height = floor_block.height();
+    let floor_targets = A::sync_targets(&floor_block);
+    let committed_targets = databases.committed_targets().await;
+    if committed_targets == floor_targets {
+        return floor_block;
+    }
+
+    let mut cursor = floor_block;
+    let found_replay_anchor = loop {
+        if A::sync_targets(&cursor) == committed_targets {
+            break true;
+        }
+        let Some(previous_height) = cursor.height().previous() else {
+            break false;
+        };
+        let Some(previous) = get_block(previous_height).await else {
+            break false;
+        };
+        cursor = previous;
+    };
+    if !found_replay_anchor {
+        let anchor_targets = A::sync_targets(&cursor);
+        databases.rewind_to_targets(anchor_targets.clone()).await;
+        let recovered_targets = databases.committed_targets().await;
+        assert!(
+            recovered_targets == anchor_targets,
+            "databases must be consistent with marshal recovery anchor after rewind",
+        );
+    }
+    let mut previous = cursor;
+    let mut height = previous.height().next();
+    while height <= floor_height {
+        let block = get_block(height)
+            .await
+            .expect("marshal must retain blocks after the database recovery anchor");
+        assert_eq!(
+            block.parent(),
+            previous.digest(),
+            "marshal recovery blocks must be contiguous",
+        );
+
+        let targets = A::sync_targets(&block);
+        let batches = databases.new_batches().await;
+        let merkleized = application
+            .apply(
+                (context.child("startup_replay"), block.context()),
+                &block,
+                batches,
+            )
+            .await;
+        assert!(
+            A::Databases::matches_sync_targets(&merkleized, &targets),
+            "startup replay state root must match block commitments",
+        );
+        databases.finalize(merkleized).await;
+
+        previous = block;
+        height = height.next();
+    }
+
+    let recovered_targets = databases.committed_targets().await;
+    assert!(
+        recovered_targets == floor_targets,
+        "databases must be consistent with marshal floor after startup replay",
+    );
+    previous
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replay_databases_to_marshal_floor;
+    use crate::stateful::{
+        db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
+        Application, Proposed,
+    };
+    use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
+    use commonware_consensus::{
+        simplex::{
+            mocks::scheme as scheme_mocks,
+            types::Context as ConsensusContext,
+        },
+        types::{Epoch, Height, Round, View},
+        Block as ConsensusBlock, CertifiableBlock, Heightable,
+    };
+    use commonware_cryptography::{
+        ed25519, sha256::Digest as Sha256Digest, Digestible, Signer as _,
+    };
+    use commonware_runtime::{deterministic, Buf, BufMut, Runner as _};
+    use commonware_utils::sync::AsyncRwLock;
+    use futures::Stream;
+    use std::{
+        collections::BTreeMap,
+        convert::Infallible,
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        },
+    };
+
+    type TestContext = ConsensusContext<Sha256Digest, ed25519::PublicKey>;
+    type ReplayDatabases = Arc<AsyncRwLock<ReplayDb>>;
+
+    #[derive(Clone, Copy)]
+    struct ReplayUnmerkleized;
+
+    #[derive(Clone, Copy)]
+    struct ReplayMerkleized {
+        target: u64,
+    }
+
+    impl Unmerkleized for ReplayUnmerkleized {
+        type Merkleized = ReplayMerkleized;
+        type Error = Infallible;
+
+        async fn merkleize(self) -> Result<Self::Merkleized, Self::Error> {
+            Ok(ReplayMerkleized { target: 0 })
+        }
+    }
+
+    impl Merkleized for ReplayMerkleized {
+        type Digest = Sha256Digest;
+        type Unmerkleized = ReplayUnmerkleized;
+
+        fn root(&self) -> Self::Digest {
+            digest(self.target)
+        }
+
+        fn new_batch(&self) -> Self::Unmerkleized {
+            ReplayUnmerkleized
+        }
+    }
+
+    struct ReplayDb {
+        target: u64,
+        rewind_count: Arc<AtomicUsize>,
+    }
+
+    impl ReplayDb {
+        fn new(target: u64, rewind_count: Arc<AtomicUsize>) -> Self {
+            Self {
+                target,
+                rewind_count,
+            }
+        }
+    }
+
+    impl ManagedDb<deterministic::Context> for ReplayDb {
+        type Unmerkleized = ReplayUnmerkleized;
+        type Merkleized = ReplayMerkleized;
+        type Error = Infallible;
+        type Config = (u64, Arc<AtomicUsize>);
+        type SyncTarget = u64;
+
+        async fn init(_context: deterministic::Context, config: Self::Config) -> Result<Self, Self::Error> {
+            Ok(Self::new(config.0, config.1))
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            ReplayUnmerkleized
+        }
+
+        fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool {
+            batch.target == *target
+        }
+
+        async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Self::Error> {
+            self.target = batch.target;
+            Ok(())
+        }
+
+        async fn persist(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {
+            self.target
+        }
+
+        async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Self::Error> {
+            self.rewind_count.fetch_add(1, Ordering::SeqCst);
+            self.target = target;
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct ReplayApp {
+        replay_count: Arc<AtomicUsize>,
+    }
+
+    impl Application<deterministic::Context> for ReplayApp {
+        type SigningScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
+        type Context = TestContext;
+        type Block = ReplayBlock;
+        type Databases = ReplayDatabases;
+        type InputProvider = ();
+
+        fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+            block.height().get()
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            ReplayBlock::new(Height::zero(), Sha256Digest::from([0; 32]))
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _input: &mut Self::InputProvider,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            None
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            self.replay_count.fetch_add(1, Ordering::SeqCst);
+            ReplayMerkleized {
+                target: block.height().get(),
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct TupleReplayApp {
+        replay_count: Arc<AtomicUsize>,
+    }
+
+    impl Application<deterministic::Context> for TupleReplayApp {
+        type SigningScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
+        type Context = TestContext;
+        type Block = ReplayBlock;
+        type Databases = (Arc<AsyncRwLock<ReplayDb>>, Arc<AsyncRwLock<ReplayDb>>);
+        type InputProvider = ();
+
+        fn sync_targets(
+            block: &Self::Block,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+            let target = block.height().get();
+            (target, target)
+        }
+
+        async fn genesis(&mut self) -> Self::Block {
+            ReplayBlock::new(Height::zero(), Sha256Digest::from([0; 32]))
+        }
+
+        async fn propose(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+            _input: &mut Self::InputProvider,
+        ) -> Option<Proposed<Self, deterministic::Context>> {
+            None
+        }
+
+        async fn verify(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _ancestry: impl Stream<Item = Self::Block> + Send,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> Option<<Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized> {
+            None
+        }
+
+        async fn apply(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
+            self.replay_count.fetch_add(1, Ordering::SeqCst);
+            let target = block.height().get();
+            (ReplayMerkleized { target }, ReplayMerkleized { target })
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ReplayBlock {
+        context: TestContext,
+        parent: Sha256Digest,
+        height: Height,
+        digest: Sha256Digest,
+    }
+
+    impl ReplayBlock {
+        fn new(height: Height, parent: Sha256Digest) -> Self {
+            Self {
+                context: TestContext {
+                    round: Round::new(Epoch::zero(), View::new(height.get())),
+                    leader: ed25519::PrivateKey::from_seed(0).public_key(),
+                    parent: (
+                        height.previous().map_or(View::zero(), |height| View::new(height.get())),
+                        parent,
+                    ),
+                },
+                parent,
+                height,
+                digest: digest(height.get()),
+            }
+        }
+    }
+
+    impl Write for ReplayBlock {
+        fn write(&self, buf: &mut impl BufMut) {
+            self.context.write(buf);
+            self.parent.write(buf);
+            self.height.write(buf);
+            self.digest.write(buf);
+        }
+    }
+
+    impl EncodeSize for ReplayBlock {
+        fn encode_size(&self) -> usize {
+            self.context.encode_size()
+                + self.parent.encode_size()
+                + self.height.encode_size()
+                + self.digest.encode_size()
+        }
+    }
+
+    impl Read for ReplayBlock {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, CodecError> {
+            Ok(Self {
+                context: TestContext::read(buf)?,
+                parent: Sha256Digest::read(buf)?,
+                height: Height::read(buf)?,
+                digest: Sha256Digest::read(buf)?,
+            })
+        }
+    }
+
+    impl Digestible for ReplayBlock {
+        type Digest = Sha256Digest;
+
+        fn digest(&self) -> Self::Digest {
+            self.digest
+        }
+    }
+
+    impl Heightable for ReplayBlock {
+        fn height(&self) -> Height {
+            self.height
+        }
+    }
+
+    impl ConsensusBlock for ReplayBlock {
+        fn parent(&self) -> Self::Digest {
+            self.parent
+        }
+    }
+
+    impl CertifiableBlock for ReplayBlock {
+        type Context = TestContext;
+
+        fn context(&self) -> Self::Context {
+            self.context.clone()
+        }
+    }
+
+    fn digest(value: u64) -> Sha256Digest {
+        let mut bytes = [0u8; 32];
+        bytes[..8].copy_from_slice(&value.to_be_bytes());
+        Sha256Digest::from(bytes)
+    }
+
+    fn retained_blocks(from: u64, to: u64) -> BTreeMap<Height, ReplayBlock> {
+        let mut blocks = BTreeMap::new();
+        let mut parent = if from == 0 {
+            Sha256Digest::from([0; 32])
+        } else {
+            digest(from - 1)
+        };
+        for height in from..=to {
+            let block = ReplayBlock::new(Height::new(height), parent);
+            parent = block.digest();
+            blocks.insert(block.height(), block);
+        }
+        blocks
+    }
+
+    #[test]
+    fn startup_replay_rederives_processed_floor_from_retained_blocks() {
+        deterministic::Runner::default().start(|context| async move {
+            let replay_count = Arc::new(AtomicUsize::new(0));
+            let rewind_count = Arc::new(AtomicUsize::new(0));
+            let databases = Arc::new(AsyncRwLock::new(ReplayDb {
+                target: 2,
+                rewind_count: rewind_count.clone(),
+            }));
+            let blocks = Arc::new(retained_blocks(2, 5));
+            let floor = blocks
+                .get(&Height::new(5))
+                .expect("floor block should exist")
+                .clone();
+            let mut app = ReplayApp {
+                replay_count: replay_count.clone(),
+            };
+
+            let recovered = replay_databases_to_marshal_floor::<_, ReplayApp, _, _>(
+                &context,
+                &mut app,
+                &databases,
+                floor,
+                {
+                    let blocks = blocks.clone();
+                    move |height| {
+                        let blocks = blocks.clone();
+                        async move { blocks.get(&height).cloned() }
+                    }
+                },
+            )
+            .await;
+
+            assert_eq!(recovered.height(), Height::new(5));
+            assert_eq!(databases.read().await.target, 5);
+            assert_eq!(
+                replay_count.load(Ordering::SeqCst),
+                3,
+                "startup should replay every block after the durable database boundary",
+            );
+            assert_eq!(
+                rewind_count.load(Ordering::SeqCst),
+                0,
+                "database should not rewind when it matches a retained marshal ancestor",
+            );
+        });
+    }
+
+    #[test]
+    fn startup_replay_rewinds_to_retained_anchor_before_replay() {
+        deterministic::Runner::default().start(|context| async move {
+            let replay_count = Arc::new(AtomicUsize::new(0));
+            let rewind_count = Arc::new(AtomicUsize::new(0));
+            let databases = Arc::new(AsyncRwLock::new(ReplayDb {
+                target: 99,
+                rewind_count: rewind_count.clone(),
+            }));
+            let blocks = Arc::new(retained_blocks(2, 5));
+            let floor = blocks
+                .get(&Height::new(5))
+                .expect("floor block should exist")
+                .clone();
+            let mut app = ReplayApp {
+                replay_count: replay_count.clone(),
+            };
+
+            let recovered = replay_databases_to_marshal_floor::<_, ReplayApp, _, _>(
+                &context,
+                &mut app,
+                &databases,
+                floor,
+                {
+                    let blocks = blocks.clone();
+                    move |height| {
+                        let blocks = blocks.clone();
+                        async move { blocks.get(&height).cloned() }
+                    }
+                },
+            )
+            .await;
+
+            assert_eq!(recovered.height(), Height::new(5));
+            assert_eq!(databases.read().await.target, 5);
+            assert_eq!(
+                rewind_count.load(Ordering::SeqCst),
+                1,
+                "startup should rewind inconsistent database state to the retained anchor",
+            );
+            assert_eq!(
+                replay_count.load(Ordering::SeqCst),
+                3,
+                "startup should replay from the retained anchor to the processed floor",
+            );
+        });
+    }
+
+    #[test]
+    fn startup_replay_rewinds_misaligned_database_set_before_replay() {
+        deterministic::Runner::default().start(|context| async move {
+            let replay_count = Arc::new(AtomicUsize::new(0));
+            let left_rewind_count = Arc::new(AtomicUsize::new(0));
+            let right_rewind_count = Arc::new(AtomicUsize::new(0));
+            let databases = (
+                Arc::new(AsyncRwLock::new(ReplayDb {
+                    target: 2,
+                    rewind_count: left_rewind_count.clone(),
+                })),
+                Arc::new(AsyncRwLock::new(ReplayDb {
+                    target: 99,
+                    rewind_count: right_rewind_count.clone(),
+                })),
+            );
+            let blocks = Arc::new(retained_blocks(2, 5));
+            let floor = blocks
+                .get(&Height::new(5))
+                .expect("floor block should exist")
+                .clone();
+            let mut app = TupleReplayApp {
+                replay_count: replay_count.clone(),
+            };
+
+            let recovered = replay_databases_to_marshal_floor::<_, TupleReplayApp, _, _>(
+                &context,
+                &mut app,
+                &databases,
+                floor,
+                {
+                    let blocks = blocks.clone();
+                    move |height| {
+                        let blocks = blocks.clone();
+                        async move { blocks.get(&height).cloned() }
+                    }
+                },
+            )
+            .await;
+
+            assert_eq!(recovered.height(), Height::new(5));
+            assert_eq!(databases.0.read().await.target, 5);
+            assert_eq!(databases.1.read().await.target, 5);
+            assert_eq!(
+                left_rewind_count.load(Ordering::SeqCst),
+                0,
+                "aligned database should not rewind",
+            );
+            assert_eq!(
+                right_rewind_count.load(Ordering::SeqCst),
+                1,
+                "misaligned database should rewind to the retained anchor",
+            );
+            assert_eq!(
+                replay_count.load(Ordering::SeqCst),
+                3,
+                "startup should replay the full database set to the processed floor",
+            );
+        });
     }
 }

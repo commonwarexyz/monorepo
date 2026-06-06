@@ -383,12 +383,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        self.write_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -482,12 +486,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        self.write_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -658,12 +666,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        self.write_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -762,12 +774,16 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
+        self.write_pending().await?;
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Error<F>> {
         self.sync().await
+    }
+
+    async fn preflush(&self) -> Result<(), Error<F>> {
+        self.write_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {

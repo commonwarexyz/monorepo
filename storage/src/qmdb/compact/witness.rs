@@ -1,78 +1,35 @@
 //! Shared machinery for the compact-db compact-sync witness.
 //!
 //! The witness is the encoded last-commit operation together with its single-leaf inclusion proof
-//! against the current root. Persisting that witness alongside the compact Merkle frontier lets a
+//! against the current root. Persisting that witness in the compact Merkle base log lets a
 //! compact database serve compact sync for its latest committed state without retaining the full
 //! historical operation log.
 //!
 //! This state lives at the db layer rather than the Merkle layer because only the db knows how to
 //! encode and decode the typed commit operation. Both [`crate::qmdb::immutable::CompactDb`] and
-//! [`crate::qmdb::keyless::CompactDb`] store the witness in the same ping-pong slots as the
-//! frontier state, then re-verify it against the current root on every reopen and rewind. If those
+//! [`crate::qmdb::keyless::CompactDb`] store the witness in the same retained base as the frontier
+//! state, then re-verify it against the current root on every reopen and rewind. If those
 //! bytes no longer describe a valid witness for the stored root, reopening fails with
 //! [`Error::DataCorrupted`].
 //!
 //! The lifecycle in this file is:
 //!
 //! 1. Build a [`ServeState`] from the current in-memory tip.
-//! 2. Persist its witness bytes into the same active/inactive slot scheme used by the compact
-//!    Merkle frontier.
+//! 2. Persist its witness bytes into the same retained base used by the compact Merkle frontier.
 //! 3. Reload that witness on reopen or rewind, re-verify it against the currently loaded root, and
 //!    rebuild the cache.
 //! 4. Use the cache to answer compact-sync requests without re-encoding the commit or recomputing
 //!    its proof on every serve.
 
 use crate::{
-    merkle::{compact, Family, Location, Proof},
-    metadata::Metadata,
+    merkle::{compact, mem::Mem, Family, Location, Proof},
     qmdb::{self, sync::compact::Target, Error},
     Context,
 };
 use commonware_codec::{Decode as _, Encode as _, FixedSize, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{sequence::prefixed_u64::U64, sync::RwLock};
-
-// Per-slot db-extra layout. A "slot" is one side of the compact Merkle's ping-pong persistence
-// scheme: each sync writes the next committed state into the inactive slot and then flips which
-// slot is active. Slots 0-4 belong to the Merkle layer; slots 5-8 mirror that scheme for the
-// db-level compact-sync witness. Only the active slot is ever consulted on reopen, rewind, or
-// serving; stale witness bytes left behind in the inactive slot are harmless until the next sync
-// overwrites them.
-//   (5, 0) slot A last commit op bytes     (7, 0) slot B last commit op bytes
-//   (6, 0) slot A last commit proof bytes  (8, 0) slot B last commit proof bytes
-const SLOT_A_LAST_COMMIT_OP_PREFIX: u8 = 5;
-const SLOT_A_LAST_COMMIT_PROOF_PREFIX: u8 = 6;
-const SLOT_B_LAST_COMMIT_OP_PREFIX: u8 = 7;
-const SLOT_B_LAST_COMMIT_PROOF_PREFIX: u8 = 8;
-
-/// Return the metadata prefix used for last-commit op bytes in the given ping-pong slot.
-const fn last_commit_op_prefix(slot: u8) -> u8 {
-    if slot == 0 {
-        SLOT_A_LAST_COMMIT_OP_PREFIX
-    } else {
-        SLOT_B_LAST_COMMIT_OP_PREFIX
-    }
-}
-
-/// Return the metadata prefix used for last-commit proof bytes in the given ping-pong slot.
-const fn last_commit_proof_prefix(slot: u8) -> u8 {
-    if slot == 0 {
-        SLOT_A_LAST_COMMIT_PROOF_PREFIX
-    } else {
-        SLOT_B_LAST_COMMIT_PROOF_PREFIX
-    }
-}
-
-/// Metadata key for the encoded last-commit operation in `slot`.
-pub(crate) const fn last_commit_op_key(slot: u8) -> U64 {
-    U64::new(last_commit_op_prefix(slot), 0)
-}
-
-/// Metadata key for the last-commit inclusion proof in `slot`.
-pub(crate) const fn last_commit_proof_key(slot: u8) -> U64 {
-    U64::new(last_commit_proof_prefix(slot), 0)
-}
+use commonware_utils::sync::RwLock;
 
 /// In-memory cache of the witness currently associated with the active compact state.
 ///
@@ -85,6 +42,8 @@ pub(crate) struct ServeState<F: Family, D: Digest> {
     pub(crate) root: D,
     /// Total leaves in the committed Merkle, which also identifies the tip commit location.
     pub(crate) leaf_count: Location<F>,
+    /// Inactivity floor declared by the current committed state.
+    pub(crate) floor: Location<F>,
     /// Frontier nodes pinned by compact sync; these are the persisted peaks, not the proof path.
     pub(crate) pinned_nodes: Vec<D>,
     /// Encoded last-commit operation bytes used for root verification and serving.
@@ -139,29 +98,6 @@ impl<F: Family, D: Digest> Cache<F, D> {
     }
 }
 
-/// Write the witness portion of `witness` into the given ping-pong slot's db metadata.
-///
-/// The compact Merkle layer persists the frontier itself. This helper persists the db-owned
-/// witness bytes that must move in lockstep with that frontier.
-pub(crate) fn write_witness_metadata<E, F, D>(
-    metadata: &mut Metadata<E, U64, Vec<u8>>,
-    slot: u8,
-    witness: &ServeState<F, D>,
-) where
-    E: Context,
-    F: Family,
-    D: Digest,
-{
-    metadata.put(
-        last_commit_op_key(slot),
-        witness.last_commit_op_bytes.clone(),
-    );
-    metadata.put(
-        last_commit_proof_key(slot),
-        witness.last_commit_proof.encode().to_vec(),
-    );
-}
-
 /// Validate that a decoded commit floor does not point past the commit it authenticates.
 ///
 /// The inactivity floor of a commit must sit at or below the commit's own location. A higher
@@ -203,6 +139,7 @@ where
     let witness = ServeState {
         root,
         leaf_count,
+        floor: inactivity_floor_loc,
         pinned_nodes,
         last_commit_op_bytes,
         last_commit_proof,
@@ -210,17 +147,17 @@ where
     Ok((last_commit_loc, witness))
 }
 
-/// Rebuild the in-memory witness cache from the active slot's persisted witness.
+/// Rebuild the in-memory witness cache from the active retained base.
 ///
 /// This is the authoritative recovery path after reopen and rewind. It:
 ///
-/// 1. reads the active slot's commit bytes and proof bytes,
+/// 1. reads the active base's commit bytes and proof bytes,
 /// 2. decodes the proof,
 /// 3. re-verifies that proof against the Merkle currently loaded in memory,
 /// 4. reconstructs the frontier pins for serving, and
 /// 5. decodes the typed last commit operation needed by the caller's db state.
 ///
-/// Any missing metadata, decode failure, or proof/root mismatch is treated as
+/// Any missing base data, decode failure, or proof/root mismatch is treated as
 /// [`Error::DataCorrupted`], because the persisted frontier and witness no longer describe the same
 /// committed state.
 pub(crate) async fn load_active_witness<F, E, H, S, C, Op, LastCommitFloor>(
@@ -236,15 +173,11 @@ where
     Op: Read<Cfg = C>,
     LastCommitFloor: FnOnce(&Op) -> Option<Location<F>>,
 {
-    let slot = merkle.active_slot();
-    let last_commit_op_bytes = merkle
-        .read_metadata_key(&last_commit_op_key(slot))
-        .await
+    let base = merkle
+        .active_base()
         .ok_or(Error::DataCorrupted("missing compact witness"))?;
-    let last_commit_proof_bytes = merkle
-        .read_metadata_key(&last_commit_proof_key(slot))
-        .await
-        .ok_or(Error::DataCorrupted("missing compact witness"))?;
+    let last_commit_op_bytes = base.last_commit_op_bytes.clone();
+    let last_commit_proof_bytes = base.last_commit_proof_bytes.clone();
     // Every encoded digest is at least `D::SIZE` bytes on the wire, so `proof_bytes.len() /
     // D::SIZE` is a hard upper bound on the digest count. Using this as the decode cap prevents a
     // malformed length prefix from forcing a large preallocation.
@@ -265,6 +198,9 @@ where
     let inactivity_floor_loc = last_commit_floor(&last_commit_op)
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+    if inactivity_floor_loc != base.floor {
+        return Err(Error::DataCorrupted("invalid compact witness"));
+    }
 
     let inactive_peaks =
         F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
@@ -272,6 +208,9 @@ where
     let root = merkle
         .root(&hasher, inactive_peaks)
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
+    if root != base.root {
+        return Err(Error::DataCorrupted("invalid compact witness"));
+    }
     if !last_commit_proof.verify_range_inclusion(
         &hasher,
         &[last_commit_op_bytes.as_slice()],
@@ -280,15 +219,11 @@ where
     ) {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
-    let pinned_nodes = merkle.with_mem(|mem| {
-        F::nodes_to_pin(leaf_count)
-            .map(|pos| *mem.get_node_unchecked(pos))
-            .collect::<Vec<_>>()
-    });
     let witness = ServeState {
         root,
         leaf_count,
-        pinned_nodes,
+        floor: inactivity_floor_loc,
+        pinned_nodes: base.pinned_nodes,
         last_commit_op_bytes,
         last_commit_proof,
     };
@@ -329,14 +264,27 @@ where
                 Ok(ServeState {
                     root,
                     leaf_count: Location::new(1),
+                    floor: Location::new(0),
                     pinned_nodes: Vec::new(),
                     last_commit_op_bytes: last_commit_op_bytes.clone(),
                     last_commit_proof,
                 })
             },
-            |metadata, slot, witness| {
-                write_witness_metadata(metadata, slot, &witness);
-                Ok(())
+            |leaf_count, pinned_nodes, witness| {
+                let mut witness = witness;
+                witness.leaf_count = leaf_count;
+                witness.pinned_nodes = pinned_nodes.clone();
+                Ok((
+                    compact::Base {
+                        root: witness.root,
+                        leaf_count,
+                        floor: witness.floor,
+                        pinned_nodes,
+                        last_commit_op_bytes: witness.last_commit_op_bytes.clone(),
+                        last_commit_proof_bytes: witness.last_commit_proof.encode().to_vec(),
+                    },
+                    (),
+                ))
             },
         )
         .await?;
@@ -349,7 +297,88 @@ where
 /// the Merkle slot being activated. Otherwise, a new witness is built from the unpruned Merkle
 /// before sync prunes it. The cache check runs inside `sync_with_witness` so concurrent syncs
 /// observe the latest witness cache after each persisted slot flip.
-pub(crate) async fn persist_witness<F, E, H, S>(
+enum PersistMode {
+    Write,
+    Commit,
+    Sync,
+}
+
+async fn persist_witness<F, E, H, S>(
+    merkle: &compact::Merkle<F, E, H::Digest, S>,
+    cache: &Cache<F, H::Digest>,
+    last_commit_loc: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    last_commit_op_bytes: Vec<u8>,
+    mode: PersistMode,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    let hasher = qmdb::hasher::<H>();
+    let build_witness = |mem: &Mem<F, H::Digest>| {
+        let mem_leaves = mem.leaves();
+        if let Some(cached) =
+            cache.with(|witness| (witness.leaf_count == mem_leaves).then(|| witness.clone()))
+        {
+            return Ok(cached);
+        }
+        let inactive_peaks =
+            F::inactive_peaks(F::location_to_position(mem_leaves), inactivity_floor_loc);
+        let mem_root = mem.root(&hasher, inactive_peaks)?;
+        let pinned_nodes = F::nodes_to_pin(mem_leaves)
+            .map(|pos| *mem.get_node_unchecked(pos))
+            .collect::<Vec<_>>();
+        let last_commit_proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
+        Ok(ServeState {
+            root: mem_root,
+            leaf_count: mem_leaves,
+            floor: inactivity_floor_loc,
+            pinned_nodes,
+            last_commit_op_bytes: last_commit_op_bytes.clone(),
+            last_commit_proof,
+        })
+    };
+    let build_base = |leaf_count, pinned_nodes: Vec<H::Digest>, witness: ServeState<F, H::Digest>| {
+        let mut witness = witness;
+        witness.leaf_count = leaf_count;
+        witness.pinned_nodes = pinned_nodes.clone();
+        let base = compact::Base {
+            root: witness.root,
+            leaf_count,
+            floor: witness.floor,
+            pinned_nodes,
+            last_commit_op_bytes: witness.last_commit_op_bytes.clone(),
+            last_commit_proof_bytes: witness.last_commit_proof.encode().to_vec(),
+        };
+        cache.replace(witness);
+        Ok((base, ()))
+    };
+
+    match mode {
+        PersistMode::Write => {
+            merkle
+                .write_with_witness(build_witness, build_base)
+                .await?;
+        }
+        PersistMode::Commit => {
+            merkle
+                .commit_with_witness(build_witness, build_base)
+                .await?;
+        }
+        PersistMode::Sync => {
+            merkle
+                .sync_with_witness(build_witness, build_base)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// Write the current compact witness without calling journal commit or sync.
+pub(crate) async fn write_witness<F, E, H, S>(
     merkle: &compact::Merkle<F, E, H::Digest, S>,
     cache: &Cache<F, H::Digest>,
     last_commit_loc: Location<F>,
@@ -362,45 +391,116 @@ where
     H: Hasher,
     S: Strategy,
 {
-    let hasher = qmdb::hasher::<H>();
-    merkle
-        .sync_with_witness(
-            |mem| {
-                let mem_leaves = mem.leaves();
-                if let Some(cached) = cache
-                    .with(|witness| (witness.leaf_count == mem_leaves).then(|| witness.clone()))
-                {
-                    return Ok(cached);
-                }
-                let inactive_peaks =
-                    F::inactive_peaks(F::location_to_position(mem_leaves), inactivity_floor_loc);
-                let mem_root = mem.root(&hasher, inactive_peaks)?;
-                let pinned_nodes = F::nodes_to_pin(mem_leaves)
-                    .map(|pos| *mem.get_node_unchecked(pos))
-                    .collect::<Vec<_>>();
-                let last_commit_proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
-                Ok(ServeState {
-                    root: mem_root,
-                    leaf_count: mem_leaves,
-                    pinned_nodes,
-                    last_commit_op_bytes: last_commit_op_bytes.clone(),
-                    last_commit_proof,
-                })
-            },
-            |metadata, slot, witness| {
-                write_witness_metadata(metadata, slot, &witness);
-                cache.replace(witness);
-                Ok(())
-            },
-        )
-        .await?;
-    Ok(())
+    persist_witness::<F, E, H, S>(
+        merkle,
+        cache,
+        last_commit_loc,
+        inactivity_floor_loc,
+        last_commit_op_bytes,
+        PersistMode::Write,
+    )
+    .await
 }
 
-/// Re-persist the already-verified cached witness into the newly active slot.
+/// Commit the current compact witness through the retained-base journal commit path.
+pub(crate) async fn commit_witness<F, E, H, S>(
+    merkle: &compact::Merkle<F, E, H::Digest, S>,
+    cache: &Cache<F, H::Digest>,
+    last_commit_loc: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    last_commit_op_bytes: Vec<u8>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    persist_witness::<F, E, H, S>(
+        merkle,
+        cache,
+        last_commit_loc,
+        inactivity_floor_loc,
+        last_commit_op_bytes,
+        PersistMode::Commit,
+    )
+    .await
+}
+
+/// Durably sync the current compact witness.
+pub(crate) async fn sync_witness<F, E, H, S>(
+    merkle: &compact::Merkle<F, E, H::Digest, S>,
+    cache: &Cache<F, H::Digest>,
+    last_commit_loc: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    last_commit_op_bytes: Vec<u8>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    persist_witness::<F, E, H, S>(
+        merkle,
+        cache,
+        last_commit_loc,
+        inactivity_floor_loc,
+        last_commit_op_bytes,
+        PersistMode::Sync,
+    )
+    .await
+}
+
+/// Build a serving witness from the current in-memory compact Merkle state
+/// without persisting it.
+///
+/// This lets a compact db serve its live post-apply target before the
+/// background durability sync has committed the corresponding retained base.
+pub(crate) fn live_witness<F, E, H, S>(
+    merkle: &compact::Merkle<F, E, H::Digest, S>,
+    last_commit_loc: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    last_commit_op_bytes: Vec<u8>,
+) -> Result<ServeState<F, H::Digest>, Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    let hasher = qmdb::hasher::<H>();
+    merkle.with_mem(|mem| {
+        let leaf_count = mem.leaves();
+        if leaf_count == 0 {
+            return Err(Error::DataCorrupted("missing final commit"));
+        }
+        if Location::new(*leaf_count - 1) != last_commit_loc {
+            return Err(Error::DataCorrupted("invalid compact witness"));
+        }
+        validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
+        let inactive_peaks =
+            F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
+        let root = mem.root(&hasher, inactive_peaks)?;
+        let pinned_nodes = F::nodes_to_pin(leaf_count)
+            .map(|pos| *mem.get_node_unchecked(pos))
+            .collect();
+        let last_commit_proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
+        Ok(ServeState {
+            root,
+            leaf_count,
+            floor: inactivity_floor_loc,
+            pinned_nodes,
+            last_commit_op_bytes,
+            last_commit_proof,
+        })
+    })
+}
+
+/// Re-persist the already-verified cached witness into the retained-base log.
 ///
 /// This is used when a compact db has reconstructed and verified state from persisted data and only
-/// needs to move that known-good witness into the Merkle's slot layout, without recomputing the
+/// needs to move that known-good witness into the Merkle's base log, without recomputing the
 /// proof from a fresh tip commit.
 pub(crate) async fn persist_cached_witness<F, E, H, S>(
     merkle: &compact::Merkle<F, E, H::Digest, S>,
@@ -418,9 +518,18 @@ where
     merkle
         .sync_with_witness(
             |_| Ok(witness),
-            |metadata, slot, witness| {
-                write_witness_metadata(metadata, slot, &witness);
-                Ok(())
+            |leaf_count, pinned_nodes, witness| {
+                Ok((
+                    compact::Base {
+                        root: witness.root,
+                        leaf_count,
+                        floor: witness.floor,
+                        pinned_nodes,
+                        last_commit_op_bytes: witness.last_commit_op_bytes.clone(),
+                        last_commit_proof_bytes: witness.last_commit_proof.encode().to_vec(),
+                    },
+                    (),
+                ))
             },
         )
         .await

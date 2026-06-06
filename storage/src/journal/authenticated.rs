@@ -346,6 +346,11 @@ where
             ancestor_items: Vec::new(),
         })
     }
+
+    /// Write pending Merkle nodes to the backing journal without waiting for durability.
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+        self.merkle.write_pending().await.map_err(Into::into)
+    }
 }
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>

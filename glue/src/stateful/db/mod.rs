@@ -8,7 +8,7 @@
 //! Normal execution has three stages:
 //! 1. [`Unmerkleized`]: mutable, in-progress batch (concrete types expose reads and writes).
 //! 2. [`Merkleized`]: a sealed batch with a computed root.
-//! 3. Finalization: persist the sealed batch via [`ManagedDb::finalize`].
+//! 3. Finalization: apply the sealed batch via [`ManagedDb::finalize`].
 //!
 //! [`DatabaseSet`] groups one or more [`ManagedDb`] instances into one logical
 //! unit for execution and commit.
@@ -144,8 +144,8 @@ pub trait Merkleized: Sized + Send + Sync {
 
 /// One database managed by the [`Stateful`](super::Stateful) wrapper.
 ///
-/// Implementations create new batches from committed state and persist finalized
-/// batches back to storage.
+/// Implementations create new batches from committed state and apply finalized
+/// batches back to the database.
 ///
 /// [`new_batch`](Self::new_batch) receives `Arc<AsyncRwLock<Self>>` so batch
 /// types can keep read-through access to committed state.
@@ -194,9 +194,11 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Apply a merkleized batch's changeset to the underlying database.
     ///
     /// In QMDB, this encapsulates calling `merkleized.finalize()` to produce
-    /// a `Changeset`, then `db.apply_batch(changeset)` and `db.commit()`.
+    /// a `Changeset`, then applying it and writing pending Merkle nodes.
     ///
-    /// This call makes changes durable, but may still require replay on startup.
+    /// This call publishes the finalized state for in-process reads, but does
+    /// not guarantee durability. Use [`ManagedDb::persist`] or
+    /// [`ManagedDb::prune`] for a durable boundary.
     fn finalize(
         &mut self,
         batch: Self::Merkleized,
@@ -204,10 +206,20 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
     /// Persist the database's current in-memory state.
     ///
-    /// This is heavier than [`finalize`](Self::finalize) and is intended for
-    /// periodic maintenance rather than every finalized block. This call makes
-    /// changes durable and ensures they will be present on startup without replay.
+    /// This is heavier than [`finalize`](Self::finalize) and makes changes
+    /// durable without pruning block history. Glue's automatic maintenance
+    /// path uses [`ManagedDb::prune`] so durability is tied to the point where
+    /// history can no longer be replayed.
     fn persist(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
+
+    /// Best-effort durability preflush that can run in the background.
+    ///
+    /// Implementations should avoid mutating logical database state. QMDB
+    /// implementations use this to start durable sync work for already-written
+    /// data while foreground reads continue.
+    fn preflush(&self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        async { Ok(()) }
+    }
 
     /// Prune the database to a previously finalized sync target.
     ///
@@ -233,12 +245,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         target: Self::SyncTarget,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Return the maximum number of finalized commits this database can rewind.
-    ///
-    /// `None` means rewind depth is not bounded by a known finite limit.
-    fn max_rewind_depth() -> Option<usize> {
-        None
-    }
 }
 
 /// A collection of individually locked [`ManagedDb`] instances.
@@ -284,17 +290,27 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Return true if merkleized batches match the committed sync targets.
     fn matches_sync_targets(batches: &Self::Merkleized, targets: &Self::SyncTargets) -> bool;
 
-    /// Apply each merkleized batch's changeset to its underlying database. This call makes
-    /// changes durable, but may still require replay on startup.
+    /// Apply each merkleized batch's changeset to its underlying database.
+    ///
+    /// This call publishes the finalized state for in-process reads, but does
+    /// not guarantee durability.
     ///
     /// Acquires a write lock on each database.
     fn finalize(&self, batches: Self::Merkleized) -> impl Future<Output = ()> + Send;
 
-    /// Persist each database's current in-memory state. This call makes changes durable
-    /// and ensures they will be present on startup without replay.
+    /// Persist each database's current in-memory state. This call makes
+    /// changes durable without pruning block history.
     ///
     /// Acquires a write lock on each database.
     fn persist(&self) -> impl Future<Output = ()> + Send;
+
+    /// Best-effort version of [`DatabaseSet::persist`] for background
+    /// maintenance.
+    ///
+    /// Implementations must not wait for write locks. If a database is
+    /// currently being mutated, this should skip it rather than queueing
+    /// behind foreground block work.
+    fn preflush(&self) -> impl Future<Output = ()> + Send;
 
     /// Prune each database to the provided per-database targets.
     ///
@@ -312,26 +328,6 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Rewind failures are fatal for startup recovery and therefore panic.
     fn rewind_to_targets(&self, targets: Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
-    /// Return the most restrictive finite rewind depth across the database set.
-    ///
-    /// `None` means every database in the set is unbounded.
-    fn max_rewind_depth() -> Option<usize>;
-}
-
-pub(crate) fn assert_rewind_window_safety<E, D>(max_pending_acks: NonZeroUsize)
-where
-    D: DatabaseSet<E>,
-{
-    let Some(max_rewind_depth) = D::max_rewind_depth() else {
-        return;
-    };
-
-    assert!(
-        max_pending_acks.get() <= max_rewind_depth,
-        "marshal max_pending_acks={} exceeds database_set.max_rewind_depth={}",
-        max_pending_acks,
-        max_rewind_depth,
-    );
 }
 
 /// Parameters for a one-time state-sync pass.
@@ -349,8 +345,8 @@ pub struct SyncEngineConfig {
     /// Capacity of per-database target-update channels.
     pub update_channel_size: NonZeroUsize,
 
-    /// Number of historical roots to retain for proof verification across
-    /// target updates.
+    /// Number of previous sync target roots retained for verifying in-flight
+    /// QMDB state-sync responses after target updates.
     pub max_retained_roots: usize,
 }
 
@@ -502,6 +498,13 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
         persist_or_panic(&mut *database, None).await;
     }
 
+    async fn preflush(&self) {
+        let Ok(database) = self.try_read() else {
+            return;
+        };
+        preflush_or_panic(&*database, None).await;
+    }
+
     async fn prune(&self, target: &Self::SyncTargets) {
         let mut database = self.write().await;
         prune_or_panic(&mut *database, target, None).await;
@@ -518,10 +521,6 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
             return;
         }
         rewind_or_panic(&mut *database, target, None).await;
-    }
-
-    fn max_rewind_depth() -> Option<usize> {
-        T::max_rewind_depth()
     }
 }
 
@@ -745,6 +744,17 @@ macro_rules! impl_database_set {
                 )+);
             }
 
+            async fn preflush(&self) {
+                join!($(
+                    async {
+                        let Ok(database) = self.$idx.try_read() else {
+                            return;
+                        };
+                        preflush_or_panic(&*database, Some($idx)).await;
+                    },
+                )+);
+            }
+
             async fn prune(&self, targets: &Self::SyncTargets) {
                 join!($(
                     async {
@@ -773,19 +783,6 @@ macro_rules! impl_database_set {
                         rewind_or_panic(&mut *database, targets.$idx, Some($idx)).await;
                     },
                 )+);
-            }
-
-            fn max_rewind_depth() -> Option<usize> {
-                let mut max_rewind_depth: Option<usize> = None;
-                $(
-                    max_rewind_depth = match (max_rewind_depth, $T::max_rewind_depth()) {
-                        (Some(current), Some(next)) => Some(current.min(next)),
-                        (Some(current), None) => Some(current),
-                        (None, Some(next)) => Some(next),
-                        (None, None) => None,
-                    };
-                )+
-                max_rewind_depth
             }
         }
     };
@@ -1457,6 +1454,23 @@ async fn persist_or_panic<E, T: ManagedDb<E>>(database: &mut T, index: Option<us
     }
 }
 
+async fn preflush_or_panic<E, T: ManagedDb<E>>(database: &T, index: Option<usize>) {
+    // Preflush failures are fatal for the same reason as persist failures: the
+    // database may already have partially advanced its durable maintenance state.
+    if let Err(err) = database.preflush().await {
+        match index {
+            Some(index) => panic!(
+                "database preflush failed (index {index}, type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+            None => panic!(
+                "database preflush failed (type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+        }
+    }
+}
+
 async fn prune_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: &T::SyncTarget,
@@ -1556,9 +1570,9 @@ impl_attachable_resolver_set!(
 #[cfg(test)]
 mod tests {
     use super::{
-        assert_rewind_window_safety, drain_single_tip_updates, Anchor, AttachableResolver,
-        AttachableResolverSet, CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb,
-        StateSyncDb, StateSyncSet, SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
+        drain_single_tip_updates, Anchor, AttachableResolver, AttachableResolverSet,
+        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, StateSyncDb, StateSyncSet,
+        SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
     };
     use crate::stateful::tests::mocks::{anchor as mock_anchor, TestMerkleized, TestUnmerkleized};
     use commonware_cryptography::sha256;
@@ -1568,7 +1582,7 @@ mod tests {
     };
     use commonware_utils::{
         channel::{mpsc, oneshot, ring},
-        sync::AsyncRwLock,
+        sync::{AsyncRwLock, Mutex},
     };
     use futures::{pin_mut, FutureExt, SinkExt};
     use std::{
@@ -1584,12 +1598,6 @@ mod tests {
     #[derive(Default)]
     struct TestDb;
 
-    #[derive(Default)]
-    struct OneStepRewindDb;
-
-    #[derive(Default)]
-    struct ThreeStepRewindDb;
-
     struct CountingRewindDb {
         current_target: u64,
         rewind_count: usize,
@@ -1601,6 +1609,20 @@ mod tests {
 
     struct PruneCountingDb {
         prune_count: Arc<AtomicUsize>,
+    }
+
+    struct BlockingPreflushDb {
+        started: Mutex<Option<oneshot::Sender<()>>>,
+        release: Mutex<Option<oneshot::Receiver<()>>>,
+    }
+
+    impl BlockingPreflushDb {
+        fn new(started: oneshot::Sender<()>, release: oneshot::Receiver<()>) -> Self {
+            Self {
+                started: Mutex::new(Some(started)),
+                release: Mutex::new(Some(release)),
+            }
+        }
     }
 
     impl<E: Send> ManagedDb<E> for TestDb {
@@ -1635,82 +1657,6 @@ mod tests {
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
             Ok(())
-        }
-    }
-
-    impl<E: Send> ManagedDb<E> for OneStepRewindDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-        type Config = ();
-        type SyncTarget = ();
-
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            Ok(Self)
-        }
-
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn max_rewind_depth() -> Option<usize> {
-            Some(1)
-        }
-    }
-
-    impl<E: Send> ManagedDb<E> for ThreeStepRewindDb {
-        type Unmerkleized = TestUnmerkleized;
-        type Merkleized = TestMerkleized;
-        type Error = Infallible;
-        type Config = ();
-        type SyncTarget = ();
-
-        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-            Ok(Self)
-        }
-
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-            TestUnmerkleized
-        }
-
-        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
-            true
-        }
-
-        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn persist(&mut self) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        async fn sync_target(&self) -> Self::SyncTarget {}
-
-        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
-            Ok(())
-        }
-
-        fn max_rewind_depth() -> Option<usize> {
-            Some(3)
         }
     }
 
@@ -1780,6 +1726,11 @@ mod tests {
             Ok(())
         }
 
+        async fn preflush(&self) -> Result<(), Self::Error> {
+            self.sync_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1816,6 +1767,51 @@ mod tests {
 
         async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
             self.prune_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn sync_target(&self) -> Self::SyncTarget {}
+
+        async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    impl<E: Send> ManagedDb<E> for BlockingPreflushDb {
+        type Unmerkleized = TestUnmerkleized;
+        type Merkleized = TestMerkleized;
+        type Error = Infallible;
+        type Config = ();
+        type SyncTarget = ();
+
+        async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
+            unreachable!("BlockingPreflushDb is constructed directly in tests")
+        }
+
+        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+            TestUnmerkleized
+        }
+
+        fn matches_sync_target(_batch: &Self::Merkleized, _target: &Self::SyncTarget) -> bool {
+            true
+        }
+
+        async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn persist(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+
+        async fn preflush(&self) -> Result<(), Self::Error> {
+            if let Some(started) = self.started.lock().take() {
+                let _ = started.send(());
+            }
+            let release = self.release.lock().take();
+            if let Some(release) = release {
+                let _ = release.await;
+            }
             Ok(())
         }
 
@@ -1931,48 +1927,6 @@ mod tests {
     }
 
     #[test]
-    fn single_db_set_reports_unbounded_rewind_depth() {
-        let rewind_depth =
-            <Arc<AsyncRwLock<TestDb>> as DatabaseSet<deterministic::Context>>::max_rewind_depth();
-        assert_eq!(rewind_depth, None);
-    }
-
-    #[test]
-    fn single_db_set_reports_one_step_rewind_depth() {
-        let rewind_depth = <Arc<AsyncRwLock<OneStepRewindDb>> as DatabaseSet<
-            deterministic::Context,
-        >>::max_rewind_depth();
-        assert_eq!(rewind_depth, Some(1));
-    }
-
-    #[test]
-    fn tuple_db_set_uses_most_restrictive_finite_rewind_depth() {
-        type DbSet = (
-            Arc<AsyncRwLock<TestDb>>,
-            Arc<AsyncRwLock<ThreeStepRewindDb>>,
-            Arc<AsyncRwLock<OneStepRewindDb>>,
-        );
-
-        let rewind_depth = <DbSet as DatabaseSet<deterministic::Context>>::max_rewind_depth();
-        assert_eq!(rewind_depth, Some(1));
-    }
-
-    #[test]
-    fn rewind_window_assertion_accepts_equal_pending_acks_and_rewind_depth() {
-        assert_rewind_window_safety::<deterministic::Context, Arc<AsyncRwLock<OneStepRewindDb>>>(
-            NonZeroUsize::new(1).unwrap(),
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "marshal max_pending_acks=2 exceeds database_set.max_rewind_depth=1")]
-    fn rewind_window_assertion_panics_when_pending_acks_exceed_rewind_depth() {
-        assert_rewind_window_safety::<deterministic::Context, Arc<AsyncRwLock<OneStepRewindDb>>>(
-            NonZeroUsize::new(2).unwrap(),
-        );
-    }
-
-    #[test]
     fn tuple_rewind_to_targets_skips_already_aligned_databases() {
         deterministic::Runner::default().start(|_context| async move {
             type DbSet = (
@@ -2017,6 +1971,108 @@ mod tests {
             .await;
 
             assert_eq!(sync_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn database_set_preflush_calls_managed_db_preflush_when_lock_free() {
+        deterministic::Runner::default().start(|_context| async move {
+            let sync_count = Arc::new(AtomicUsize::new(0));
+            let database = Arc::new(AsyncRwLock::new(SyncCountingDb {
+                sync_count: sync_count.clone(),
+            }));
+
+            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
+                &database,
+            )
+            .await;
+
+            assert_eq!(sync_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn database_set_preflush_skips_when_lock_busy() {
+        deterministic::Runner::default().start(|_context| async move {
+            let sync_count = Arc::new(AtomicUsize::new(0));
+            let database = Arc::new(AsyncRwLock::new(SyncCountingDb {
+                sync_count: sync_count.clone(),
+            }));
+
+            let guard = database.write().await;
+            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
+                &database,
+            )
+            .await;
+            assert_eq!(sync_count.load(Ordering::SeqCst), 0);
+
+            drop(guard);
+            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
+                &database,
+            )
+            .await;
+            assert_eq!(sync_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn database_set_preflush_does_not_block_readers() {
+        deterministic::Runner::default().start(|_context| async move {
+            let (started_tx, started_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            let database = Arc::new(AsyncRwLock::new(BlockingPreflushDb::new(
+                started_tx, release_rx,
+            )));
+
+            let preflush =
+                <Arc<AsyncRwLock<BlockingPreflushDb>> as DatabaseSet<
+                    deterministic::Context,
+                >>::preflush(&database);
+            pin_mut!(preflush);
+            assert!(preflush.as_mut().now_or_never().is_none());
+            started_rx
+                .await
+                .expect("preflush should start before blocking");
+
+            let new_batches =
+                <Arc<AsyncRwLock<BlockingPreflushDb>> as DatabaseSet<
+                    deterministic::Context,
+                >>::new_batches(&database);
+            pin_mut!(new_batches);
+            assert!(
+                new_batches.as_mut().now_or_never().is_some(),
+                "preflush should hold only a read lock"
+            );
+
+            let _ = release_tx.send(());
+            preflush.await;
+        });
+    }
+
+    #[test]
+    fn tuple_database_set_preflush_skips_busy_database_only() {
+        deterministic::Runner::default().start(|_context| async move {
+            type DbSet = (
+                Arc<AsyncRwLock<SyncCountingDb>>,
+                Arc<AsyncRwLock<SyncCountingDb>>,
+            );
+
+            let left_count = Arc::new(AtomicUsize::new(0));
+            let right_count = Arc::new(AtomicUsize::new(0));
+            let left = Arc::new(AsyncRwLock::new(SyncCountingDb {
+                sync_count: left_count.clone(),
+            }));
+            let right = Arc::new(AsyncRwLock::new(SyncCountingDb {
+                sync_count: right_count.clone(),
+            }));
+            let databases: DbSet = (left.clone(), right);
+
+            let guard = left.write().await;
+            <DbSet as DatabaseSet<deterministic::Context>>::preflush(&databases).await;
+
+            assert_eq!(left_count.load(Ordering::SeqCst), 0);
+            assert_eq!(right_count.load(Ordering::SeqCst), 1);
+            drop(guard);
         });
     }
 

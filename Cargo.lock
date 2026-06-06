@@ -1681,6 +1681,7 @@ dependencies = [
  "commonware-runtime",
  "commonware-storage",
  "commonware-utils",
+ "criterion",
  "futures",
  "prometheus-client",
  "rand 0.8.5",

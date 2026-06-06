@@ -126,9 +126,13 @@ mod tests {
     async fn open_compact<F: Family>(
         context: deterministic::Context,
     ) -> CompactDb<F, deterministic::Context, Digest, Digest, Sha256, Sequential> {
+        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
         let cfg = CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-immutable-fixed".into(),
+                items_per_section: NZU64!(5),
+                page_cache,
+                write_buffer: NZUsize!(1024),
                 strategy: Sequential,
             },
             commit_codec_config: (),

@@ -11,32 +11,38 @@
 //! retained nodes and those peaks as pinned values reconstructs an equivalent tree: same root,
 //! same future append behavior.
 //!
-//! # One-step rewind
+//! # Retained bases
 //!
-//! State is persisted into one of two slots on disk, with a generation pointer identifying the
-//! active slot. Each `sync` writes the new state to the *other* slot and flips the pointer
-//! atomically. The `rewind` entry point flips the pointer back and clears the now-stale slot,
-//! restoring the state as of the sync before the most recent one. Rewind is one-shot until the
-//! next `sync`.
+//! Each sync appends a compact base record to a contiguous variable journal. A base contains the
+//! leaf count, pinned peaks, the floor associated with the committed state, and caller-owned witness
+//! bytes. Startup replays retained bases into an in-memory index and opens the journal tail as the
+//! active committed state. Pruning removes bases before the requested floor, while exact rewind
+//! truncates the journal back to a retained base and rebuilds [`Mem`] from that record.
 
 use crate::{
+    journal::contiguous::{
+        variable::{Config as JournalConfig, Journal},
+        Reader as _,
+    },
     merkle::{
         batch,
         hasher::Hasher,
         mem::{Config as MemConfig, Mem},
-        Error, Family, Location, Position,
+        Error, Family, Location, Position, MAX_PINNED_NODES,
     },
-    metadata::{Config as MConfig, Metadata},
     Context,
 };
-use commonware_codec::DecodeExt;
+use bytes::{Buf, BufMut};
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    sequence::prefixed_u64::U64,
-    sync::{AsyncMutex, RwLock},
+use commonware_runtime::buffer::paged::CacheRef;
+use commonware_utils::sync::{AsyncMutex, RwLock};
+use std::{
+    collections::BTreeMap,
+    num::{NonZeroU64, NonZeroUsize},
+    sync::Arc,
 };
-use std::sync::Arc;
 
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
@@ -81,161 +87,277 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 /// Configuration for a compact Merkle structure.
 #[derive(Clone)]
 pub struct Config<S: Strategy> {
-    /// Metadata partition used to persist the current compact state.
+    /// Base partition used to persist compact state.
     pub partition: String,
+
+    /// Number of retained bases to store in each log section.
+    ///
+    /// Once set, this value cannot be changed across restarts.
+    pub items_per_section: NonZeroU64,
+
+    /// Page cache for buffering retained-base reads.
+    pub page_cache: CacheRef,
+
+    /// Write buffer size for each retained-base section.
+    pub write_buffer: NonZeroUsize,
 
     /// Strategy used to parallelize batch operations.
     pub strategy: S,
 }
 
-/// A Merkle structure that persists only the state required to continue appending.
-pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
-    inner: RwLock<Mem<F, D>>,
-    metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
-    sync_lock: AsyncMutex<()>,
-    strategy: S,
-    /// Active slot (0 or 1). Source of truth lives on disk under `GEN_PTR_PREFIX`; this is an
-    /// in-memory cache refreshed on every `sync_with` and `rewind`.
-    active_slot: RwLock<u8>,
+/// Codec limits for retained compact base records.
+#[derive(Clone)]
+pub struct BaseCfg {
+    /// Allowed number of pinned frontier nodes.
+    pub pinned_nodes: RangeCfg<usize>,
+    /// Allowed size of the caller-owned last-commit operation bytes.
+    pub last_commit_op_bytes: RangeCfg<usize>,
+    /// Allowed size of the caller-owned last-commit proof bytes.
+    pub last_commit_proof_bytes: RangeCfg<usize>,
 }
 
-// Metadata key prefixes. The Merkle persists into one of two slots (A=0, B=1); `GEN_PTR_PREFIX`
-// records which slot is currently active. Each `sync` writes to the other slot and flips the
-// pointer atomically, giving one-step rewind.
-const GEN_PTR_PREFIX: u8 = 0;
-const SLOT_A_SIZE_PREFIX: u8 = 1;
-const SLOT_A_NODE_PREFIX: u8 = 2;
-const SLOT_B_SIZE_PREFIX: u8 = 3;
-const SLOT_B_NODE_PREFIX: u8 = 4;
-
-const fn size_prefix(slot: u8) -> u8 {
-    if slot == 0 {
-        SLOT_A_SIZE_PREFIX
-    } else {
-        SLOT_B_SIZE_PREFIX
+impl Default for BaseCfg {
+    fn default() -> Self {
+        Self {
+            pinned_nodes: (0..=MAX_PINNED_NODES).into(),
+            last_commit_op_bytes: (0..).into(),
+            last_commit_proof_bytes: (0..).into(),
+        }
     }
 }
 
-const fn node_prefix(slot: u8) -> u8 {
-    if slot == 0 {
-        SLOT_A_NODE_PREFIX
-    } else {
-        SLOT_B_NODE_PREFIX
+fn base_log_config<S: Strategy>(cfg: &Config<S>) -> JournalConfig<BaseCfg> {
+    JournalConfig {
+        partition: format!("{}-bases", cfg.partition),
+        items_per_section: cfg.items_per_section,
+        compression: None,
+        codec_config: BaseCfg::default(),
+        page_cache: cfg.page_cache.clone(),
+        write_buffer: cfg.write_buffer,
+    }
+}
+
+/// Retained compact state captured at a durable sync boundary.
+#[derive(Clone)]
+pub(crate) struct Base<F: Family, D: Digest> {
+    /// Authenticated root for this base.
+    pub(crate) root: D,
+    /// Total leaves committed by this base.
+    pub(crate) leaf_count: Location<F>,
+    /// Inactivity floor associated with this base.
+    pub(crate) floor: Location<F>,
+    /// Frontier nodes pinned by this base.
+    pub(crate) pinned_nodes: Vec<D>,
+    /// Caller-owned encoded last-commit operation bytes.
+    pub(crate) last_commit_op_bytes: Vec<u8>,
+    /// Caller-owned encoded last-commit proof bytes.
+    pub(crate) last_commit_proof_bytes: Vec<u8>,
+}
+
+impl<F: Family, D: Digest> Write for Base<F, D> {
+    fn write(&self, buf: &mut impl BufMut) {
+        self.root.write(buf);
+        self.leaf_count.write(buf);
+        self.floor.write(buf);
+        self.pinned_nodes.write(buf);
+        self.last_commit_op_bytes.write(buf);
+        self.last_commit_proof_bytes.write(buf);
+    }
+}
+
+impl<F: Family, D: Digest> EncodeSize for Base<F, D> {
+    fn encode_size(&self) -> usize {
+        self.root.encode_size()
+            + self.leaf_count.encode_size()
+            + self.floor.encode_size()
+            + self.pinned_nodes.encode_size()
+            + self.last_commit_op_bytes.encode_size()
+            + self.last_commit_proof_bytes.encode_size()
+    }
+}
+
+impl<F: Family, D: Digest> Read for Base<F, D> {
+    type Cfg = BaseCfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let root = D::read_cfg(buf, &())?;
+        let leaf_count = Location::<F>::read_cfg(buf, &())?;
+        let floor = Location::<F>::read_cfg(buf, &())?;
+        let pinned_nodes = Vec::<D>::read_cfg(buf, &(cfg.pinned_nodes.clone(), ()))?;
+        let last_commit_op_bytes =
+            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_op_bytes.clone(), ()))?;
+        let last_commit_proof_bytes =
+            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_proof_bytes.clone(), ()))?;
+        Ok(Self {
+            root,
+            leaf_count,
+            floor,
+            pinned_nodes,
+            last_commit_op_bytes,
+            last_commit_proof_bytes,
+        })
+    }
+}
+
+/// A Merkle structure that persists only the state required to continue appending.
+pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
+    inner: RwLock<Mem<F, D>>,
+    base_log: Journal<E, Base<F, D>>,
+    retained: RwLock<RetainedBases<F, D>>,
+    sync_lock: AsyncMutex<()>,
+    strategy: S,
+    replace_on_next_sync: RwLock<bool>,
+}
+
+enum PersistMode {
+    Write,
+    Commit,
+    Sync,
+}
+
+#[derive(Clone)]
+struct RetainedBases<F: Family, D: Digest> {
+    bases: BTreeMap<u64, Base<F, D>>,
+    by_target: BTreeMap<(u64, Vec<u8>), u64>,
+    by_leaf_count: BTreeMap<u64, u64>,
+    current_position: Option<u64>,
+}
+
+impl<F: Family, D: Digest> Default for RetainedBases<F, D> {
+    fn default() -> Self {
+        Self {
+            bases: BTreeMap::new(),
+            by_target: BTreeMap::new(),
+            by_leaf_count: BTreeMap::new(),
+            current_position: None,
+        }
+    }
+}
+
+impl<F: Family, D: Digest> RetainedBases<F, D> {
+    fn insert(&mut self, position: u64, base: Base<F, D>) {
+        self.by_target
+            .insert((*base.leaf_count, base.root.to_vec()), position);
+        self.by_leaf_count.insert(*base.leaf_count, position);
+        self.current_position = Some(position);
+        self.bases.insert(position, base);
+    }
+
+    fn current(&self) -> Option<&Base<F, D>> {
+        self.current_position
+            .and_then(|position| self.bases.get(&position))
+    }
+
+    fn previous_position(&self) -> Option<u64> {
+        let current = self.current_position?;
+        self.bases.range(..current).next_back().map(|(position, _)| *position)
+    }
+
+    fn position_for_target(&self, leaf_count: Location<F>, root: D) -> Option<u64> {
+        self.by_target.get(&(*leaf_count, root.to_vec())).copied()
+    }
+
+    fn position_for_leaf_count(&self, leaf_count: Location<F>) -> Option<u64> {
+        self.by_leaf_count.get(&*leaf_count).copied()
+    }
+
+    fn truncate_after(&mut self, position: u64) {
+        let removed = self
+            .bases
+            .split_off(&(position.checked_add(1).expect("position overflow")));
+        for base in removed.values() {
+            self.by_target.remove(&(*base.leaf_count, base.root.to_vec()));
+            self.by_leaf_count.remove(&*base.leaf_count);
+        }
+        self.current_position = self.bases.keys().next_back().copied();
+    }
+
+    fn clear(&mut self) {
+        self.bases.clear();
+        self.by_target.clear();
+        self.by_leaf_count.clear();
+        self.current_position = None;
     }
 }
 
 impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     const fn validate_persisted_leaves(leaves: Location<F>) -> Result<(), Error<F>> {
         if !leaves.is_valid() {
-            return Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"));
+            return Err(Error::DataCorrupted("base size exceeds MAX_LEAVES"));
         }
         Ok(())
     }
 
-    /// Read the active slot pointer, defaulting to 0 if absent.
-    fn read_gen_ptr(metadata: &Metadata<E, U64, Vec<u8>>) -> Result<Option<u8>, Error<F>> {
-        let Some(raw) = metadata.get(&U64::new(GEN_PTR_PREFIX, 0)) else {
-            return Ok(None);
-        };
-        if raw.len() != 1 || (raw[0] != 0 && raw[0] != 1) {
-            return Err(Error::DataCorrupted("invalid generation pointer"));
+    fn validate_base(base: &Base<F, D>) -> Result<(), Error<F>> {
+        Self::validate_persisted_leaves(base.leaf_count)?;
+        if base.pinned_nodes.len() != F::nodes_to_pin(base.leaf_count).count() {
+            return Err(Error::InvalidPinnedNodes);
         }
-        Ok(Some(raw[0]))
+        if base.leaf_count == 0 && base.floor != 0 {
+            return Err(Error::DataCorrupted("invalid compact base floor"));
+        }
+        if base.leaf_count > 0 && base.floor > Location::new(*base.leaf_count - 1) {
+            return Err(Error::DataCorrupted("invalid compact base floor"));
+        }
+        Ok(())
     }
 
-    /// Read the size key for a given slot, returning `None` if the slot is unpopulated.
-    fn read_slot_size(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        slot: u8,
-    ) -> Result<Option<Location<F>>, Error<F>> {
-        let Some(raw) = metadata.get(&U64::new(size_prefix(slot), 0)) else {
-            return Ok(None);
-        };
-        let bytes: [u8; 8] = raw
-            .as_slice()
-            .try_into()
-            .map_err(|_| Error::DataCorrupted("slot size is not 8 bytes"))?;
-        let leaves = Location::new(u64::from_be_bytes(bytes));
-        Self::validate_persisted_leaves(leaves)?;
-        Ok(Some(leaves))
-    }
-
-    /// Remove all pin entries for a given slot.
-    fn clear_slot_pins(metadata: &mut Metadata<E, U64, Vec<u8>>, slot: u8, leaves: Location<F>) {
-        let pin_count = F::nodes_to_pin(leaves).count();
-        for i in 0..pin_count {
-            metadata.remove(&U64::new(node_prefix(slot), i as u64));
+    fn mem_from_base(base: &Base<F, D>) -> Result<Mem<F, D>, Error<F>> {
+        if base.leaf_count == 0 {
+            Ok(Mem::new())
+        } else {
+            Ok(Mem::init(MemConfig {
+                nodes: vec![],
+                pruning_boundary: base.leaf_count,
+                pinned_nodes: base.pinned_nodes.clone(),
+            })?)
         }
     }
 
-    /// Clear both the pins and the size key for a slot, marking it as unpopulated so that
-    /// subsequent rewinds targeting it will fail with `RewindBeyondHistory`.
-    fn clear_slot(metadata: &mut Metadata<E, U64, Vec<u8>>, slot: u8, leaves: Location<F>) {
-        Self::clear_slot_pins(metadata, slot, leaves);
-        metadata.remove(&U64::new(size_prefix(slot), 0));
-    }
-
-    fn load_slot_pins(
-        metadata: &Metadata<E, U64, Vec<u8>>,
-        slot: u8,
-        leaves: Location<F>,
-    ) -> Result<Vec<D>, Error<F>> {
-        let mut pinned = Vec::new();
-        for (idx, pos) in F::nodes_to_pin(leaves).enumerate() {
-            let bytes = metadata
-                .get(&U64::new(node_prefix(slot), idx as u64))
-                .ok_or(Error::MissingNode(pos))?;
-            let digest = D::decode(bytes.as_ref())
-                .map_err(|_| Error::DataCorrupted("invalid pinned node"))?;
-            pinned.push(digest);
+    async fn load_retained_bases(
+        base_log: &Journal<E, Base<F, D>>,
+    ) -> Result<RetainedBases<F, D>, Error<F>> {
+        let reader = base_log.reader().await;
+        let mut retained = RetainedBases::default();
+        for position in reader.bounds() {
+            let base = reader.read(position).await?;
+            Self::validate_base(&base)?;
+            retained.insert(position, base);
         }
-        Ok(pinned)
+        Ok(retained)
     }
 
     /// Initialize a new `Merkle` instance, rebuilding in-memory state from the last sync.
     pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
-        let metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.child("compact_metadata"),
-            MConfig {
-                partition: cfg.partition,
-                codec_config: ((0..).into(), ()),
-            },
-        )
-        .await?;
-
-        let active_slot = Self::read_gen_ptr(&metadata)?.unwrap_or(0);
-        let leaves = Self::read_slot_size(&metadata, active_slot)?.unwrap_or(Location::new(0));
-        let mem = if leaves == 0 {
-            Mem::new()
+        let base_log =
+            Journal::<_, Base<F, D>>::init(context.child("compact_bases"), base_log_config(&cfg))
+            .await?;
+        let retained = Self::load_retained_bases(&base_log).await?;
+        let mem = if let Some(base) = retained.current() {
+            Self::mem_from_base(base)?
         } else {
-            Mem::init(MemConfig {
-                nodes: vec![],
-                pruning_boundary: leaves,
-                pinned_nodes: Self::load_slot_pins(&metadata, active_slot, leaves)?,
-            })?
+            Mem::new()
         };
 
         Ok(Self {
             inner: RwLock::new(mem),
-            metadata: AsyncMutex::new(metadata),
+            base_log,
+            retained: RwLock::new(retained),
             sync_lock: AsyncMutex::new(()),
             strategy: cfg.strategy,
-            active_slot: RwLock::new(active_slot),
+            replace_on_next_sync: RwLock::new(false),
         })
     }
 
     /// Initialize from compact state without persisting it.
     ///
-    /// Callers use this to reconstruct a compact tree in memory, verify that its root
-    /// matches an authenticated target, and only then persist it with [`Self::sync_with_witness`].
-    /// Starting from a cleared metadata view means the first persistence populates exactly one
-    /// slot, so `rewind` will return [`Error::RewindBeyondHistory`] until a later sync overwrites
-    /// the alternate slot.
+    /// Callers use this to reconstruct a compact tree in memory, verify that its root matches an
+    /// authenticated target, and only then persist it with [`Self::sync_with_witness`].
     ///
-    /// This path is intended for a fresh or disposable compact partition. Existing metadata is
-    /// cleared only in memory here; if verification fails before a later successful
-    /// [`Self::sync_with_witness`], the on-disk state remains untouched. Once persistence succeeds,
-    /// the previous compact history in this partition is replaced by the newly initialized state.
+    /// Existing retained bases are ignored in memory here; if verification fails before a later
+    /// successful [`Self::sync_with_witness`], the on-disk state remains untouched. Once persistence
+    /// succeeds, the previous compact history in this partition is replaced by the newly initialized
+    /// state.
     /// Root verification itself happens at the QMDB layer after reconstruction, because that layer
     /// owns the typed final commit operation needed to authenticate the caller's requested target.
     pub(crate) async fn init_from_compact_state(
@@ -249,15 +371,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             return Err(Error::InvalidPinnedNodes);
         }
 
-        let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
-            context.child("compact_metadata"),
-            MConfig {
-                partition: cfg.partition,
-                codec_config: ((0..).into(), ()),
-            },
-        )
-        .await?;
-        metadata.clear();
+        let base_log =
+            Journal::<_, Base<F, D>>::init(context.child("compact_bases"), base_log_config(&cfg))
+            .await?;
 
         let mem = if leaves == 0 {
             Mem::new()
@@ -271,10 +387,11 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         let merkle = Self {
             inner: RwLock::new(mem),
-            metadata: AsyncMutex::new(metadata),
+            base_log,
+            retained: RwLock::new(RetainedBases::default()),
             sync_lock: AsyncMutex::new(()),
             strategy: cfg.strategy,
-            active_slot: RwLock::new(0),
+            replace_on_next_sync: RwLock::new(true),
         };
         Ok(merkle)
     }
@@ -303,9 +420,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         &self.strategy
     }
 
-    /// Return the index of the slot currently holding the committed state.
-    pub(crate) fn active_slot(&self) -> u8 {
-        *self.active_slot.read()
+    /// Return the retained base currently holding the committed state.
+    pub(crate) fn active_base(&self) -> Option<Base<F, D>> {
+        self.retained.read().current().cloned()
     }
 
     /// Borrow the committed in-memory [`Mem`].
@@ -331,14 +448,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.inner.get_mut().apply_batch(batch)
     }
 
-    /// Read a metadata key from the Db's "extras" keyspace for the given slot. Used by the
-    /// qmdb `CompactDb` layer to read back its own per-slot state on reopen or rewind.
-    pub(crate) async fn read_metadata_key(&self, key: &U64) -> Option<Vec<u8>> {
-        let metadata = self.metadata.lock().await;
-        metadata.get(key).cloned()
-    }
-
-    /// Persist the tree state to the inactive slot together with a caller-provided witness.
+    /// Persist the tree state to the retained-base log together with a caller-provided witness.
     ///
     /// This is the only safe way to durably persist state from this Merkle. The `build_witness`
     /// closure is the caller's one chance to capture anything that depends on the unpruned
@@ -346,23 +456,18 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// information is no longer recoverable locally.
     ///
     /// The `build_witness` closure runs against the unpruned [`Mem`] under `sync_lock`, making it
-    /// the only safe place to capture data that would be lost by peak-only pruning. The `update`
-    /// closure then receives both the mutable [`Metadata`] store and the built witness so caller
-    /// metadata and the witness are written in the same atomic transaction before the generation
-    /// pointer flips. `build_witness` must stay fully synchronous and non-blocking: it runs while a
-    /// read lock is held on the committed in-memory tree, so it must not `.await` or do
-    /// unexpectedly heavy work. In practice this closure is where callers capture a last-leaf
-    /// proof or other small authenticated snapshot that would be impossible to reconstruct once the
-    /// tree is pruned back to peaks.
-    pub(crate) async fn sync_with_witness<W, R>(
+    /// the only safe place to capture data that would be lost by peak-only pruning. The `build_base`
+    /// closure then receives the captured leaf count, pinned nodes, and witness and returns the base
+    /// record to append. `build_witness` must stay fully synchronous and non-blocking: it runs while a
+    /// read lock is held on the committed in-memory tree, so it must not `.await` or do unexpectedly
+    /// heavy work.
+    async fn persist_with_witness<W, R>(
         &self,
+        mode: PersistMode,
         build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
-        update: impl FnOnce(&mut Metadata<E, U64, Vec<u8>>, u8, W) -> Result<R, Error<F>>,
+        build_base: impl FnOnce(Location<F>, Vec<D>, W) -> Result<(Base<F, D>, R), Error<F>>,
     ) -> Result<R, Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
-
-        let current_slot = *self.active_slot.read();
-        let target_slot = 1 - current_slot;
 
         let (leaves, pinned_nodes, witness) = {
             let inner = self.inner.read();
@@ -374,109 +479,177 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             (leaves, pinned_nodes, witness)
         };
 
-        let result = {
-            let mut metadata = self.metadata.lock().await;
-            let old_target_leaves =
-                Self::read_slot_size(&metadata, target_slot)?.unwrap_or(Location::new(0));
-            Self::clear_slot_pins(&mut metadata, target_slot, old_target_leaves);
-            metadata.put(
-                U64::new(size_prefix(target_slot), 0),
-                leaves.as_u64().to_be_bytes().to_vec(),
-            );
-            for (idx, digest) in pinned_nodes.iter().enumerate() {
-                metadata.put(
-                    U64::new(node_prefix(target_slot), idx as u64),
-                    digest.to_vec(),
-                );
-            }
-            let result = update(&mut metadata, target_slot, witness)?;
-            metadata
-                .put_sync(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot])
-                .await?;
-            result
-        };
+        let (base, result) = build_base(leaves, pinned_nodes, witness)?;
+        Self::validate_base(&base)?;
 
-        *self.active_slot.write() = target_slot;
+        let current_matches = self.retained.read().current().is_some_and(|current| {
+            current.leaf_count == base.leaf_count && current.root == base.root
+        });
+        if current_matches {
+            if matches!(mode, PersistMode::Sync) {
+                self.base_log.sync().await?;
+            }
+            self.inner.write().prune_all();
+            return Ok(result);
+        }
+
+        if *self.replace_on_next_sync.read() {
+            self.base_log.clear_to_size(0).await?;
+            self.retained.write().clear();
+            *self.replace_on_next_sync.write() = false;
+        }
+
+        let position = self.base_log.append(&base).await?;
+        match mode {
+            PersistMode::Write => {}
+            PersistMode::Commit => self.base_log.commit().await?,
+            PersistMode::Sync => self.base_log.sync().await?,
+        }
+        self.retained.write().insert(position, base);
+
         self.inner.write().prune_all();
         Ok(result)
     }
 
+    /// Write the tree state to the retained-base log together with a caller-provided witness.
+    ///
+    /// This appends pending base bytes but does not call `commit()` or `sync()` on the journal.
+    pub(crate) async fn write_with_witness<W, R>(
+        &self,
+        build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
+        build_base: impl FnOnce(Location<F>, Vec<D>, W) -> Result<(Base<F, D>, R), Error<F>>,
+    ) -> Result<R, Error<F>> {
+        self.persist_with_witness(PersistMode::Write, build_witness, build_base)
+            .await
+    }
+
+    /// Commit the tree state to the retained-base log together with a caller-provided witness.
+    pub(crate) async fn commit_with_witness<W, R>(
+        &self,
+        build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
+        build_base: impl FnOnce(Location<F>, Vec<D>, W) -> Result<(Base<F, D>, R), Error<F>>,
+    ) -> Result<R, Error<F>> {
+        self.persist_with_witness(PersistMode::Commit, build_witness, build_base)
+            .await
+    }
+
+    /// Sync the tree state to the retained-base log together with a caller-provided witness.
+    pub(crate) async fn sync_with_witness<W, R>(
+        &self,
+        build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
+        build_base: impl FnOnce(Location<F>, Vec<D>, W) -> Result<(Base<F, D>, R), Error<F>>,
+    ) -> Result<R, Error<F>> {
+        self.persist_with_witness(PersistMode::Sync, build_witness, build_base)
+            .await
+    }
+
     /// Restore the state as of the sync before the most recent one.
     ///
-    /// Flips the generation pointer back to the previous slot and rebuilds the in-memory
-    /// structure from the (size, peaks) persisted there. Any uncommitted `apply_batch` calls
-    /// since the last `sync` are discarded. The pre-rewind slot is cleared, making rewind
-    /// one-shot until the next `sync` (a second rewind without an intervening sync returns
-    /// [`Error::RewindBeyondHistory`]).
-    ///
-    /// Returns the slot index now active (caller uses this to repopulate its own per-slot
-    /// caches from the matching slot).
-    pub(crate) async fn rewind(&mut self) -> Result<u8, Error<F>> {
+    /// Truncates the retained-base log to the previous base and rebuilds the in-memory structure
+    /// from that base. Any uncommitted `apply_batch` calls since the last `sync` are discarded.
+    pub(crate) async fn rewind(&mut self) -> Result<Base<F, D>, Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
+        let position = self
+            .retained
+            .read()
+            .previous_position()
+            .ok_or(Error::RewindBeyondHistory)?;
+        self.rewind_to_position(position).await
+    }
 
-        let current_slot = *self.active_slot.read();
-        let target_slot = 1 - current_slot;
+    /// Restore the retained base matching `leaf_count` and `root`.
+    pub(crate) async fn rewind_to_base(
+        &mut self,
+        leaf_count: Location<F>,
+        root: D,
+    ) -> Result<Base<F, D>, Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+        let position = self
+            .retained
+            .read()
+            .position_for_target(leaf_count, root)
+            .ok_or(Error::RewindBeyondHistory)?;
+        self.rewind_to_position(position).await
+    }
 
-        let (new_leaves, pinned_nodes) = {
-            let metadata = self.metadata.lock().await;
-            let Some(new_leaves) = Self::read_slot_size(&metadata, target_slot)? else {
-                return Err(Error::RewindBeyondHistory);
-            };
-            let pinned_nodes = if new_leaves == 0 {
-                Vec::new()
-            } else {
-                Self::load_slot_pins(&metadata, target_slot, new_leaves)?
-            };
-            (new_leaves, pinned_nodes)
-        };
+    async fn rewind_to_position(&self, position: u64) -> Result<Base<F, D>, Error<F>> {
+        let base = self
+            .retained
+            .read()
+            .bases
+            .get(&position)
+            .cloned()
+            .ok_or(Error::RewindBeyondHistory)?;
+        let new_mem = Self::mem_from_base(&base)?;
 
-        // Rebuild Mem from the rewound slot's state. This discards any uncommitted appends.
-        let new_mem = if new_leaves == 0 {
-            Mem::new()
-        } else {
-            Mem::init(MemConfig {
-                nodes: vec![],
-                pruning_boundary: new_leaves,
-                pinned_nodes,
-            })?
-        };
-
-        // Atomically clear this layer's state in the pre-rewind slot (size + pins) and flip the
-        // generation pointer. Removing the size key is what makes the slot "no longer a valid
-        // rewind target": subsequent rewinds read `None` for its size and fail with
-        // `RewindBeyondHistory`. Any caller-specific extras written alongside under separate
-        // prefixes remain on disk but are harmless, since the next `sync_with` into this slot
-        // overwrites them before they can be read.
-        {
-            let mut metadata = self.metadata.lock().await;
-            let old_current_leaves =
-                Self::read_slot_size(&metadata, current_slot)?.unwrap_or(Location::new(0));
-            Self::clear_slot(&mut metadata, current_slot, old_current_leaves);
-            metadata
-                .put_sync(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot])
-                .await?;
-        }
-
+        self.base_log.rewind(position + 1).await?;
+        self.base_log.sync().await?;
+        self.retained.write().truncate_after(position);
         *self.inner.write() = new_mem;
-        *self.active_slot.write() = target_slot;
-        Ok(target_slot)
+        Ok(base)
+    }
+
+    /// Prune retained bases before the base at `leaf_count`.
+    pub(crate) async fn prune(&self, leaf_count: Location<F>) -> Result<(), Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+        let position = self
+            .retained
+            .read()
+            .position_for_leaf_count(leaf_count)
+            .ok_or(Error::RewindBeyondHistory)?;
+        self.base_log.prune(position).await?;
+        self.base_log.sync().await?;
+        *self.retained.write() = Self::load_retained_bases(&self.base_log).await?;
+        Ok(())
     }
 
     /// Durably persist the current tree state to disk.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        self.sync_with_witness(|_| Ok(()), |_, _, ()| Ok(()))
-            .await
-            .map(|_| ())
+        self.sync_with_witness(
+            |_| Ok(()),
+            |leaf_count, pinned_nodes, ()| {
+                Ok((
+                    Base {
+                        root: D::EMPTY,
+                        leaf_count,
+                        floor: Location::new(0),
+                        pinned_nodes,
+                        last_commit_op_bytes: Vec::new(),
+                        last_commit_proof_bytes: Vec::new(),
+                    },
+                    (),
+                ))
+            },
+        )
+        .await
+        .map(|_| ())
     }
 
-    /// Durably persist the current tree state to disk (alias for [`Self::sync`]).
+    /// Write the current tree state to disk without waiting for durability.
     pub async fn commit(&self) -> Result<(), Error<F>> {
-        self.sync().await
+        self.commit_with_witness(
+            |_| Ok(()),
+            |leaf_count, pinned_nodes, ()| {
+                Ok((
+                    Base {
+                        root: D::EMPTY,
+                        leaf_count,
+                        floor: Location::new(0),
+                        pinned_nodes,
+                        last_commit_op_bytes: Vec::new(),
+                        last_commit_proof_bytes: Vec::new(),
+                    },
+                    (),
+                ))
+            },
+        )
+        .await
+        .map(|_| ())
     }
 
     /// Destroy all persisted state associated with this structure.
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.metadata.into_inner().destroy().await?;
+        self.base_log.destroy().await?;
         Ok(())
     }
 }
@@ -484,13 +657,15 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold},
-        metadata::{Config as MConfig, Metadata},
-    };
+    use crate::merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::{NonZeroU16, NonZeroUsize};
+
+    const PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
     type TestMerkle<F> = Merkle<
         F,
@@ -499,14 +674,20 @@ mod tests {
         Sequential,
     >;
 
+    fn test_config(context: &deterministic::Context, partition: &str) -> Config<Sequential> {
+        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        Config {
+            partition: partition.into(),
+            items_per_section: NZU64!(7),
+            page_cache,
+            write_buffer: NZUsize!(1024),
+            strategy: Sequential,
+        }
+    }
+
     async fn open<F: Family>(context: deterministic::Context, partition: &str) -> TestMerkle<F> {
-        TestMerkle::<F>::init(
-            context,
-            Config {
-                partition: partition.into(),
-                strategy: Sequential,
-            },
-        )
+        let cfg = test_config(&context, partition);
+        TestMerkle::<F>::init(context, cfg)
         .await
         .unwrap()
     }
@@ -529,10 +710,7 @@ mod tests {
         partition: &str,
     ) {
         let hasher = StandardHasher::<Sha256>::new(ForwardFold);
-        let cfg = Config {
-            partition: partition.into(),
-            strategy: Sequential,
-        };
+        let cfg = test_config(&context, partition);
 
         let mut merkle = TestMerkle::<F>::init(context.child("first"), cfg.clone())
             .await
@@ -664,10 +842,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let hasher = StandardHasher::<Sha256>::new(ForwardFold);
             let partition = "rewind-reopen";
-            let cfg = Config {
-                partition: partition.into(),
-                strategy: Sequential,
-            };
+            let cfg = test_config(&context, partition);
 
             let mut merkle = open::<mmr::Family>(context.child("first"), partition).await;
             append_and_sync(&mut merkle, &[b"a"]).await;
@@ -724,45 +899,31 @@ mod tests {
     }
 
     #[test]
-    fn test_reopen_rejects_invalid_persisted_leaf_count() {
+    fn test_reopen_rejects_invalid_base_pins() {
         deterministic::Runner::default().start(|context| async move {
-            let partition = "compact-invalid-leaf-count";
-            let cfg = Config {
-                partition: partition.into(),
-                strategy: Sequential,
-            };
-
-            let mut merkle = TestMerkle::<mmr::Family>::init(context.child("first"), cfg.clone())
-                .await
-                .unwrap();
-            append_and_sync(&mut merkle, &[b"a"]).await;
-            let slot = merkle.active_slot();
-            drop(merkle);
-
-            let mut metadata = Metadata::<_, U64, Vec<u8>>::init(
+            let partition = "compact-invalid-base-pins";
+            let cfg = test_config(&context, partition);
+            let base_log = Journal::<_, Base<mmr::Family, _>>::init(
                 context.child("tamper"),
-                MConfig {
-                    partition: partition.into(),
-                    codec_config: ((0..).into(), ()),
-                },
+                base_log_config(&cfg),
             )
             .await
             .unwrap();
-            metadata
-                .put_sync(
-                    U64::new(size_prefix(slot), 0),
-                    (mmr::Family::MAX_LEAVES.as_u64() + 1)
-                        .to_be_bytes()
-                        .to_vec(),
-                )
+            base_log
+                .append(&Base {
+                    root: <<Sha256 as commonware_cryptography::Hasher>::Digest as commonware_cryptography::Digest>::EMPTY,
+                    leaf_count: Location::new(2),
+                    floor: Location::new(0),
+                    pinned_nodes: Vec::new(),
+                    last_commit_op_bytes: Vec::new(),
+                    last_commit_proof_bytes: Vec::new(),
+                })
                 .await
                 .unwrap();
+            base_log.sync().await.unwrap();
 
             let reopened = TestMerkle::<mmr::Family>::init(context.child("second"), cfg).await;
-            assert!(matches!(
-                reopened,
-                Err(Error::DataCorrupted("slot size exceeds MAX_LEAVES"))
-            ));
+            assert!(matches!(reopened, Err(Error::InvalidPinnedNodes)));
         });
     }
 }

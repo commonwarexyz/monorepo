@@ -16,15 +16,12 @@ use commonware_consensus::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select_loop;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, futures::OptionFuture, Acknowledgement};
-use futures::{
-    future::{self, BoxFuture, Either},
-    FutureExt as _,
-};
+use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_utils::{channel::fallible::OneshotExt, Acknowledgement};
+use futures::future::{self, Either};
 use rand::Rng;
 use std::collections::VecDeque;
-use tracing::debug;
+use tracing::{debug, warn};
 
 pub(super) struct Processing<E, A, S, V, R>
 where
@@ -70,27 +67,25 @@ where
 {
     pub async fn start(mut self) {
         let mut pending_maintenance = VecDeque::new();
-        let mut maintenance_task: OptionFuture<BoxFuture<'static, ()>> = None.into();
+        let mut maintenance_task: Option<Handle<()>> = None;
 
         select_loop! {
             self.context,
             on_start => {
-                let mailbox_message = if maintenance_task.is_some() {
-                    Either::Left(future::pending())
-                } else {
-                    Either::Right(self.mailbox.recv())
-                };
-
                 let start_maintenance = if maintenance_task.is_none() && !pending_maintenance.is_empty() {
                     Either::Left(future::ready(()))
                 } else {
                     Either::Right(future::pending())
                 };
+                let maintenance_complete = maintenance_task.as_mut().map_or_else(
+                    || Either::Right(future::pending()),
+                    Either::Left,
+                );
             },
             on_stopped => {
                 debug!("processor received shutdown signal");
             },
-            Some(message) = mailbox_message else {
+            Some(message) = self.mailbox.recv() else {
                 debug!("mailbox closed, shutting down processor");
                 break;
             } => match message {
@@ -134,11 +129,13 @@ where
                         continue;
                     }
                     let (status, maintenance) = self.processor.finalize(&self.context, block).await;
-                    if !matches!(maintenance, MaintenanceAction::None) {
-                        pending_maintenance.push_back(maintenance);
-                    }
-                    if let FinalizeStatus::Persisted { height } = status {
-                        debug!(height = height.get(), "persisted finalized database batch");
+                    queue_maintenance(
+                        &mut pending_maintenance,
+                        maintenance_task.is_some(),
+                        maintenance,
+                    );
+                    if let FinalizeStatus::Applied { height } = status {
+                        debug!(height = height.get(), "applied finalized database batch");
                     }
                     acknowledgement.acknowledge();
                 }
@@ -153,12 +150,36 @@ where
                 let databases = self.processor.databases().clone();
                 let marshal = self.marshal.clone();
                 maintenance_task = Some(
-                    run_maintenance::<E, _, _, _>(databases, marshal, maintenance).boxed()
-                ).into();
+                    self.context.child("maintenance").spawn(|_| async move {
+                        run_maintenance::<E, _, _, _>(databases, marshal, maintenance).await
+                    })
+                );
             },
-            _ = &mut maintenance_task => {
-                maintenance_task = None.into();
+            result = maintenance_complete => {
+                if let Err(err) = result {
+                    warn!(?err, "maintenance task exited before completion");
+                }
+                maintenance_task = None;
             }
+        }
+    }
+}
+
+fn queue_maintenance<T>(
+    pending: &mut VecDeque<MaintenanceAction<T>>,
+    task_active: bool,
+    maintenance: MaintenanceAction<T>,
+) {
+    match maintenance {
+        MaintenanceAction::None => {}
+        MaintenanceAction::Preflush => {
+            if !task_active && pending.is_empty() {
+                pending.push_back(MaintenanceAction::Preflush);
+            }
+        }
+        MaintenanceAction::Prune { .. } => {
+            pending.retain(|queued| !matches!(queued, MaintenanceAction::Preflush));
+            pending.push_back(maintenance);
         }
     }
 }
@@ -179,8 +200,10 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::skip_finalized_block;
+    use super::{queue_maintenance, skip_finalized_block};
+    use crate::stateful::actor::processor::MaintenanceAction;
     use commonware_consensus::types::Height;
+    use std::collections::VecDeque;
 
     #[test]
     fn skip_finalized_block_skips_through_target_height() {
@@ -199,5 +222,40 @@ mod tests {
 
         assert!(!skip_finalized_block(&mut skip_until, Height::new(4)));
         assert_eq!(skip_until, None);
+    }
+
+    #[test]
+    fn queue_maintenance_coalesces_preflush() {
+        let mut pending = VecDeque::new();
+        queue_maintenance::<u64>(&mut pending, false, MaintenanceAction::Preflush);
+        queue_maintenance::<u64>(&mut pending, false, MaintenanceAction::Preflush);
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending.pop_front(), Some(MaintenanceAction::Preflush));
+
+        queue_maintenance::<u64>(&mut pending, true, MaintenanceAction::Preflush);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn queue_maintenance_keeps_prune_boundaries() {
+        let mut pending = VecDeque::new();
+        queue_maintenance(&mut pending, false, MaintenanceAction::Preflush);
+        queue_maintenance(
+            &mut pending,
+            true,
+            MaintenanceAction::Prune {
+                height: Height::new(7),
+                targets: 11_u64,
+            },
+        );
+
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending.pop_front(),
+            Some(MaintenanceAction::Prune {
+                height: Height::new(7),
+                targets: 11,
+            }),
+        );
     }
 }

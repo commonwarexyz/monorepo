@@ -274,49 +274,56 @@ fn keyless_variable_config(
     }
 }
 
-fn compact_merkle_config(suffix: &str) -> crate::merkle::compact::Config<Sequential> {
+fn compact_merkle_config(
+    suffix: &str,
+    pooler: &impl BufferPooler,
+) -> crate::merkle::compact::Config<Sequential> {
+    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
     crate::merkle::compact::Config {
         partition: format!("{suffix}-compact"),
+        items_per_section: NZU64!(7),
+        page_cache: pc,
+        write_buffer: NZUsize!(1024),
         strategy: Sequential,
     }
 }
 
 fn immutable_fixed_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        merkle: compact_merkle_config(suffix, pooler),
         commit_codec_config: (),
     }
 }
 
 fn immutable_variable_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        merkle: compact_merkle_config(suffix, pooler),
         commit_codec_config: ((), ()),
     }
 }
 
 fn keyless_fixed_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> keyless::fixed::CompactConfig<Sequential> {
     keyless::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        merkle: compact_merkle_config(suffix, pooler),
         commit_codec_config: (),
     }
 }
 
 fn keyless_variable_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
     keyless::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        merkle: compact_merkle_config(suffix, pooler),
         commit_codec_config: ((0..=10000usize).into(), ()),
     }
 }

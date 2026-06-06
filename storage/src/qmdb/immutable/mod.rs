@@ -654,6 +654,11 @@ where
         Ok(())
     }
 
+    /// Write pending Merkle nodes without waiting for durable sync.
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+        self.journal.write_pending().await.map_err(Into::into)
+    }
+
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
     pub async fn commit(&self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.commit_timer();
