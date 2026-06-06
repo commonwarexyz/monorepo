@@ -99,6 +99,12 @@ pub trait Contiguous: Send + Sync {
     fn size(&self) -> impl Future<Output = u64> + Send;
 }
 
+/// A [Contiguous] journal that can flush buffered writes without making them durable.
+pub trait Flushable: Contiguous {
+    /// Flush pending buffered writes to storage without waiting for durability.
+    fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
 /// Items to append via [`Mutable::append_many`].
 ///
 /// `Flat` wraps a single contiguous slice; `Nested` wraps multiple slices that are

@@ -57,6 +57,32 @@ where
     pub(super) skip_finalized_until: Option<Height>,
 }
 
+struct ActiveMaintenance {
+    handle: Handle<()>,
+    cancellable: bool,
+}
+
+impl ActiveMaintenance {
+    const fn new<T>(maintenance: &MaintenanceAction<T>) -> PendingActiveMaintenance {
+        PendingActiveMaintenance {
+            cancellable: matches!(maintenance, MaintenanceAction::Preflush),
+        }
+    }
+}
+
+struct PendingActiveMaintenance {
+    cancellable: bool,
+}
+
+impl PendingActiveMaintenance {
+    const fn with_handle(self, handle: Handle<()>) -> ActiveMaintenance {
+        ActiveMaintenance {
+            handle,
+            cancellable: self.cancellable,
+        }
+    }
+}
+
 impl<E, A, S, V, R> Processing<E, A, S, V, R>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -67,7 +93,7 @@ where
 {
     pub async fn start(mut self) {
         let mut pending_maintenance = VecDeque::new();
-        let mut maintenance_task: Option<Handle<()>> = None;
+        let mut maintenance_task: Option<ActiveMaintenance> = None;
 
         select_loop! {
             self.context,
@@ -79,7 +105,7 @@ where
                 };
                 let maintenance_complete = maintenance_task.as_mut().map_or_else(
                     || Either::Right(future::pending()),
-                    Either::Left,
+                    |task| Either::Left(&mut task.handle),
                 );
             },
             on_stopped => {
@@ -124,6 +150,7 @@ where
                     block,
                     acknowledgement,
                 } => {
+                    abort_cancellable_maintenance(&mut maintenance_task);
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                         acknowledgement.acknowledge();
                         continue;
@@ -149,11 +176,11 @@ where
                     .expect("start_maintenance should only run when work is queued");
                 let databases = self.processor.databases().clone();
                 let marshal = self.marshal.clone();
-                maintenance_task = Some(
-                    self.context.child("maintenance").spawn(|_| async move {
+                let active = ActiveMaintenance::new(&maintenance);
+                let handle = self.context.child("maintenance").spawn(|_| async move {
                         run_maintenance::<E, _, _, _>(databases, marshal, maintenance).await
-                    })
-                );
+                    });
+                maintenance_task = Some(active.with_handle(handle));
             },
             result = maintenance_complete => {
                 if let Err(err) = result {
@@ -163,6 +190,17 @@ where
             }
         }
     }
+}
+
+fn abort_cancellable_maintenance(maintenance: &mut Option<ActiveMaintenance>) {
+    let Some(active) = maintenance else {
+        return;
+    };
+    if !active.cancellable {
+        return;
+    }
+    active.handle.abort();
+    *maintenance = None;
 }
 
 fn queue_maintenance<T>(
@@ -200,10 +238,13 @@ fn skip_finalized_block(skip_until: &mut Option<Height>, height: Height) -> bool
 
 #[cfg(test)]
 mod tests {
-    use super::{queue_maintenance, skip_finalized_block};
+    use super::{
+        abort_cancellable_maintenance, queue_maintenance, skip_finalized_block, ActiveMaintenance,
+    };
     use crate::stateful::actor::processor::MaintenanceAction;
     use commonware_consensus::types::Height;
-    use std::collections::VecDeque;
+    use commonware_runtime::{deterministic, Runner as _, Spawner as _, Supervisor as _};
+    use std::{collections::VecDeque, future};
 
     #[test]
     fn skip_finalized_block_skips_through_target_height() {
@@ -257,5 +298,21 @@ mod tests {
                 targets: 11,
             }),
         );
+    }
+
+    #[test]
+    fn abort_cancellable_maintenance_clears_best_effort_task() {
+        deterministic::Runner::default().start(|context| async move {
+            let handle = context
+                .child("maintenance")
+                .spawn(|_| async move { future::pending::<()>().await });
+            let mut active = Some(ActiveMaintenance {
+                handle,
+                cancellable: true,
+            });
+
+            abort_cancellable_maintenance(&mut active);
+            assert!(active.is_none());
+        });
     }
 }

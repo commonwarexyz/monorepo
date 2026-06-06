@@ -885,13 +885,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(pruned)
     }
 
-    /// Flush dirty data sections to storage under the read lock, allowing concurrent reads.
-    ///
-    /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
-    /// data, so committed sections are never at risk, and recovery replays the data journal as the
-    /// source of truth and truncates at the first short or missing section, so a crash that leaves a
-    /// gap still recovers a contiguous prefix no shorter than the last completed commit.
-    async fn flush_dirty_data(&self) -> Result<(), Error> {
+    /// Sync dirty data sections to storage under the read lock, allowing concurrent reads.
+    async fn sync_dirty_data(&self) -> Result<(), Error> {
         let inner = self.inner.read().await;
         if let Some(start_section) = inner.dirty_from_section {
             let tail_section = position_to_section(inner.size, self.items_per_section);
@@ -908,16 +903,39 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(())
     }
 
+    /// Flush dirty data sections to storage without waiting for durability.
+    async fn flush_dirty_data(&self) -> Result<(), Error> {
+        let inner = self.inner.read().await;
+        if let Some(start_section) = inner.dirty_from_section {
+            let tail_section = position_to_section(inner.size, self.items_per_section);
+            let start_section = inner
+                .data
+                .oldest_section()
+                .map(|oldest| start_section.max(oldest))
+                .unwrap_or(tail_section);
+            try_join_all((start_section..=tail_section).map(|section| inner.data.flush(section)))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Persist dirty data and offsets sections so committed data survives a crash.
     pub async fn commit(&self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_data().await?;
+        self.sync_dirty_data().await?;
         self.offsets.commit().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
         Ok(())
+    }
+
+    /// Flush dirty data and offset sections without waiting for durability.
+    pub async fn flush(&self) -> Result<(), Error> {
+        let _op_guard = self.op_lock.lock().await;
+        self.flush_dirty_data().await?;
+        self.offsets.flush().await
     }
 
     /// Persist dirty data sections and all metadata for both the data and offsets journals.
@@ -925,7 +943,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_data().await?;
+        self.sync_dirty_data().await?;
         self.offsets.sync().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
@@ -1314,6 +1332,12 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
 
     async fn size(&self) -> u64 {
         Self::size(self).await
+    }
+}
+
+impl<E: Context, V: CodecShared> super::Flushable for Journal<E, V> {
+    async fn flush(&self) -> Result<(), Error> {
+        Self::flush(self).await
     }
 }
 

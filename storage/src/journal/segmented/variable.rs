@@ -832,9 +832,19 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         self.manager.sync(section).await
     }
 
+    /// Flush the given section to storage without waiting for durability.
+    pub async fn flush(&self, section: u64) -> Result<(), Error> {
+        self.manager.flush(section).await
+    }
+
     /// Syncs all open sections.
     pub async fn sync_all(&self) -> Result<(), Error> {
         self.manager.sync_all().await
+    }
+
+    /// Flush all open sections to storage without waiting for durability.
+    pub async fn flush_all(&self) -> Result<(), Error> {
+        self.manager.flush_all().await
     }
 
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.

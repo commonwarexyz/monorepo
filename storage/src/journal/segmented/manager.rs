@@ -25,6 +25,9 @@ pub trait SectionBuffer: Clone + Send + Sync {
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
 
+    /// Flush buffered data to storage without waiting for durability.
+    fn flush(&self) -> impl Future<Output = Result<(), RError>> + Send;
+
     /// Resize the logical size of the buffer.
     fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
@@ -36,6 +39,10 @@ impl<B: Blob> SectionBuffer for Append<B> {
 
     async fn sync(&self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn flush(&self) -> Result<(), RError> {
+        Self::flush(self).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), RError> {
@@ -50,6 +57,10 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn sync(&self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn flush(&self) -> Result<(), RError> {
+        Self::flush(self).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), RError> {
@@ -225,11 +236,28 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    /// Flush the given section to storage without waiting for durability.
+    pub async fn flush(&self, section: u64) -> Result<(), Error> {
+        self.prune_guard(section)?;
+        if let Some(blob) = self.blobs.get(&section) {
+            blob.flush().await.map_err(Error::Runtime)?;
+        }
+        Ok(())
+    }
+
     /// Sync all sections to storage.
     pub async fn sync_all(&self) -> Result<(), Error> {
         let futures: Vec<_> = self.blobs.values().map(|blob| blob.sync()).collect();
         let results = try_join_all(futures).await.map_err(Error::Runtime)?;
         self.synced.inc_by(results.len() as u64);
+        Ok(())
+    }
+
+    /// Flush all sections to storage without waiting for durability.
+    pub async fn flush_all(&self) -> Result<(), Error> {
+        try_join_all(self.blobs.values().map(|blob| blob.flush()))
+            .await
+            .map_err(Error::Runtime)?;
         Ok(())
     }
 

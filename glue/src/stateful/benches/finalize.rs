@@ -113,30 +113,48 @@ async fn bench_apply_then_commit<F: Family>(ctx: &Context) -> Duration {
     elapsed
 }
 
-fn spawn_preflush<F>(ctx: &Context, db: Arc<AsyncRwLock<BenchDb<F>>>) -> Handle<()>
+fn spawn_background_preflush<F>(ctx: &Context, db: Arc<AsyncRwLock<BenchDb<F>>>) -> Handle<()>
 where
     F: Family + 'static,
 {
-    ctx.child("preflush").spawn(|_| async move {
+    ctx.child("background_preflush").spawn(|_| async move {
         <Arc<AsyncRwLock<BenchDb<F>>> as DatabaseSet<Context>>::preflush(&db).await;
     })
 }
 
-async fn drain_preflush(preflush: &mut Option<Handle<()>>) {
-    if let Some(handle) = preflush.take() {
-        handle.await.expect("preflush task should complete");
+async fn abort_background_preflush(sync: &mut Option<Handle<()>>) {
+    if let Some(handle) = sync.take() {
+        handle.abort();
+        let _ = handle.await;
     }
 }
 
-fn clear_finished_preflush(preflush: &mut Option<Handle<()>>) {
-    let Some(handle) = preflush.as_mut() else {
+fn cancel_background_preflush(sync: &mut Option<Handle<()>>, cancelled: &mut Vec<Handle<()>>) {
+    if let Some(handle) = sync.take() {
+        handle.abort();
+        cancelled.push(handle);
+    }
+}
+
+fn clear_finished_background_preflush(sync: &mut Option<Handle<()>>) {
+    let Some(handle) = sync.as_mut() else {
         return;
     };
     let Some(result) = handle.now_or_never() else {
         return;
     };
-    result.expect("preflush task should complete");
-    *preflush = None;
+    result.expect("background preflush task should complete");
+    *sync = None;
+}
+
+fn clear_cancelled_background_preflushes(cancelled: &mut Vec<Handle<()>>) {
+    cancelled.retain_mut(|handle| handle.now_or_never().is_none());
+}
+
+async fn await_cancelled_background_preflushes(cancelled: Vec<Handle<()>>) {
+    for handle in cancelled {
+        let _ = handle.await;
+    }
 }
 
 async fn bench_managed_pipeline<F: Family>(ctx: &Context) -> Duration {
@@ -190,9 +208,11 @@ async fn bench_managed_preflushed_pipeline<F: Family + 'static>(ctx: &Context) -
     let db = Arc::new(AsyncRwLock::new(db));
     let mut elapsed = Duration::ZERO;
     let mut next_loc = 1;
-    let mut preflush = None;
+    let mut background_preflush = None;
+    let mut cancelled_preflushes = Vec::new();
 
     for batch_idx in 0..BATCHES {
+        clear_cancelled_background_preflushes(&mut cancelled_preflushes);
         let mut batch = <BenchDb<F> as ManagedDb<Context>>::new_batch(&db)
             .await
             .with_inactivity_floor(Location::new(next_loc));
@@ -201,22 +221,22 @@ async fn bench_managed_preflushed_pipeline<F: Family + 'static>(ctx: &Context) -
         }
         let merkleized = batch.merkleize().await.unwrap();
 
+        clear_finished_background_preflush(&mut background_preflush);
         let start = Instant::now();
+        cancel_background_preflush(&mut background_preflush, &mut cancelled_preflushes);
         {
             let mut guard = db.write().await;
             <BenchDb<F> as ManagedDb<Context>>::finalize(&mut *guard, merkleized)
                 .await
                 .unwrap();
         }
-        clear_finished_preflush(&mut preflush);
-        if preflush.is_none() {
-            preflush = Some(spawn_preflush(ctx, db.clone()));
+        if background_preflush.is_none() {
+            background_preflush = Some(spawn_background_preflush(ctx, db.clone()));
         }
         elapsed += start.elapsed();
         next_loc += APPENDS_PER_BATCH + 1;
 
         if (batch_idx + 1) % PRUNE_EVERY == 0 {
-            drain_preflush(&mut preflush).await;
             let target = {
                 let guard = db.read().await;
                 <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await
@@ -231,7 +251,8 @@ async fn bench_managed_preflushed_pipeline<F: Family + 'static>(ctx: &Context) -
             elapsed += start.elapsed();
         }
     }
-    drain_preflush(&mut preflush).await;
+    abort_background_preflush(&mut background_preflush).await;
+    await_cancelled_background_preflushes(cancelled_preflushes).await;
 
     let db = Arc::try_unwrap(db)
         .ok()
@@ -349,9 +370,11 @@ async fn bench_managed_preflushed_boundary_stall<F: Family + 'static>(ctx: &Cont
     let db = Arc::new(AsyncRwLock::new(db));
     let mut max_boundary = Duration::ZERO;
     let mut next_loc = 1;
-    let mut preflush = None;
+    let mut background_preflush = None;
+    let mut cancelled_preflushes = Vec::new();
 
     for batch_idx in 0..BATCHES {
+        clear_cancelled_background_preflushes(&mut cancelled_preflushes);
         let mut batch = <BenchDb<F> as ManagedDb<Context>>::new_batch(&db)
             .await
             .with_inactivity_floor(Location::new(next_loc));
@@ -360,20 +383,20 @@ async fn bench_managed_preflushed_boundary_stall<F: Family + 'static>(ctx: &Cont
         }
         let merkleized = batch.merkleize().await.unwrap();
 
+        clear_finished_background_preflush(&mut background_preflush);
+        cancel_background_preflush(&mut background_preflush, &mut cancelled_preflushes);
         {
             let mut guard = db.write().await;
             <BenchDb<F> as ManagedDb<Context>>::finalize(&mut *guard, merkleized)
                 .await
                 .unwrap();
         }
-        clear_finished_preflush(&mut preflush);
-        if preflush.is_none() {
-            preflush = Some(spawn_preflush(ctx, db.clone()));
+        if background_preflush.is_none() {
+            background_preflush = Some(spawn_background_preflush(ctx, db.clone()));
         }
         next_loc += APPENDS_PER_BATCH + 1;
 
         if (batch_idx + 1) % PRUNE_EVERY == 0 {
-            drain_preflush(&mut preflush).await;
             let target = {
                 let guard = db.read().await;
                 <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await
@@ -388,7 +411,8 @@ async fn bench_managed_preflushed_boundary_stall<F: Family + 'static>(ctx: &Cont
             max_boundary = max_boundary.max(start.elapsed());
         }
     }
-    drain_preflush(&mut preflush).await;
+    abort_background_preflush(&mut background_preflush).await;
+    await_cancelled_background_preflushes(cancelled_preflushes).await;
 
     let db = Arc::try_unwrap(db)
         .ok()
@@ -454,7 +478,7 @@ fn bench_finalize(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "{}/case=managed_preflushed_pipeline variant=keyless::fixed::mmb preflush=write_pending batches={BATCHES} appends={APPENDS_PER_BATCH} prune_every={PRUNE_EVERY}",
+            "{}/case=managed_preflush_pipeline variant=keyless::fixed::mmb preflush=write_pending cancel=finalize batches={BATCHES} appends={APPENDS_PER_BATCH} prune_every={PRUNE_EVERY}",
             module_path!(),
         ),
         |b| {
@@ -522,7 +546,7 @@ fn bench_finalize(c: &mut Criterion) {
 
     c.bench_function(
         &format!(
-            "{}/case=managed_preflushed_prune_boundary variant=keyless::fixed::mmb preflush=write_pending metric=max_boundary batches={BATCHES} appends={APPENDS_PER_BATCH} prune_every={PRUNE_EVERY}",
+            "{}/case=managed_preflush_prune_boundary variant=keyless::fixed::mmb preflush=write_pending cancel=finalize metric=max_boundary batches={BATCHES} appends={APPENDS_PER_BATCH} prune_every={PRUNE_EVERY}",
             module_path!(),
         ),
         |b| {

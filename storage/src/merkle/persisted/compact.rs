@@ -486,8 +486,10 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             current.leaf_count == base.leaf_count && current.root == base.root
         });
         if current_matches {
-            if matches!(mode, PersistMode::Sync) {
-                self.base_log.sync().await?;
+            match mode {
+                PersistMode::Write => self.base_log.flush().await?,
+                PersistMode::Commit => self.base_log.commit().await?,
+                PersistMode::Sync => self.base_log.sync().await?,
             }
             self.inner.write().prune_all();
             return Ok(result);
@@ -501,7 +503,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         let position = self.base_log.append(&base).await?;
         match mode {
-            PersistMode::Write => {}
+            PersistMode::Write => self.base_log.flush().await?,
             PersistMode::Commit => self.base_log.commit().await?,
             PersistMode::Sync => self.base_log.sync().await?,
         }

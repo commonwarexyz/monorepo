@@ -46,7 +46,7 @@
 use crate::{
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Flushable, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
@@ -479,7 +479,10 @@ where
     }
 
     /// Write pending Merkle nodes without waiting for durable sync.
-    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+    pub async fn write_pending(&self) -> Result<(), Error<F>>
+    where
+        C: Flushable,
+    {
         self.journal.write_pending().await.map_err(Into::into)
     }
 

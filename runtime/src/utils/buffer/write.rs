@@ -285,6 +285,15 @@ impl<B: Blob> Write<B> {
         Ok(())
     }
 
+    /// Flush buffered bytes to the underlying blob without waiting for durability.
+    pub async fn flush(&self) -> Result<(), Error> {
+        let mut state = self.state.write().await;
+        if let Some((buf, offset)) = state.buffer.take() {
+            state.write_at(offset, buf).await?;
+        }
+        Ok(())
+    }
+
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&self) -> Result<(), Error> {
         let mut state = self.state.write().await;

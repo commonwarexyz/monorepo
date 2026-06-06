@@ -1047,6 +1047,13 @@ impl<B: Blob> Append<B> {
 }
 
 impl<B: Blob> Append<B> {
+    /// Flush buffered data to the underlying blob without waiting for durability.
+    pub async fn flush(&self) -> Result<(), Error> {
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, true, false).await?;
+        Ok(())
+    }
+
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there

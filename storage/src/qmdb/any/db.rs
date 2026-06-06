@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Flushable, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{Family, Location, Proof},
@@ -773,7 +773,10 @@ where
     }
 
     /// Write pending Merkle nodes without waiting for durable sync.
-    pub async fn write_pending(&self) -> Result<(), crate::qmdb::Error<F>> {
+    pub async fn write_pending(&self) -> Result<(), crate::qmdb::Error<F>>
+    where
+        C: Flushable,
+    {
         self.log.write_pending().await.map_err(Into::into)
     }
 

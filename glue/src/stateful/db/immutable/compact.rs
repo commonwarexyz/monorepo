@@ -251,6 +251,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
+        self.write_pending().await?;
         Ok(())
     }
 
@@ -323,6 +324,7 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
+        self.write_pending().await?;
         Ok(())
     }
 
@@ -693,7 +695,7 @@ mod tests {
             let guard = db.read().await;
             assert_eq!(guard.root(), expected_root);
             assert_eq!(guard.get_metadata(), Some(metadata));
-            assert_ne!(guard.current_target().root, guard.root());
+            assert_eq!(guard.current_target().root, guard.root());
 
             let target = <FixedDb as ManagedDb<_>>::sync_target(&*guard).await;
             assert_eq!(target.root, guard.root());
@@ -707,9 +709,10 @@ mod tests {
     #[test]
     fn state_sync_fetches_fixed_immutable_compact_state() {
         deterministic::Runner::default().start(|context| async move {
-            let mut source = FixedDb::init(context.child("source"), fixed_config("source", &context))
-                .await
-                .unwrap();
+            let mut source =
+                FixedDb::init(context.child("source"), fixed_config("source", &context))
+                    .await
+                    .unwrap();
             let metadata = Sha256::hash(&[3]);
             let floor = source.inactivity_floor_loc();
             let batch = source
@@ -742,9 +745,10 @@ mod tests {
     #[test]
     fn state_sync_fetches_live_fixed_immutable_compact_state_before_sync() {
         deterministic::Runner::default().start(|context| async move {
-            let mut source = FixedDb::init(context.child("source"), fixed_config("source", &context))
-                .await
-                .unwrap();
+            let mut source =
+                FixedDb::init(context.child("source"), fixed_config("source", &context))
+                    .await
+                    .unwrap();
             let metadata = Sha256::hash(&[3]);
             let floor = source.inactivity_floor_loc();
             let batch = source

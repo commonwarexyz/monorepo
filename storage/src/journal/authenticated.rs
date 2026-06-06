@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Many, Mutable, Reader},
+        contiguous::{fixed, variable, Contiguous, Flushable, Many, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -347,9 +347,16 @@ where
         })
     }
 
-    /// Write pending Merkle nodes to the backing journal without waiting for durability.
-    pub async fn write_pending(&self) -> Result<(), Error<F>> {
-        self.merkle.write_pending().await.map_err(Into::into)
+    /// Write pending operation-log and Merkle data without waiting for durability.
+    pub async fn write_pending(&self) -> Result<(), Error<F>>
+    where
+        C: Flushable,
+    {
+        try_join!(
+            self.journal.flush().map_err(Error::Journal),
+            self.merkle.write_pending().map_err(Error::Merkle),
+        )?;
+        Ok(())
     }
 }
 

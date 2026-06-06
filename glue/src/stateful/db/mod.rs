@@ -212,11 +212,11 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// history can no longer be replayed.
     fn persist(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Best-effort durability preflush that can run in the background.
+    /// Best-effort write preflush that can run in the background.
     ///
     /// Implementations should avoid mutating logical database state. QMDB
-    /// implementations use this to start durable sync work for already-written
-    /// data while foreground reads continue.
+    /// implementations use this to write pending derived index data without
+    /// waiting for storage durability.
     fn preflush(&self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         async { Ok(()) }
     }

@@ -95,11 +95,12 @@ pub(super) enum MaintenanceAction<T> {
     /// No maintenance should run for this finalized block.
     None,
 
-    /// Best-effort background durability preflush.
+    /// Best-effort background write preflush.
     ///
     /// This is coalesced by the actor loop and skips databases that are already
-    /// busy. Prune remains the authoritative durable boundary before marshal
-    /// history is discarded.
+    /// busy. The actor may cancel it before foreground finalization. Prune
+    /// remains the authoritative durable boundary before marshal history is
+    /// discarded.
     Preflush,
 
     /// Prune databases and marshal to the provided finalized boundary.
@@ -792,10 +793,11 @@ where
 /// Callers can then schedule this work separately so preflushes and pruning do
 /// not delay subsequent mailbox polling.
 ///
-/// Preflush maintenance is best effort and may be coalesced or skipped when a
-/// database is already busy. Prune maintenance always runs database pruning
-/// before marshal pruning so the actor never drops marshal history ahead of the
-/// corresponding durable database boundary.
+/// Preflush maintenance is best effort and may be coalesced, skipped when a
+/// database is already busy, or canceled by the actor before foreground
+/// finalization. Prune maintenance always runs database pruning before marshal
+/// pruning so the actor never drops marshal history ahead of the corresponding
+/// durable database boundary.
 /// [`MaintenanceAction::None`] is a no-op.
 pub(super) async fn run_maintenance<E, DBs, S, V>(
     databases: DBs,
@@ -809,7 +811,9 @@ pub(super) async fn run_maintenance<E, DBs, S, V>(
 {
     match maintenance {
         MaintenanceAction::None => {}
-        MaintenanceAction::Preflush => databases.preflush().await,
+        MaintenanceAction::Preflush => {
+            databases.preflush().await;
+        }
         MaintenanceAction::Prune { height, targets } => {
             databases.preflush().await;
             databases.prune(&targets).await;
@@ -1728,6 +1732,22 @@ mod tests {
             .await;
 
             assert_eq!(&*databases.events.lock(), &["preflush", "prune"]);
+        });
+    }
+
+    #[test]
+    fn preflush_maintenance_writes_pending_data() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = init_marshal_mailbox(context.child("marshal")).await;
+            let databases = MaintenanceOrderDbSet::default();
+            run_maintenance::<deterministic::Context, _, _, _>(
+                databases.clone(),
+                marshal,
+                MaintenanceAction::Preflush,
+            )
+            .await;
+
+            assert_eq!(&*databases.events.lock(), &["preflush"]);
         });
     }
 

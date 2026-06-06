@@ -658,10 +658,14 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
             self.snapshot_missing(journal_size)
         else {
+            if self.needs_sync.load(Ordering::Acquire) {
+                self.journal.flush().await?;
+            }
             return Ok(());
         };
 
         self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+        self.journal.flush().await?;
         self.needs_sync.store(true, Ordering::Release);
         self.prune_committed_mem(sync_target_leaves, pinned_nodes);
         Ok(())
