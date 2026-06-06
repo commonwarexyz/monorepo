@@ -26,8 +26,40 @@
 //!   - Con: heavier (fewer iterations) and only valid
 //!     consensus orderings.
 
+use arbitrary::Arbitrary;
+use commonware_consensus::marshal::mocks::harness::StandardHarness;
+
+pub mod inline;
 pub mod multi_node;
 pub mod single_node;
+pub mod store;
 
+pub use inline::{fuzz_marshal_inline, MarshalInlineInput};
 pub use multi_node::{fuzz_marshal_liveness, MarshalLivenessInput};
 pub use single_node::{fuzz_marshal, MarshalEvent, MarshalFuzzInput, VariantPublish};
+pub use store::{fuzz_marshal_store, MarshalStoreInput};
+
+#[derive(Debug, Clone)]
+pub enum MarshalStandardInput {
+    Actor(MarshalFuzzInput),
+    Inline(MarshalInlineInput),
+    Store(MarshalStoreInput),
+}
+
+impl Arbitrary<'_> for MarshalStandardInput {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(match u.int_in_range(0..=99)? {
+            0..=69 => Self::Actor(MarshalFuzzInput::arbitrary(u)?),
+            70..=89 => Self::Inline(MarshalInlineInput::arbitrary(u)?),
+            _ => Self::Store(MarshalStoreInput::arbitrary(u)?),
+        })
+    }
+}
+
+pub fn fuzz_marshal_standard(input: MarshalStandardInput) {
+    match input {
+        MarshalStandardInput::Actor(input) => fuzz_marshal::<StandardHarness>(input),
+        MarshalStandardInput::Inline(input) => fuzz_marshal_inline(input),
+        MarshalStandardInput::Store(input) => fuzz_marshal_store(input),
+    }
+}
