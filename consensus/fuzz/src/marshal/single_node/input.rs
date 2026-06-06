@@ -12,6 +12,32 @@ fn block_idx(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<u8> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum QueryKind {
+    /// Query via `Height::into()`.
+    Height,
+    /// Query via `(&Digest)::into()`.
+    Digest,
+    /// Query via `archive::Identifier::Index`.
+    ArchiveIndex,
+    /// Query via `archive::Identifier::Key`.
+    ArchiveKey,
+    /// Query the latest finalized block.
+    Latest,
+}
+
+impl Arbitrary<'_> for QueryKind {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(match u.int_in_range(0..=4)? {
+            0 => Self::Height,
+            1 => Self::Digest,
+            2 => Self::ArchiveIndex,
+            3 => Self::ArchiveKey,
+            _ => Self::Latest,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub enum MarshalEvent {
     /// Notify marshal that a block was locally proposed.
     Propose { block_idx: u8 },
@@ -24,7 +50,19 @@ pub enum MarshalEvent {
     /// Report a notarization for a block.
     ReportNotarization { block_idx: u8 },
     /// Best-effort local read of a finalized block by height (pure query).
-    GetBlock { block_idx: u8 },
+    GetBlock { block_idx: u8, query: QueryKind },
+    /// Best-effort local read of finalized block info by height, digest, archive
+    /// identifier, or latest tip.
+    GetInfo { block_idx: u8, query: QueryKind },
+    /// Walk ancestry from a locally available block.
+    Ancestry { block_idx: u8, max_items: u8 },
+    /// Exercise the bounded ancestry stream produced from caller-provided blocks.
+    BoundedAncestry {
+        block_idx: u8,
+        len: u8,
+        reverse: bool,
+        max_items: u8,
+    },
     /// Subscribe to a block by digest or commitment with a fetch fallback,
     /// exercising the missing-block subscription path.
     Subscribe { block_idx: u8, by_commitment: bool },
@@ -52,7 +90,7 @@ pub enum MarshalEvent {
 
 impl Arbitrary<'_> for MarshalEvent {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(0..=99)? {
+        Ok(match u.int_in_range(0..=119)? {
             0..=11 => Self::Propose {
                 block_idx: block_idx(u)?,
             },
@@ -68,24 +106,39 @@ impl Arbitrary<'_> for MarshalEvent {
             48..=57 => Self::ReportNotarization {
                 block_idx: block_idx(u)?,
             },
-            58..=63 => Self::GetBlock {
+            58..=62 => Self::GetBlock {
                 block_idx: block_idx(u)?,
+                query: QueryKind::arbitrary(u)?,
             },
-            64..=71 => Self::Subscribe {
+            63..=67 => Self::GetInfo {
+                block_idx: block_idx(u)?,
+                query: QueryKind::arbitrary(u)?,
+            },
+            68..=73 => Self::Ancestry {
+                block_idx: block_idx(u)?,
+                max_items: u.arbitrary()?,
+            },
+            74..=79 => Self::BoundedAncestry {
+                block_idx: block_idx(u)?,
+                len: u.arbitrary()?,
+                reverse: u.arbitrary()?,
+                max_items: u.arbitrary()?,
+            },
+            80..=87 => Self::Subscribe {
                 block_idx: block_idx(u)?,
                 by_commitment: u.arbitrary()?,
             },
-            72..=77 => Self::SetFloor {
+            88..=93 => Self::SetFloor {
                 block_idx: block_idx(u)?,
             },
-            78..=81 => Self::Prune {
+            94..=97 => Self::Prune {
                 block_idx: block_idx(u)?,
             },
-            82..=89 => Self::PublishViaVariant {
+            98..=105 => Self::PublishViaVariant {
                 block_idx: block_idx(u)?,
             },
-            90..=95 => Self::AckNext,
-            96..=98 => Self::Restart,
+            106..=113 => Self::AckNext,
+            114..=117 => Self::Restart,
             _ => Self::Idle,
         })
     }
@@ -101,47 +154,50 @@ impl Arbitrary<'_> for MarshalFuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
         let mut events = Vec::with_capacity(event_count);
-        if events.len() < event_count && !u.is_empty() && u.arbitrary::<bool>()? {
-            events.push(MarshalEvent::Subscribe {
+        events.extend([
+            MarshalEvent::Subscribe {
                 block_idx: 0,
                 by_commitment: true,
-            });
-        }
-        if event_count - events.len() >= 2 && u.len() >= 2 && u.arbitrary::<bool>()? {
-            if u.arbitrary::<bool>()? {
-                events.push(MarshalEvent::Propose { block_idx: 0 });
-                events.push(MarshalEvent::SetFloor { block_idx: 0 });
-            } else {
-                events.push(MarshalEvent::SetFloor { block_idx: 0 });
-                events.push(MarshalEvent::Propose { block_idx: 0 });
-            }
-            if events.len() < event_count {
-                events.push(MarshalEvent::AckNext);
-            }
-            if events.len() < event_count {
-                events.push(MarshalEvent::AckNext);
-            }
-            if events.len() < event_count {
-                events.push(MarshalEvent::Prune { block_idx: 0 });
-            }
-            if events.len() < event_count {
-                events.push(MarshalEvent::Subscribe {
-                    block_idx: 0,
-                    by_commitment: false,
-                });
-            }
-            if events.len() < event_count {
-                events.push(MarshalEvent::Subscribe {
-                    block_idx: 0,
-                    by_commitment: true,
-                });
-            }
-        }
-        if events.len() < event_count && u.len() >= 2 && u.arbitrary::<bool>()? {
-            events.push(MarshalEvent::PublishViaVariant {
-                block_idx: block_idx(u)?,
-            });
-        }
+            },
+            MarshalEvent::Verify { block_idx: 0 },
+            MarshalEvent::Verify { block_idx: 1 },
+            MarshalEvent::GetBlock {
+                block_idx: 0,
+                query: QueryKind::ArchiveIndex,
+            },
+            MarshalEvent::GetBlock {
+                block_idx: 0,
+                query: QueryKind::ArchiveKey,
+            },
+            MarshalEvent::GetInfo {
+                block_idx: 0,
+                query: QueryKind::ArchiveIndex,
+            },
+            MarshalEvent::GetInfo {
+                block_idx: 0,
+                query: QueryKind::ArchiveKey,
+            },
+            MarshalEvent::Ancestry {
+                block_idx: 1,
+                max_items: 4,
+            },
+            MarshalEvent::BoundedAncestry {
+                block_idx: 1,
+                len: 4,
+                reverse: true,
+                max_items: 4,
+            },
+            MarshalEvent::PublishViaVariant { block_idx: 0 },
+            MarshalEvent::Propose { block_idx: 0 },
+            MarshalEvent::SetFloor { block_idx: 0 },
+            MarshalEvent::AckNext,
+            MarshalEvent::AckNext,
+            MarshalEvent::Prune { block_idx: 0 },
+            MarshalEvent::Subscribe {
+                block_idx: 0,
+                by_commitment: false,
+            },
+        ]);
         for _ in events.len()..event_count {
             events.push(MarshalEvent::arbitrary(u)?);
         }

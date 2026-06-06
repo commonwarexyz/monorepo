@@ -20,6 +20,7 @@ cargo-fuzz = true
 [dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 bytes.workspace = true
+commonware-actor.workspace = true
 commonware-broadcast.workspace = true
 commonware-codec.workspace = true
 commonware-coding.workspace = true
@@ -31,6 +32,7 @@ commonware-p2p = { workspace = true, features = ["mocks"] }
 commonware-parallel.workspace = true
 commonware-resolver.workspace = true
 commonware-runtime.workspace = true
+commonware-storage.workspace = true
 commonware-utils = { workspace = true, features = ["arbitrary"] }
 futures.workspace = true
 libfuzzer-sys.workspace = true

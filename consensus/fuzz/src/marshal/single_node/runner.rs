@@ -6,19 +6,20 @@
 //! end of the run.
 
 use super::{
-    input::{MarshalEvent, MarshalFuzzInput},
+    input::{MarshalEvent, MarshalFuzzInput, QueryKind},
     invariant,
     variant::VariantPublish,
     NUM_BLOCKS,
 };
 use commonware_consensus::{
     marshal::{
-        core::{CommitmentFallback, DigestFallback},
+        ancestry::{self, Ancestry as _, BlockProvider},
+        core::{CommitmentFallback, DigestFallback, Mailbox, Variant},
         mocks::{
             application::Application,
             harness::{
-                setup_network_with_participants, TestHarness, ValidatorHandle, NAMESPACE,
-                NUM_VALIDATORS, QUORUM,
+                setup_network_with_participants, TestHarness, ValidatorHandle, D, NAMESPACE,
+                NUM_VALIDATORS, QUORUM, S,
             },
         },
         Identifier,
@@ -28,18 +29,29 @@ use commonware_consensus::{
         types::{Activity, Proposal},
     },
     types::{Epoch, Height, Round, View},
-    Reporter,
+    Heightable, Reporter,
 };
 use commonware_cryptography::{
     bls12381::primitives::variant::MinPk,
     certificate::{mocks::Fixture, ConstantProvider},
     Digestible,
 };
-use commonware_runtime::{deterministic, Clock, Runner, Supervisor as _};
+use commonware_macros::select;
+use commonware_runtime::{
+    deterministic,
+    telemetry::metrics::{
+        histogram::{Buckets, Timed},
+        MetricsExt as _,
+    },
+    Clock, Runner, Supervisor as _,
+};
+use commonware_storage::archive;
 use commonware_utils::{FuzzRng, NZUsize};
+use futures::StreamExt;
 use std::{
     collections::{HashSet, VecDeque},
     num::NonZeroUsize,
+    sync::Arc,
     time::Duration,
 };
 
@@ -100,6 +112,44 @@ fn block_available(
     height: u64,
 ) -> bool {
     durable_available.contains(&height) || variant_available.contains(&height)
+}
+
+fn application_block<H: TestHarness>(block: &H::TestBlock) -> H::ApplicationBlock {
+    <H::Variant as Variant>::into_inner(block.clone().into())
+}
+
+fn expected_digest<H: TestHarness>(
+    canonical: &[H::TestBlock],
+    genesis: &H::TestBlock,
+    height: Height,
+) -> Option<D> {
+    if height.get() == 0 {
+        Some(H::digest(genesis))
+    } else {
+        canonical.get((height.get() - 1) as usize).map(H::digest)
+    }
+}
+
+fn assert_known_digest<H: TestHarness>(
+    canonical: &[H::TestBlock],
+    genesis: &H::TestBlock,
+    height: Height,
+    digest: D,
+    label: &str,
+) {
+    let Some(expected) = expected_digest::<H>(canonical, genesis, height) else {
+        panic!(
+            "{label} returned unexpected height {} beyond canonical chain length {}",
+            height.get(),
+            canonical.len(),
+        );
+    };
+    assert_eq!(
+        digest,
+        expected,
+        "{label} returned wrong digest for height {}",
+        height.get(),
+    );
 }
 
 fn advance_ready_prefix(finalized_available: &HashSet<u64>, ready_prefix: &mut u64) {
@@ -177,6 +227,7 @@ pub fn fuzz_marshal<H: TestHarness>(input: MarshalFuzzInput)
 where
     H::ValidatorExtra: VariantPublish<H::TestBlock>,
     H::TestBlock: Clone + Send + 'static,
+    Mailbox<S, H::Variant>: BlockProvider<Block = H::ApplicationBlock>,
 {
     let rng = FuzzRng::new(input.raw_bytes.clone());
     let cfg = deterministic::Config::new().with_rng(Box::new(rng));
@@ -281,6 +332,11 @@ where
         let mut restart_counter: usize = 0;
         let mut pending_floor: Option<u64> = None;
         let mut subscriptions = Vec::new();
+        let ancestry_fetch_duration = Timed::new(context.histogram(
+            "marshal_fuzz_ancestor_fetch_duration",
+            "Histogram of time taken to fetch a block via the marshal fuzz ancestry stream, in seconds",
+            Buckets::LOCAL,
+        ));
 
         for event in input.events.iter().copied() {
             // Set inside the ReportFinalization arm when marshal's
@@ -412,22 +468,144 @@ where
                         durable_available.insert(h);
                     }
                 }
-                MarshalEvent::GetBlock { block_idx } => {
+                MarshalEvent::GetBlock { block_idx, query } => {
                     // Read of the finalized archive by height. Absence can be
                     // valid before finalization or after pruning, but any
                     // returned block must match the canonical chain.
                     let block = &canonical[block_index(block_idx)];
-                    if let Some(returned) = handle
-                        .mailbox
-                        .get_block(Identifier::Height(H::height(block)))
-                        .await
-                    {
-                        assert_eq!(
+                    let height = H::height(block);
+                    let digest = H::digest(block);
+                    let returned = match query {
+                        QueryKind::Height => handle.mailbox.get_block(height).await,
+                        QueryKind::Digest => handle.mailbox.get_block(&digest).await,
+                        QueryKind::ArchiveIndex => {
+                            handle
+                                .mailbox
+                                .get_block(archive::Identifier::Index(height.get()))
+                                .await
+                        }
+                        QueryKind::ArchiveKey => {
+                            handle
+                                .mailbox
+                                .get_block(archive::Identifier::Key(&digest))
+                                .await
+                        }
+                        QueryKind::Latest => handle.mailbox.get_block(Identifier::Latest).await,
+                    };
+                    if let Some(returned) = returned {
+                        assert_known_digest::<H>(
+                            &canonical,
+                            &genesis,
+                            returned.height(),
                             returned.digest(),
-                            H::digest(block),
-                            "GetBlock returned wrong digest for height {}",
-                            H::height(block).get(),
+                            "GetBlock",
                         );
+                    }
+                }
+                MarshalEvent::GetInfo { block_idx, query } => {
+                    let block = &canonical[block_index(block_idx)];
+                    let height = H::height(block);
+                    let digest = H::digest(block);
+                    let returned = match query {
+                        QueryKind::Height => handle.mailbox.get_info(height).await,
+                        QueryKind::Digest => handle.mailbox.get_info(&digest).await,
+                        QueryKind::ArchiveIndex => {
+                            handle
+                                .mailbox
+                                .get_info(archive::Identifier::Index(height.get()))
+                                .await
+                        }
+                        QueryKind::ArchiveKey => {
+                            handle
+                                .mailbox
+                                .get_info(archive::Identifier::Key(&digest))
+                                .await
+                        }
+                        QueryKind::Latest => handle.mailbox.get_info(Identifier::Latest).await,
+                    };
+                    if let Some((height, digest)) = returned {
+                        assert_known_digest::<H>(
+                            &canonical,
+                            &genesis,
+                            height,
+                            digest,
+                            "GetInfo",
+                        );
+                    }
+                }
+                MarshalEvent::Ancestry {
+                    block_idx,
+                    max_items,
+                } => {
+                    let block = &canonical[block_index(block_idx)];
+                    let height = H::height(block);
+                    if !block_available(&durable_available, &variant_available, height.get()) {
+                        continue;
+                    }
+                    let stream = select! {
+                        result = handle.mailbox.ancestry(
+                            Arc::new(context.child("fuzz_ancestry")),
+                            (DigestFallback::Wait, H::digest(block)),
+                            ancestry_fetch_duration.clone(),
+                        ) => result,
+                        _ = context.sleep(EVENT_SETTLE) => None,
+                    };
+                    let Some(mut stream) = stream else {
+                        continue;
+                    };
+
+                    let mut previous = None;
+                    let budget = usize::from(max_items % 8) + 1;
+                    for _ in 0..budget {
+                        let _ = stream.peek();
+                        context.sleep(EVENT_SETTLE).await;
+                        let next = select! {
+                            result = stream.next() => result,
+                            _ = context.sleep(EVENT_SETTLE) => None,
+                        };
+                        let Some(item) = next else {
+                            break;
+                        };
+                        if let Some(previous_height) = previous {
+                            assert!(
+                                item.height() < previous_height,
+                                "ancestry stream must walk toward lower heights"
+                            );
+                        }
+                        previous = Some(item.height());
+                        assert_known_digest::<H>(
+                            &canonical,
+                            &genesis,
+                            item.height(),
+                            item.digest(),
+                            "Ancestry",
+                        );
+                    }
+                }
+                MarshalEvent::BoundedAncestry {
+                    block_idx,
+                    len,
+                    reverse,
+                    max_items,
+                } => {
+                    let start = block_index(block_idx);
+                    let len = usize::from(len % 8) + 1;
+                    let mut blocks = (0..len)
+                        .map(|offset| {
+                            let idx = (start + offset) % canonical.len();
+                            application_block::<H>(&canonical[idx])
+                        })
+                        .collect::<Vec<_>>();
+                    if reverse {
+                        blocks.reverse();
+                    }
+                    let mut stream = ancestry::from_iter(blocks);
+                    let budget = usize::from(max_items % 8) + 1;
+                    for _ in 0..budget {
+                        let _ = stream.peek();
+                        if stream.next().await.is_none() {
+                            break;
+                        }
                     }
                 }
                 MarshalEvent::Subscribe {
