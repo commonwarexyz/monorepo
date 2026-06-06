@@ -35,16 +35,13 @@ pub(super) mod partition_sync_fault {
         time::{Duration, SystemTime},
     };
 
-    pub(in crate::journal::contiguous) struct Context {
+    pub(crate) struct Context {
         inner: deterministic::Context,
         fail_partition: String,
     }
 
     impl Context {
-        pub(in crate::journal::contiguous) fn new(
-            inner: deterministic::Context,
-            fail_partition: String,
-        ) -> Self {
+        pub(crate) fn new(inner: deterministic::Context, fail_partition: String) -> Self {
             Self {
                 inner,
                 fail_partition,
@@ -53,7 +50,7 @@ pub(super) mod partition_sync_fault {
     }
 
     #[derive(Clone)]
-    pub(in crate::journal::contiguous) struct BlobWithSyncFault<B: Blob> {
+    pub(crate) struct BlobWithSyncFault<B: Blob> {
         inner: B,
         partition: String,
         fail_partition: String,
@@ -194,11 +191,11 @@ pub(super) mod partition_sync_fault {
 }
 
 /// Coordinates a test pause after a target blob is removed from storage.
-pub(in crate::journal::contiguous) struct RemoveBlocker {
+pub(crate) struct RemoveBlocker {
     partition: Option<String>,
     target: Vec<u8>,
-    pub(in crate::journal::contiguous) removed: Notify,
-    pub(in crate::journal::contiguous) release: Notify,
+    pub(crate) removed: Notify,
+    pub(crate) release: Notify,
 }
 
 impl RemoveBlocker {
@@ -239,14 +236,14 @@ impl Clone for RemoveHook {
 }
 
 /// Deterministic test context that can intercept remove calls.
-pub(in crate::journal::contiguous) struct RemoveHookContext {
+pub(crate) struct RemoveHookContext {
     inner: deterministic::Context,
     hook: RemoveHook,
 }
 
 impl RemoveHookContext {
     /// Wrap a deterministic context and pause removal of `section` in any partition.
-    pub(in crate::journal::contiguous) fn blocking_any(
+    pub(crate) fn blocking_any(
         inner: deterministic::Context,
         section: u64,
     ) -> (Self, Arc<RemoveBlocker>) {
@@ -254,7 +251,7 @@ impl RemoveHookContext {
     }
 
     /// Wrap a deterministic context and pause removal of `section` in `partition`.
-    pub(in crate::journal::contiguous) fn blocking(
+    pub(crate) fn blocking(
         inner: deterministic::Context,
         partition: String,
         section: u64,
@@ -278,15 +275,12 @@ impl RemoveHookContext {
     }
 
     /// Wrap a deterministic context and fail the `fail_on`th remove call in any partition.
-    pub(in crate::journal::contiguous) fn failing_any(
-        inner: deterministic::Context,
-        fail_on: usize,
-    ) -> Self {
+    pub(crate) fn failing_any(inner: deterministic::Context, fail_on: usize) -> Self {
         Self::failing_inner(inner, None, fail_on)
     }
 
     /// Wrap a deterministic context and fail the `fail_on`th remove call in `partition`.
-    pub(in crate::journal::contiguous) fn failing(
+    pub(crate) fn failing(
         inner: deterministic::Context,
         partition: String,
         fail_on: usize,

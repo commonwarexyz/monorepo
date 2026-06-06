@@ -152,9 +152,9 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strate
     /// Stores the pinned nodes for the current pruning boundary, and the corresponding pruning
     /// boundary used to generate them. The metadata remains empty until pruning is invoked, and its
     /// contents change only when the pruning boundary moves.
-    pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
+    pub(crate) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
 
-    /// Serializes concurrent sync calls.
+    /// Serializes concurrent sync and prune calls.
     pub(crate) sync_lock: AsyncMutex<()>,
 
     /// The strategy to use for parallelization.
@@ -276,7 +276,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                     pruned_to_pos: Position::new(0),
                 }),
                 journal,
-                metadata,
+                metadata: AsyncMutex::new(metadata),
                 sync_lock: AsyncMutex::new(()),
                 strategy: cfg.strategy,
             });
@@ -407,7 +407,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 pruned_to_pos: effective_prune_pos,
             }),
             journal,
-            metadata,
+            metadata: AsyncMutex::new(metadata),
             sync_lock: AsyncMutex::new(()),
             strategy: cfg.strategy,
         })
@@ -527,7 +527,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 pruned_to_pos: prune_pos,
             }),
             journal,
-            metadata,
+            metadata: AsyncMutex::new(metadata),
             sync_lock: AsyncMutex::new(()),
             strategy: cfg.config.strategy,
         })
@@ -536,24 +536,24 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// Compute and add required nodes for the given pruning point to the metadata, and write it to
     /// disk. Return the computed set of required nodes.
     async fn update_metadata(
-        &mut self,
+        &self,
         prune_to_pos: Position<F>,
     ) -> Result<BTreeMap<Position<F>, D>, Error<F>> {
-        assert!(prune_to_pos >= self.inner.get_mut().pruned_to_pos);
+        assert!(prune_to_pos >= self.inner.read().pruned_to_pos);
 
         let prune_loc = Location::try_from(prune_to_pos).expect("valid prune_to_pos");
         let mut pinned_nodes = BTreeMap::new();
+        let mut metadata = self.metadata.lock().await;
         for pos in F::nodes_to_pin(prune_loc) {
             let digest = self.get_node(pos).await?.expect(
                 "pinned node should exist if prune_to_pos is no less than self.pruned_to_pos",
             );
-            self.metadata
-                .put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
+            metadata.put(U64::new(NODE_PREFIX, *pos), digest.to_vec());
             pinned_nodes.insert(pos, digest);
         }
 
         let key: U64 = U64::new(PRUNED_TO_PREFIX, 0);
-        self.metadata
+        metadata
             .put_sync(
                 key,
                 Location::try_from(prune_to_pos)?
@@ -596,7 +596,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// Sync the structure to disk.
     pub async fn sync(&self) -> Result<(), Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
+        self.sync_inner().await
+    }
 
+    /// Sync the structure to disk. The caller must hold `sync_lock`.
+    async fn sync_inner(&self) -> Result<(), Error<F>> {
         let journal_size = Position::<F>::new(self.journal.size().await);
 
         // Snapshot nodes in the mem that are missing from the journal, along with the pinned
@@ -658,12 +662,18 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// This implementation ensures that no failure can leave the structure in an unrecoverable
     /// state, requiring it sync the structure to write any potential unsynced updates.
     ///
+    /// Pruning is serialized with [Self::sync] and other prune calls, but does not block
+    /// concurrent reads. Reads of nodes below the new pruning boundary may fail with
+    /// [Error::ElementPruned] once pruning begins.
+    ///
     /// Returns [Error::LocationOverflow] if `loc` exceeds [Family::MAX_LEAVES].
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
-    pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
+    pub async fn prune(&self, loc: Location<F>) -> Result<(), Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+
         let pos = Position::try_from(loc)?;
         {
-            let inner = self.inner.get_mut();
+            let inner = self.inner.read();
             if loc > inner.mem.leaves() {
                 return Err(Error::LeafOutOfBounds(loc));
             }
@@ -673,14 +683,14 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         }
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
-        self.sync().await?;
+        self.sync_inner().await?;
 
         // Update metadata to reflect the desired pruning boundary, allowing for recovery in the
         // event of a pruning failure.
         let pinned_nodes = self.update_metadata(pos).await?;
 
         self.journal.prune(*pos).await?;
-        let inner = self.inner.get_mut();
+        let mut inner = self.inner.write();
         inner.mem.add_pinned_nodes(pinned_nodes);
         inner.pruned_to_pos = pos;
 
@@ -698,8 +708,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
-    pub async fn prune_all(&mut self) -> Result<(), Error<F>> {
-        let leaves = self.inner.get_mut().mem.leaves();
+    pub async fn prune_all(&self) -> Result<(), Error<F>> {
+        let leaves = self.inner.read().mem.leaves();
         if leaves != 0 {
             self.prune(leaves).await?;
         }
@@ -709,7 +719,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// Close and permanently remove any disk resources.
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.journal.destroy().await?;
-        self.metadata.destroy().await?;
+        self.metadata.into_inner().destroy().await?;
 
         Ok(())
     }
@@ -749,9 +759,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
     #[cfg(test)]
     /// Simulate a crash after pruning metadata is written but before the journal is pruned.
-    pub async fn simulate_pruning_failure(mut self, prune_to: Location<F>) -> Result<(), Error<F>> {
+    pub async fn simulate_pruning_failure(self, prune_to: Location<F>) -> Result<(), Error<F>> {
         let prune_to_pos = Position::try_from(prune_to)?;
-        assert!(prune_to_pos <= self.inner.get_mut().mem.size());
+        assert!(prune_to_pos <= self.inner.read().mem.size());
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
         self.sync().await?;
@@ -852,11 +862,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         {
             inner.mem.truncate(new_size);
         } else {
+            let metadata = self.metadata.lock().await;
             let mut pinned_nodes = Vec::new();
             for pos in F::nodes_to_pin(destination_loc) {
-                pinned_nodes.push(
-                    Self::get_from_metadata_or_journal(&self.metadata, &self.journal, pos).await?,
-                );
+                pinned_nodes
+                    .push(Self::get_from_metadata_or_journal(&metadata, &self.journal, pos).await?);
             }
             inner.mem = Mem::init(MemConfig {
                 nodes: vec![],
@@ -865,7 +875,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             })?;
             Self::add_extra_pinned_nodes(
                 &mut inner.mem,
-                &self.metadata,
+                &metadata,
                 &self.journal,
                 inner.pruned_to_pos,
             )
@@ -1033,7 +1043,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::fixed::{Config as JConfig, Journal},
+        journal::contiguous::{
+            fixed::{Config as JConfig, Journal},
+            tests::RemoveHookContext,
+        },
         merkle::{
             hasher::Standard, mmb, mmr, Bagging::ForwardFold, Location, LocationRangeExt as _,
             Position, Proof,
@@ -1044,15 +1057,16 @@ mod tests {
         sha256::{self, Digest},
         Hasher as _, Sha256,
     };
-    use commonware_macros::test_traced;
+    use commonware_macros::{select, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Spawner as _, Supervisor as _,
     };
     use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
         num::{NonZeroU16, NonZeroUsize},
+        time::Duration,
     };
 
     fn test_digest(v: usize) -> Digest {
@@ -1162,7 +1176,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("oob_prune"),
             &hasher,
             test_config(&context),
@@ -1192,6 +1206,86 @@ mod tests {
     fn test_full_prune_out_of_bounds_returns_error_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_prune_out_of_bounds_returns_error_inner::<mmb::Family>);
+    }
+
+    /// Reads proceed while a prune (invoked through a shared reference) is paused mid-unlink.
+    async fn full_reads_during_prune_unlink_inner<F: Family>(context: deterministic::Context) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+
+        // Pause the prune when it attempts to remove the journal's first section blob.
+        let (hook_context, blocker) = RemoveHookContext::blocking(
+            context.child("hooked"),
+            "journal-partition-blobs".into(),
+            0,
+        );
+        let mmr = Arc::new(
+            Merkle::<F, _, Digest, Sequential>::init(
+                hook_context.child("mmr"),
+                &hasher,
+                test_config(&hook_context),
+            )
+            .await
+            .unwrap(),
+        );
+
+        const LEAF_COUNT: usize = 32;
+        let mut batch = mmr.new_batch();
+        for i in 0..LEAF_COUNT {
+            batch = batch.add(&hasher, &test_digest(i));
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
+        mmr.sync().await.unwrap();
+        let root = mmr.root(&hasher, 0).unwrap();
+
+        let prune_loc = Location::<F>::new(16);
+        let prune = context.child("prune").spawn({
+            let mmr = mmr.clone();
+            move |_| async move { mmr.prune(prune_loc).await }
+        });
+
+        select! {
+            _ = blocker.removed.notified() => {},
+            _ = context.sleep(Duration::from_secs(1)) => panic!("prune did not unlink section"),
+        }
+
+        // While the prune is paused mid-unlink, reads served by both the journal and the
+        // in-memory structure must proceed.
+        let retained_pos = Position::try_from(Location::<F>::new(20)).unwrap();
+        let node = select! {
+            node = mmr.as_ref().get_node(retained_pos) => node.unwrap(),
+            _ = context.sleep(Duration::from_secs(1)) => panic!("read blocked during prune"),
+        };
+        assert!(node.is_some());
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
+
+        blocker.release.notify_one();
+        prune.await.unwrap().unwrap();
+
+        // The boundary moved, pruned nodes are gone, and retained nodes are unchanged.
+        assert_eq!(mmr.as_ref().bounds().start, prune_loc);
+        assert!(mmr
+            .as_ref()
+            .get_node(Position::<F>::new(0))
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(mmr.as_ref().get_node(retained_pos).await.unwrap(), node);
+        assert_eq!(mmr.root(&hasher, 0).unwrap(), root);
+
+        Arc::try_unwrap(mmr).ok().unwrap().destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_reads_during_prune_unlink_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_reads_during_prune_unlink_inner::<mmr::Family>);
+    }
+
+    #[test_traced]
+    fn test_full_reads_during_prune_unlink_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_reads_during_prune_unlink_inner::<mmb::Family>);
     }
 
     async fn full_rewind_error_leaves_valid_state_inner<F: Family>(
@@ -1418,7 +1512,7 @@ mod tests {
         // make sure pruning doesn't break root computation, adding of new nodes, etc.
         const LEAF_COUNT: usize = 2000;
         let cfg_pruned = test_config(&context);
-        let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("pruned"),
             &hasher,
             cfg_pruned.clone(),
@@ -1492,7 +1586,7 @@ mod tests {
         // Sync the structure & reopen.
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
-        let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("pruned_reopen"),
             &hasher,
             cfg_pruned.clone(),
@@ -1528,7 +1622,7 @@ mod tests {
         assert!(*pruned_mmr.size() % cfg_pruned.items_per_blob != 0);
         pruned_mmr.sync().await.unwrap();
         drop(pruned_mmr);
-        let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("pruned_reopen").with_attribute("index", 2),
             &hasher,
             cfg_pruned.clone(),
@@ -1758,7 +1852,7 @@ mod tests {
 
     async fn full_historical_proof_with_pruning_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("main"),
             &hasher,
             test_config(&context),
@@ -2107,7 +2201,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create initial structure with elements.
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2219,7 +2313,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create a structure with some data and prune it
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2296,7 +2390,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create a structure with some data
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2428,7 +2522,7 @@ mod tests {
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2595,7 +2689,7 @@ mod tests {
 
     async fn full_historical_proof_after_pruning_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2662,7 +2756,7 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 2: Structure has nodes but is fully pruned.
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("fully_pruned"),
             &hasher,
             test_config(&context),
@@ -2692,7 +2786,7 @@ mod tests {
         mmr.destroy().await.unwrap();
 
         // Case 3: All nodes but one (single leaf) are pruned.
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("single_leaf"),
             &hasher,
             test_config(&context),
@@ -2872,7 +2966,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("non_size_prune"),
             &hasher,
             test_config(&context),

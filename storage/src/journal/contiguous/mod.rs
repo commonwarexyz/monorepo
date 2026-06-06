@@ -14,7 +14,7 @@ mod metrics;
 pub mod variable;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 /// A reader guard that holds a consistent view of the journal.
 ///
