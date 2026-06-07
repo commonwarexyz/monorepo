@@ -1,7 +1,7 @@
 //! Trait providing a unified test/benchmark interface across all Any database variants.
 
 use crate::{
-    journal::contiguous::Mutable,
+    journal::contiguous::{BoundarySyncable, Mutable},
     merkle::{Family, Location, Proof},
     qmdb::{operation::Key, Error},
     Persistable,
@@ -13,12 +13,12 @@ use std::{future::Future, ops::Range};
 
 /// A mutable operation log that can be durably persisted.
 pub(crate) trait PersistableMutableLog<O>:
-    Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+    BoundarySyncable<Item = O> + Mutable<Item = O> + Persistable<Error = crate::journal::Error>
 {
 }
 
 impl<T, O> PersistableMutableLog<O> for T where
-    T: Mutable<Item = O> + Persistable<Error = crate::journal::Error>
+    T: BoundarySyncable<Item = O> + Mutable<Item = O> + Persistable<Error = crate::journal::Error>
 {
 }
 

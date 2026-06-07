@@ -90,7 +90,10 @@ use super::Reader as _;
 use crate::{
     journal::{
         contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
-        segmented::fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
+        segmented::{
+            fixed::{Config as SegmentedConfig, Journal as SegmentedJournal},
+            SectionSync,
+        },
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
@@ -100,10 +103,11 @@ use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::{
     sequence::VecU64,
-    sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
+    sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard, Mutex},
 };
 use futures::{future::try_join_all, stream::Stream, StreamExt};
 use std::{
+    collections::BTreeMap,
     future::Future,
     num::{NonZeroU64, NonZeroUsize},
 };
@@ -201,6 +205,17 @@ struct Inner<E: Context, A: CodecFixedShared> {
 
     /// The earliest section modified since the last successful `commit()` or `sync()`.
     dirty_from_section: Option<u64>,
+
+    /// Contiguous logical end known to be durable in this execution.
+    durable_logical_end: u64,
+
+    /// In-flight section syncs and the logical end they cover.
+    pending_syncs: BTreeMap<u64, PendingSectionSync>,
+}
+
+struct PendingSectionSync {
+    end: u64,
+    handle: Mutex<Option<SectionSync>>,
 }
 
 /// A deferred blob truncation to apply after metadata is persisted during init.
@@ -508,6 +523,30 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         );
     }
 
+    fn section_end(section: u64, items_per_blob: u64) -> u64 {
+        section
+            .checked_add(1)
+            .and_then(|section| section.checked_mul(items_per_blob))
+            .expect("section end overflow")
+    }
+
+    fn section_logical_end(section: u64, size: u64, items_per_blob: u64) -> u64 {
+        Self::section_end(section, items_per_blob).min(size)
+    }
+
+    fn dirty_from_logical(inner: &mut Inner<E, A>, items_per_blob: u64) {
+        let dirty_from = inner
+            .durable_logical_end
+            .max(inner.pruning_boundary)
+            .min(inner.size);
+        inner.dirty_from_section = (dirty_from < inner.size).then_some(dirty_from / items_per_blob);
+    }
+
+    fn mark_synced_to(inner: &mut Inner<E, A>, synced_end: u64, items_per_blob: u64) {
+        inner.durable_logical_end = inner.durable_logical_end.max(synced_end.min(inner.size));
+        Self::dirty_from_logical(inner, items_per_blob);
+    }
+
     /// Update pruning-boundary and recovery-watermark entries in metadata's in-memory state.
     ///
     /// Call `inner.metadata.sync()` separately to persist the updated entries.
@@ -572,6 +611,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             return false;
         }
         inner.metadata.put(RECOVERY_WATERMARK_KEY, limit.into());
+        inner.durable_logical_end = inner.durable_logical_end.min(limit);
+        inner.pending_syncs.clear();
         true
     }
 
@@ -737,6 +778,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             metadata,
             pruning_boundary,
             dirty_from_section,
+            durable_logical_end: recovery_watermark.min(size),
+            pending_syncs: BTreeMap::new(),
         };
 
         // Metadata must be persisted before the rewind repair: the rewind cannot reduce the
@@ -1017,21 +1060,174 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         (section, pos_in_section)
     }
 
+    /// Return the section containing the last logical item before `end`.
+    const fn end_to_section(&self, end: u64) -> Option<u64> {
+        if end == 0 {
+            None
+        } else {
+            Some((end - 1) / self.items_per_blob)
+        }
+    }
+
+    /// Return the section containing the last logical item in a journal of `size`.
+    const fn size_to_last_section(size: u64, items_per_blob: u64) -> Option<u64> {
+        if size == 0 {
+            None
+        } else {
+            Some((size - 1) / items_per_blob)
+        }
+    }
+
+    fn metadata_watermark_at_least(inner: &Inner<E, A>, watermark: u64) -> u64 {
+        inner
+            .metadata
+            .get(&RECOVERY_WATERMARK_KEY)
+            .copied()
+            .map(u64::from)
+            .map_or(watermark, |current| current.max(watermark))
+    }
+
+    fn pending_covers(inner: &Inner<E, A>, section: u64, end: u64) -> bool {
+        end <= inner.durable_logical_end
+            || inner
+                .pending_syncs
+                .get(&section)
+                .is_some_and(|pending| pending.end >= end)
+    }
+
+    async fn start_section_syncs_to(&self, end: u64) -> Result<(), Error> {
+        let mut started = Vec::new();
+        {
+            let inner = self.inner.read().await;
+            let requested_end = end.min(inner.size);
+            if requested_end <= inner.durable_logical_end {
+                return Ok(());
+            }
+            let Some(target_section) = self.end_to_section(requested_end) else {
+                return Ok(());
+            };
+            let Some(start_section) = inner.dirty_from_section else {
+                return Ok(());
+            };
+            let Some(tail_section) = Self::size_to_last_section(inner.size, self.items_per_blob)
+            else {
+                return Ok(());
+            };
+            let end_section = target_section.min(tail_section);
+            let Some(oldest_section) = inner.journal.oldest_section() else {
+                return Ok(());
+            };
+            let start_section = start_section.max(oldest_section);
+            if start_section > end_section {
+                return Ok(());
+            }
+
+            for section in start_section..=end_section {
+                let needed_end =
+                    Self::section_logical_end(section, requested_end, self.items_per_blob);
+                if Self::pending_covers(&inner, section, needed_end) {
+                    continue;
+                }
+                let Some(handle) = inner.journal.sync_start_waitable(section).await? else {
+                    continue;
+                };
+                let coverage_end =
+                    Self::section_logical_end(section, inner.size, self.items_per_blob);
+                started.push((section, coverage_end, handle));
+            }
+        }
+
+        if started.is_empty() {
+            return Ok(());
+        }
+
+        let mut inner = self.inner.write().await;
+        for (section, end, handle) in started {
+            inner
+                .pending_syncs
+                .insert(section, PendingSectionSync {
+                    end,
+                    handle: Mutex::new(Some(handle)),
+                });
+        }
+        Ok(())
+    }
+
+    async fn wait_section_syncs_to(&self, end: u64) -> Result<u64, Error> {
+        let mut pending = Vec::new();
+        let mut missing = Vec::new();
+        let mut synced_end;
+        {
+            let mut inner = self.inner.write().await;
+            let requested_end = end.min(inner.size);
+            synced_end = inner.durable_logical_end;
+            if requested_end <= inner.durable_logical_end {
+                return Ok(synced_end);
+            }
+            let Some(target_section) = self.end_to_section(requested_end) else {
+                return Ok(synced_end);
+            };
+            let Some(start_section) = inner.dirty_from_section else {
+                return Ok(synced_end);
+            };
+            let Some(tail_section) = Self::size_to_last_section(inner.size, self.items_per_blob)
+            else {
+                return Ok(synced_end);
+            };
+            let end_section = target_section.min(tail_section);
+            let Some(oldest_section) = inner.journal.oldest_section() else {
+                return Ok(synced_end);
+            };
+            let start_section = start_section.max(oldest_section);
+            if start_section > end_section {
+                return Ok(synced_end);
+            }
+
+            for section in start_section..=end_section {
+                let needed_end =
+                    Self::section_logical_end(section, requested_end, self.items_per_blob);
+                if needed_end <= inner.durable_logical_end {
+                    continue;
+                }
+                if inner
+                    .pending_syncs
+                    .get(&section)
+                    .is_some_and(|sync| sync.end >= needed_end)
+                {
+                    let sync = inner
+                        .pending_syncs
+                        .remove(&section)
+                        .expect("pending sync should exist");
+                    synced_end = synced_end.max(sync.end);
+                    pending.push(
+                        sync.handle
+                            .into_inner()
+                            .expect("pending sync handle should exist"),
+                    );
+                } else {
+                    inner.pending_syncs.remove(&section);
+                    let coverage_end =
+                        Self::section_logical_end(section, inner.size, self.items_per_blob);
+                    synced_end = synced_end.max(coverage_end);
+                    missing.push(section);
+                }
+            }
+        }
+
+        try_join_all(pending).await?;
+        if !missing.is_empty() {
+            let inner = self.inner.read().await;
+            try_join_all(missing.into_iter().map(|section| inner.journal.sync(section))).await?;
+        }
+        Ok(synced_end)
+    }
+
     /// Sync dirty sections to storage under the read lock, allowing concurrent reads.
     async fn sync_dirty_sections(&self) -> Result<(), Error> {
-        let inner = self.inner.read().await;
-        if let Some(start_section) = inner.dirty_from_section {
-            let tail_section = inner.size / self.items_per_blob;
-            let start_section = inner
-                .journal
-                .oldest_section()
-                .map(|oldest| start_section.max(oldest))
-                // With no retained blobs, any earlier dirty section was cleared or pruned.
-                // Syncing the tail section is harmless when it does not exist.
-                .unwrap_or(tail_section);
-            try_join_all((start_section..=tail_section).map(|section| inner.journal.sync(section)))
-                .await?;
-        }
+        let size = self.inner.read().await.size;
+        let synced_end = self.wait_section_syncs_to(size).await?;
+        let mut inner = self.inner.write().await;
+        Self::mark_synced_to(&mut inner, synced_end, self.items_per_blob);
         Ok(())
     }
 
@@ -1039,16 +1235,59 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     async fn flush_dirty_sections(&self) -> Result<(), Error> {
         let inner = self.inner.read().await;
         if let Some(start_section) = inner.dirty_from_section {
-            let tail_section = inner.size / self.items_per_blob;
-            let start_section = inner
-                .journal
-                .oldest_section()
-                .map(|oldest| start_section.max(oldest))
-                .unwrap_or(tail_section);
-            try_join_all((start_section..=tail_section).map(|section| inner.journal.flush(section)))
+            let Some(tail_section) = Self::size_to_last_section(inner.size, self.items_per_blob)
+            else {
+                return Ok(());
+            };
+            let Some(oldest_section) = inner.journal.oldest_section() else {
+                return Ok(());
+            };
+            let start_section = start_section.max(oldest_section);
+            if start_section <= tail_section {
+                try_join_all(
+                    (start_section..=tail_section).map(|section| inner.journal.flush(section)),
+                )
                 .await?;
+            }
         }
         Ok(())
+    }
+
+    /// Flush dirty sections that can contain positions below `end`.
+    async fn flush_dirty_sections_to(&self, end: u64) -> Result<(), Error> {
+        let Some(target_section) = self.end_to_section(end) else {
+            return Ok(());
+        };
+        let inner = self.inner.read().await;
+        if let Some(start_section) = inner.dirty_from_section {
+            let Some(tail_section) = Self::size_to_last_section(inner.size, self.items_per_blob)
+            else {
+                return Ok(());
+            };
+            let end_section = target_section.min(tail_section);
+            let Some(oldest_section) = inner.journal.oldest_section() else {
+                return Ok(());
+            };
+            let start_section = start_section.max(oldest_section);
+            if start_section <= end_section {
+                try_join_all(
+                    (start_section..=end_section).map(|section| inner.journal.flush(section)),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Start syncing dirty sections without waiting for durability.
+    async fn sync_start_dirty_sections(&self) -> Result<(), Error> {
+        let size = self.inner.read().await.size;
+        self.start_section_syncs_to(size).await
+    }
+
+    /// Start syncing dirty sections that can contain positions below `end`.
+    async fn sync_start_dirty_sections_to(&self, end: u64) -> Result<(), Error> {
+        self.start_section_syncs_to(end).await
     }
 
     /// Durably persists the current state of the structure.
@@ -1063,7 +1302,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.sync_dirty_sections().await?;
 
         let mut inner = self.inner.write().await;
+        inner.durable_logical_end = inner.size;
         inner.dirty_from_section = None;
+        inner.pending_syncs.clear();
         Ok(())
     }
 
@@ -1071,6 +1312,20 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     pub async fn flush(&self) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
         self.flush_dirty_sections().await
+    }
+
+    /// Flush dirty sections and start syncing them without waiting for durability.
+    pub async fn sync_start(&self) -> Result<(), Error> {
+        let _op_guard = self.op_lock.lock().await;
+        self.flush_dirty_sections().await?;
+        self.sync_start_dirty_sections().await
+    }
+
+    /// Flush and start syncing sections that can contain positions below `end`.
+    pub async fn sync_start_to(&self, end: u64) -> Result<(), Error> {
+        let _op_guard = self.op_lock.lock().await;
+        self.flush_dirty_sections_to(end).await?;
+        self.sync_start_dirty_sections_to(end).await
     }
 
     /// Durably persist the current state of the structure, ensuring no recovery is required in the
@@ -1084,10 +1339,37 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.sync_dirty_sections().await?;
 
         let mut inner = self.inner.write().await;
+        inner.durable_logical_end = inner.size;
         inner.dirty_from_section = None;
+        inner.pending_syncs.clear();
         let pruning_boundary = inner.pruning_boundary;
         let size = inner.size;
         Self::update_metadata_entries(&mut inner, self.items_per_blob, pruning_boundary, size);
+        drop(inner);
+
+        let inner = self.inner.read().await;
+        inner.metadata.sync().await?;
+
+        Ok(())
+    }
+
+    /// Durably sync logical positions below `end`.
+    pub async fn wait_for_sync_to(&self, end: u64) -> Result<(), Error> {
+        let _timer = self.metrics.sync_timer();
+        self.metrics.sync_calls.inc();
+        let _op_guard = self.op_lock.lock().await;
+        let synced_end = self.wait_section_syncs_to(end).await?;
+
+        let mut inner = self.inner.write().await;
+        Self::mark_synced_to(&mut inner, synced_end, self.items_per_blob);
+        let pruning_boundary = inner.pruning_boundary;
+        let recovery_watermark = Self::metadata_watermark_at_least(&inner, end.min(inner.size));
+        Self::update_metadata_entries(
+            &mut inner,
+            self.items_per_blob,
+            pruning_boundary,
+            recovery_watermark,
+        );
         drop(inner);
 
         let inner = self.inner.read().await;
@@ -1239,6 +1521,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let mut inner = self.inner.write().await;
         inner.journal.rewind(section, byte_offset).await?;
         inner.size = size;
+        inner.durable_logical_end = inner
+            .durable_logical_end
+            .min(section.saturating_mul(self.items_per_blob));
+        inner
+            .pending_syncs
+            .retain(|pending_section, _| *pending_section < section);
         Self::mark_dirty_from(&mut inner, section);
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_blob);
@@ -1282,9 +1570,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             // Pruning boundary only moves forward
             assert!(inner.pruning_boundary < new_oldest * self.items_per_blob);
             inner.pruning_boundary = new_oldest * self.items_per_blob;
-            if let Some(dirty_from) = inner.dirty_from_section {
-                inner.dirty_from_section = Some(dirty_from.max(new_oldest));
-            }
+            inner.durable_logical_end = inner.durable_logical_end.max(inner.pruning_boundary);
+            inner
+                .pending_syncs
+                .retain(|section, _| *section >= new_oldest);
+            Self::dirty_from_logical(&mut inner, self.items_per_blob);
             self.metrics
                 .update(inner.size, inner.pruning_boundary, self.items_per_blob);
         }
@@ -1336,7 +1626,9 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         inner.size = new_size;
         inner.pruning_boundary = new_size;
+        inner.durable_logical_end = new_size;
         inner.dirty_from_section = None;
+        inner.pending_syncs.clear();
 
         self.metrics
             .update(inner.size, inner.pruning_boundary, self.items_per_blob);
@@ -1410,6 +1702,22 @@ impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
 impl<E: Context, A: CodecFixedShared> super::Flushable for Journal<E, A> {
     async fn flush(&self) -> Result<(), Error> {
         Self::flush(self).await
+    }
+}
+
+impl<E: Context, A: CodecFixedShared> super::SyncStartable for Journal<E, A> {
+    async fn sync_start(&self) -> Result<(), Error> {
+        Self::sync_start(self).await
+    }
+
+    async fn sync_start_to(&self, end: u64) -> Result<(), Error> {
+        Self::sync_start_to(self, end).await
+    }
+}
+
+impl<E: Context, A: CodecFixedShared> super::BoundarySyncable for Journal<E, A> {
+    async fn wait_for_sync_to(&self, end: u64) -> Result<(), Error> {
+        Self::wait_for_sync_to(self, end).await
     }
 }
 
@@ -1545,6 +1853,117 @@ mod tests {
             assert!(
                 journal.commit().await.is_err(),
                 "commit() must sync recovered data beyond the persisted recovery watermark"
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_sync_to_keeps_later_sections_dirty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(3));
+            cfg.partition = "sync-to-keeps-later-fixed".into();
+
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for value in 0..8 {
+                journal.append(&value).await.unwrap();
+            }
+
+            journal.wait_for_sync_to(3).await.unwrap();
+            {
+                let inner = journal.inner.read().await;
+                assert_eq!(inner.dirty_from_section, Some(1));
+                assert_eq!(
+                    inner
+                        .metadata
+                        .get(&RECOVERY_WATERMARK_KEY)
+                        .copied()
+                        .map(u64::from),
+                    Some(3)
+                );
+            }
+
+            journal.wait_for_sync_to(6).await.unwrap();
+            {
+                let inner = journal.inner.read().await;
+                assert_eq!(inner.dirty_from_section, Some(2));
+                assert_eq!(
+                    inner
+                        .metadata
+                        .get(&RECOVERY_WATERMARK_KEY)
+                        .copied()
+                        .map(u64::from),
+                    Some(6)
+                );
+            }
+
+            journal.sync().await.unwrap();
+            assert_eq!(journal.inner.read().await.dirty_from_section, None);
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_sync_to_reuses_same_blob_pending_coverage() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(10));
+            cfg.partition = "sync-to-same-blob-fixed".into();
+
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for value in 0..3 {
+                journal.append(&value).await.unwrap();
+            }
+            journal.sync_start_to(3).await.unwrap();
+
+            for value in 3..5 {
+                journal.append(&value).await.unwrap();
+            }
+            journal.wait_for_sync_to(2).await.unwrap();
+            {
+                let inner = journal.inner.read().await;
+                assert_eq!(inner.durable_logical_end, 3);
+                assert_eq!(inner.dirty_from_section, Some(0));
+                assert!(inner.pending_syncs.is_empty());
+            }
+
+            journal.sync_start_to(3).await.unwrap();
+            assert!(journal.inner.read().await.pending_syncs.is_empty());
+
+            journal.wait_for_sync_to(5).await.unwrap();
+            let inner = journal.inner.read().await;
+            assert_eq!(inner.durable_logical_end, 5);
+            assert_eq!(inner.dirty_from_section, None);
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_sync_to_exact_boundary_clears_dirty() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut cfg = test_cfg(&context, NZU64!(3));
+            cfg.partition = "sync-to-exact-boundary-fixed".into();
+
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            for value in 0..6 {
+                journal.append(&value).await.unwrap();
+            }
+
+            journal.wait_for_sync_to(6).await.unwrap();
+            let inner = journal.inner.read().await;
+            assert_eq!(inner.dirty_from_section, None);
+            assert_eq!(
+                inner
+                    .metadata
+                    .get(&RECOVERY_WATERMARK_KEY)
+                    .copied()
+                    .map(u64::from),
+                Some(6)
             );
         });
     }

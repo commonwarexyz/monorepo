@@ -5,7 +5,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Flushable, Mutable, Reader},
+        contiguous::{BoundarySyncable, Contiguous, Flushable, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -781,11 +781,45 @@ where
         self.any.write_pending().await
     }
 
+    /// Write pending Merkle nodes and start syncing without waiting for durability.
+    pub async fn sync_start_pending(&self) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        self.metrics.sync_calls.inc();
+        self.any.sync_start_pending().await
+    }
+
+    /// Write pending Merkle nodes and start syncing through `durable_size`.
+    pub async fn sync_start_to(&self, durable_size: Location<F>) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        self.metrics.sync_calls.inc();
+        self.any.sync_start_to(durable_size).await
+    }
+
     /// Prune historical operations prior to `prune_loc` and sync all database state to disk.
     ///
     /// This preserves the prune ordering that makes recovery safe and avoids syncing Current
     /// metadata twice when callers need both operations.
-    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        let durable_size = Location::new(*self.any.last_commit_loc + 1);
+        self.prune_and_sync_to(prune_loc, durable_size).await
+    }
+
+    /// Prune historical operations prior to `prune_loc` after syncing through `durable_size`.
+    pub async fn prune_and_sync_to(
+        &mut self,
+        prune_loc: Location<F>,
+        durable_size: Location<F>,
+    ) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
         let _prune_timer = self.metrics.prune_timer();
         let _sync_timer = self.metrics.sync_timer();
         self.metrics.prune_calls.inc();
@@ -806,7 +840,9 @@ where
         // a pruned log with stale metadata would lose peak digests permanently.
         self.sync_metadata().await?;
 
-        self.any.prune_log_and_sync(prune_loc).await?;
+        self.any
+            .prune_log_and_sync_to(prune_loc, durable_size)
+            .await?;
         self.any.update_metrics().await;
         self.update_metrics();
         Ok(())

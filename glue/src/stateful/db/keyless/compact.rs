@@ -249,11 +249,11 @@ where
     }
 
     async fn preflush(&self) -> Result<(), Error<F>> {
-        self.write_pending().await
+        self.sync_start_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
-        fixed::CompactDb::prune(self, target.clone()).await
+        Self::prune(self, target.clone()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -265,7 +265,7 @@ where
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         let expected = target.clone();
-        fixed::CompactDb::rewind_to_target(self, target).await?;
+        Self::rewind_to_target(self, target).await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(
@@ -321,11 +321,11 @@ where
     }
 
     async fn preflush(&self) -> Result<(), Error<F>> {
-        self.write_pending().await
+        self.sync_start_pending().await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
-        variable::CompactDb::prune(self, target.clone()).await
+        Self::prune(self, target.clone()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -337,7 +337,7 @@ where
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         let expected = target.clone();
-        variable::CompactDb::rewind_to_target(self, target).await?;
+        Self::rewind_to_target(self, target).await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(

@@ -6,5 +6,6 @@
 pub mod fixed;
 pub mod glob;
 mod manager;
+pub(crate) use manager::SectionSync;
 pub mod oversized;
 pub mod variable;

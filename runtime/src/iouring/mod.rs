@@ -157,7 +157,7 @@
 
 use crate::{
     telemetry::metrics::{raw, Gauge, Register},
-    Error, IoBufMut, IoBufs,
+    BlobSync, Error, IoBufMut, IoBufs,
 };
 use commonware_utils::channel::{
     mpsc::{self, error::TryRecvError},
@@ -323,6 +323,22 @@ impl Handle {
         Ok(())
     }
 
+    /// Enqueue a request without waiting for channel capacity.
+    ///
+    /// On success, the request has been submitted to the io_uring loop before
+    /// this method returns.
+    fn try_enqueue(&self, request: Request) -> Result<(), mpsc::error::TrySendError<Request>> {
+        self.inner
+            .sender
+            .as_ref()
+            .expect("handle sender is only taken on drop")
+            .try_send(request)?;
+
+        self.inner.waker.publish();
+
+        Ok(())
+    }
+
     /// Submit a logical send request and wait for its completion.
     #[cfg_attr(not(feature = "iouring-network"), allow(dead_code))]
     pub async fn send(
@@ -476,6 +492,22 @@ impl Handle {
         .map_err(|_| std::io::Error::other("failed to send work"))?;
         rx.await
             .map_err(|_| std::io::Error::other("failed to read result"))?
+    }
+
+    /// Submit a logical fsync request and return a completion handle.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub fn sync_start(&self, file: Arc<File>) -> Result<BlobSync, Error> {
+        let (tx, rx) = oneshot::channel();
+        self.try_enqueue(Request::Sync(SyncRequest {
+            file,
+            result: None,
+            sender: tx,
+        }))
+        .map_err(|_| Error::SendFailed)?;
+
+        Ok(Box::pin(async move {
+            rx.await.map_err(|_| Error::Closed)?.map_err(Error::Io)
+        }))
     }
 }
 

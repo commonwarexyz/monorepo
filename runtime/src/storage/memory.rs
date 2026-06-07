@@ -147,6 +147,25 @@ impl Blob {
             pool,
         }
     }
+
+    fn sync_now(&self) -> Result<(), crate::Error> {
+        // Create new content for partition
+        let new_content = self.content.read().clone();
+
+        // Update partition content
+        let mut partitions = self.partitions.lock();
+        let partition = partitions
+            .get_mut(&self.partition)
+            .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
+        let content = partition
+            .get_mut(&self.name)
+            .ok_or(crate::Error::BlobMissing(
+                self.partition.clone(),
+                hex(&self.name),
+            ))?;
+        *content = new_content;
+        Ok(())
+    }
 }
 
 impl crate::Blob for Blob {
@@ -224,22 +243,12 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
-        // Create new content for partition
-        let new_content = self.content.read().clone();
+        self.sync_now()
+    }
 
-        // Update partition content
-        let mut partitions = self.partitions.lock();
-        let partition = partitions
-            .get_mut(&self.partition)
-            .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
-        let content = partition
-            .get_mut(&self.name)
-            .ok_or(crate::Error::BlobMissing(
-                self.partition.clone(),
-                hex(&self.name),
-            ))?;
-        *content = new_content;
-        Ok(())
+    fn sync_start(&self) -> Result<crate::BlobSync, crate::Error> {
+        let result = self.sync_now();
+        Ok(Box::pin(async move { result }))
     }
 }
 

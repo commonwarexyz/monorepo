@@ -105,6 +105,30 @@ pub trait Flushable: Contiguous {
     fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
+/// A [Contiguous] journal that can start syncing buffered writes without waiting.
+pub trait SyncStartable: Flushable {
+    /// Flush pending buffered writes and submit sync work without waiting for durability.
+    ///
+    /// Awaiting this only waits for the buffered writes to be submitted and the sync request to
+    /// start. It does not wait for the sync request to complete.
+    fn sync_start(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
+    /// Flush pending buffered writes up to `end` and submit sync work without waiting.
+    ///
+    /// Awaiting this only waits for the buffered writes to be submitted and the sync request to
+    /// start. It does not wait for the sync request to complete.
+    fn sync_start_to(&self, end: u64) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
+/// A [Contiguous] journal that can durably sync up to a logical end position.
+pub trait BoundarySyncable: SyncStartable {
+    /// Wait until writes up to `end` are durable.
+    ///
+    /// If no previously submitted sync covers the boundary, this starts the missing sync work
+    /// before waiting for it.
+    fn wait_for_sync_to(&self, end: u64) -> impl Future<Output = Result<(), Error>> + Send;
+}
+
 /// Items to append via [`Mutable::append_many`].
 ///
 /// `Flat` wraps a single contiguous slice; `Nested` wraps multiple slices that are

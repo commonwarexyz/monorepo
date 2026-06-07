@@ -126,6 +126,10 @@ mod tests {
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
         }
+
+        fn sync_start(&self) -> Result<crate::BlobSync, Error> {
+            Ok(Box::pin(async { Ok(()) }))
+        }
     }
 
     #[derive(Default)]
@@ -248,6 +252,14 @@ mod tests {
             state.durable = state.data.clone();
             state.full_syncs += 1;
             Ok(())
+        }
+
+        fn sync_start(&self) -> Result<crate::BlobSync, Error> {
+            let mut state = self.state.lock();
+            state.durable = state.data.clone();
+            state.full_syncs += 1;
+            let result = Ok(());
+            Ok(Box::pin(async move { result }))
         }
     }
 
@@ -1563,6 +1575,38 @@ mod tests {
             assert_eq!(writes, 2);
             assert_eq!(full_syncs, 1);
             assert_eq!(range_syncs, 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_sync_start_coalesces_pending_generation() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = SyncTrackingBlob::new();
+            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+
+            writer.sync_start().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert!(durable.is_empty());
+            assert_eq!(writes, 0);
+            assert_eq!(full_syncs, 1);
+            assert_eq!(range_syncs, 0);
+
+            writer.write_at(0, b"abc").await.unwrap();
+            writer.sync_start().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 0);
+
+            writer.sync_start().await.unwrap();
+            writer.sync().await.unwrap();
+            let (durable, writes, full_syncs, range_syncs) = blob.snapshot();
+            assert_eq!(durable.as_slice(), b"abc");
+            assert_eq!(writes, 1);
+            assert_eq!(full_syncs, 2);
+            assert_eq!(range_syncs, 0);
         });
     }
 

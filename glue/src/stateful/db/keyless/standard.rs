@@ -286,11 +286,16 @@ where
     }
 
     async fn preflush(&self) -> Result<(), Error<F>> {
-        self.write_pending().await
+        self.sync_start_pending().await
+    }
+
+    async fn preflush_to(&self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.sync_start_to(target.range.end()).await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
-        self.prune_and_sync((*target.range.start()).into()).await
+        self.prune_and_sync_to((*target.range.start()).into(), target.range.end())
+            .await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -373,11 +378,16 @@ where
     }
 
     async fn preflush(&self) -> Result<(), Error<F>> {
-        self.write_pending().await
+        self.sync_start_pending().await
+    }
+
+    async fn preflush_to(&self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.sync_start_to(target.range.end()).await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
-        self.prune_and_sync((*target.range.start()).into()).await
+        self.prune_and_sync_to((*target.range.start()).into(), target.range.end())
+            .await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {

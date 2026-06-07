@@ -183,11 +183,11 @@ impl<F: Family, D: Digest> Read for Base<F, D> {
         let root = D::read_cfg(buf, &())?;
         let leaf_count = Location::<F>::read_cfg(buf, &())?;
         let floor = Location::<F>::read_cfg(buf, &())?;
-        let pinned_nodes = Vec::<D>::read_cfg(buf, &(cfg.pinned_nodes.clone(), ()))?;
+        let pinned_nodes = Vec::<D>::read_cfg(buf, &(cfg.pinned_nodes, ()))?;
         let last_commit_op_bytes =
-            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_op_bytes.clone(), ()))?;
+            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_op_bytes, ()))?;
         let last_commit_proof_bytes =
-            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_proof_bytes.clone(), ()))?;
+            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_proof_bytes, ()))?;
         Ok(Self {
             root,
             leaf_count,
@@ -212,6 +212,7 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
 enum PersistMode {
     Write,
     Commit,
+    SyncStart,
     Sync,
 }
 
@@ -489,6 +490,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             match mode {
                 PersistMode::Write => self.base_log.flush().await?,
                 PersistMode::Commit => self.base_log.commit().await?,
+                PersistMode::SyncStart => self.base_log.sync_start().await?,
                 PersistMode::Sync => self.base_log.sync().await?,
             }
             self.inner.write().prune_all();
@@ -505,6 +507,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         match mode {
             PersistMode::Write => self.base_log.flush().await?,
             PersistMode::Commit => self.base_log.commit().await?,
+            PersistMode::SyncStart => self.base_log.sync_start().await?,
             PersistMode::Sync => self.base_log.sync().await?,
         }
         self.retained.write().insert(position, base);
@@ -532,6 +535,16 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         build_base: impl FnOnce(Location<F>, Vec<D>, W) -> Result<(Base<F, D>, R), Error<F>>,
     ) -> Result<R, Error<F>> {
         self.persist_with_witness(PersistMode::Commit, build_witness, build_base)
+            .await
+    }
+
+    /// Start syncing the tree state to the retained-base log together with a caller-provided witness.
+    pub(crate) async fn sync_start_with_witness<W, R>(
+        &self,
+        build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
+        build_base: impl FnOnce(Location<F>, Vec<D>, W) -> Result<(Base<F, D>, R), Error<F>>,
+    ) -> Result<R, Error<F>> {
+        self.persist_with_witness(PersistMode::SyncStart, build_witness, build_base)
             .await
     }
 

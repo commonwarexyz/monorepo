@@ -31,6 +31,8 @@ use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::RwLock;
 
+pub(crate) type ActiveWitness<F, D, Op> = (ServeState<F, D>, Op);
+
 /// In-memory cache of the witness currently associated with the active compact state.
 ///
 /// Compact sync serving needs the current root, frontier pins, last commit bytes, and proof as one
@@ -160,11 +162,11 @@ where
 /// Any missing base data, decode failure, or proof/root mismatch is treated as
 /// [`Error::DataCorrupted`], because the persisted frontier and witness no longer describe the same
 /// committed state.
-pub(crate) async fn load_active_witness<F, E, H, S, C, Op, LastCommitFloor>(
+pub(crate) fn load_active_witness<F, E, H, S, C, Op, LastCommitFloor>(
     merkle: &compact::Merkle<F, E, H::Digest, S>,
     commit_codec_config: &C,
     last_commit_floor: LastCommitFloor,
-) -> Result<(ServeState<F, H::Digest>, Op), Error<F>>
+) -> Result<ActiveWitness<F, H::Digest, Op>, Error<F>>
 where
     F: Family,
     E: Context,
@@ -300,6 +302,7 @@ where
 enum PersistMode {
     Write,
     Commit,
+    SyncStart,
     Sync,
 }
 
@@ -368,6 +371,11 @@ where
                 .commit_with_witness(build_witness, build_base)
                 .await?;
         }
+        PersistMode::SyncStart => {
+            merkle
+                .sync_start_with_witness(build_witness, build_base)
+                .await?;
+        }
         PersistMode::Sync => {
             merkle
                 .sync_with_witness(build_witness, build_base)
@@ -423,6 +431,31 @@ where
         inactivity_floor_loc,
         last_commit_op_bytes,
         PersistMode::Commit,
+    )
+    .await
+}
+
+/// Start syncing the current compact witness without waiting for durability.
+pub(crate) async fn sync_start_witness<F, E, H, S>(
+    merkle: &compact::Merkle<F, E, H::Digest, S>,
+    cache: &Cache<F, H::Digest>,
+    last_commit_loc: Location<F>,
+    inactivity_floor_loc: Location<F>,
+    last_commit_op_bytes: Vec<u8>,
+) -> Result<(), Error<F>>
+where
+    F: Family,
+    E: Context,
+    H: Hasher,
+    S: Strategy,
+{
+    persist_witness::<F, E, H, S>(
+        merkle,
+        cache,
+        last_commit_loc,
+        inactivity_floor_loc,
+        last_commit_op_bytes,
+        PersistMode::SyncStart,
     )
     .await
 }

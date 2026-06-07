@@ -98,10 +98,9 @@ pub(super) enum MaintenanceAction<T> {
     /// Best-effort background write preflush.
     ///
     /// This is coalesced by the actor loop and skips databases that are already
-    /// busy. The actor may cancel it before foreground finalization. Prune
-    /// remains the authoritative durable boundary before marshal history is
-    /// discarded.
-    Preflush,
+    /// busy. Prune remains the authoritative durable boundary before marshal
+    /// history is discarded.
+    Preflush { targets: T },
 
     /// Prune databases and marshal to the provided finalized boundary.
     Prune { height: Height, targets: T },
@@ -153,13 +152,23 @@ impl<T: Clone> Maintenance<T> {
         let interval = u64::try_from(self.config.interval.get())
             .expect("maintenance interval should fit in u64");
         if !height.get().is_multiple_of(interval) {
-            return MaintenanceAction::Preflush;
+            let (_, targets) = self
+                .retained_targets
+                .front()
+                .cloned()
+                .expect("retained preflush targets must exist");
+            return MaintenanceAction::Preflush { targets };
         }
 
         // Do not prune until we've observed a full rewind-safe window
         // of finalized blocks after startup.
         if self.retained_targets.len() < self.prune_retention_window {
-            return MaintenanceAction::Preflush;
+            let (_, targets) = self
+                .retained_targets
+                .front()
+                .cloned()
+                .expect("retained preflush targets must exist");
+            return MaintenanceAction::Preflush { targets };
         }
 
         let (height, targets) = self
@@ -793,11 +802,10 @@ where
 /// Callers can then schedule this work separately so preflushes and pruning do
 /// not delay subsequent mailbox polling.
 ///
-/// Preflush maintenance is best effort and may be coalesced, skipped when a
-/// database is already busy, or canceled by the actor before foreground
-/// finalization. Prune maintenance always runs database pruning before marshal
-/// pruning so the actor never drops marshal history ahead of the corresponding
-/// durable database boundary.
+/// Preflush maintenance is best effort and may be coalesced or skipped when a
+/// database is already busy. Prune maintenance always runs database pruning
+/// before marshal pruning so the actor never drops marshal history ahead of the
+/// corresponding durable database boundary.
 /// [`MaintenanceAction::None`] is a no-op.
 pub(super) async fn run_maintenance<E, DBs, S, V>(
     databases: DBs,
@@ -811,11 +819,11 @@ pub(super) async fn run_maintenance<E, DBs, S, V>(
 {
     match maintenance {
         MaintenanceAction::None => {}
-        MaintenanceAction::Preflush => {
-            databases.preflush().await;
+        MaintenanceAction::Preflush { targets } => {
+            databases.preflush_to(&targets).await;
         }
         MaintenanceAction::Prune { height, targets } => {
-            databases.preflush().await;
+            databases.preflush_to(&targets).await;
             databases.prune(&targets).await;
             marshal.prune(height);
         }
@@ -983,6 +991,10 @@ mod tests {
 
         async fn preflush(&self) {
             self.events.lock().push("preflush");
+        }
+
+        async fn preflush_to(&self, _targets: &Self::SyncTargets) {
+            self.events.lock().push("preflush_to");
         }
 
         async fn prune(&self, _targets: &Self::SyncTargets) {
@@ -1644,11 +1656,11 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::Preflush,
+            MaintenanceAction::Preflush { targets: 10 },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
-            MaintenanceAction::Preflush,
+            MaintenanceAction::Preflush { targets: 10 },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(3), 30_u64),
@@ -1671,11 +1683,11 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::Preflush,
+            MaintenanceAction::Preflush { targets: 10 },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
-            MaintenanceAction::Preflush,
+            MaintenanceAction::Preflush { targets: 10 },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(3), 30_u64),
@@ -1698,7 +1710,7 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::Preflush,
+            MaintenanceAction::Preflush { targets: 10 },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
@@ -1731,23 +1743,23 @@ mod tests {
             )
             .await;
 
-            assert_eq!(&*databases.events.lock(), &["preflush", "prune"]);
+            assert_eq!(&*databases.events.lock(), &["preflush_to", "prune"]);
         });
     }
 
     #[test]
-    fn preflush_maintenance_writes_pending_data() {
+    fn preflush_maintenance_preflushes_target() {
         deterministic::Runner::default().start(|context| async move {
             let marshal = init_marshal_mailbox(context.child("marshal")).await;
             let databases = MaintenanceOrderDbSet::default();
             run_maintenance::<deterministic::Context, _, _, _>(
                 databases.clone(),
                 marshal,
-                MaintenanceAction::Preflush,
+                MaintenanceAction::Preflush { targets: () },
             )
             .await;
 
-            assert_eq!(&*databases.events.lock(), &["preflush"]);
+            assert_eq!(&*databases.events.lock(), &["preflush_to"]);
         });
     }
 

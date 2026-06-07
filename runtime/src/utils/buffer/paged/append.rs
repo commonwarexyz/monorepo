@@ -31,11 +31,11 @@ use crate::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs,
+    Blob, BlobSync, Error, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
-use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
+use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard, Mutex};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -51,7 +51,6 @@ enum ProtectedCrc {
 }
 
 /// Describes the state of the underlying blob with respect to the buffer.
-#[derive(Clone)]
 struct BlobState<B: Blob> {
     blob: B,
 
@@ -62,15 +61,35 @@ struct BlobState<B: Blob> {
     /// will contain its CRC record.
     partial_page_state: Option<Checksum>,
 
-    /// Whether prior plain writes or resizes must be made durable by a full sync.
-    needs_sync: bool,
+    /// Monotonic mutation generation for plain writes and resizes.
+    generation: u64,
+
+    /// Highest generation known to be durable.
+    durable_generation: u64,
+
+}
+
+struct PendingSync {
+    generation: u64,
+    handle: BlobSync,
 }
 
 impl<B: Blob> BlobState<B> {
+    const fn mark_dirty(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("sync generation overflow");
+    }
+
+    const fn needs_sync(&self) -> bool {
+        self.durable_generation < self.generation
+    }
+
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
+        self.mark_dirty();
         Ok(())
     }
 
@@ -80,18 +99,18 @@ impl<B: Blob> BlobState<B> {
     /// mutations. Otherwise, writes the bytes and then syncs the blob.
     async fn write_at_sync(
         &mut self,
+        pending_sync: &Mutex<Option<PendingSync>>,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.needs_sync {
+        if self.needs_sync() {
             self.write_at(offset, bufs).await?;
-            self.sync().await
+            self.sync(pending_sync).await
         } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained
-            // buffer as durable.
-            self.needs_sync = true;
+            self.mark_dirty();
+            let generation = self.generation;
             self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
+            self.durable_generation = generation;
             Ok(())
         }
     }
@@ -99,12 +118,13 @@ impl<B: Blob> BlobState<B> {
     /// Write bytes to the underlying blob, optionally making them durable.
     async fn write_at_maybe_sync(
         &mut self,
+        pending_sync: &Mutex<Option<PendingSync>>,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
         sync: bool,
     ) -> Result<(), Error> {
         if sync {
-            self.write_at_sync(offset, bufs).await
+            self.write_at_sync(pending_sync, offset, bufs).await
         } else {
             self.write_at(offset, bufs).await
         }
@@ -113,17 +133,42 @@ impl<B: Blob> BlobState<B> {
     /// Resize the underlying blob and mark it as needing sync.
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
-        self.needs_sync = true;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Start syncing pending mutations without waiting for completion.
+    fn sync_start(&mut self, pending_sync: &Mutex<Option<PendingSync>>) -> Result<(), Error> {
+        if !self.needs_sync() {
+            return Ok(());
+        }
+
+        let mut pending_sync = pending_sync.lock();
+        if pending_sync
+            .as_ref()
+            .is_some_and(|pending| pending.generation >= self.generation)
+        {
+            return Ok(());
+        }
+        *pending_sync = Some(PendingSync {
+            generation: self.generation,
+            handle: self.blob.sync_start()?,
+        });
         Ok(())
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
-            return Ok(());
+    async fn sync(&mut self, pending_sync: &Mutex<Option<PendingSync>>) -> Result<(), Error> {
+        while self.needs_sync() {
+            self.sync_start(pending_sync)?;
+            let pending = pending_sync
+                .lock()
+                .take()
+                .expect("pending sync should exist after sync_start");
+            let generation = pending.generation;
+            pending.handle.await?;
+            self.durable_generation = self.durable_generation.max(generation);
         }
-        self.blob.sync().await?;
-        self.needs_sync = false;
         Ok(())
     }
 }
@@ -134,6 +179,9 @@ impl<B: Blob> BlobState<B> {
 pub struct Append<B: Blob> {
     /// The underlying blob being wrapped.
     blob_state: Arc<AsyncRwLock<BlobState<B>>>,
+
+    /// Submitted sync completion handle for the underlying blob.
+    pending_sync: Arc<Mutex<Option<PendingSync>>>,
 
     /// Unique id assigned to this blob by the page cache.
     id: u64,
@@ -186,7 +234,12 @@ impl<B: Blob> Append<B> {
         }
 
         let capacity = capacity_with_floor(capacity, cache_ref.page_size());
-        let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
+        let (generation, durable_generation) = if invalid_data_found {
+            (0, 0)
+        } else {
+            // Ensure pending writes on the wrapped blob are synced.
+            (1, 0)
+        };
 
         let (blob_state, partial_data) = match partial_page_state {
             Some((partial_page, crc_record)) => (
@@ -194,7 +247,8 @@ impl<B: Blob> Append<B> {
                     blob,
                     current_page: pages - 1,
                     partial_page_state: Some(crc_record),
-                    needs_sync,
+                    generation,
+                    durable_generation,
                 },
                 Some(partial_page),
             ),
@@ -203,7 +257,8 @@ impl<B: Blob> Append<B> {
                     blob,
                     current_page: pages,
                     partial_page_state: None,
-                    needs_sync,
+                    generation,
+                    durable_generation,
                 },
                 None,
             ),
@@ -218,6 +273,7 @@ impl<B: Blob> Append<B> {
 
         Ok(Self {
             blob_state: Arc::new(AsyncRwLock::new(blob_state)),
+            pending_sync: Arc::new(Mutex::new(None)),
             id: cache_ref.next_id(),
             cache_ref,
             buffer: Arc::new(AsyncRwLock::new(buffer)),
@@ -428,6 +484,7 @@ impl<B: Blob> Append<B> {
                     let has_second_write = physical_pages.len() > CHECKSUM_SLOT_SIZE;
                     blob_state
                         .write_at_maybe_sync(
+                            &self.pending_sync,
                             write_at_offset + prefix_len as u64,
                             first_payload,
                             sync && !has_second_write,
@@ -446,6 +503,7 @@ impl<B: Blob> Append<B> {
                     let _ = physical_pages.split_to(CHECKSUM_SLOT_SIZE);
                     blob_state
                         .write_at_maybe_sync(
+                            &self.pending_sync,
                             write_at_offset + (logical_page_size + CHECKSUM_SLOT_SIZE) as u64,
                             physical_pages,
                             sync && !has_first_write,
@@ -474,6 +532,7 @@ impl<B: Blob> Append<B> {
                     let has_second_write = physical_pages.len() > skip;
                     blob_state
                         .write_at_maybe_sync(
+                            &self.pending_sync,
                             write_at_offset + prefix_len as u64,
                             first_payload,
                             sync && !has_second_write,
@@ -492,6 +551,7 @@ impl<B: Blob> Append<B> {
                     let _ = physical_pages.split_to(skip);
                     blob_state
                         .write_at_maybe_sync(
+                            &self.pending_sync,
                             write_at_offset + physical_page_size as u64,
                             physical_pages,
                             sync && !has_first_write,
@@ -507,7 +567,12 @@ impl<B: Blob> Append<B> {
             None => {
                 // No protected regions, write everything in one operation
                 blob_state
-                    .write_at_maybe_sync(write_at_offset, physical_pages, sync)
+                    .write_at_maybe_sync(
+                        &self.pending_sync,
+                        write_at_offset,
+                        physical_pages,
+                        sync,
+                    )
                     .await?;
                 Ok(sync)
             }
@@ -922,6 +987,7 @@ impl<B: Blob> Append<B> {
     /// Durably rewrite a committed page to a shorter partial length.
     async fn sync_partial_page_shrink(
         blob_state: &mut BlobState<B>,
+        pending_sync: &Mutex<Option<PendingSync>>,
         page: u64,
         logical_page_size: u64,
         new_len: u16,
@@ -952,13 +1018,13 @@ impl<B: Blob> Append<B> {
             .ok_or(Error::OffsetOverflow)?;
         let staged_slot = Self::checksum_slot_bytes(0, new_crc);
         blob_state
-            .write_at_sync(new_slot_offset, staged_slot.to_vec())
+            .write_at_sync(pending_sync, new_slot_offset, staged_slot.to_vec())
             .await?;
 
         // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
         // both slots may be valid, but recovery still chooses the old longer length.
         blob_state
-            .write_at_sync(new_slot_offset, new_len.to_be_bytes().to_vec())
+            .write_at_sync(pending_sync, new_slot_offset, new_len.to_be_bytes().to_vec())
             .await?;
 
         // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across
@@ -969,7 +1035,7 @@ impl<B: Blob> Append<B> {
             .ok_or(Error::OffsetOverflow)?;
         let len_size = std::mem::size_of::<u16>();
         blob_state
-            .write_at_sync(old_slot_offset, vec![0u8; len_size])
+            .write_at_sync(pending_sync, old_slot_offset, vec![0u8; len_size])
             .await?;
 
         let final_record = if new_slot_start == 0 {
@@ -1054,6 +1120,34 @@ impl<B: Blob> Append<B> {
         Ok(())
     }
 
+    /// Flush buffered data and start syncing pending mutations.
+    pub async fn sync_start(&self) -> Result<(), Error> {
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, true, false).await?;
+        let mut blob_state = self.blob_state.write().await;
+        blob_state.sync_start(&self.pending_sync)
+    }
+
+    /// Flush buffered data and start syncing pending mutations, returning a completion handle.
+    pub async fn sync_start_waitable(&self) -> Result<Option<BlobSync>, Error> {
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, true, false).await?;
+        let blob_state = self.blob_state.write().await;
+        if !blob_state.needs_sync() {
+            return Ok(None);
+        }
+
+        let generation = blob_state.generation;
+        let handle = blob_state.blob.sync_start()?;
+        let blob_state = self.blob_state.clone();
+        Ok(Some(Box::pin(async move {
+            handle.await?;
+            let mut blob_state = blob_state.write().await;
+            blob_state.durable_generation = blob_state.durable_generation.max(generation);
+            Ok(())
+        })))
+    }
+
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there
@@ -1071,7 +1165,7 @@ impl<B: Blob> Append<B> {
         // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
         // durability barrier is still pending.
         let mut blob_state = self.blob_state.write().await;
-        blob_state.sync().await
+        blob_state.sync(&self.pending_sync).await
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -1210,6 +1304,7 @@ impl<B: Blob> Append<B> {
 
         let final_record = Self::sync_partial_page_shrink(
             blob_guard,
+            &self.pending_sync,
             full_pages,
             logical_page_size,
             partial_bytes as u16,
@@ -2133,6 +2228,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             self.inner.sync().await
+        }
+
+        fn sync_start(&self) -> Result<crate::BlobSync, Error> {
+            self.inner.sync_start()
         }
     }
 

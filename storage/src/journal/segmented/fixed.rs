@@ -20,7 +20,7 @@
 //! All data must be assigned to a `section`. This allows pruning entire sections
 //! (and their corresponding blobs) independently.
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager, SectionSync};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
@@ -374,6 +374,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.sync(section).await
     }
 
+    /// Start syncing the given section without waiting for completion.
+    pub async fn sync_start(&self, section: u64) -> Result<(), Error> {
+        self.manager.sync_start(section).await
+    }
+
+    /// Start syncing the given section and return a handle that waits for completion.
+    pub async fn sync_start_waitable(&self, section: u64) -> Result<Option<SectionSync>, Error> {
+        self.manager.sync_start_waitable(section).await
+    }
+
     /// Flush the given section to storage without waiting for durability.
     pub async fn flush(&self, section: u64) -> Result<(), Error> {
         self.manager.flush(section).await
@@ -382,6 +392,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Sync all sections to storage.
     pub async fn sync_all(&self) -> Result<(), Error> {
         self.manager.sync_all().await
+    }
+
+    /// Start syncing all sections without waiting for completion.
+    pub async fn sync_start_all(&self) -> Result<(), Error> {
+        self.manager.sync_start_all().await
     }
 
     /// Flush all sections to storage without waiting for durability.

@@ -45,6 +45,8 @@ use std::{
     sync::{Arc, Weak},
 };
 
+type LoadedWitness<F, D, K, V> = witness::ActiveWitness<F, D, Operation<F, K, V>>;
+
 /// Configuration for a compact immutable authenticated db.
 #[derive(Clone)]
 pub struct Config<C, S: Strategy> {
@@ -260,16 +262,15 @@ where
             .to_vec()
     }
 
-    async fn load_active_witness(
+    fn load_active_witness(
         merkle: &compact_merkle::Merkle<F, E, H::Digest, S>,
         commit_codec_config: &C,
-    ) -> Result<(ServeState<F, H::Digest>, Operation<F, K, V>), Error<F>> {
+    ) -> Result<LoadedWitness<F, H::Digest, K, V>, Error<F>> {
         witness::load_active_witness::<F, E, H, S, _, Operation<F, K, V>, _>(
             merkle,
             commit_codec_config,
             Operation::has_floor,
         )
-        .await
     }
 
     /// Build a compact db handle from already-verified compact state.
@@ -339,7 +340,7 @@ where
         }
 
         let (witness, last_commit_op) =
-            Self::load_active_witness(&merkle, &commit_codec_config).await?;
+            Self::load_active_witness(&merkle, &commit_codec_config)?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
@@ -557,6 +558,21 @@ where
         .await
     }
 
+    /// Write pending compact witness bytes and start syncing without waiting for durability.
+    pub async fn sync_start_pending(&self) -> Result<(), Error<F>>
+    where
+        F: Family,
+    {
+        witness::sync_start_witness::<F, E, H, S>(
+            &self.merkle,
+            &self.witness,
+            self.last_commit_loc,
+            self.inactivity_floor_loc,
+            Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc),
+        )
+        .await
+    }
+
     /// Commit the current db state through the retained-base journal commit path.
     pub async fn commit(&self) -> Result<(), Error<F>>
     where
@@ -572,12 +588,12 @@ where
         .await
     }
 
-    async fn reload_active_witness(&mut self) -> Result<(), Error<F>>
+    fn reload_active_witness(&mut self) -> Result<(), Error<F>>
     where
         F: Family,
     {
         let (witness, last_commit_op) =
-            Self::load_active_witness(&self.merkle, &self.commit_codec_config).await?;
+            Self::load_active_witness(&self.merkle, &self.commit_codec_config)?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
@@ -617,7 +633,7 @@ where
         F: Family,
     {
         self.merkle.rewind().await?;
-        self.reload_active_witness().await?;
+        self.reload_active_witness()?;
         Ok(())
     }
 
@@ -632,7 +648,7 @@ where
         self.merkle
             .rewind_to_base(target.leaf_count, target.root)
             .await?;
-        self.reload_active_witness().await?;
+        self.reload_active_witness()?;
         Ok(())
     }
 

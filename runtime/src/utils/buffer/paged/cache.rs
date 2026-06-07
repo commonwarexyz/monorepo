@@ -697,6 +697,10 @@ mod tests {
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
         }
+
+        fn sync_start(&self) -> Result<crate::BlobSync, Error> {
+            Ok(Box::pin(async { Ok(()) }))
+        }
     }
 
     #[derive(Clone)]
@@ -775,6 +779,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
+        }
+
+        fn sync_start(&self) -> Result<crate::BlobSync, Error> {
+            Ok(Box::pin(async { Ok(()) }))
         }
     }
 

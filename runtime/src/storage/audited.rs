@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut};
+use crate::{deterministic::Auditor, BlobSync, Error, IoBufs, IoBufsMut};
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -145,6 +145,14 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             hasher.update(&self.name);
         });
         self.inner.sync().await
+    }
+
+    fn sync_start(&self) -> Result<BlobSync, Error> {
+        self.auditor.event(b"sync_start", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
+        self.inner.sync_start()
     }
 }
 
@@ -330,6 +338,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
+        }
+
+        fn sync_start(&self) -> Result<crate::BlobSync, Error> {
+            Ok(Box::pin(async { Ok(()) }))
         }
     }
 

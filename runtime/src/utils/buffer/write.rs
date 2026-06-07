@@ -1,5 +1,5 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBufs};
-use commonware_utils::sync::AsyncRwLock;
+use crate::{buffer::tip::Buffer, Blob, BlobSync, Buf, BufferPool, BufferPooler, Error, IoBufs};
+use commonware_utils::sync::{AsyncRwLock, Mutex};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// Shared writer state.
@@ -10,15 +10,30 @@ struct State<B: Blob> {
     /// Buffered bytes at the logical tip of the blob.
     buffer: Buffer,
 
-    /// Whether a prior plain mutation must be persisted with [`Blob::sync`].
-    ///
-    /// [`State::write_at_sync`] uses [`Blob::write_at_sync`] only when this is
-    /// false, otherwise it must use [`Blob::sync`] to cover earlier unsynced
-    /// mutations.
-    needs_sync: bool,
+    /// Monotonic mutation generation for plain writes and resizes.
+    generation: u64,
+
+    /// Highest generation known to be durable.
+    durable_generation: u64,
+}
+
+struct PendingSync {
+    generation: u64,
+    handle: BlobSync,
 }
 
 impl<B: Blob> State<B> {
+    const fn mark_dirty(&mut self) {
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .expect("sync generation overflow");
+    }
+
+    const fn needs_sync(&self) -> bool {
+        self.durable_generation < self.generation
+    }
+
     /// Read bytes from the underlying blob.
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         Ok(self.blob.read_at(offset, len).await?.freeze())
@@ -27,7 +42,7 @@ impl<B: Blob> State<B> {
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.blob.write_at(offset, bufs).await?;
-        self.needs_sync = true;
+        self.mark_dirty();
         Ok(())
     }
 
@@ -37,18 +52,18 @@ impl<B: Blob> State<B> {
     /// mutations. Otherwise, writes the bytes and then syncs the blob.
     async fn write_at_sync(
         &mut self,
+        pending_sync: &Mutex<Option<PendingSync>>,
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.needs_sync {
+        if self.needs_sync() {
             self.write_at(offset, bufs).await?;
-            self.sync().await
+            self.sync(pending_sync).await
         } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained
-            // buffer as durable.
-            self.needs_sync = true;
+            self.mark_dirty();
+            let generation = self.generation;
             self.blob.write_at_sync(offset, bufs).await?;
-            self.needs_sync = false;
+            self.durable_generation = generation;
             Ok(())
         }
     }
@@ -56,17 +71,42 @@ impl<B: Blob> State<B> {
     /// Resize the underlying blob and mark the resize as needing sync.
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
-        self.needs_sync = true;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Start syncing pending mutations without waiting for completion.
+    fn sync_start(&mut self, pending_sync: &Mutex<Option<PendingSync>>) -> Result<(), Error> {
+        if !self.needs_sync() {
+            return Ok(());
+        }
+
+        let mut pending_sync = pending_sync.lock();
+        if pending_sync
+            .as_ref()
+            .is_some_and(|pending| pending.generation >= self.generation)
+        {
+            return Ok(());
+        }
+        *pending_sync = Some(PendingSync {
+            generation: self.generation,
+            handle: self.blob.sync_start()?,
+        });
         Ok(())
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
-            return Ok(());
+    async fn sync(&mut self, pending_sync: &Mutex<Option<PendingSync>>) -> Result<(), Error> {
+        while self.needs_sync() {
+            self.sync_start(pending_sync)?;
+            let pending = pending_sync
+                .lock()
+                .take()
+                .expect("pending sync should exist after sync_start");
+            let generation = pending.generation;
+            pending.handle.await?;
+            self.durable_generation = self.durable_generation.max(generation);
         }
-        self.blob.sync().await?;
-        self.needs_sync = false;
         Ok(())
     }
 }
@@ -126,6 +166,10 @@ impl<B: Blob> State<B> {
 pub struct Write<B: Blob> {
     /// Shared blob, tip buffer, and durability state.
     state: Arc<AsyncRwLock<State<B>>>,
+
+    /// Submitted sync completion handle, kept out of the async rwlock state so readers can be
+    /// spawned across threads.
+    pending_sync: Arc<Mutex<Option<PendingSync>>>,
 }
 
 impl<B: Blob> Write<B> {
@@ -136,8 +180,10 @@ impl<B: Blob> Write<B> {
             state: Arc::new(AsyncRwLock::new(State {
                 blob,
                 buffer: Buffer::new(size, capacity.get(), pool),
-                needs_sync: true, // ensure pending writes on the wrapped blob are synced
+                generation: 1, // ensure pending writes on the wrapped blob are synced
+                durable_generation: 0,
             })),
+            pending_sync: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -294,13 +340,43 @@ impl<B: Blob> Write<B> {
         Ok(())
     }
 
+    /// Flush buffered bytes and start syncing tracked mutations.
+    pub async fn sync_start(&self) -> Result<(), Error> {
+        let mut state = self.state.write().await;
+        if let Some((buf, offset)) = state.buffer.take() {
+            state.write_at(offset, buf).await?;
+        }
+        state.sync_start(&self.pending_sync)
+    }
+
+    /// Flush buffered bytes and start syncing tracked mutations, returning a completion handle.
+    pub async fn sync_start_waitable(&self) -> Result<Option<BlobSync>, Error> {
+        let mut state = self.state.write().await;
+        if let Some((buf, offset)) = state.buffer.take() {
+            state.write_at(offset, buf).await?;
+        }
+        if !state.needs_sync() {
+            return Ok(None);
+        }
+
+        let generation = state.generation;
+        let handle = state.blob.sync_start()?;
+        let state = self.state.clone();
+        Ok(Some(Box::pin(async move {
+            handle.await?;
+            let mut state = state.write().await;
+            state.durable_generation = state.durable_generation.max(generation);
+            Ok(())
+        })))
+    }
+
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&self) -> Result<(), Error> {
         let mut state = self.state.write().await;
         if let Some((buf, offset)) = state.buffer.take() {
-            return state.write_at_sync(offset, buf).await;
+            return state.write_at_sync(&self.pending_sync, offset, buf).await;
         }
 
-        state.sync().await
+        state.sync(&self.pending_sync).await
     }
 }

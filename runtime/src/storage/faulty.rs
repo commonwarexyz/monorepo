@@ -1,6 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{deterministic::BoxDynRng, Error, IoBufs, IoBufsMut};
+use crate::{deterministic::BoxDynRng, BlobSync, Error, IoBufs, IoBufsMut};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::Rng;
@@ -390,6 +390,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
             return Err(Error::Io(injected_io_error()));
         }
         self.inner.sync().await
+    }
+
+    fn sync_start(&self) -> Result<BlobSync, Error> {
+        if self.ctx.should_fail(Op::Sync) {
+            return Err(Error::Io(injected_io_error()));
+        }
+        self.inner.sync_start()
     }
 }
 

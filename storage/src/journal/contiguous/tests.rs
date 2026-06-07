@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
-        deterministic, telemetry::metrics, Blob, Clock, Error, IoBufs, IoBufsMut, Metrics, Name,
-        Storage, Supervisor, Tracing,
+        deterministic, telemetry::metrics, Blob, BlobSync, Clock, Error, IoBufs, IoBufsMut,
+        Metrics, Name, Storage, Supervisor, Tracing,
     };
     use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
     use std::{
@@ -176,6 +176,13 @@ pub(super) mod partition_sync_fault {
                 return Err(Error::Io(IoError::other("injected partition sync fault")));
             }
             self.inner.sync().await
+        }
+
+        fn sync_start(&self) -> Result<BlobSync, Error> {
+            if self.partition == self.fail_partition {
+                return Err(Error::Io(IoError::other("injected partition sync fault")));
+            }
+            self.inner.sync_start()
         }
     }
 }

@@ -212,13 +212,24 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// history can no longer be replayed.
     fn persist(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send;
 
-    /// Best-effort write preflush that can run in the background.
+    /// Best-effort preflush that can run in the background.
     ///
     /// Implementations should avoid mutating logical database state. QMDB
-    /// implementations use this to write pending derived index data without
-    /// waiting for storage durability.
+    /// implementations use this to write pending derived index data and start
+    /// storage sync work without waiting for durability.
     fn preflush(&self) -> impl Future<Output = Result<(), Self::Error>> + Send {
         async { Ok(()) }
+    }
+
+    /// Best-effort preflush for a specific durable target.
+    ///
+    /// Implementations that can map a target to a logical storage boundary should avoid starting
+    /// sync work beyond that boundary. The default falls back to [`ManagedDb::preflush`].
+    fn preflush_to(
+        &self,
+        _target: &Self::SyncTarget,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.preflush()
     }
 
     /// Prune the database to a previously finalized sync target.
@@ -311,6 +322,12 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// currently being mutated, this should skip it rather than queueing
     /// behind foreground block work.
     fn preflush(&self) -> impl Future<Output = ()> + Send;
+
+    /// Best-effort preflush for the provided prune targets.
+    ///
+    /// Implementations must not wait for write locks. If a database is currently being mutated,
+    /// this should skip it rather than queueing behind foreground block work.
+    fn preflush_to(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
 
     /// Prune each database to the provided per-database targets.
     ///
@@ -503,6 +520,13 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
             return;
         };
         preflush_or_panic(&*database, None).await;
+    }
+
+    async fn preflush_to(&self, target: &Self::SyncTargets) {
+        let Ok(database) = self.try_read() else {
+            return;
+        };
+        preflush_to_or_panic(&*database, target, None).await;
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
@@ -751,6 +775,17 @@ macro_rules! impl_database_set {
                             return;
                         };
                         preflush_or_panic(&*database, Some($idx)).await;
+                    },
+                )+);
+            }
+
+            async fn preflush_to(&self, targets: &Self::SyncTargets) {
+                join!($(
+                    async {
+                        let Ok(database) = self.$idx.try_read() else {
+                            return;
+                        };
+                        preflush_to_or_panic(&*database, &targets.$idx, Some($idx)).await;
                     },
                 )+);
             }
@@ -1471,6 +1506,27 @@ async fn preflush_or_panic<E, T: ManagedDb<E>>(database: &T, index: Option<usize
     }
 }
 
+async fn preflush_to_or_panic<E, T: ManagedDb<E>>(
+    database: &T,
+    target: &T::SyncTarget,
+    index: Option<usize>,
+) {
+    // Preflush failures are fatal for the same reason as persist failures: the
+    // database may already have partially advanced its durable maintenance state.
+    if let Err(err) = database.preflush_to(target).await {
+        match index {
+            Some(index) => panic!(
+                "database target preflush failed (index {index}, type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+            None => panic!(
+                "database target preflush failed (type {}): {err:?}",
+                core::any::type_name::<T>(),
+            ),
+        }
+    }
+}
+
 async fn prune_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: &T::SyncTarget,
@@ -1731,6 +1787,11 @@ mod tests {
             Ok(())
         }
 
+        async fn preflush_to(&self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+            self.sync_count.fetch_add(10, Ordering::SeqCst);
+            Ok(())
+        }
+
         async fn sync_target(&self) -> Self::SyncTarget {}
 
         async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
@@ -1988,6 +2049,24 @@ mod tests {
             .await;
 
             assert_eq!(sync_count.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn database_set_preflush_to_calls_managed_db_preflush_to_when_lock_free() {
+        deterministic::Runner::default().start(|_context| async move {
+            let sync_count = Arc::new(AtomicUsize::new(0));
+            let database = Arc::new(AsyncRwLock::new(SyncCountingDb {
+                sync_count: sync_count.clone(),
+            }));
+
+            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush_to(
+                &database,
+                &(),
+            )
+            .await;
+
+            assert_eq!(sync_count.load(Ordering::SeqCst), 10);
         });
     }
 

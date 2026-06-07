@@ -24,7 +24,7 @@ use super::Header;
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
-    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
+    utils, BlobSync, Buf, BufferPool, Error, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
@@ -384,10 +384,19 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.io_handle
-            .sync(self.file.clone())
-            .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+        self.sync_start()?.await
+    }
+
+    fn sync_start(&self) -> Result<BlobSync, Error> {
+        let sync = self.io_handle.sync_start(self.file.clone())?;
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        Ok(Box::pin(async move {
+            sync.await.map_err(|e| match e {
+                Error::Io(err) => Error::BlobSyncFailed(partition, hex(&name), err),
+                err => err,
+            })
+        }))
     }
 }
 

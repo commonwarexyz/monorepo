@@ -57,6 +57,7 @@ stability_scope!(BETA {
         io::Error as IoError,
         net::SocketAddr,
         num::NonZeroUsize,
+        pin::Pin,
         time::{Duration, SystemTime},
     };
     pub(crate) use telemetry::metrics::{child_label, prefixed_name, METRICS_PREFIX};
@@ -75,6 +76,9 @@ stability_scope!(BETA {
 
     /// Default [`Blob`] version used when no version is specified via [`Storage::open`].
     pub const DEFAULT_BLOB_VERSION: u16 = 0;
+
+    /// Completion handle for a sync request that has already been submitted.
+    pub type BlobSync = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
 
     /// Errors that can occur when interacting with the runtime.
     #[derive(Error, Debug)]
@@ -800,6 +804,14 @@ stability_scope!(BETA {
 
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Submit a sync request and return a handle that waits for its completion.
+        ///
+        /// Unlike [`Blob::sync`], this method starts the durability operation before returning.
+        /// Dropping the returned handle does not make the submitted sync a durability guarantee
+        /// for the caller, but implementations should allow the submitted operation to continue
+        /// when possible.
+        fn sync_start(&self) -> Result<BlobSync, Error>;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

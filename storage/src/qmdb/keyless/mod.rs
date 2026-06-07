@@ -46,7 +46,7 @@
 use crate::{
     journal::{
         authenticated,
-        contiguous::{Contiguous, Flushable, Mutable, Reader},
+        contiguous::{BoundarySyncable, Contiguous, Flushable, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
@@ -393,7 +393,23 @@ where
     }
 
     /// Prune historical operations prior to `prune_loc` and sync all database state to disk.
-    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
+    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        let durable_size = Location::new(*self.last_commit_loc + 1);
+        self.prune_and_sync_to(prune_loc, durable_size).await
+    }
+
+    /// Prune historical operations prior to `prune_loc` after syncing through `durable_size`.
+    pub async fn prune_and_sync_to(
+        &mut self,
+        prune_loc: Location<F>,
+        durable_size: Location<F>,
+    ) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
         let _prune_timer = self.metrics.operations.prune_timer();
         let _sync_timer = self.metrics.operations.sync_timer();
         self.metrics.operations.prune_calls.inc();
@@ -404,7 +420,9 @@ where
                 self.inactivity_floor_loc,
             ));
         }
-        self.journal.prune_and_sync(prune_loc).await?;
+        self.journal
+            .prune_and_sync_to(prune_loc, durable_size)
+            .await?;
         self.update_metrics().await;
         Ok(())
     }
@@ -484,6 +502,24 @@ where
         C: Flushable,
     {
         self.journal.write_pending().await.map_err(Into::into)
+    }
+
+    /// Write pending Merkle nodes and start syncing without waiting for durability.
+    pub async fn sync_start_pending(&self) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        self.metrics.operations.sync_calls.inc();
+        self.journal.sync_start_pending().await.map_err(Into::into)
+    }
+
+    /// Write pending Merkle nodes and start syncing through `durable_size`.
+    pub async fn sync_start_to(&self, durable_size: Location<F>) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        self.metrics.operations.sync_calls.inc();
+        self.journal.sync_start_to(durable_size).await.map_err(Into::into)
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.

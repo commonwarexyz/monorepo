@@ -1,6 +1,6 @@
 use crate::{
     telemetry::metrics::{raw, Counter, Gauge, Register},
-    Buf, Error, IoBufs, IoBufsMut,
+    BlobSync, Buf, Error, IoBufs, IoBufsMut,
 };
 use std::{
     ops::{Deref, RangeInclusive},
@@ -175,6 +175,10 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
 
     async fn sync(&self) -> Result<(), Error> {
         self.inner.sync().await
+    }
+
+    fn sync_start(&self) -> Result<BlobSync, Error> {
+        self.inner.sync_start()
     }
 }
 

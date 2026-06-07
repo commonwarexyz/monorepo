@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Flushable, Many, Mutable, Reader},
+        contiguous::{fixed, variable, BoundarySyncable, Contiguous, Flushable, Many, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -355,6 +355,40 @@ where
         try_join!(
             self.journal.flush().map_err(Error::Journal),
             self.merkle.write_pending().map_err(Error::Merkle),
+        )?;
+        Ok(())
+    }
+
+    /// Write pending operation-log and Merkle data, then start syncing without waiting.
+    pub async fn sync_start_pending(&self) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        let journal_end = self.journal.size().await;
+        let merkle_leaves = self.merkle.leaves();
+        try_join!(
+            self.journal
+                .sync_start_to(journal_end)
+                .map_err(Error::Journal),
+            self.merkle
+                .sync_start_to_leaves(merkle_leaves)
+                .map_err(Error::Merkle),
+        )?;
+        Ok(())
+    }
+
+    /// Write pending operation-log and Merkle data, then start syncing through `durable_size`.
+    pub async fn sync_start_to(&self, durable_size: Location<F>) -> Result<(), Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        try_join!(
+            self.journal
+                .sync_start_to(*durable_size)
+                .map_err(Error::Journal),
+            self.merkle
+                .sync_start_to_leaves(durable_size)
+                .map_err(Error::Merkle),
         )?;
         Ok(())
     }
@@ -709,17 +743,36 @@ where
     pub async fn prune_and_sync(
         &mut self,
         prune_loc: Location<F>,
-    ) -> Result<Location<F>, Error<F>> {
+    ) -> Result<Location<F>, Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        let durable_size = self.size().await;
+        self.prune_and_sync_to(prune_loc, durable_size)
+            .await
+    }
+
+    /// Prune history below `prune_loc` after syncing through `durable_size`.
+    ///
+    /// `prune_loc` is the floor that can be removed. `durable_size` is the logical end of the
+    /// committed target that made that floor safe; later positions may remain replay-only.
+    pub async fn prune_and_sync_to(
+        &mut self,
+        prune_loc: Location<F>,
+        durable_size: Location<F>,
+    ) -> Result<Location<F>, Error<F>>
+    where
+        C: BoundarySyncable,
+    {
         if self.merkle.size() == 0 {
-            self.merkle.sync().await?;
-            self.journal.sync().await?;
+            self.merkle.sync_to_leaves(durable_size).await?;
+            self.journal.wait_for_sync_to(*durable_size).await?;
             return Ok(Location::new(self.reader().await.bounds().start));
         }
 
-        // Sync the Merkle structure before pruning the journal, otherwise its last element could
-        // end up behind the journal's first element after a crash, and there would be no way to
-        // replay the items between the structure's last element and the journal's first element.
-        self.merkle.sync().await?;
+        // Sync the Merkle structure through the target end before pruning the journal. If newer
+        // positions exist, startup can replay them from the retained operation log.
+        self.merkle.sync_to_leaves(durable_size).await?;
 
         self.journal.prune(*prune_loc).await?;
         let bounds = self.reader().await.bounds();
@@ -728,9 +781,11 @@ where
 
         if boundary > merkle_boundary {
             debug!(size = ?bounds.end, ?prune_loc, boundary = ?bounds.start, "pruned inactive ops");
-            self.merkle.prune_synced_and_sync(boundary).await?;
+            self.merkle
+                .prune_synced_and_sync_to(boundary, durable_size)
+                .await?;
         }
-        self.journal.sync().await?;
+        self.journal.wait_for_sync_to(*durable_size).await?;
 
         Ok(boundary)
     }

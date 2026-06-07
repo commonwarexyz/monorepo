@@ -11,11 +11,14 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufferPool, Error as RError, Metrics, Storage,
+    Blob, BlobSync, BufferPool, Error as RError, Metrics, Storage,
 };
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
+use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize, pin::Pin};
 use tracing::debug;
+
+/// A per-section sync completion handle.
+pub type SectionSync = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Clone + Send + Sync {
@@ -24,6 +27,12 @@ pub trait SectionBuffer: Clone + Send + Sync {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Start syncing pending data without waiting for completion.
+    fn sync_start(&self) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Start syncing pending data and return a handle that waits for completion.
+    fn sync_start_waitable(&self) -> impl Future<Output = Result<Option<BlobSync>, RError>> + Send;
 
     /// Flush buffered data to storage without waiting for durability.
     fn flush(&self) -> impl Future<Output = Result<(), RError>> + Send;
@@ -39,6 +48,14 @@ impl<B: Blob> SectionBuffer for Append<B> {
 
     async fn sync(&self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn sync_start(&self) -> Result<(), RError> {
+        Self::sync_start(self).await
+    }
+
+    async fn sync_start_waitable(&self) -> Result<Option<BlobSync>, RError> {
+        Self::sync_start_waitable(self).await
     }
 
     async fn flush(&self) -> Result<(), RError> {
@@ -57,6 +74,14 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn sync(&self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn sync_start(&self) -> Result<(), RError> {
+        Self::sync_start(self).await
+    }
+
+    async fn sync_start_waitable(&self) -> Result<Option<BlobSync>, RError> {
+        Self::sync_start_waitable(self).await
     }
 
     async fn flush(&self) -> Result<(), RError> {
@@ -236,6 +261,31 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(())
     }
 
+    /// Start syncing the given section without waiting for completion.
+    pub async fn sync_start(&self, section: u64) -> Result<(), Error> {
+        self.prune_guard(section)?;
+        if let Some(blob) = self.blobs.get(&section) {
+            self.synced.inc();
+            blob.sync_start().await.map_err(Error::Runtime)?;
+        }
+        Ok(())
+    }
+
+    /// Start syncing the given section and return a handle that waits for completion.
+    pub async fn sync_start_waitable(&self, section: u64) -> Result<Option<SectionSync>, Error> {
+        self.prune_guard(section)?;
+        let Some(blob) = self.blobs.get(&section) else {
+            return Ok(None);
+        };
+        let Some(handle) = blob.sync_start_waitable().await.map_err(Error::Runtime)? else {
+            return Ok(None);
+        };
+        self.synced.inc();
+        Ok(Some(Box::pin(async move {
+            handle.await.map_err(Error::Runtime)
+        })))
+    }
+
     /// Flush the given section to storage without waiting for durability.
     pub async fn flush(&self, section: u64) -> Result<(), Error> {
         self.prune_guard(section)?;
@@ -249,6 +299,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     pub async fn sync_all(&self) -> Result<(), Error> {
         let futures: Vec<_> = self.blobs.values().map(|blob| blob.sync()).collect();
         let results = try_join_all(futures).await.map_err(Error::Runtime)?;
+        self.synced.inc_by(results.len() as u64);
+        Ok(())
+    }
+
+    /// Start syncing all sections without waiting for completion.
+    pub async fn sync_start_all(&self) -> Result<(), Error> {
+        let results = try_join_all(self.blobs.values().map(|blob| blob.sync_start()))
+            .await
+            .map_err(Error::Runtime)?;
         self.synced.inc_by(results.len() as u64);
         Ok(())
     }

@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Flushable, Mutable, Reader},
+        contiguous::{BoundarySyncable, Contiguous, Flushable, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{Family, Location, Proof},
@@ -354,14 +354,14 @@ where
         Ok(self.log.prune(prune_loc).await?)
     }
 
-    /// Prune the operations log to `prune_loc` and sync the retained journal state. Does not touch
-    /// the bitmap.
-    pub(crate) async fn prune_log_and_sync(
+    /// Prune the operations log to `prune_loc` after syncing through `durable_size`.
+    pub(crate) async fn prune_log_and_sync_to(
         &mut self,
         prune_loc: Location<F>,
+        durable_size: Location<F>,
     ) -> Result<Location<F>, crate::qmdb::Error<F>>
     where
-        C: Persistable<Error = JournalError>,
+        C: BoundarySyncable + Persistable<Error = JournalError>,
     {
         if prune_loc > self.inactivity_floor_loc {
             return Err(crate::qmdb::Error::PruneBeyondMinRequired(
@@ -370,7 +370,7 @@ where
             ));
         }
 
-        Ok(self.log.prune_and_sync(prune_loc).await?)
+        Ok(self.log.prune_and_sync_to(prune_loc, durable_size).await?)
     }
 
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
@@ -780,6 +780,27 @@ where
         self.log.write_pending().await.map_err(Into::into)
     }
 
+    /// Write pending Merkle nodes and start syncing without waiting for durability.
+    pub async fn sync_start_pending(&self) -> Result<(), crate::qmdb::Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        self.metrics.operations.sync_calls.inc();
+        self.log.sync_start_pending().await.map_err(Into::into)
+    }
+
+    /// Write pending Merkle nodes and start syncing through `durable_size`.
+    pub async fn sync_start_to(
+        &self,
+        durable_size: Location<F>,
+    ) -> Result<(), crate::qmdb::Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        self.metrics.operations.sync_calls.inc();
+        self.log.sync_start_to(durable_size).await.map_err(Into::into)
+    }
+
     /// Prune historical operations prior to `prune_loc` and sync all database state to disk.
     #[tracing::instrument(
         name = "qmdb::any::Db::prune_and_sync",
@@ -793,12 +814,28 @@ where
     pub async fn prune_and_sync(
         &mut self,
         prune_loc: Location<F>,
-    ) -> Result<(), crate::qmdb::Error<F>> {
+    ) -> Result<(), crate::qmdb::Error<F>>
+    where
+        C: BoundarySyncable,
+    {
+        let durable_size = Location::new(*self.last_commit_loc + 1);
+        self.prune_and_sync_to(prune_loc, durable_size).await
+    }
+
+    /// Prune historical operations prior to `prune_loc` after syncing through `durable_size`.
+    pub async fn prune_and_sync_to(
+        &mut self,
+        prune_loc: Location<F>,
+        durable_size: Location<F>,
+    ) -> Result<(), crate::qmdb::Error<F>>
+    where
+        C: BoundarySyncable,
+    {
         let _prune_timer = self.metrics.operations.prune_timer();
         let _sync_timer = self.metrics.operations.sync_timer();
         self.metrics.operations.prune_calls.inc();
         self.metrics.operations.sync_calls.inc();
-        let actual_pruned = self.prune_log_and_sync(prune_loc).await?;
+        let actual_pruned = self.prune_log_and_sync_to(prune_loc, durable_size).await?;
         self.prune_bitmap(actual_pruned);
         self.update_metrics().await;
         Ok(())

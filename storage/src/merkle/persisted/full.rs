@@ -41,6 +41,8 @@ use std::{
 };
 use tracing::{debug, error, warn};
 
+type MissingSnapshot<F, D> = (Location<F>, Vec<D>, BTreeMap<Position<F>, D>);
+
 /// Append-only wrapper around [`batch::UnmerkleizedBatch`].
 ///
 /// The full Merkle structure's [`Merkle::sync`] only persists *appended* nodes
@@ -602,10 +604,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         futures::future::try_join_all(futs).await
     }
 
-    fn snapshot_missing(
-        &self,
-        journal_size: Position<F>,
-    ) -> Option<(Location<F>, Vec<D>, BTreeMap<Position<F>, D>)> {
+    fn snapshot_missing(&self, journal_size: Position<F>) -> Option<MissingSnapshot<F, D>> {
         let inner = self.inner.read();
         let size = inner.mem.size();
         let sync_target_leaves = inner.mem.leaves();
@@ -671,6 +670,49 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         Ok(())
     }
 
+    /// Write missing Merkle nodes and start syncing them without waiting for durability.
+    pub async fn sync_start(&self) -> Result<(), Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+
+        let journal_size = Position::<F>::new(self.journal.size().await);
+        let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
+            self.snapshot_missing(journal_size)
+        else {
+            if self.needs_sync.load(Ordering::Acquire) {
+                self.journal.sync_start().await?;
+            }
+            return Ok(());
+        };
+
+        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+        self.needs_sync.store(true, Ordering::Release);
+        self.journal.sync_start().await?;
+        self.prune_committed_mem(sync_target_leaves, pinned_nodes);
+        Ok(())
+    }
+
+    /// Write missing Merkle nodes and start syncing through `leaves`.
+    pub async fn sync_start_to_leaves(&self, leaves: Location<F>) -> Result<(), Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+        let target_size = Position::try_from(leaves)?;
+
+        let journal_size = Position::<F>::new(self.journal.size().await);
+        let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
+            self.snapshot_missing(journal_size)
+        else {
+            if self.needs_sync.load(Ordering::Acquire) {
+                self.journal.sync_start_to(*target_size).await?;
+            }
+            return Ok(());
+        };
+
+        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+        self.needs_sync.store(true, Ordering::Release);
+        self.journal.sync_start_to(*target_size).await?;
+        self.prune_committed_mem(sync_target_leaves, pinned_nodes);
+        Ok(())
+    }
+
     /// Sync the structure to disk.
     pub async fn sync(&self) -> Result<(), Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
@@ -690,6 +732,34 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         self.needs_sync.store(true, Ordering::Release);
         self.journal.sync().await?;
         self.needs_sync.store(false, Ordering::Release);
+        self.prune_committed_mem(sync_target_leaves, pinned_nodes);
+        Ok(())
+    }
+
+    /// Sync the structure through `leaves` without forcing later appended nodes durable.
+    pub async fn sync_to_leaves(&self, leaves: Location<F>) -> Result<(), Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+        let target_size = Position::try_from(leaves)?;
+
+        let journal_size = Position::<F>::new(self.journal.size().await);
+        let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
+            self.snapshot_missing(journal_size)
+        else {
+            if self.needs_sync.load(Ordering::Acquire) {
+                self.journal.wait_for_sync_to(*target_size).await?;
+                if self.journal.size().await <= *target_size {
+                    self.needs_sync.store(false, Ordering::Release);
+                }
+            }
+            return Ok(());
+        };
+
+        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+        self.needs_sync.store(true, Ordering::Release);
+        self.journal.wait_for_sync_to(*target_size).await?;
+        if self.journal.size().await <= *target_size {
+            self.needs_sync.store(false, Ordering::Release);
+        }
         self.prune_committed_mem(sync_target_leaves, pinned_nodes);
         Ok(())
     }
@@ -744,9 +814,42 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         self.prune_synced(loc, false).await
     }
 
-    /// Prune nodes after the caller has already synced appended nodes, then persist pruning state.
-    pub(crate) async fn prune_synced_and_sync(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
-        self.prune_synced(loc, true).await
+    /// Prune nodes and persist pruning state without syncing beyond `synced_leaves`.
+    pub(crate) async fn prune_synced_and_sync_to(
+        &mut self,
+        loc: Location<F>,
+        synced_leaves: Location<F>,
+    ) -> Result<(), Error<F>> {
+        let pos = Position::try_from(loc)?;
+        {
+            let inner = self.inner.get_mut();
+            if loc > inner.mem.leaves() {
+                return Err(Error::LeafOutOfBounds(loc));
+            }
+            if pos <= inner.pruned_to_pos {
+                self.journal
+                    .wait_for_sync_to(*Position::try_from(synced_leaves)?)
+                    .await?;
+                if self.journal.size().await <= *Position::try_from(synced_leaves)? {
+                    self.needs_sync.store(false, Ordering::Release);
+                }
+                return Ok(());
+            }
+        }
+
+        let pinned_nodes = self.update_metadata(pos).await?;
+
+        self.journal.prune(*pos).await?;
+        let synced_size = Position::try_from(synced_leaves)?;
+        self.journal.wait_for_sync_to(*synced_size).await?;
+        if self.journal.size().await <= *synced_size {
+            self.needs_sync.store(false, Ordering::Release);
+        }
+        let inner = self.inner.get_mut();
+        inner.mem.add_pinned_nodes(pinned_nodes);
+        inner.pruned_to_pos = pos;
+
+        Ok(())
     }
 
     /// Compute the root of the structure using `inactive_peaks` and the bagging carried by `hasher`.

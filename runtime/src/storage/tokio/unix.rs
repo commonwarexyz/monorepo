@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
+use crate::{BlobSync, Buf, BufferPool, Error, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use std::{
@@ -203,12 +203,20 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), Error> {
+        self.sync_start()?.await
+    }
+
+    fn sync_start(&self) -> Result<BlobSync, Error> {
         let file = self.file.clone();
-        task::spawn_blocking(move || file.sync_all())
-            .await
-            .map_err(|e| e.into())
-            .and_then(|r| r)
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
-        Ok(())
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let handle = task::spawn_blocking(move || file.sync_all());
+        Ok(Box::pin(async move {
+            handle
+                .await
+                .map_err(|e| e.into())
+                .and_then(|r| r)
+                .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e))
+        }))
     }
 }
