@@ -1,4 +1,4 @@
-use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
+use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_glue::stateful::db::{ManagedDb, Unmerkleized as _};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
@@ -77,11 +77,13 @@ fn env_u64(name: &str, default: u64) -> u64 {
 }
 
 fn digest(domain: u8, block: u64, append: u64) -> Digest {
-    let mut hasher = Sha256::new();
-    hasher.update(&[domain]);
-    hasher.update(&block.to_be_bytes());
-    hasher.update(&append.to_be_bytes());
-    hasher.finalize()
+    let block = u32::try_from(block).expect("block index must fit in u32");
+    let append = u32::try_from(append).expect("append index must fit in u32");
+    let mut bytes = [0; 32];
+    bytes[..4].copy_from_slice(&block.to_be_bytes());
+    bytes[4..8].copy_from_slice(&append.to_be_bytes());
+    bytes[8] = domain;
+    Digest::from(bytes)
 }
 
 fn key(block: u64, append: u64) -> Digest {
