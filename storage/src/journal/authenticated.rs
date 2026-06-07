@@ -7,9 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{
-            fixed, variable, BoundarySyncable, Contiguous, Flushable, Many, Mutable, Reader,
-        },
+        contiguous::{fixed, variable, BoundarySyncable, Contiguous, Many, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -349,19 +347,13 @@ where
         })
     }
 
-    /// Write pending operation-log and Merkle data without waiting for durability.
-    pub async fn write_pending(&self) -> Result<(), Error<F>>
-    where
-        C: Flushable,
-    {
-        try_join!(
-            self.journal.flush().map_err(Error::Journal),
-            self.merkle.write_pending().map_err(Error::Merkle),
-        )?;
+    /// Buffer pending Merkle data without waiting for durability.
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+        self.merkle.write_pending().await.map_err(Error::Merkle)?;
         Ok(())
     }
 
-    /// Write pending operation-log and Merkle data, then start syncing without waiting.
+    /// Start syncing pending operation-log and Merkle data without waiting.
     pub async fn sync_start_pending(&self) -> Result<(), Error<F>>
     where
         C: BoundarySyncable,
@@ -379,7 +371,7 @@ where
         Ok(())
     }
 
-    /// Write pending operation-log and Merkle data, then start syncing through `durable_size`.
+    /// Start syncing pending operation-log and Merkle data through `durable_size`.
     pub async fn sync_start_to(&self, durable_size: Location<F>) -> Result<(), Error<F>>
     where
         C: BoundarySyncable,
@@ -579,14 +571,11 @@ where
         Ok(())
     }
 
-    /// Apply a batch and write pending operation-log and Merkle data without waiting for durability.
-    pub async fn apply_batch_and_write_pending(
+    /// Apply a batch and buffer pending operation-log and Merkle data.
+    pub async fn apply_batch_and_buffer_pending(
         &mut self,
         batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
-    ) -> Result<(), Error<F>>
-    where
-        C: Flushable,
-    {
+    ) -> Result<(), Error<F>> {
         let batches = self.append_batches(batch).await?;
         self.merkle.apply_batch(&batch.inner)?;
 
@@ -594,11 +583,11 @@ where
             if !batches.is_empty() {
                 self.journal.append_many(Many::Nested(&batches)).await?;
             }
-            self.journal.flush().await
+            Ok(())
         };
         try_join!(
             journal.map_err(Error::Journal),
-            self.merkle.write_pending().map_err(Error::Merkle),
+            self.merkle.buffer_pending().map_err(Error::Merkle),
         )?;
 
         assert_eq!(*self.merkle.leaves(), self.journal.size().await);

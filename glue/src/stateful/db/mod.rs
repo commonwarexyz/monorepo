@@ -320,13 +320,17 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// Implementations must not wait for write locks. If a database is
     /// currently being mutated, this should skip it rather than queueing
     /// behind foreground block work.
-    fn preflush(&self) -> impl Future<Output = ()> + Send;
+    ///
+    /// Returns `true` if every database acquired its lock and attempted preflush.
+    fn preflush(&self) -> impl Future<Output = bool> + Send;
 
     /// Best-effort preflush for the provided prune targets.
     ///
     /// Implementations must not wait for write locks. If a database is currently being mutated,
     /// this should skip it rather than queueing behind foreground block work.
-    fn preflush_to(&self, targets: &Self::SyncTargets) -> impl Future<Output = ()> + Send;
+    ///
+    /// Returns `true` if every database acquired its lock and attempted preflush.
+    fn preflush_to(&self, targets: &Self::SyncTargets) -> impl Future<Output = bool> + Send;
 
     /// Prune each database to the provided per-database targets.
     ///
@@ -513,18 +517,20 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
         persist_or_panic(&mut *database, None).await;
     }
 
-    async fn preflush(&self) {
+    async fn preflush(&self) -> bool {
         let Ok(database) = self.try_read() else {
-            return;
+            return false;
         };
         preflush_or_panic(&*database, None).await;
+        true
     }
 
-    async fn preflush_to(&self, target: &Self::SyncTargets) {
+    async fn preflush_to(&self, target: &Self::SyncTargets) -> bool {
         let Ok(database) = self.try_read() else {
-            return;
+            return false;
         };
         preflush_to_or_panic(&*database, target, None).await;
+        true
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
@@ -766,26 +772,30 @@ macro_rules! impl_database_set {
                 )+);
             }
 
-            async fn preflush(&self) {
-                join!($(
+            async fn preflush(&self) -> bool {
+                let results = join!($(
                     async {
                         let Ok(database) = self.$idx.try_read() else {
-                            return;
+                            return false;
                         };
                         preflush_or_panic(&*database, Some($idx)).await;
+                        true
                     },
                 )+);
+                true $(&& results.$idx)+
             }
 
-            async fn preflush_to(&self, targets: &Self::SyncTargets) {
-                join!($(
+            async fn preflush_to(&self, targets: &Self::SyncTargets) -> bool {
+                let results = join!($(
                     async {
                         let Ok(database) = self.$idx.try_read() else {
-                            return;
+                            return false;
                         };
                         preflush_to_or_panic(&*database, &targets.$idx, Some($idx)).await;
+                        true
                     },
                 )+);
+                true $(&& results.$idx)+
             }
 
             async fn prune(&self, targets: &Self::SyncTargets) {
@@ -2041,11 +2051,13 @@ mod tests {
                 sync_count: sync_count.clone(),
             }));
 
-            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
-                &database,
-            )
-            .await;
+            let started =
+                <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
+                    &database,
+                )
+                .await;
 
+            assert!(started);
             assert_eq!(sync_count.load(Ordering::SeqCst), 1);
         });
     }
@@ -2058,12 +2070,12 @@ mod tests {
                 sync_count: sync_count.clone(),
             }));
 
-            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush_to(
-                &database,
-                &(),
-            )
+            let started = <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<
+                deterministic::Context,
+            >>::preflush_to(&database, &())
             .await;
 
+            assert!(started);
             assert_eq!(sync_count.load(Ordering::SeqCst), 10);
         });
     }
@@ -2077,17 +2089,21 @@ mod tests {
             }));
 
             let guard = database.write().await;
-            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
-                &database,
-            )
-            .await;
+            let started =
+                <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
+                    &database,
+                )
+                .await;
+            assert!(!started);
             assert_eq!(sync_count.load(Ordering::SeqCst), 0);
 
             drop(guard);
-            <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
-                &database,
-            )
-            .await;
+            let started =
+                <Arc<AsyncRwLock<SyncCountingDb>> as DatabaseSet<deterministic::Context>>::preflush(
+                    &database,
+                )
+                .await;
+            assert!(started);
             assert_eq!(sync_count.load(Ordering::SeqCst), 1);
         });
     }
@@ -2120,7 +2136,7 @@ mod tests {
             );
 
             let _ = release_tx.send(());
-            preflush.await;
+            assert!(preflush.await);
         });
     }
 
@@ -2143,8 +2159,10 @@ mod tests {
             let databases: DbSet = (left.clone(), right);
 
             let guard = left.write().await;
-            <DbSet as DatabaseSet<deterministic::Context>>::preflush(&databases).await;
+            let started =
+                <DbSet as DatabaseSet<deterministic::Context>>::preflush(&databases).await;
 
+            assert!(!started);
             assert_eq!(left_count.load(Ordering::SeqCst), 0);
             assert_eq!(right_count.load(Ordering::SeqCst), 1);
             drop(guard);

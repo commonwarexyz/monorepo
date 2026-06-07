@@ -105,18 +105,18 @@ pub trait Flushable: Contiguous {
     fn flush(&self) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
-/// A [Contiguous] journal that can start syncing buffered writes without waiting.
+/// A [Contiguous] journal that can start syncing writes without waiting.
 pub trait SyncStartable: Flushable {
-    /// Flush pending buffered writes and submit sync work without waiting for durability.
+    /// Submit sync work for pending writes without waiting for durability.
     ///
-    /// Awaiting this only waits for the buffered writes to be submitted and the sync request to
-    /// start. It does not wait for the sync request to complete.
+    /// Awaiting this only waits for any required buffered writes to be submitted and the sync
+    /// request to start. It does not wait for the sync request to complete.
     fn sync_start(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
-    /// Flush pending buffered writes up to `end` and submit sync work without waiting.
+    /// Submit sync work covering writes up to `end` without waiting.
     ///
-    /// Awaiting this only waits for the buffered writes to be submitted and the sync request to
-    /// start. It does not wait for the sync request to complete.
+    /// Awaiting this only waits for any buffered writes required by `end` to be submitted and the
+    /// sync request to start. It does not wait for the sync request to complete.
     fn sync_start_to(&self, end: u64) -> impl Future<Output = Result<(), Error>> + Send;
 }
 

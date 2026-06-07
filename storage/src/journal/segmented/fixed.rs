@@ -384,6 +384,23 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.sync_start_waitable(section).await
     }
 
+    /// Start syncing items below `position` in the given section and return covered item end.
+    pub async fn sync_start_waitable_to(
+        &self,
+        section: u64,
+        position: u64,
+    ) -> Result<Option<(u64, SectionSync)>, Error> {
+        let logical_end = position
+            .checked_mul(Self::CHUNK_SIZE_U64)
+            .ok_or(Error::OffsetOverflow)?;
+        let Some((coverage_end, handle)) =
+            self.manager.sync_start_waitable_to(section, logical_end).await?
+        else {
+            return Ok(None);
+        };
+        Ok(Some((coverage_end / Self::CHUNK_SIZE_U64, handle)))
+    }
+
     /// Flush the given section to storage without waiting for durability.
     pub async fn flush(&self, section: u64) -> Result<(), Error> {
         self.manager.flush(section).await

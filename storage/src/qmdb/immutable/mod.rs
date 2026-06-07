@@ -81,7 +81,7 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::{
         authenticated,
-        contiguous::{BoundarySyncable, Contiguous, Flushable, Mutable, Reader},
+        contiguous::{BoundarySyncable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
@@ -672,11 +672,8 @@ where
         Ok(())
     }
 
-    /// Write pending Merkle nodes without waiting for durable sync.
-    pub async fn write_pending(&self) -> Result<(), Error<F>>
-    where
-        C: Flushable,
-    {
+    /// Buffer pending Merkle nodes without waiting for durable sync.
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
         self.journal.write_pending().await.map_err(Into::into)
     }
 
@@ -796,14 +793,11 @@ where
         Ok(range)
     }
 
-    /// Apply a batch and write pending operation-log and Merkle data without waiting for durability.
-    pub async fn apply_batch_and_write_pending(
+    /// Apply a batch and buffer pending operation-log and Merkle data.
+    pub async fn apply_batch_and_buffer_pending(
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V, S>>,
-    ) -> Result<Range<Location<F>>, Error<F>>
-    where
-        C: Flushable,
-    {
+    ) -> Result<Range<Location<F>>, Error<F>> {
         let _timer = self.metrics.operations.apply_batch_timer();
         self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
@@ -813,7 +807,7 @@ where
         let start_loc = Location::new(db_size);
 
         self.journal
-            .apply_batch_and_write_pending(&batch.journal_batch)
+            .apply_batch_and_buffer_pending(&batch.journal_batch)
             .await?;
 
         let bounds = self.journal.reader().await.bounds();

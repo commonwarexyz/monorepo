@@ -370,6 +370,46 @@ impl<B: Blob> Write<B> {
         })))
     }
 
+    /// Start syncing mutations that cover `logical_end`, avoiding a tip-buffer flush when the
+    /// requested prefix has already been written to the underlying blob.
+    ///
+    /// Returns a completion handle together with the logical end that the started sync covers.
+    pub async fn sync_start_waitable_to(
+        &self,
+        logical_end: u64,
+    ) -> Result<Option<(u64, BlobSync)>, Error> {
+        if logical_end == 0 {
+            return Ok(None);
+        }
+
+        let mut state = self.state.write().await;
+        let coverage_end = if logical_end <= state.buffer.offset {
+            state.buffer.offset
+        } else {
+            let coverage_end = state.buffer.size();
+            if let Some((buf, offset)) = state.buffer.take() {
+                state.write_at(offset, buf).await?;
+            }
+            coverage_end
+        };
+        if !state.needs_sync() {
+            return Ok(None);
+        }
+
+        let generation = state.generation;
+        let handle = state.blob.sync_start()?;
+        let state = self.state.clone();
+        Ok(Some((
+            coverage_end,
+            Box::pin(async move {
+                handle.await?;
+                let mut state = state.write().await;
+                state.durable_generation = state.durable_generation.max(generation);
+                Ok(())
+            }),
+        )))
+    }
+
     /// Flush buffered bytes and durably sync mutations tracked by this writer.
     pub async fn sync(&self) -> Result<(), Error> {
         let mut state = self.state.write().await;

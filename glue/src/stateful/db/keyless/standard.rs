@@ -276,7 +276,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch_and_write_pending(batch.inner).await?;
+        self.apply_batch_and_buffer_pending(batch.inner).await?;
         Ok(())
     }
 
@@ -367,7 +367,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch_and_write_pending(batch.inner).await?;
+        self.apply_batch_and_buffer_pending(batch.inner).await?;
         Ok(())
     }
 

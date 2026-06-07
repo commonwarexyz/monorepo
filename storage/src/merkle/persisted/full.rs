@@ -646,28 +646,35 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         inner.mem.add_pinned_nodes(pinned_nodes);
     }
 
-    /// Write missing Merkle nodes to the backing journal without waiting for durability.
-    ///
-    /// This keeps later [`Self::sync`] calls from having to append a large backlog while still
-    /// allowing recovery from the operation log if these node writes are lost before the next sync.
-    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+    async fn write_pending_inner(&self) -> Result<(), Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
 
         let journal_size = Position::<F>::new(self.journal.size().await);
         let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
             self.snapshot_missing(journal_size)
         else {
-            if self.needs_sync.load(Ordering::Acquire) {
-                self.journal.flush().await?;
-            }
             return Ok(());
         };
 
         self.journal.append_many(Many::Flat(&missing_nodes)).await?;
-        self.journal.flush().await?;
         self.needs_sync.store(true, Ordering::Release);
         self.prune_committed_mem(sync_target_leaves, pinned_nodes);
         Ok(())
+    }
+
+    /// Buffer missing Merkle nodes to the backing journal without flushing.
+    ///
+    /// The buffered nodes remain queryable through this handle. A later sync-start, sync, or
+    /// buffer-pressure flush pushes them to storage.
+    pub async fn buffer_pending(&self) -> Result<(), Error<F>> {
+        self.write_pending_inner().await
+    }
+
+    /// Buffer missing Merkle nodes to the backing journal.
+    ///
+    /// This is equivalent to [`Self::buffer_pending`].
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
+        self.write_pending_inner().await
     }
 
     /// Write missing Merkle nodes and start syncing them without waiting for durability.
@@ -1527,7 +1534,7 @@ mod tests {
         executor.start(full_write_pending_marks_unsynced_nodes_inner::<mmb::Family>);
     }
 
-    async fn full_write_pending_preflushes_prune_boundary_inner<F: Family>(
+    async fn full_write_pending_buffers_prune_boundary_inner<F: Family>(
         context: deterministic::Context,
     ) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
@@ -1575,15 +1582,15 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_full_write_pending_preflushes_prune_boundary_mmr() {
+    fn test_full_write_pending_buffers_prune_boundary_mmr() {
         let executor = deterministic::Runner::default();
-        executor.start(full_write_pending_preflushes_prune_boundary_inner::<mmr::Family>);
+        executor.start(full_write_pending_buffers_prune_boundary_inner::<mmr::Family>);
     }
 
     #[test_traced]
-    fn test_full_write_pending_preflushes_prune_boundary_mmb() {
+    fn test_full_write_pending_buffers_prune_boundary_mmb() {
         let executor = deterministic::Runner::default();
-        executor.start(full_write_pending_preflushes_prune_boundary_inner::<mmb::Family>);
+        executor.start(full_write_pending_buffers_prune_boundary_inner::<mmb::Family>);
     }
 
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent

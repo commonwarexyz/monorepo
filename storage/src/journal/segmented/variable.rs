@@ -80,7 +80,9 @@
 //! });
 //! ```
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager, SectionSync};
+use super::manager::{
+    AppendFactory, Config as ManagerConfig, Manager, SectionSync, SectionSyncCoverage,
+};
 use crate::journal::Error;
 use commonware_codec::{
     varint::{UInt, MAX_U32_VARINT_SIZE},
@@ -840,6 +842,17 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Start syncing the given section and return a handle that waits for completion.
     pub async fn sync_start_waitable(&self, section: u64) -> Result<Option<SectionSync>, Error> {
         self.manager.sync_start_waitable(section).await
+    }
+
+    /// Start syncing bytes below `logical_end` in the given section and return covered byte end.
+    pub async fn sync_start_waitable_to(
+        &self,
+        section: u64,
+        logical_end: u64,
+    ) -> Result<Option<SectionSyncCoverage>, Error> {
+        self.manager
+            .sync_start_waitable_to(section, logical_end)
+            .await
     }
 
     /// Flush the given section to storage without waiting for durability.

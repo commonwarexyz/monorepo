@@ -20,6 +20,9 @@ use tracing::debug;
 /// A per-section sync completion handle.
 pub type SectionSync = Pin<Box<dyn Future<Output = Result<(), Error>> + Send + 'static>>;
 
+/// A per-section sync completion handle and the logical byte end it covers.
+pub type SectionSyncCoverage = (u64, SectionSync);
+
 /// A minimal [`Blob`] wrapper for [`Manager`].
 pub trait SectionBuffer: Clone + Send + Sync {
     /// Returns the current logical size of the buffer including any buffered data.
@@ -33,6 +36,12 @@ pub trait SectionBuffer: Clone + Send + Sync {
 
     /// Start syncing pending data and return a handle that waits for completion.
     fn sync_start_waitable(&self) -> impl Future<Output = Result<Option<BlobSync>, RError>> + Send;
+
+    /// Start syncing pending data through `logical_end` and return the covered logical byte end.
+    fn sync_start_waitable_to(
+        &self,
+        logical_end: u64,
+    ) -> impl Future<Output = Result<Option<(u64, BlobSync)>, RError>> + Send;
 
     /// Flush buffered data to storage without waiting for durability.
     fn flush(&self) -> impl Future<Output = Result<(), RError>> + Send;
@@ -56,6 +65,13 @@ impl<B: Blob> SectionBuffer for Append<B> {
 
     async fn sync_start_waitable(&self) -> Result<Option<BlobSync>, RError> {
         Self::sync_start_waitable(self).await
+    }
+
+    async fn sync_start_waitable_to(
+        &self,
+        logical_end: u64,
+    ) -> Result<Option<(u64, BlobSync)>, RError> {
+        Self::sync_start_waitable_to(self, logical_end).await
     }
 
     async fn flush(&self) -> Result<(), RError> {
@@ -82,6 +98,13 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn sync_start_waitable(&self) -> Result<Option<BlobSync>, RError> {
         Self::sync_start_waitable(self).await
+    }
+
+    async fn sync_start_waitable_to(
+        &self,
+        logical_end: u64,
+    ) -> Result<Option<(u64, BlobSync)>, RError> {
+        Self::sync_start_waitable_to(self, logical_end).await
     }
 
     async fn flush(&self) -> Result<(), RError> {
@@ -284,6 +307,30 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(Some(Box::pin(async move {
             handle.await.map_err(Error::Runtime)
         })))
+    }
+
+    /// Start syncing the given section through `logical_end` and return covered byte end.
+    pub async fn sync_start_waitable_to(
+        &self,
+        section: u64,
+        logical_end: u64,
+    ) -> Result<Option<SectionSyncCoverage>, Error> {
+        self.prune_guard(section)?;
+        let Some(blob) = self.blobs.get(&section) else {
+            return Ok(None);
+        };
+        let Some((coverage_end, handle)) = blob
+            .sync_start_waitable_to(logical_end)
+            .await
+            .map_err(Error::Runtime)?
+        else {
+            return Ok(None);
+        };
+        self.synced.inc();
+        Ok(Some((
+            coverage_end,
+            Box::pin(async move { handle.await.map_err(Error::Runtime) }),
+        )))
     }
 
     /// Flush the given section to storage without waiting for durability.

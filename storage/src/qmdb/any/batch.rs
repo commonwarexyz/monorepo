@@ -4,7 +4,7 @@ use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Flushable, Mutable, Reader},
+        contiguous::{Contiguous, Mutable, Reader},
     },
     merkle::{Family, Location},
     qmdb::{
@@ -1820,9 +1820,9 @@ where
         Ok(range)
     }
 
-    /// Apply a batch and write pending operation-log and Merkle data without waiting for durability.
+    /// Apply a batch and buffer pending operation-log and Merkle data.
     #[tracing::instrument(
-        name = "qmdb::any::Db::apply_batch_and_write_pending",
+        name = "qmdb::any::Db::apply_batch_and_buffer_pending",
         level = "info",
         skip_all,
         fields(
@@ -1832,13 +1832,10 @@ where
             ancestor_batches = batch.ancestor_diffs.len() as u64,
         ),
     )]
-    pub async fn apply_batch_and_write_pending(
+    pub async fn apply_batch_and_buffer_pending(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>>
-    where
-        C: Flushable,
-    {
+    ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
         let _timer = self.metrics.operations.apply_batch_timer();
         self.metrics.operations.apply_batch_calls.inc();
         let db_size = *self.last_commit_loc + 1;
@@ -1848,7 +1845,7 @@ where
         let start_loc = Location::new(db_size);
 
         self.log
-            .apply_batch_and_write_pending(&batch.journal_batch)
+            .apply_batch_and_buffer_pending(&batch.journal_batch)
             .await?;
 
         {

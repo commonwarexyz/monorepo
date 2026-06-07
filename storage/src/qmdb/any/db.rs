@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{BoundarySyncable, Contiguous, Flushable, Mutable, Reader},
+        contiguous::{BoundarySyncable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{Family, Location, Proof},
@@ -772,11 +772,8 @@ where
         Ok(())
     }
 
-    /// Write pending Merkle nodes without waiting for durable sync.
-    pub async fn write_pending(&self) -> Result<(), crate::qmdb::Error<F>>
-    where
-        C: Flushable,
-    {
+    /// Buffer pending Merkle nodes without waiting for durable sync.
+    pub async fn write_pending(&self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.write_pending().await.map_err(Into::into)
     }
 

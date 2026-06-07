@@ -523,6 +523,50 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 .is_some_and(|pending| pending.end >= end)
     }
 
+    async fn data_sync_end(
+        &self,
+        inner: &Inner<E, V>,
+        section: u64,
+        needed_end: u64,
+    ) -> Result<u64, Error> {
+        if needed_end < inner.size && position_to_section(needed_end, self.items_per_section) == section
+        {
+            let offsets = self.offsets.reader().await;
+            return offsets.read(needed_end).await;
+        }
+        inner.data.size(section).await
+    }
+
+    async fn data_coverage_logical_end(
+        &self,
+        inner: &Inner<E, V>,
+        section: u64,
+        coverage_data_end: u64,
+        min_end: u64,
+    ) -> Result<u64, Error> {
+        let section_end = Self::section_logical_end(section, inner.size, self.items_per_section);
+        if min_end >= section_end {
+            return Ok(section_end);
+        }
+
+        if coverage_data_end >= inner.data.size(section).await? {
+            return Ok(section_end);
+        }
+
+        let offsets = self.offsets.reader().await;
+        let mut low = min_end;
+        let mut high = section_end - 1;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            if offsets.read(mid).await? <= coverage_data_end {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        Ok(low)
+    }
+
     async fn start_data_syncs_to(&self, end: u64) -> Result<(), Error> {
         let mut started = Vec::new();
         {
@@ -556,11 +600,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 if Self::pending_covers(&inner, section, needed_end) {
                     continue;
                 }
-                let Some(handle) = inner.data.sync_start_waitable(section).await? else {
+                let data_end = self.data_sync_end(&inner, section, needed_end).await?;
+                let Some((coverage_data_end, handle)) =
+                    inner.data.sync_start_waitable_to(section, data_end).await?
+                else {
                     continue;
                 };
-                let coverage_end =
-                    Self::section_logical_end(section, inner.size, self.items_per_section);
+                let coverage_end = self
+                    .data_coverage_logical_end(&inner, section, coverage_data_end, needed_end)
+                    .await?;
                 started.push((section, coverage_end, handle));
             }
         }
@@ -635,19 +683,34 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                     );
                 } else {
                     inner.pending_syncs.remove(&section);
-                    let coverage_end =
-                        Self::section_logical_end(section, inner.size, self.items_per_section);
-                    synced_end = synced_end.max(coverage_end);
-                    missing.push(section);
+                    missing.push((section, needed_end));
                 }
             }
         }
 
-        try_join_all(pending).await?;
         if !missing.is_empty() {
             let inner = self.inner.read().await;
-            try_join_all(missing.into_iter().map(|section| inner.data.sync(section))).await?;
+            for (section, needed_end) in missing {
+                let data_end = self.data_sync_end(&inner, section, needed_end).await?;
+                if let Some((coverage_data_end, handle)) =
+                    inner.data.sync_start_waitable_to(section, data_end).await?
+                {
+                    synced_end = synced_end.max(
+                        self.data_coverage_logical_end(
+                            &inner,
+                            section,
+                            coverage_data_end,
+                            needed_end,
+                        )
+                        .await?,
+                    );
+                    pending.push(handle);
+                } else {
+                    synced_end = synced_end.max(needed_end);
+                }
+            }
         }
+        try_join_all(pending).await?;
         Ok(synced_end)
     }
 
@@ -1119,32 +1182,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(())
     }
 
-    /// Flush dirty data sections that can contain positions below `end`.
-    async fn flush_dirty_data_to(&self, end: u64) -> Result<(), Error> {
-        let Some(target_section) = self.end_to_section(end) else {
-            return Ok(());
-        };
-        let inner = self.inner.read().await;
-        if let Some(start_section) = inner.dirty_from_section {
-            let Some(tail_section) = Self::size_to_last_section(inner.size, self.items_per_section)
-            else {
-                return Ok(());
-            };
-            let end_section = target_section.min(tail_section);
-            let Some(oldest_section) = inner.data.oldest_section() else {
-                return Ok(());
-            };
-            let start_section = start_section.max(oldest_section);
-            if start_section <= end_section {
-                try_join_all(
-                    (start_section..=end_section).map(|section| inner.data.flush(section)),
-                )
-                .await?;
-            }
-        }
-        Ok(())
-    }
-
     /// Start syncing dirty data sections without waiting for durability.
     async fn sync_start_dirty_data(&self) -> Result<(), Error> {
         let size = self.inner.read().await.size;
@@ -1177,20 +1214,16 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.offsets.flush().await
     }
 
-    /// Flush dirty data and offset sections and start syncing them without waiting.
+    /// Start syncing dirty data and offset sections without waiting.
     pub async fn sync_start(&self) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_data().await?;
-        self.offsets.flush().await?;
         self.sync_start_dirty_data().await?;
         self.offsets.sync_start().await
     }
 
-    /// Flush and start syncing data and offset entries below `end`.
+    /// Start syncing data and offset entries below `end`.
     pub async fn sync_start_to(&self, end: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_data_to(end).await?;
-        self.offsets.flush().await?;
         self.sync_start_dirty_data_to(end).await?;
         self.offsets.sync_start_to(end).await
     }
@@ -1893,6 +1926,14 @@ mod tests {
                     .await
                     .unwrap();
             }
+            let before_redundant_sync_start = context.auditor().state();
+            journal.sync_start_to(3).await.unwrap();
+            assert_eq!(
+                context.auditor().state(),
+                before_redundant_sync_start,
+                "already-covered sync_start_to must not flush the same section again"
+            );
+
             journal.wait_for_sync_to(2).await.unwrap();
             {
                 let inner = journal.inner.read().await;
@@ -1902,7 +1943,13 @@ mod tests {
             }
             assert_eq!(journal.offsets.recovery_watermark().await, 2);
 
+            let before_durable_sync_start = context.auditor().state();
             journal.sync_start_to(3).await.unwrap();
+            assert_eq!(
+                context.auditor().state(),
+                before_durable_sync_start,
+                "durable sync_start_to target must not flush the same section again"
+            );
             assert!(journal.inner.read().await.pending_syncs.is_empty());
 
             journal.wait_for_sync_to(5).await.unwrap();
@@ -3218,10 +3265,9 @@ mod tests {
     /// Test that a crash partway through a multi-section sync leaves a contiguous durable prefix
     /// that recovery preserves.
     ///
-    /// `flush_dirty_data` syncs dirty data sections before syncing offsets, and all mutating
-    /// operations serialize on `op_lock` so no concurrent sync can interleave. This reproduces a
-    /// crash after sections 0 and 1 were synced but before section 2 and the offsets journal were,
-    /// then asserts recovery keeps exactly the contiguous prefix 0..20.
+    /// Data syncs and all mutating operations serialize on `op_lock` so no concurrent sync can
+    /// interleave. This reproduces a crash after sections 0 and 1 were synced but before section 2
+    /// and the offsets journal were, then asserts recovery keeps exactly the contiguous prefix 0..20.
     #[test_traced]
     fn test_variable_recovery_partial_sync_loop_keeps_contiguous_prefix() {
         let executor = deterministic::Runner::default();

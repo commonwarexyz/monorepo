@@ -33,6 +33,7 @@ const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const ENV_BATCHES: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_BATCHES";
 const ENV_APPENDS_PER_BATCH: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_APPENDS_PER_BATCH";
 const ENV_PRUNE_EVERY: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_PRUNE_EVERY";
+const ENV_WRITE_BUFFER_SIZE: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_WRITE_BUFFER_SIZE";
 
 type BenchDb<F> = Db<F, Context, Digest, Sha256, Rayon>;
 
@@ -41,6 +42,7 @@ struct Workload {
     batches: u64,
     appends_per_batch: u64,
     prune_every: u64,
+    write_buffer: NonZeroUsize,
 }
 
 impl Workload {
@@ -49,6 +51,7 @@ impl Workload {
             batches: env_u64(ENV_BATCHES, DEFAULT_BATCHES),
             appends_per_batch: env_u64(ENV_APPENDS_PER_BATCH, DEFAULT_APPENDS_PER_BATCH),
             prune_every: env_u64(ENV_PRUNE_EVERY, DEFAULT_PRUNE_EVERY),
+            write_buffer: env_nonzero_usize(ENV_WRITE_BUFFER_SIZE, WRITE_BUFFER_SIZE),
         }
     }
 
@@ -59,11 +62,12 @@ impl Workload {
             format!(" {extra}")
         };
         format!(
-            "{}/case={case} v=kfix{prefix} blocks={} keys={} prune={}",
+            "{}/case={case} v=kfix{prefix} blocks={} keys={} prune={} buf={}",
             module_path!(),
             self.batches,
             self.appends_per_batch,
             self.prune_every,
+            self.write_buffer,
         )
     }
 }
@@ -86,14 +90,27 @@ fn value(batch: u64, append: u64) -> Digest {
     Sha256::hash(&[batch.to_be_bytes(), append.to_be_bytes()].concat())
 }
 
-fn db_config(ctx: &Context, suffix: &str) -> KeylessConfig<Rayon> {
+fn env_nonzero_usize(name: &str, default: NonZeroUsize) -> NonZeroUsize {
+    match env::var(name) {
+        Ok(value) => {
+            let parsed = value
+                .parse()
+                .unwrap_or_else(|_| panic!("{name} must be a positive integer"));
+            NonZeroUsize::new(parsed).unwrap_or_else(|| panic!("{name} must be non-zero"))
+        }
+        Err(env::VarError::NotPresent) => default,
+        Err(error) => panic!("failed to read {name}: {error}"),
+    }
+}
+
+fn db_config(ctx: &Context, suffix: &str, write_buffer: NonZeroUsize) -> KeylessConfig<Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
         merkle: MerkleConfig {
             journal_partition: format!("merkle-journal-{suffix}"),
             metadata_partition: format!("merkle-metadata-{suffix}"),
             items_per_blob: ITEMS_PER_BLOB,
-            write_buffer: WRITE_BUFFER_SIZE,
+            write_buffer,
             strategy: ctx.create_strategy(THREADS).unwrap(),
             page_cache: page_cache.clone(),
         },
@@ -101,19 +118,22 @@ fn db_config(ctx: &Context, suffix: &str) -> KeylessConfig<Rayon> {
             partition: format!("log-journal-{suffix}"),
             items_per_blob: ITEMS_PER_BLOB,
             page_cache,
-            write_buffer: WRITE_BUFFER_SIZE,
+            write_buffer,
         },
     }
 }
 
-async fn open_db<F: Family>(ctx: &Context, suffix: &str) -> BenchDb<F> {
-    BenchDb::<F>::init(ctx.child("storage"), db_config(ctx, suffix))
-        .await
-        .unwrap()
+async fn open_db<F: Family>(ctx: &Context, suffix: &str, workload: Workload) -> BenchDb<F> {
+    BenchDb::<F>::init(
+        ctx.child("storage"),
+        db_config(ctx, suffix, workload.write_buffer),
+    )
+    .await
+    .unwrap()
 }
 
 async fn bench_managed_finalize<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let db = open_db::<F>(ctx, "managed-finalize").await;
+    let db = open_db::<F>(ctx, "managed-finalize", workload).await;
     let db = Arc::new(AsyncRwLock::new(db));
     let mut elapsed = Duration::ZERO;
 
@@ -143,7 +163,7 @@ async fn bench_managed_finalize<F: Family>(ctx: &Context, workload: Workload) ->
 }
 
 async fn bench_apply_then_commit<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-commit").await;
+    let mut db = open_db::<F>(ctx, "apply-commit", workload).await;
     let mut elapsed = Duration::ZERO;
 
     for batch_idx in 0..workload.batches {
@@ -164,7 +184,7 @@ async fn bench_apply_then_commit<F: Family>(ctx: &Context, workload: Workload) -
 }
 
 async fn bench_apply_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-only").await;
+    let mut db = open_db::<F>(ctx, "apply-only", workload).await;
     let mut elapsed = Duration::ZERO;
 
     for batch_idx in 0..workload.batches {
@@ -184,7 +204,7 @@ async fn bench_apply_only<F: Family>(ctx: &Context, workload: Workload) -> Durat
 }
 
 async fn bench_write_pending_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "write-pending-only").await;
+    let mut db = open_db::<F>(ctx, "write-pending-only", workload).await;
     let mut elapsed = Duration::ZERO;
 
     for batch_idx in 0..workload.batches {
@@ -205,7 +225,7 @@ async fn bench_write_pending_only<F: Family>(ctx: &Context, workload: Workload) 
 }
 
 async fn bench_commit_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "commit-only").await;
+    let mut db = open_db::<F>(ctx, "commit-only", workload).await;
     let mut elapsed = Duration::ZERO;
 
     for batch_idx in 0..workload.batches {
@@ -226,7 +246,7 @@ async fn bench_commit_only<F: Family>(ctx: &Context, workload: Workload) -> Dura
 }
 
 async fn bench_sync_start_pending_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "sync-start-pending-only").await;
+    let mut db = open_db::<F>(ctx, "sync-start-pending-only", workload).await;
     let mut elapsed = Duration::ZERO;
 
     for batch_idx in 0..workload.batches {
@@ -280,7 +300,7 @@ fn clear_finished_background_preflush(sync: &mut Option<Handle<()>>) {
 }
 
 async fn bench_managed_pipeline<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let db = open_db::<F>(ctx, "managed-pipeline").await;
+    let db = open_db::<F>(ctx, "managed-pipeline", workload).await;
     let db = Arc::new(AsyncRwLock::new(db));
     let mut elapsed = Duration::ZERO;
     let mut next_loc = 1;
@@ -329,7 +349,7 @@ async fn bench_managed_preflushed_pipeline<F: Family + 'static>(
     ctx: &Context,
     workload: Workload,
 ) -> Duration {
-    let db = open_db::<F>(ctx, "managed-preflushed-pipeline").await;
+    let db = open_db::<F>(ctx, "managed-preflushed-pipeline", workload).await;
     let db = Arc::new(AsyncRwLock::new(db));
     let mut elapsed = Duration::ZERO;
     let mut next_loc = 1;
@@ -388,7 +408,7 @@ async fn bench_managed_preflushed_pipeline<F: Family + 'static>(
 }
 
 async fn bench_apply_commit_pipeline<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-commit-pipeline").await;
+    let mut db = open_db::<F>(ctx, "apply-commit-pipeline", workload).await;
     let mut elapsed = Duration::ZERO;
     let mut next_loc = 1;
 
@@ -417,7 +437,7 @@ async fn bench_apply_commit_pipeline<F: Family>(ctx: &Context, workload: Workloa
 }
 
 async fn bench_managed_boundary_stall<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let db = open_db::<F>(ctx, "managed-boundary-stall").await;
+    let db = open_db::<F>(ctx, "managed-boundary-stall", workload).await;
     let db = Arc::new(AsyncRwLock::new(db));
     let mut max_boundary = Duration::ZERO;
     let mut next_loc = 1;
@@ -467,7 +487,7 @@ async fn bench_apply_commit_boundary_stall<F: Family>(
     ctx: &Context,
     workload: Workload,
 ) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-commit-boundary-stall").await;
+    let mut db = open_db::<F>(ctx, "apply-commit-boundary-stall", workload).await;
     let mut max_boundary = Duration::ZERO;
     let mut next_loc = 1;
 
@@ -497,7 +517,7 @@ async fn bench_managed_preflushed_boundary_stall<F: Family + 'static>(
     ctx: &Context,
     workload: Workload,
 ) -> Duration {
-    let db = open_db::<F>(ctx, "managed-preflushed-boundary-stall").await;
+    let db = open_db::<F>(ctx, "managed-preflushed-boundary-stall", workload).await;
     let db = Arc::new(AsyncRwLock::new(db));
     let mut max_boundary = Duration::ZERO;
     let mut next_loc = 1;

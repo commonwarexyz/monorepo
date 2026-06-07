@@ -382,7 +382,7 @@ where
     Ok(())
 }
 
-/// Write the current compact witness without calling journal commit or sync.
+/// Buffer the current compact witness without calling journal flush, commit, or sync.
 pub(crate) async fn write_witness<F, E, H, S>(
     merkle: &compact::Merkle<F, E, H::Digest, S>,
     cache: &Cache<F, H::Digest>,

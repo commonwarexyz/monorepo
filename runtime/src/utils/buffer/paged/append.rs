@@ -209,6 +209,17 @@ fn capacity_with_floor(capacity: usize, page_size: u64) -> usize {
 }
 
 impl<B: Blob> Append<B> {
+    fn written_logical_end(&self, blob_state: &BlobState<B>) -> u64 {
+        let full_pages_end = blob_state.current_page * self.cache_ref.page_size();
+        blob_state
+            .partial_page_state
+            .as_ref()
+            .map_or(full_pages_end, |crc_record| {
+                let (partial_len, _) = crc_record.get_crc();
+                full_pages_end + u64::from(partial_len)
+            })
+    }
+
     /// Create a new [Append] wrapper of the provided `blob` that is known to have `blob_size`
     /// underlying physical bytes, using the provided `cache_ref` for read caching, and a write
     /// buffer with capacity `capacity`. Rewinds the blob if necessary to ensure it only contains
@@ -1146,6 +1157,52 @@ impl<B: Blob> Append<B> {
         })))
     }
 
+    /// Start syncing mutations that cover `logical_end`, avoiding a tip-buffer flush when the
+    /// requested prefix has already been written to the underlying blob.
+    ///
+    /// Returns a completion handle together with the logical end that the started sync covers.
+    pub async fn sync_start_waitable_to(
+        &self,
+        logical_end: u64,
+    ) -> Result<Option<(u64, BlobSync)>, Error> {
+        if logical_end == 0 {
+            return Ok(None);
+        }
+
+        let coverage_end = {
+            let buf_guard = self.buffer.write().await;
+            let written_end = {
+                let blob_state = self.blob_state.read().await;
+                self.written_logical_end(&blob_state)
+            };
+            if logical_end <= written_end {
+                written_end
+            } else {
+                let coverage_end = buf_guard.size();
+                self.flush_internal(buf_guard, true, false).await?;
+                coverage_end
+            }
+        };
+
+        let blob_state = self.blob_state.write().await;
+        if !blob_state.needs_sync() {
+            return Ok(None);
+        }
+
+        let generation = blob_state.generation;
+        let handle = blob_state.blob.sync_start()?;
+        let blob_state = self.blob_state.clone();
+        Ok(Some((
+            coverage_end,
+            Box::pin(async move {
+                handle.await?;
+                let mut blob_state = blob_state.write().await;
+                blob_state.durable_generation = blob_state.durable_generation.max(generation);
+                Ok(())
+            }),
+        )))
+    }
+
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there
@@ -1336,6 +1393,53 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[test_traced("DEBUG")]
+    fn test_sync_start_waitable_to_skips_tip_flush_when_target_already_written() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let page_size = PAGE_SIZE.get() as usize;
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"sync_start_to_written_prefix")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            let data = vec![7u8; page_size * 2 + 5];
+            append.append(&data).await.unwrap();
+            {
+                let buffer = append.buffer.read().await;
+                assert_eq!(buffer.offset, (page_size * 2) as u64);
+                assert_eq!(buffer.len(), 5);
+                let blob_state = append.blob_state.read().await;
+                assert_eq!(blob_state.current_page, 2);
+                assert!(blob_state.partial_page_state.is_none());
+            }
+
+            let (coverage_end, handle) = append
+                .sync_start_waitable_to(PAGE_SIZE.get() as u64)
+                .await
+                .unwrap()
+                .expect("written prefix should still need a sync");
+            assert_eq!(coverage_end, (page_size * 2) as u64);
+            {
+                let buffer = append.buffer.read().await;
+                assert_eq!(buffer.offset, (page_size * 2) as u64);
+                assert_eq!(buffer.len(), 5);
+                let blob_state = append.blob_state.read().await;
+                assert_eq!(blob_state.current_page, 2);
+                assert!(
+                    blob_state.partial_page_state.is_none(),
+                    "target-aware sync_start must not flush the trailing partial page"
+                );
+            }
+            handle.await.unwrap();
+        });
+    }
 
     #[test_traced("DEBUG")]
     fn test_read_many_into_empty() {

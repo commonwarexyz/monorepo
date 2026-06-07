@@ -5,7 +5,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{BoundarySyncable, Contiguous, Flushable, Mutable, Reader},
+        contiguous::{BoundarySyncable, Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{
@@ -773,11 +773,8 @@ where
         Ok(())
     }
 
-    /// Write pending Merkle nodes without waiting for durable sync.
-    pub async fn write_pending(&self) -> Result<(), Error<F>>
-    where
-        C: Flushable,
-    {
+    /// Buffer pending Merkle nodes without waiting for durable sync.
+    pub async fn write_pending(&self) -> Result<(), Error<F>> {
         self.any.write_pending().await
     }
 
@@ -888,19 +885,16 @@ where
         Ok(range)
     }
 
-    /// Apply a batch and write pending operation-log and Merkle data without waiting for durability.
-    pub async fn apply_batch_and_write_pending(
+    /// Apply a batch and buffer pending operation-log and Merkle data.
+    pub async fn apply_batch_and_buffer_pending(
         &mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
-    ) -> Result<Range<Location<F>>, Error<F>>
-    where
-        C: Flushable,
-    {
+    ) -> Result<Range<Location<F>>, Error<F>> {
         let _timer = self.metrics.apply_batch_timer();
         self.metrics.apply_batch_calls.inc();
         let range = self
             .any
-            .apply_batch_and_write_pending(Arc::clone(&batch.inner))
+            .apply_batch_and_buffer_pending(Arc::clone(&batch.inner))
             .await?;
         self.grafted_tree.apply_batch(&batch.grafted)?;
         self.root = batch.canonical_root;

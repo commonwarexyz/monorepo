@@ -1087,6 +1087,29 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             .map_or(watermark, |current| current.max(watermark))
     }
 
+    fn section_start(section: u64, items_per_blob: u64) -> Result<u64, Error> {
+        section
+            .checked_mul(items_per_blob)
+            .ok_or(Error::OffsetOverflow)
+    }
+
+    fn local_section_end(section: u64, end: u64, items_per_blob: u64) -> Result<u64, Error> {
+        let section_start = Self::section_start(section, items_per_blob)?;
+        end.checked_sub(section_start).ok_or(Error::OffsetOverflow)
+    }
+
+    fn local_to_global_end(
+        section: u64,
+        local_end: u64,
+        size: u64,
+        items_per_blob: u64,
+    ) -> Result<u64, Error> {
+        Ok(Self::section_start(section, items_per_blob)?
+            .checked_add(local_end)
+            .ok_or(Error::OffsetOverflow)?
+            .min(size))
+    }
+
     fn pending_covers(inner: &Inner<E, A>, section: u64, end: u64) -> bool {
         end <= inner.durable_logical_end
             || inner
@@ -1128,11 +1151,21 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 if Self::pending_covers(&inner, section, needed_end) {
                     continue;
                 }
-                let Some(handle) = inner.journal.sync_start_waitable(section).await? else {
+                let local_end =
+                    Self::local_section_end(section, needed_end, self.items_per_blob)?;
+                let Some((coverage_local_end, handle)) = inner
+                    .journal
+                    .sync_start_waitable_to(section, local_end)
+                    .await?
+                else {
                     continue;
                 };
-                let coverage_end =
-                    Self::section_logical_end(section, inner.size, self.items_per_blob);
+                let coverage_end = Self::local_to_global_end(
+                    section,
+                    coverage_local_end,
+                    inner.size,
+                    self.items_per_blob,
+                )?;
                 started.push((section, coverage_end, handle));
             }
         }
@@ -1207,24 +1240,34 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                     );
                 } else {
                     inner.pending_syncs.remove(&section);
-                    let coverage_end =
-                        Self::section_logical_end(section, inner.size, self.items_per_blob);
-                    synced_end = synced_end.max(coverage_end);
-                    missing.push(section);
+                    missing.push((section, needed_end));
                 }
             }
         }
 
-        try_join_all(pending).await?;
         if !missing.is_empty() {
             let inner = self.inner.read().await;
-            try_join_all(
-                missing
-                    .into_iter()
-                    .map(|section| inner.journal.sync(section)),
-            )
-            .await?;
+            for (section, needed_end) in missing {
+                let local_end =
+                    Self::local_section_end(section, needed_end, self.items_per_blob)?;
+                if let Some((coverage_local_end, handle)) = inner
+                    .journal
+                    .sync_start_waitable_to(section, local_end)
+                    .await?
+                {
+                    synced_end = synced_end.max(Self::local_to_global_end(
+                        section,
+                        coverage_local_end,
+                        inner.size,
+                        self.items_per_blob,
+                    )?);
+                    pending.push(handle);
+                } else {
+                    synced_end = synced_end.max(needed_end);
+                }
+            }
         }
+        try_join_all(pending).await?;
         Ok(synced_end)
     }
 
@@ -1252,32 +1295,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             if start_section <= tail_section {
                 try_join_all(
                     (start_section..=tail_section).map(|section| inner.journal.flush(section)),
-                )
-                .await?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Flush dirty sections that can contain positions below `end`.
-    async fn flush_dirty_sections_to(&self, end: u64) -> Result<(), Error> {
-        let Some(target_section) = self.end_to_section(end) else {
-            return Ok(());
-        };
-        let inner = self.inner.read().await;
-        if let Some(start_section) = inner.dirty_from_section {
-            let Some(tail_section) = Self::size_to_last_section(inner.size, self.items_per_blob)
-            else {
-                return Ok(());
-            };
-            let end_section = target_section.min(tail_section);
-            let Some(oldest_section) = inner.journal.oldest_section() else {
-                return Ok(());
-            };
-            let start_section = start_section.max(oldest_section);
-            if start_section <= end_section {
-                try_join_all(
-                    (start_section..=end_section).map(|section| inner.journal.flush(section)),
                 )
                 .await?;
             }
@@ -1320,17 +1337,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.flush_dirty_sections().await
     }
 
-    /// Flush dirty sections and start syncing them without waiting for durability.
+    /// Start syncing dirty sections without waiting for durability.
     pub async fn sync_start(&self) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_sections().await?;
         self.sync_start_dirty_sections().await
     }
 
-    /// Flush and start syncing sections that can contain positions below `end`.
+    /// Start syncing sections that can contain positions below `end`.
     pub async fn sync_start_to(&self, end: u64) -> Result<(), Error> {
         let _op_guard = self.op_lock.lock().await;
-        self.flush_dirty_sections_to(end).await?;
         self.sync_start_dirty_sections_to(end).await
     }
 
@@ -1928,6 +1943,14 @@ mod tests {
             for value in 3..5 {
                 journal.append(&value).await.unwrap();
             }
+            let before_redundant_sync_start = context.auditor().state();
+            journal.sync_start_to(3).await.unwrap();
+            assert_eq!(
+                context.auditor().state(),
+                before_redundant_sync_start,
+                "already-covered sync_start_to must not flush the same blob again"
+            );
+
             journal.wait_for_sync_to(2).await.unwrap();
             {
                 let inner = journal.inner.read().await;
@@ -1936,7 +1959,13 @@ mod tests {
                 assert!(inner.pending_syncs.is_empty());
             }
 
+            let before_durable_sync_start = context.auditor().state();
             journal.sync_start_to(3).await.unwrap();
+            assert_eq!(
+                context.auditor().state(),
+                before_durable_sync_start,
+                "durable sync_start_to target must not flush the same blob again"
+            );
             assert!(journal.inner.read().await.pending_syncs.is_empty());
 
             journal.wait_for_sync_to(5).await.unwrap();
@@ -3471,10 +3500,9 @@ mod tests {
     /// Test that a crash partway through a multi-section sync leaves a contiguous durable prefix
     /// that recovery preserves.
     ///
-    /// `flush_dirty_sections` syncs dirty sections, and all mutating operations serialize on
-    /// `op_lock` so no concurrent sync can interleave. This reproduces a crash after sections 0 and
-    /// 1 were synced but before section 2, then asserts recovery keeps exactly the contiguous
-    /// prefix 0..20.
+    /// Section syncs and all mutating operations serialize on `op_lock` so no concurrent sync can
+    /// interleave. This reproduces a crash after sections 0 and 1 were synced but before section 2,
+    /// then asserts recovery keeps exactly the contiguous prefix 0..20.
     #[test_traced]
     fn test_fixed_recovery_partial_sync_loop_keeps_contiguous_prefix() {
         let executor = deterministic::Runner::default();

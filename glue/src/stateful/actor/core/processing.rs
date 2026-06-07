@@ -1,7 +1,9 @@
 use crate::stateful::{
     actor::{
         core::mailbox::Message,
-        processor::{run_maintenance, FinalizeStatus, MaintenanceAction, Processor},
+        processor::{
+            run_maintenance, FinalizeStatus, MaintenanceAction, MaintenanceResult, Processor,
+        },
     },
     Application,
 };
@@ -58,7 +60,7 @@ where
 }
 
 struct ActiveMaintenance {
-    handle: Handle<()>,
+    handle: Handle<MaintenanceResult>,
 }
 
 impl<E, A, S, V, R> Processing<E, A, S, V, R>
@@ -133,11 +135,7 @@ where
                         continue;
                     }
                     let (status, maintenance) = self.processor.finalize(&self.context, block).await;
-                    queue_maintenance(
-                        &mut pending_maintenance,
-                        maintenance_task.is_some(),
-                        maintenance,
-                    );
+                    queue_maintenance(&mut pending_maintenance, maintenance);
                     if let FinalizeStatus::Applied { height } = status {
                         debug!(height = height.get(), "applied finalized database batch");
                     }
@@ -154,13 +152,28 @@ where
                 let databases = self.processor.databases().clone();
                 let marshal = self.marshal.clone();
                 let handle = self.context.child("maintenance").spawn(|_| async move {
-                        run_maintenance::<E, _, _, _>(databases, marshal, maintenance).await
-                    });
+                    run_maintenance::<E, _, _, _>(databases, marshal, maintenance).await
+                });
                 maintenance_task = Some(ActiveMaintenance { handle });
             },
             result = maintenance_complete => {
-                if let Err(err) = result {
-                    warn!(?err, "maintenance task exited before completion");
+                match result {
+                    Ok(MaintenanceResult::PreflushStarted { height }) => {
+                        self.processor.mark_preflush_started(height);
+                        pending_maintenance.retain(|queued| {
+                            !matches!(
+                                queued,
+                                MaintenanceAction::Preflush {
+                                    height: queued_height,
+                                    ..
+                                } if *queued_height == height
+                            )
+                        });
+                    }
+                    Ok(MaintenanceResult::None) => {}
+                    Err(err) => {
+                        warn!(?err, "maintenance task exited before completion");
+                    }
                 }
                 maintenance_task = None;
             }
@@ -170,20 +183,13 @@ where
 
 fn queue_maintenance<T>(
     pending: &mut VecDeque<MaintenanceAction<T>>,
-    task_active: bool,
     maintenance: MaintenanceAction<T>,
 ) {
     match maintenance {
         MaintenanceAction::None => {}
         MaintenanceAction::Preflush { .. } => {
-            if !task_active
-                && !pending
-                    .iter()
-                    .any(|queued| matches!(queued, MaintenanceAction::Prune { .. }))
-            {
-                pending.retain(|queued| !matches!(queued, MaintenanceAction::Preflush { .. }));
-                pending.push_back(maintenance);
-            }
+            pending.retain(|queued| !matches!(queued, MaintenanceAction::Preflush { .. }));
+            pending.push_back(maintenance);
         }
         MaintenanceAction::Prune { .. } => {
             pending.retain(|queued| !matches!(queued, MaintenanceAction::Preflush { .. }));
@@ -237,26 +243,42 @@ mod tests {
         let mut pending = VecDeque::new();
         queue_maintenance::<u64>(
             &mut pending,
-            false,
-            MaintenanceAction::Preflush { targets: 1 },
+            MaintenanceAction::Preflush {
+                height: Height::new(1),
+                targets: 1,
+            },
         );
         queue_maintenance::<u64>(
             &mut pending,
-            false,
-            MaintenanceAction::Preflush { targets: 2 },
+            MaintenanceAction::Preflush {
+                height: Height::new(2),
+                targets: 2,
+            },
         );
         assert_eq!(pending.len(), 1);
         assert_eq!(
             pending.pop_front(),
-            Some(MaintenanceAction::Preflush { targets: 2 })
+            Some(MaintenanceAction::Preflush {
+                height: Height::new(2),
+                targets: 2,
+            })
         );
 
         queue_maintenance::<u64>(
             &mut pending,
-            true,
-            MaintenanceAction::Preflush { targets: 3 },
+            MaintenanceAction::Preflush {
+                height: Height::new(3),
+                targets: 3,
+            },
         );
-        assert!(pending.is_empty());
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending.pop_front(),
+            Some(MaintenanceAction::Preflush {
+                height: Height::new(3),
+                targets: 3,
+            })
+        );
     }
 
     #[test]
@@ -264,15 +286,17 @@ mod tests {
         let mut pending = VecDeque::new();
         queue_maintenance(
             &mut pending,
-            false,
-            MaintenanceAction::Preflush { targets: 1 },
+            MaintenanceAction::Preflush {
+                height: Height::new(8),
+                targets: 1,
+            },
         );
         queue_maintenance(
             &mut pending,
-            true,
             MaintenanceAction::Prune {
                 height: Height::new(7),
                 targets: 11_u64,
+                next_preflush: None,
             },
         );
 
@@ -282,7 +306,45 @@ mod tests {
             Some(MaintenanceAction::Prune {
                 height: Height::new(7),
                 targets: 11,
+                next_preflush: None,
             }),
+        );
+    }
+
+    #[test]
+    fn queue_maintenance_places_preflush_after_pending_prune() {
+        let mut pending = VecDeque::new();
+        queue_maintenance(
+            &mut pending,
+            MaintenanceAction::Prune {
+                height: Height::new(7),
+                targets: 11_u64,
+                next_preflush: None,
+            },
+        );
+        queue_maintenance(
+            &mut pending,
+            MaintenanceAction::Preflush {
+                height: Height::new(8),
+                targets: 12,
+            },
+        );
+
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            pending.pop_front(),
+            Some(MaintenanceAction::Prune {
+                height: Height::new(7),
+                targets: 11,
+                next_preflush: None,
+            }),
+        );
+        assert_eq!(
+            pending.pop_front(),
+            Some(MaintenanceAction::Preflush {
+                height: Height::new(8),
+                targets: 12,
+            })
         );
     }
 }

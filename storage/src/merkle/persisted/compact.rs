@@ -481,7 +481,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         });
         if current_matches {
             match mode {
-                PersistMode::Write => self.base_log.flush().await?,
+                PersistMode::Write => {}
                 PersistMode::Commit => self.base_log.commit().await?,
                 PersistMode::SyncStart => self.base_log.sync_start().await?,
                 PersistMode::Sync => self.base_log.sync().await?,
@@ -498,7 +498,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         let position = self.base_log.append(&base).await?;
         match mode {
-            PersistMode::Write => self.base_log.flush().await?,
+            PersistMode::Write => {}
             PersistMode::Commit => self.base_log.commit().await?,
             PersistMode::SyncStart => self.base_log.sync_start().await?,
             PersistMode::Sync => self.base_log.sync().await?,
@@ -511,7 +511,8 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
     /// Write the tree state to the retained-base log together with a caller-provided witness.
     ///
-    /// This appends pending base bytes but does not call `commit()` or `sync()` on the journal.
+    /// This appends pending base bytes but does not call `flush()`, `commit()`, or `sync()` on the
+    /// journal.
     pub(crate) async fn write_with_witness<W, R>(
         &self,
         build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,

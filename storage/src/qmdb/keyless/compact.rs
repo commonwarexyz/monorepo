@@ -529,7 +529,7 @@ where
         .await
     }
 
-    /// Write pending compact witness bytes without calling journal commit or sync.
+    /// Buffer pending compact witness bytes without calling journal flush, commit, or sync.
     pub async fn write_pending(&self) -> Result<(), Error<F>>
     where
         F: Family,
@@ -544,7 +544,7 @@ where
         .await
     }
 
-    /// Write pending compact witness bytes and start syncing without waiting for durability.
+    /// Start syncing pending compact witness bytes without waiting for durability.
     pub async fn sync_start_pending(&self) -> Result<(), Error<F>>
     where
         F: Family,

@@ -97,13 +97,21 @@ pub(super) enum MaintenanceAction<T> {
 
     /// Best-effort background write preflush.
     ///
-    /// This is coalesced by the actor loop and skips databases that are already
-    /// busy. Prune remains the authoritative durable boundary before marshal
-    /// history is discarded.
-    Preflush { targets: T },
+    /// This is coalesced by the actor loop so a running maintenance task is
+    /// followed by the latest known target. Individual databases may still skip
+    /// the preflush when they are already busy; skipped prune boundaries are
+    /// retried until a background attempt actually starts. Prune remains the
+    /// authoritative durable boundary before marshal history is discarded.
+    Preflush { height: Height, targets: T },
 
     /// Prune databases and marshal to the provided finalized boundary.
-    Prune { height: Height, targets: T },
+    Prune {
+        height: Height,
+        targets: T,
+        /// Next prune-boundary target to preflush after this prune, if it is
+        /// already known.
+        next_preflush: Option<(Height, T)>,
+    },
 }
 
 /// Tracks the configured finalized-block maintenance policy and any retained
@@ -112,6 +120,7 @@ struct Maintenance<T> {
     config: MaintenanceConfig,
     prune_retention_window: usize,
     retained_targets: VecDeque<(Height, T)>,
+    preflush_started_prune_height: Option<Height>,
 }
 
 impl<T: Clone> Maintenance<T> {
@@ -124,19 +133,48 @@ impl<T: Clone> Maintenance<T> {
             config,
             prune_retention_window,
             retained_targets: VecDeque::new(),
+            preflush_started_prune_height: None,
         }
+    }
+
+    fn prune_lag(&self) -> u64 {
+        u64::try_from(self.prune_retention_window - 1)
+            .expect("prune retention window should fit in u64")
+    }
+
+    fn next_prune_height_after(height: Height, interval: u64) -> Height {
+        let current = height.get();
+        let remainder = current % interval;
+        let delta = if remainder == 0 {
+            interval
+        } else {
+            interval - remainder
+        };
+        Height::new(
+            current
+                .checked_add(delta)
+                .expect("next prune height overflowed"),
+        )
+    }
+
+    fn preflush_target_for(&self, prune_height: Height) -> Option<T> {
+        let target_height = Height::new(prune_height.get().checked_sub(self.prune_lag())?);
+        self.retained_targets
+            .iter()
+            .find_map(|(height, targets)| (*height == target_height).then(|| targets.clone()))
     }
 
     /// Observe a newly finalized block and decide whether maintenance should
     /// run for it.
     ///
-    /// When pruning is enabled, non-boundary finalizations request a coalesced
-    /// preflush. Prune maintenance first retains the last `max_pending_acks + 1`
-    /// finalized `(height, sync_targets)` pairs, so the oldest retained target
-    /// stays `max_pending_acks` blocks behind the tip. It then prunes only when
-    /// that full window is populated and the current finalized height matches
-    /// the configured cadence. The prune target is the oldest retained finalized
-    /// target and its corresponding finalized block height.
+    /// When pruning is enabled, preflush maintenance targets the retained block
+    /// that will be pruned at the next pruning boundary. Prune maintenance first
+    /// retains the last `max_pending_acks + 1` finalized `(height, sync_targets)`
+    /// pairs, so the oldest retained target stays `max_pending_acks` blocks
+    /// behind the tip. It then prunes only when that full window is populated
+    /// and the current finalized height matches the configured cadence. The
+    /// prune target is the oldest retained finalized target and its
+    /// corresponding finalized block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
         if self.config.prune {
             self.retained_targets.push_back((height, targets));
@@ -151,33 +189,66 @@ impl<T: Clone> Maintenance<T> {
 
         let interval = u64::try_from(self.config.interval.get())
             .expect("maintenance interval should fit in u64");
-        if !height.get().is_multiple_of(interval) {
-            let (_, targets) = self
+        let at_prune_boundary = height.get().is_multiple_of(interval);
+
+        if at_prune_boundary && self.retained_targets.len() >= self.prune_retention_window {
+            let (prune_height, targets) = self
                 .retained_targets
                 .front()
                 .cloned()
-                .expect("retained preflush targets must exist");
-            return MaintenanceAction::Preflush { targets };
+                .expect("retained prune targets must exist");
+            let next_prune_height = Height::new(
+                height
+                    .get()
+                    .checked_add(interval)
+                    .expect("next prune height overflowed"),
+            );
+            let next_preflush = if self.preflush_started_prune_height == Some(next_prune_height) {
+                None
+            } else {
+                self.preflush_target_for(next_prune_height)
+                    .map(|targets| (next_prune_height, targets))
+            };
+            return MaintenanceAction::Prune {
+                height: prune_height,
+                targets,
+                next_preflush,
+            };
         }
 
-        // Do not prune until we've observed a full rewind-safe window
-        // of finalized blocks after startup.
-        if self.retained_targets.len() < self.prune_retention_window {
-            let (_, targets) = self
-                .retained_targets
-                .front()
-                .cloned()
-                .expect("retained preflush targets must exist");
-            return MaintenanceAction::Preflush { targets };
-        }
+        let prune_height = if at_prune_boundary {
+            Self::next_prune_height_after(height, interval)
+        } else {
+            let current = height.get();
+            let remainder = current % interval;
+            Height::new(
+                current
+                    .checked_add(interval - remainder)
+                    .expect("next prune height overflowed"),
+            )
+        };
 
-        let (height, targets) = self
-            .retained_targets
-            .front()
-            .cloned()
-            .expect("retained prune targets must exist");
-        MaintenanceAction::Prune { height, targets }
+        if self.preflush_started_prune_height == Some(prune_height) {
+            return MaintenanceAction::None;
+        }
+        let Some(targets) = self.preflush_target_for(prune_height) else {
+            return MaintenanceAction::None;
+        };
+        MaintenanceAction::Preflush {
+            height: prune_height,
+            targets,
+        }
     }
+
+    fn mark_preflush_started(&mut self, prune_height: Height) {
+        self.preflush_started_prune_height = Some(prune_height);
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum MaintenanceResult {
+    None,
+    PreflushStarted { height: Height },
 }
 
 /// Owns speculative execution and state persistence for a running stateful actor.
@@ -222,6 +293,10 @@ where
     /// Returns a reference to the database set.
     pub(super) const fn databases(&self) -> &A::Databases {
         &self.databases
+    }
+
+    pub(super) fn mark_preflush_started(&mut self, prune_height: Height) {
+        self.maintenance.mark_preflush_started(prune_height);
     }
 
     /// Prepare parent-relative batches and delegate to the application to
@@ -802,30 +877,46 @@ where
 /// Callers can then schedule this work separately so preflushes and pruning do
 /// not delay subsequent mailbox polling.
 ///
-/// Preflush maintenance is best effort and may be coalesced or skipped when a
-/// database is already busy. Prune maintenance always runs database pruning
-/// before marshal pruning so the actor never drops marshal history ahead of the
-/// corresponding durable database boundary.
+/// Preflush maintenance is best effort and may be coalesced. Individual
+/// databases may skip preflush work when they are already busy; skipped prune
+/// boundaries are retried by later maintenance observations. Prune maintenance
+/// always runs database pruning before marshal pruning so the actor never drops
+/// marshal history ahead of the corresponding durable database boundary.
 /// [`MaintenanceAction::None`] is a no-op.
 pub(super) async fn run_maintenance<E, DBs, S, V>(
     databases: DBs,
     marshal: MarshalMailbox<S, V>,
     maintenance: MaintenanceAction<DBs::SyncTargets>,
-) where
+) -> MaintenanceResult
+where
     E: Rng + Spawner + Metrics + Clock,
     DBs: DatabaseSet<E>,
     S: Scheme,
     V: MarshalVariant,
 {
     match maintenance {
-        MaintenanceAction::None => {}
-        MaintenanceAction::Preflush { targets } => {
-            databases.preflush_to(&targets).await;
+        MaintenanceAction::None => MaintenanceResult::None,
+        MaintenanceAction::Preflush { height, targets } => {
+            if databases.preflush_to(&targets).await {
+                MaintenanceResult::PreflushStarted { height }
+            } else {
+                MaintenanceResult::None
+            }
         }
-        MaintenanceAction::Prune { height, targets } => {
+        MaintenanceAction::Prune {
+            height,
+            targets,
+            next_preflush,
+        } => {
             databases.preflush_to(&targets).await;
             databases.prune(&targets).await;
             marshal.prune(height);
+            if let Some((height, targets)) = next_preflush {
+                if databases.preflush_to(&targets).await {
+                    return MaintenanceResult::PreflushStarted { height };
+                }
+            }
+            MaintenanceResult::None
         }
     }
 }
@@ -899,7 +990,7 @@ where
 mod tests {
     use super::{
         await_or_cancel, next_or_cancel, run_maintenance, FinalizeStatus, Maintenance,
-        MaintenanceAction, MaintenanceConfig, PrepareBatchesError, Processor,
+        MaintenanceAction, MaintenanceConfig, MaintenanceResult, PrepareBatchesError, Processor,
     };
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
@@ -959,9 +1050,28 @@ mod tests {
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
     type DbSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
 
-    #[derive(Clone, Default)]
+    #[derive(Clone)]
     struct MaintenanceOrderDbSet {
         events: Arc<Mutex<Vec<&'static str>>>,
+        preflush_started: bool,
+    }
+
+    impl Default for MaintenanceOrderDbSet {
+        fn default() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                preflush_started: true,
+            }
+        }
+    }
+
+    impl MaintenanceOrderDbSet {
+        fn skipping_preflush() -> Self {
+            Self {
+                events: Arc::new(Mutex::new(Vec::new())),
+                preflush_started: false,
+            }
+        }
     }
 
     impl DatabaseSet<deterministic::Context> for MaintenanceOrderDbSet {
@@ -986,12 +1096,14 @@ mod tests {
 
         async fn persist(&self) {}
 
-        async fn preflush(&self) {
+        async fn preflush(&self) -> bool {
             self.events.lock().push("preflush");
+            self.preflush_started
         }
 
-        async fn preflush_to(&self, _targets: &Self::SyncTargets) {
+        async fn preflush_to(&self, _targets: &Self::SyncTargets) -> bool {
             self.events.lock().push("preflush_to");
+            self.preflush_started
         }
 
         async fn prune(&self, _targets: &Self::SyncTargets) {
@@ -1653,17 +1765,21 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::Preflush { targets: 10 },
+            MaintenanceAction::None,
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
-            MaintenanceAction::Preflush { targets: 10 },
+            MaintenanceAction::Preflush {
+                height: Height::new(3),
+                targets: 10,
+            },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(3), 30_u64),
             MaintenanceAction::Prune {
                 height: Height::new(1),
                 targets: 10,
+                next_preflush: Some((Height::new(4), 20)),
             },
         );
     }
@@ -1680,19 +1796,66 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::Preflush { targets: 10 },
+            MaintenanceAction::None,
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
-            MaintenanceAction::Preflush { targets: 10 },
+            MaintenanceAction::Preflush {
+                height: Height::new(3),
+                targets: 20,
+            },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(3), 30_u64),
             MaintenanceAction::Prune {
                 height: Height::new(2),
                 targets: 20,
+                next_preflush: None,
             },
         );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(4), 40_u64),
+            MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(5), 50_u64),
+            MaintenanceAction::Preflush {
+                height: Height::new(6),
+                targets: 50,
+            },
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(6), 60_u64),
+            MaintenanceAction::Prune {
+                height: Height::new(5),
+                targets: 50,
+                next_preflush: None,
+            },
+        );
+    }
+
+    #[test]
+    fn maintenance_preflushes_once_per_prune_boundary() {
+        let mut maintenance = Maintenance::new(
+            MaintenanceConfig {
+                interval: NZUsize!(3),
+                prune: true,
+            },
+            NZUsize!(1),
+        );
+
+        let mut preflushes = 0;
+        let mut prunes = 0;
+        for height in 1..=9 {
+            match maintenance.observe_finalized(Height::new(height), height * 10) {
+                MaintenanceAction::None => {}
+                MaintenanceAction::Preflush { .. } => preflushes += 1,
+                MaintenanceAction::Prune { .. } => prunes += 1,
+            }
+        }
+
+        assert_eq!(preflushes, 3);
+        assert_eq!(prunes, 3);
     }
 
     #[test]
@@ -1707,13 +1870,17 @@ mod tests {
 
         assert_eq!(
             maintenance.observe_finalized(Height::new(1), 10_u64),
-            MaintenanceAction::Preflush { targets: 10 },
+            MaintenanceAction::Preflush {
+                height: Height::new(2),
+                targets: 10,
+            },
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
             MaintenanceAction::Prune {
                 height: Height::new(1),
                 targets: 10,
+                next_preflush: Some((Height::new(3), 20)),
             },
         );
         assert_eq!(
@@ -1721,6 +1888,51 @@ mod tests {
             MaintenanceAction::Prune {
                 height: Height::new(2),
                 targets: 20,
+                next_preflush: Some((Height::new(4), 30)),
+            },
+        );
+    }
+
+    #[test]
+    fn maintenance_retries_preflush_until_marked_started() {
+        let mut maintenance = Maintenance::new(
+            MaintenanceConfig {
+                interval: NZUsize!(5),
+                prune: true,
+            },
+            NZUsize!(2),
+        );
+
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(1), 10_u64),
+            MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(2), 20_u64),
+            MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(3), 30_u64),
+            MaintenanceAction::Preflush {
+                height: Height::new(5),
+                targets: 30,
+            },
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(4), 40_u64),
+            MaintenanceAction::Preflush {
+                height: Height::new(5),
+                targets: 30,
+            },
+        );
+
+        maintenance.mark_preflush_started(Height::new(5));
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(5), 50_u64),
+            MaintenanceAction::Prune {
+                height: Height::new(3),
+                targets: 30,
+                next_preflush: None,
             },
         );
     }
@@ -1730,17 +1942,48 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let marshal = init_marshal_mailbox(context.child("marshal")).await;
             let databases = MaintenanceOrderDbSet::default();
-            run_maintenance::<deterministic::Context, _, _, _>(
+            let result = run_maintenance::<deterministic::Context, _, _, _>(
                 databases.clone(),
                 marshal,
                 MaintenanceAction::Prune {
                     height: Height::zero(),
                     targets: (),
+                    next_preflush: None,
                 },
             )
             .await;
 
             assert_eq!(&*databases.events.lock(), &["preflush_to", "prune"]);
+            assert_eq!(result, MaintenanceResult::None);
+        });
+    }
+
+    #[test]
+    fn prune_maintenance_preflushes_next_target_after_pruning() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = init_marshal_mailbox(context.child("marshal")).await;
+            let databases = MaintenanceOrderDbSet::default();
+            let result = run_maintenance::<deterministic::Context, _, _, _>(
+                databases.clone(),
+                marshal,
+                MaintenanceAction::Prune {
+                    height: Height::zero(),
+                    targets: (),
+                    next_preflush: Some((Height::new(1), ())),
+                },
+            )
+            .await;
+
+            assert_eq!(
+                &*databases.events.lock(),
+                &["preflush_to", "prune", "preflush_to"]
+            );
+            assert_eq!(
+                result,
+                MaintenanceResult::PreflushStarted {
+                    height: Height::new(1),
+                },
+            );
         });
     }
 
@@ -1749,14 +1992,43 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let marshal = init_marshal_mailbox(context.child("marshal")).await;
             let databases = MaintenanceOrderDbSet::default();
-            run_maintenance::<deterministic::Context, _, _, _>(
+            let result = run_maintenance::<deterministic::Context, _, _, _>(
                 databases.clone(),
                 marshal,
-                MaintenanceAction::Preflush { targets: () },
+                MaintenanceAction::Preflush {
+                    height: Height::new(1),
+                    targets: (),
+                },
             )
             .await;
 
             assert_eq!(&*databases.events.lock(), &["preflush_to"]);
+            assert_eq!(
+                result,
+                MaintenanceResult::PreflushStarted {
+                    height: Height::new(1)
+                },
+            );
+        });
+    }
+
+    #[test]
+    fn preflush_maintenance_reports_none_when_skipped() {
+        deterministic::Runner::default().start(|context| async move {
+            let marshal = init_marshal_mailbox(context.child("marshal")).await;
+            let databases = MaintenanceOrderDbSet::skipping_preflush();
+            let result = run_maintenance::<deterministic::Context, _, _, _>(
+                databases.clone(),
+                marshal,
+                MaintenanceAction::Preflush {
+                    height: Height::new(1),
+                    targets: (),
+                },
+            )
+            .await;
+
+            assert_eq!(&*databases.events.lock(), &["preflush_to"]);
+            assert_eq!(result, MaintenanceResult::None);
         });
     }
 
