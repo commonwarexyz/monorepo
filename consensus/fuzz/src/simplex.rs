@@ -269,7 +269,7 @@ mod tests {
     use super::*;
     use crate::{
         fuzz, strategy::StrategyChoice, utils::Partition, CertifyChoice, FaultyMessaging,
-        FuzzInput, Standard, TwinsMutator, N4F1C3,
+        FuzzInput, ReporterWiring, Standard, TwinsMutator, N4F1C3,
     };
     use commonware_consensus::simplex::{mocks::application::Certifier, ForwardingPolicy};
     use commonware_macros::{test_group, test_traced};
@@ -306,6 +306,7 @@ mod tests {
             messaging_faults: Vec::new(),
             forwarding: ForwardingPolicy::Disabled,
             certify: CertifyChoice::Always,
+            reporting: ReporterWiring::Solo,
         }
     }
 

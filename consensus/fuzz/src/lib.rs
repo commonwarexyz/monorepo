@@ -31,6 +31,7 @@ use crate::{
     utils::{apply_partition, link_peers, register, Action, Partition, SetPartition},
 };
 use arbitrary::Arbitrary;
+use commonware_actor::Feedback;
 use commonware_codec::{Decode, DecodeExt, Read};
 use commonware_consensus::{
     simplex::{
@@ -41,7 +42,7 @@ use commonware_consensus::{
         Engine, Floor, ForwardingPolicy,
     },
     types::{Delta, Epoch, View},
-    Monitor, Viewable,
+    Monitor, Reporter, Reporters, Viewable,
 };
 use commonware_cryptography::{
     certificate::Verifier, sha256::Digest as Sha256Digest, PublicKey as CryptoPublicKey, Sha256,
@@ -205,6 +206,84 @@ impl CertifyChoice {
     }
 }
 
+/// Per-iteration shape of the [Reporters] combinator wrapping each honest
+/// engine's reporter, driving coverage of `commonware_consensus::reporter`.
+/// Compromised twin engines keep raw reporters. The real reporter is always
+/// present so liveness checks keep working; the variant picks its slot and
+/// what (if anything) occupies the other one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReporterWiring {
+    /// `(Some(real), None)`
+    Solo,
+    /// `(None, Some(Some(real)))`
+    SecondSlot,
+    /// `(Some(real), Some(None))`
+    EmptySlot,
+    /// `(Some(real), Some(Some(probe)))`
+    ProbeSecond(Feedback),
+    /// `(Some(probe), Some(Some(real)))`
+    ProbeFirst(Feedback),
+}
+
+impl Arbitrary<'_> for ReporterWiring {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        let feedback = |u: &mut arbitrary::Unstructured<'_>| {
+            Ok(match u.int_in_range(0..=2)? {
+                0 => Feedback::Ok,
+                1 => Feedback::Backoff,
+                _ => Feedback::Closed,
+            })
+        };
+        Ok(match u.int_in_range(0..=4)? {
+            0 => Self::Solo,
+            1 => Self::SecondSlot,
+            2 => Self::EmptySlot,
+            3 => Self::ProbeSecond(feedback(u)?),
+            _ => Self::ProbeFirst(feedback(u)?),
+        })
+    }
+}
+
+impl ReporterWiring {
+    fn wire<R: Reporter>(self, real: R) -> WiredReporter<R> {
+        let real = FuzzReporter::Real(real);
+        match self {
+            Self::Solo => Reporters::from((real, None::<Option<FuzzReporter<R>>>)),
+            Self::SecondSlot => Reporters::from((None::<FuzzReporter<R>>, Some(real))),
+            Self::EmptySlot => Reporters::from((real, None::<FuzzReporter<R>>)),
+            Self::ProbeSecond(feedback) => {
+                Reporters::from((real, Some(FuzzReporter::Probe(feedback))))
+            }
+            Self::ProbeFirst(feedback) => {
+                Reporters::from((Some(FuzzReporter::Probe(feedback)), Some(real)))
+            }
+        }
+    }
+}
+
+/// Slot occupant for [ReporterWiring]: the real reporter or a probe that
+/// returns a fixed [Feedback], exercising `combine` with non-`Ok` values
+/// (the engine discards reporter feedback, so any value is liveness-safe).
+#[derive(Clone)]
+pub(crate) enum FuzzReporter<R> {
+    Real(R),
+    Probe(Feedback),
+}
+
+impl<R: Reporter> Reporter for FuzzReporter<R> {
+    type Activity = R::Activity;
+
+    fn report(&mut self, activity: Self::Activity) -> Feedback {
+        match self {
+            Self::Real(reporter) => reporter.report(activity),
+            Self::Probe(feedback) => *feedback,
+        }
+    }
+}
+
+type WiredReporter<R> =
+    Reporters<<R as Reporter>::Activity, FuzzReporter<R>, Option<FuzzReporter<R>>>;
+
 struct FuzzInputDebug<'a>(&'a FuzzInput);
 
 impl fmt::Debug for FuzzInputDebug<'_> {
@@ -220,6 +299,7 @@ impl fmt::Debug for FuzzInputDebug<'_> {
             .field("messaging_faults", &input.messaging_faults)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
+            .field("reporting", &input.reporting)
             .finish()
     }
 }
@@ -234,6 +314,7 @@ impl fmt::Debug for NodeFuzzInputDebug<'_> {
             .field("events", &input.events)
             .field("forwarding", &input.forwarding)
             .field("certify", &input.certify)
+            .field("reporting", &input.reporting)
             .finish()
     }
 }
@@ -276,6 +357,9 @@ pub struct FuzzInput {
     /// Per-iteration certify policy threaded into every honest validator
     /// the harness spawns.
     pub certify: CertifyChoice,
+    /// Per-iteration reporter wiring threaded into every honest engine
+    /// the harness spawns.
+    pub reporting: ReporterWiring,
 }
 
 impl Arbitrary<'_> for FuzzInput {
@@ -343,6 +427,8 @@ impl Arbitrary<'_> for FuzzInput {
         // below the quorum of three.
         let certify = CertifyChoice::Always;
 
+        let reporting = ReporterWiring::arbitrary(u)?;
+
         // Collect bytes for RNG
         let remaining = u.len().min(MAX_RAW_BYTES);
         let raw_bytes = u.bytes(remaining)?.to_vec();
@@ -361,6 +447,7 @@ impl Arbitrary<'_> for FuzzInput {
             messaging_faults: Vec::new(),
             forwarding,
             certify,
+            reporting,
         })
     }
 }
@@ -581,6 +668,7 @@ pub(crate) fn spawn_honest_validator<
     recovered: (RecoveredSender, RecoveredReceiver),
     resolver: (ResolverSender, ResolverReceiver),
     certify: CertifyChoice,
+    wiring: ReporterWiring,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, EC, Sha256Digest>
 where
     P: simplex::Simplex,
@@ -626,7 +714,7 @@ where
         elector,
         automaton: application.clone(),
         relay: application.clone(),
-        reporter: reporter.clone(),
+        reporter: wiring.wire(reporter.clone()),
         partition: validator.to_string(),
         mailbox_size: NZUsize!(1024),
         epoch: Epoch::new(EPOCH),
@@ -668,6 +756,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
     forwarding: ForwardingPolicy,
     channels: NetworkChannels<PublicKeyOf<P>>,
     certify: CertifyChoice,
+    wiring: ReporterWiring,
 ) -> reporter::Reporter<deterministic::Context, P::Scheme, P::Elector, Sha256Digest> {
     let (vote_network, certificate_network, resolver_network) = channels;
     let (vote_sender, vote_receiver) = vote_network;
@@ -711,6 +800,7 @@ fn spawn_honest_validator_in_faulty_messaging<P: simplex::Simplex>(
         (certificate_sender, certificate_receiver),
         (resolver_sender, resolver_receiver),
         certify,
+        wiring,
     )
 }
 
@@ -998,6 +1088,7 @@ fn run<P: simplex::Simplex>(mut input: FuzzInput) {
                 recovered,
                 resolver,
                 input.certify,
+                input.reporting,
             );
             reporters.push((validator, reporter));
         }
@@ -1120,6 +1211,7 @@ fn run_with_faulty_messaging<P: simplex::Simplex>(mut input: FuzzInput) {
                 input.forwarding,
                 channels,
                 input.certify,
+                input.reporting,
             );
             reporters.push((validator, reporter));
         }
@@ -1564,6 +1656,7 @@ fn run_twins<P: simplex::Simplex>(mut input: FuzzInput, role: TwinsRole) {
                 recovered,
                 resolver,
                 input.certify,
+                input.reporting,
             );
             reporters.push(reporter);
         }
@@ -1638,6 +1731,7 @@ where
     let executor = deterministic::Runner::new(cfg);
     let forwarding = input.forwarding;
     let certify = input.certify;
+    let reporting = input.reporting;
 
     match M::MODE {
         simplex_node::NodeMode::WithoutRecovery => {
@@ -1650,7 +1744,14 @@ where
                 executor.start_and_recover(|mut context| async move {
                     simplex_node::run::<P>(&mut context, &input).await
                 });
-            simplex_node::run_recovery::<P>(checkpoint, participants, schemes, forwarding, certify);
+            simplex_node::run_recovery::<P>(
+                checkpoint,
+                participants,
+                schemes,
+                forwarding,
+                certify,
+                reporting,
+            );
         }
     }
 }

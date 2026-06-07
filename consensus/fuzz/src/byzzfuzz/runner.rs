@@ -263,6 +263,7 @@ where
             (cert_primary, cert_receiver),
             (resolver_primary, resolver_receiver),
             input.certify,
+            input.reporting,
         );
         reporters.push(reporter);
     }
