@@ -4,7 +4,7 @@ use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Flushable, Mutable, Reader},
     },
     merkle::{Family, Location},
     qmdb::{
@@ -1810,6 +1810,90 @@ where
         self.root = batch.root;
 
         // Return range of operations that were written to the log.
+        let end_loc = Location::new(*self.last_commit_loc + 1);
+        let range = start_loc..end_loc;
+        self.update_metrics().await;
+        self.metrics
+            .operations
+            .operations_applied
+            .inc_by(*range.end - *range.start);
+        Ok(range)
+    }
+
+    /// Apply a batch and write pending operation-log and Merkle data without waiting for durability.
+    #[tracing::instrument(
+        name = "qmdb::any::Db::apply_batch_and_write_pending",
+        level = "info",
+        skip_all,
+        fields(
+            batch_total_size = batch.bounds.total_size,
+            batch_base_size = batch.bounds.base_size,
+            db_size = *self.last_commit_loc + 1,
+            ancestor_batches = batch.ancestor_diffs.len() as u64,
+        ),
+    )]
+    pub async fn apply_batch_and_write_pending(
+        &mut self,
+        batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
+    ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>>
+    where
+        C: Flushable,
+    {
+        let _timer = self.metrics.operations.apply_batch_timer();
+        self.metrics.operations.apply_batch_calls.inc();
+        let db_size = *self.last_commit_loc + 1;
+        batch
+            .bounds
+            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
+        let start_loc = Location::new(db_size);
+
+        self.log
+            .apply_batch_and_write_pending(&batch.journal_batch)
+            .await?;
+
+        {
+            let mut bitmap = self.bitmap.write();
+            bitmap.extend_to(batch.bounds.total_size);
+
+            if batch.ancestor_diffs.is_empty() {
+                for (key, entry) in batch.diff.iter() {
+                    apply_diff(
+                        &mut self.snapshot,
+                        &mut bitmap,
+                        key,
+                        entry,
+                        entry.base_old_loc(),
+                    );
+                }
+            } else {
+                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
+                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
+                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
+                    if batch.bounds.ancestors[i].end <= db_size {
+                        applied.push(ancestor_diff.as_slice());
+                    } else {
+                        pending.push(ancestor_diff.as_slice());
+                    }
+                }
+                let mut resolver = AppliedAncestorResolver::new(applied);
+                let merge = DiffMerge::new(
+                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
+                );
+                for (key, entry) in merge {
+                    let old = resolver.lookup(key).unwrap_or_else(|| entry.base_old_loc());
+                    apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
+                }
+            }
+
+            bitmap.set_bit(*self.last_commit_loc, false);
+            bitmap.set_bit(batch.bounds.total_size - 1, true);
+        }
+
+        self.active_keys = batch.total_active_keys;
+        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
+        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.root = batch.root;
+
         let end_loc = Location::new(*self.last_commit_loc + 1);
         let range = start_loc..end_loc;
         self.update_metrics().await;

@@ -7,7 +7,9 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, BoundarySyncable, Contiguous, Flushable, Many, Mutable, Reader},
+        contiguous::{
+            fixed, variable, BoundarySyncable, Contiguous, Flushable, Many, Mutable, Reader,
+        },
         Error as JournalError,
     },
     merkle::{
@@ -495,31 +497,10 @@ where
         Ok(())
     }
 
-    /// Append an item to the journal and update the Merkle structure.
-    pub async fn append(&mut self, item: &C::Item) -> Result<Location<F>, Error<F>> {
-        let encoded_item = item.encode();
-
-        // Append item to the journal, then update the Merkle structure state.
-        let loc = self.journal.append(item).await?;
-        let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
-        let batch = self
-            .merkle
-            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
-        self.merkle.apply_batch(&batch)?;
-
-        Ok(Location::new(loc))
-    }
-
-    /// Apply a batch to the journal.
-    ///
-    /// A batch is valid if the journal has not been modified since the batch
-    /// chain was created, or if only ancestors of this batch have been applied.
-    /// Already-committed ancestors are skipped automatically.
-    /// Applying a batch from a different fork returns an error.
-    pub async fn apply_batch(
-        &mut self,
-        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
-    ) -> Result<(), Error<F>> {
+    async fn append_batches<'a>(
+        &self,
+        batch: &'a MerkleizedBatch<F, H::Digest, C::Item, S>,
+    ) -> Result<Vec<&'a [C::Item]>, Error<F>> {
         let merkle_size = self.merkle.size();
         let base_size = batch.inner.base_size();
 
@@ -560,11 +541,66 @@ where
         if !batch.items.is_empty() {
             batches.push(&batch.items);
         }
+        Ok(batches)
+    }
+
+    /// Append an item to the journal and update the Merkle structure.
+    pub async fn append(&mut self, item: &C::Item) -> Result<Location<F>, Error<F>> {
+        let encoded_item = item.encode();
+
+        // Append item to the journal, then update the Merkle structure state.
+        let loc = self.journal.append(item).await?;
+        let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
+        let batch = self
+            .merkle
+            .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
+        self.merkle.apply_batch(&batch)?;
+
+        Ok(Location::new(loc))
+    }
+
+    /// Apply a batch to the journal.
+    ///
+    /// A batch is valid if the journal has not been modified since the batch
+    /// chain was created, or if only ancestors of this batch have been applied.
+    /// Already-committed ancestors are skipped automatically.
+    /// Applying a batch from a different fork returns an error.
+    pub async fn apply_batch(
+        &mut self,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
+    ) -> Result<(), Error<F>> {
+        let batches = self.append_batches(batch).await?;
         if !batches.is_empty() {
             self.journal.append_many(Many::Nested(&batches)).await?;
         }
 
         self.merkle.apply_batch(&batch.inner)?;
+        assert_eq!(*self.merkle.leaves(), self.journal.size().await);
+        Ok(())
+    }
+
+    /// Apply a batch and write pending operation-log and Merkle data without waiting for durability.
+    pub async fn apply_batch_and_write_pending(
+        &mut self,
+        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
+    ) -> Result<(), Error<F>>
+    where
+        C: Flushable,
+    {
+        let batches = self.append_batches(batch).await?;
+        self.merkle.apply_batch(&batch.inner)?;
+
+        let journal = async {
+            if !batches.is_empty() {
+                self.journal.append_many(Many::Nested(&batches)).await?;
+            }
+            self.journal.flush().await
+        };
+        try_join!(
+            journal.map_err(Error::Journal),
+            self.merkle.write_pending().map_err(Error::Merkle),
+        )?;
+
         assert_eq!(*self.merkle.leaves(), self.journal.size().await);
         Ok(())
     }
@@ -740,16 +776,12 @@ where
     ///
     /// # Returns
     /// The new pruning boundary, which may be less than the requested `prune_loc`.
-    pub async fn prune_and_sync(
-        &mut self,
-        prune_loc: Location<F>,
-    ) -> Result<Location<F>, Error<F>>
+    pub async fn prune_and_sync(&mut self, prune_loc: Location<F>) -> Result<Location<F>, Error<F>>
     where
         C: BoundarySyncable,
     {
         let durable_size = self.size().await;
-        self.prune_and_sync_to(prune_loc, durable_size)
-            .await
+        self.prune_and_sync_to(prune_loc, durable_size).await
     }
 
     /// Prune history below `prune_loc` after syncing through `durable_size`.

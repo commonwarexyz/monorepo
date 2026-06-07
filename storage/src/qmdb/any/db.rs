@@ -798,7 +798,10 @@ where
         C: BoundarySyncable,
     {
         self.metrics.operations.sync_calls.inc();
-        self.log.sync_start_to(durable_size).await.map_err(Into::into)
+        self.log
+            .sync_start_to(durable_size)
+            .await
+            .map_err(Into::into)
     }
 
     /// Prune historical operations prior to `prune_loc` and sync all database state to disk.

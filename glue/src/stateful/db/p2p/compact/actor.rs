@@ -351,7 +351,9 @@ mod tests {
     use commonware_cryptography::{ed25519, sha256, Sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _,
+    };
     use commonware_storage::{
         merkle::Proof,
         mmr,

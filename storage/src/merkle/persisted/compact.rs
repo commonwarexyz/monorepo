@@ -184,10 +184,8 @@ impl<F: Family, D: Digest> Read for Base<F, D> {
         let leaf_count = Location::<F>::read_cfg(buf, &())?;
         let floor = Location::<F>::read_cfg(buf, &())?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &(cfg.pinned_nodes, ()))?;
-        let last_commit_op_bytes =
-            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_op_bytes, ()))?;
-        let last_commit_proof_bytes =
-            Vec::<u8>::read_cfg(buf, &(cfg.last_commit_proof_bytes, ()))?;
+        let last_commit_op_bytes = Vec::<u8>::read_cfg(buf, &(cfg.last_commit_op_bytes, ()))?;
+        let last_commit_proof_bytes = Vec::<u8>::read_cfg(buf, &(cfg.last_commit_proof_bytes, ()))?;
         Ok(Self {
             root,
             leaf_count,
@@ -248,7 +246,10 @@ impl<F: Family, D: Digest> RetainedBases<F, D> {
 
     fn previous_position(&self) -> Option<u64> {
         let current = self.current_position?;
-        self.bases.range(..current).next_back().map(|(position, _)| *position)
+        self.bases
+            .range(..current)
+            .next_back()
+            .map(|(position, _)| *position)
     }
 
     fn position_for_target(&self, leaf_count: Location<F>, root: D) -> Option<u64> {
@@ -260,7 +261,8 @@ impl<F: Family, D: Digest> RetainedBases<F, D> {
             .bases
             .split_off(&(position.checked_add(1).expect("position overflow")));
         for base in removed.values() {
-            self.by_target.remove(&(*base.leaf_count, base.root.to_vec()));
+            self.by_target
+                .remove(&(*base.leaf_count, base.root.to_vec()));
         }
         self.current_position = self.bases.keys().next_back().copied();
     }
@@ -323,7 +325,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     pub async fn init(context: E, cfg: Config<S>) -> Result<Self, Error<F>> {
         let base_log =
             Journal::<_, Base<F, D>>::init(context.child("compact_bases"), base_log_config(&cfg))
-            .await?;
+                .await?;
         let retained = Self::load_retained_bases(&base_log).await?;
         let mem = if let Some(base) = retained.current() {
             Self::mem_from_base(base)?
@@ -365,7 +367,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
 
         let base_log =
             Journal::<_, Base<F, D>>::init(context.child("compact_bases"), base_log_config(&cfg))
-            .await?;
+                .await?;
 
         let mem = if leaves == 0 {
             Mem::new()
@@ -685,7 +687,9 @@ mod tests {
     use crate::merkle::{hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold};
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -712,9 +716,7 @@ mod tests {
 
     async fn open<F: Family>(context: deterministic::Context, partition: &str) -> TestMerkle<F> {
         let cfg = test_config(&context, partition);
-        TestMerkle::<F>::init(context, cfg)
-        .await
-        .unwrap()
+        TestMerkle::<F>::init(context, cfg).await.unwrap()
     }
 
     async fn append_and_sync<F: Family>(merkle: &mut TestMerkle<F>, values: &[&[u8]]) {

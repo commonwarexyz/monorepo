@@ -571,12 +571,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
         let mut inner = self.inner.write().await;
         for (section, end, handle) in started {
-            inner
-                .pending_syncs
-                .insert(section, PendingSectionSync {
+            inner.pending_syncs.insert(
+                section,
+                PendingSectionSync {
                     end,
                     handle: Mutex::new(Some(handle)),
-                });
+                },
+            );
         }
         Ok(())
     }
@@ -1109,8 +1110,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             };
             let start_section = start_section.max(oldest_section);
             if start_section <= tail_section {
-                try_join_all((start_section..=tail_section).map(|section| inner.data.flush(section)))
-                    .await?;
+                try_join_all(
+                    (start_section..=tail_section).map(|section| inner.data.flush(section)),
+                )
+                .await?;
             }
         }
         Ok(())

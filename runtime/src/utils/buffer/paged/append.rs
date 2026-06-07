@@ -66,7 +66,6 @@ struct BlobState<B: Blob> {
 
     /// Highest generation known to be durable.
     durable_generation: u64,
-
 }
 
 struct PendingSync {
@@ -567,12 +566,7 @@ impl<B: Blob> Append<B> {
             None => {
                 // No protected regions, write everything in one operation
                 blob_state
-                    .write_at_maybe_sync(
-                        &self.pending_sync,
-                        write_at_offset,
-                        physical_pages,
-                        sync,
-                    )
+                    .write_at_maybe_sync(&self.pending_sync, write_at_offset, physical_pages, sync)
                     .await?;
                 Ok(sync)
             }
@@ -1024,7 +1018,11 @@ impl<B: Blob> Append<B> {
         // Publish the new shrunken length. If a crash happens before the old slot is invalidated,
         // both slots may be valid, but recovery still chooses the old longer length.
         blob_state
-            .write_at_sync(pending_sync, new_slot_offset, new_len.to_be_bytes().to_vec())
+            .write_at_sync(
+                pending_sync,
+                new_slot_offset,
+                new_len.to_be_bytes().to_vec(),
+            )
             .await?;
 
         // Clear only the old slot's length bytes. Rewriting the whole footer here could tear across

@@ -1143,12 +1143,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let mut inner = self.inner.write().await;
         for (section, end, handle) in started {
-            inner
-                .pending_syncs
-                .insert(section, PendingSectionSync {
+            inner.pending_syncs.insert(
+                section,
+                PendingSectionSync {
                     end,
                     handle: Mutex::new(Some(handle)),
-                });
+                },
+            );
         }
         Ok(())
     }
@@ -1217,7 +1218,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         try_join_all(pending).await?;
         if !missing.is_empty() {
             let inner = self.inner.read().await;
-            try_join_all(missing.into_iter().map(|section| inner.journal.sync(section))).await?;
+            try_join_all(
+                missing
+                    .into_iter()
+                    .map(|section| inner.journal.sync(section)),
+            )
+            .await?;
         }
         Ok(synced_end)
     }

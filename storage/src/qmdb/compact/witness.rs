@@ -344,27 +344,26 @@ where
             last_commit_proof,
         })
     };
-    let build_base = |leaf_count, pinned_nodes: Vec<H::Digest>, witness: ServeState<F, H::Digest>| {
-        let mut witness = witness;
-        witness.leaf_count = leaf_count;
-        witness.pinned_nodes = pinned_nodes.clone();
-        let base = compact::Base {
-            root: witness.root,
-            leaf_count,
-            floor: witness.floor,
-            pinned_nodes,
-            last_commit_op_bytes: witness.last_commit_op_bytes.clone(),
-            last_commit_proof_bytes: witness.last_commit_proof.encode().to_vec(),
+    let build_base =
+        |leaf_count, pinned_nodes: Vec<H::Digest>, witness: ServeState<F, H::Digest>| {
+            let mut witness = witness;
+            witness.leaf_count = leaf_count;
+            witness.pinned_nodes = pinned_nodes.clone();
+            let base = compact::Base {
+                root: witness.root,
+                leaf_count,
+                floor: witness.floor,
+                pinned_nodes,
+                last_commit_op_bytes: witness.last_commit_op_bytes.clone(),
+                last_commit_proof_bytes: witness.last_commit_proof.encode().to_vec(),
+            };
+            cache.replace(witness);
+            Ok((base, ()))
         };
-        cache.replace(witness);
-        Ok((base, ()))
-    };
 
     match mode {
         PersistMode::Write => {
-            merkle
-                .write_with_witness(build_witness, build_base)
-                .await?;
+            merkle.write_with_witness(build_witness, build_base).await?;
         }
         PersistMode::Commit => {
             merkle
@@ -377,9 +376,7 @@ where
                 .await?;
         }
         PersistMode::Sync => {
-            merkle
-                .sync_with_witness(build_witness, build_base)
-                .await?;
+            merkle.sync_with_witness(build_witness, build_base).await?;
         }
     }
     Ok(())

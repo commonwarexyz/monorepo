@@ -339,8 +339,7 @@ where
             .await?;
         }
 
-        let (witness, last_commit_op) =
-            Self::load_active_witness(&merkle, &commit_codec_config)?;
+        let (witness, last_commit_op) = Self::load_active_witness(&merkle, &commit_codec_config)?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
@@ -454,9 +453,9 @@ where
             witness.last_commit_op_bytes.as_ref(),
             &self.commit_codec_config,
         )
-            .map_err(|_| {
-                compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
-            })?;
+        .map_err(|_| {
+            compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
+        })?;
         if !matches!(&op, Operation::Commit(_, _)) {
             return Err(compact_sync::ServeError::Database(Error::DataCorrupted(
                 "last operation was not a commit",
@@ -667,7 +666,10 @@ where
     }
 
     /// Prune retained compact bases before `target`.
-    pub async fn prune(&mut self, target: compact_sync::Target<F, H::Digest>) -> Result<(), Error<F>>
+    pub async fn prune(
+        &mut self,
+        target: compact_sync::Target<F, H::Digest>,
+    ) -> Result<(), Error<F>>
     where
         F: Family,
     {
@@ -688,14 +690,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        merkle::mmr,
-        qmdb::any::value::FixedEncoding,
-    };
+    use crate::{merkle::mmr, qmdb::any::value::FixedEncoding};
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, Runner as _, Supervisor as _,
+    };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -721,12 +722,9 @@ mod tests {
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
         let cfg = merkle_config(&context, partition);
-        let merkle = crate::merkle::compact::Merkle::init(
-            context,
-            cfg,
-        )
-        .await
-        .unwrap();
+        let merkle = crate::merkle::compact::Merkle::init(context, cfg)
+            .await
+            .unwrap();
         Db::init_from_merkle(merkle, ()).await.unwrap()
     }
 
@@ -1045,7 +1043,10 @@ mod tests {
             drop(db);
 
             let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _, Sequential> =
-                crate::merkle::compact::Merkle::init(context.child("reopen"), merkle_config(&context, partition))
+                crate::merkle::compact::Merkle::init(
+                    context.child("reopen"),
+                    merkle_config(&context, partition),
+                )
                 .await
                 .unwrap();
             let reopened = TestDb::<mmr::Family>::init_from_merkle(merkle, ()).await;

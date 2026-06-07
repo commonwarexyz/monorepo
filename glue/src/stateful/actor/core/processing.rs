@@ -176,7 +176,11 @@ fn queue_maintenance<T>(
     match maintenance {
         MaintenanceAction::None => {}
         MaintenanceAction::Preflush { .. } => {
-            if !task_active && !pending.iter().any(|queued| matches!(queued, MaintenanceAction::Prune { .. })) {
+            if !task_active
+                && !pending
+                    .iter()
+                    .any(|queued| matches!(queued, MaintenanceAction::Prune { .. }))
+            {
                 pending.retain(|queued| !matches!(queued, MaintenanceAction::Preflush { .. }));
                 pending.push_back(maintenance);
             }

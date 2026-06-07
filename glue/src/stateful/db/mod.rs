@@ -255,7 +255,6 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
         &mut self,
         target: Self::SyncTarget,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
-
 }
 
 /// A collection of individually locked [`ManagedDb`] instances.
@@ -344,7 +343,6 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     ///
     /// Rewind failures are fatal for startup recovery and therefore panic.
     fn rewind_to_targets(&self, targets: Self::SyncTargets) -> impl Future<Output = ()> + Send;
-
 }
 
 /// Parameters for a one-time state-sync pass.
@@ -2103,20 +2101,18 @@ mod tests {
                 started_tx, release_rx,
             )));
 
-            let preflush =
-                <Arc<AsyncRwLock<BlockingPreflushDb>> as DatabaseSet<
-                    deterministic::Context,
-                >>::preflush(&database);
+            let preflush = <Arc<AsyncRwLock<BlockingPreflushDb>> as DatabaseSet<
+                deterministic::Context,
+            >>::preflush(&database);
             pin_mut!(preflush);
             assert!(preflush.as_mut().now_or_never().is_none());
             started_rx
                 .await
                 .expect("preflush should start before blocking");
 
-            let new_batches =
-                <Arc<AsyncRwLock<BlockingPreflushDb>> as DatabaseSet<
-                    deterministic::Context,
-                >>::new_batches(&database);
+            let new_batches = <Arc<AsyncRwLock<BlockingPreflushDb>> as DatabaseSet<
+                deterministic::Context,
+            >>::new_batches(&database);
             pin_mut!(new_batches);
             assert!(
                 new_batches.as_mut().now_or_never().is_some(),

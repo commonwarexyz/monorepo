@@ -898,8 +898,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        await_or_cancel, next_or_cancel, run_maintenance, FinalizeStatus, Maintenance, MaintenanceAction,
-        MaintenanceConfig, PrepareBatchesError, Processor,
+        await_or_cancel, next_or_cancel, run_maintenance, FinalizeStatus, Maintenance,
+        MaintenanceAction, MaintenanceConfig, PrepareBatchesError, Processor,
     };
     use crate::stateful::{
         actor::processor::ProcessorMetrics,
@@ -978,10 +978,7 @@ mod tests {
 
         fn fork_batches(_parent: &Self::Merkleized) -> Self::Unmerkleized {}
 
-        fn matches_sync_targets(
-            _batches: &Self::Merkleized,
-            _targets: &Self::SyncTargets,
-        ) -> bool {
+        fn matches_sync_targets(_batches: &Self::Merkleized, _targets: &Self::SyncTargets) -> bool {
             true
         }
 
@@ -2094,7 +2091,7 @@ mod tests {
     }
 
     #[test]
-    fn execution_finalization_persists_state_to_db() {
+    fn execution_finalization_publishes_without_durable_sync() {
         deterministic::Runner::default().start(|context| async move {
             let mut harness = Harness::new(context.child("harness")).await;
             let genesis = Block::genesis();
@@ -2112,8 +2109,76 @@ mod tests {
                 harness
                     .reopen_height_value(context.child("reopen"), Height::new(1))
                     .await,
+                None,
+                "finalize publishes in-process state but does not force durability",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_prune_maintenance_makes_finalized_state_durable() {
+        deterministic::Runner::default().start(|context| async move {
+            let provider = MapProvider::default();
+            let config = qmdb_config("durable_prune", &context);
+            let app = ExecutionApp::new();
+            let mut harness =
+                Harness::with_app(context.child("harness"), provider, config, app).await;
+            harness.processor = Processor::new(
+                ExecutionApp::new(),
+                harness.processor.databases().clone(),
+                Anchor {
+                    height: Height::zero(),
+                    round: Block::genesis().context().round,
+                    digest: Block::genesis().digest(),
+                },
+                ProcessorMetrics::new(harness.context_cell.child("durable_prune_metrics")),
+                NZUsize!(1),
+                MaintenanceConfig {
+                    interval: NZUsize!(1),
+                    prune: true,
+                },
+            );
+
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let (status, maintenance) = harness.finalize_with_maintenance(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Applied {
+                    height: Height::new(1)
+                }
+            );
+            assert!(matches!(maintenance, MaintenanceAction::Preflush { .. }));
+
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+            let (status, maintenance) = harness.finalize_with_maintenance(block2).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Applied {
+                    height: Height::new(2)
+                }
+            );
+            match &maintenance {
+                MaintenanceAction::Prune { height, .. } => {
+                    assert_eq!(*height, Height::new(1));
+                }
+                other => panic!("expected prune maintenance, got {other:?}"),
+            }
+
+            let marshal = init_marshal_mailbox(context.child("marshal")).await;
+            run_maintenance::<deterministic::Context, _, _, _>(
+                harness.processor.databases().clone(),
+                marshal,
+                maintenance,
+            )
+            .await;
+
+            assert_eq!(
+                harness
+                    .reopen_height_value(context.child("reopen"), Height::new(1))
+                    .await,
                 Some(1),
-                "height state should survive reopen after finalization",
+                "prune maintenance must make the retained finalized target durable",
             );
         });
     }

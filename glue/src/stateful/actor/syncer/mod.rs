@@ -537,10 +537,7 @@ mod tests {
     };
     use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
     use commonware_consensus::{
-        simplex::{
-            mocks::scheme as scheme_mocks,
-            types::Context as ConsensusContext,
-        },
+        simplex::{mocks::scheme as scheme_mocks, types::Context as ConsensusContext},
         types::{Epoch, Height, Round, View},
         Block as ConsensusBlock, CertifiableBlock, Heightable,
     };
@@ -613,7 +610,10 @@ mod tests {
         type Config = (u64, Arc<AtomicUsize>);
         type SyncTarget = u64;
 
-        async fn init(_context: deterministic::Context, config: Self::Config) -> Result<Self, Self::Error> {
+        async fn init(
+            _context: deterministic::Context,
+            config: Self::Config,
+        ) -> Result<Self, Self::Error> {
             Ok(Self::new(config.0, config.1))
         }
 
@@ -657,7 +657,9 @@ mod tests {
         type Databases = ReplayDatabases;
         type InputProvider = ();
 
-        fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
+        fn sync_targets(
+            block: &Self::Block,
+        ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::SyncTargets {
             block.height().get()
         }
 
@@ -766,7 +768,9 @@ mod tests {
                     round: Round::new(Epoch::zero(), View::new(height.get())),
                     leader: ed25519::PrivateKey::from_seed(0).public_key(),
                     parent: (
-                        height.previous().map_or(View::zero(), |height| View::new(height.get())),
+                        height
+                            .previous()
+                            .map_or(View::zero(), |height| View::new(height.get())),
                         parent,
                     ),
                 },

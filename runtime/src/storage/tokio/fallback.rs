@@ -145,8 +145,8 @@ impl crate::Blob for Blob {
                 .await
                 .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e))
         });
-        Ok(Box::pin(async move {
-            handle.await.map_err(|_| Error::Closed)?
-        }))
+        Ok(Box::pin(
+            async move { handle.await.map_err(|_| Error::Closed)? },
+        ))
     }
 }

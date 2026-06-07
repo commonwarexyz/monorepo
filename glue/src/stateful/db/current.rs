@@ -382,8 +382,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.write_pending().await?;
+        self.apply_batch_and_write_pending(batch.inner).await?;
         Ok(())
     }
 
@@ -490,8 +489,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.write_pending().await?;
+        self.apply_batch_and_write_pending(batch.inner).await?;
         Ok(())
     }
 
@@ -675,8 +673,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.write_pending().await?;
+        self.apply_batch_and_write_pending(batch.inner).await?;
         Ok(())
     }
 
@@ -788,8 +785,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch(batch.inner).await?;
-        self.write_pending().await?;
+        self.apply_batch_and_write_pending(batch.inner).await?;
         Ok(())
     }
 

@@ -519,7 +519,10 @@ where
         C: BoundarySyncable,
     {
         self.metrics.operations.sync_calls.inc();
-        self.journal.sync_start_to(durable_size).await.map_err(Into::into)
+        self.journal
+            .sync_start_to(durable_size)
+            .await
+            .map_err(Into::into)
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
@@ -596,6 +599,40 @@ where
         let start_loc = self.last_commit_loc + 1;
 
         self.journal.apply_batch(&batch.journal_batch).await?;
+
+        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
+        self.root = batch.root;
+        let end_loc = Location::new(batch.bounds.total_size);
+        debug!(size = ?end_loc, "applied batch");
+        let range = start_loc..end_loc;
+        self.update_metrics().await;
+        self.metrics
+            .operations
+            .operations_applied
+            .inc_by(*range.end - *range.start);
+        Ok(range)
+    }
+
+    /// Apply a batch and write pending operation-log and Merkle data without waiting for durability.
+    pub async fn apply_batch_and_write_pending(
+        &mut self,
+        batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,
+    ) -> Result<core::ops::Range<Location<F>>, Error<F>>
+    where
+        C: Flushable,
+    {
+        let _timer = self.metrics.operations.apply_batch_timer();
+        self.metrics.operations.apply_batch_calls.inc();
+        let db_size = *self.last_commit_loc + 1;
+        batch
+            .bounds
+            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
+        let start_loc = self.last_commit_loc + 1;
+
+        self.journal
+            .apply_batch_and_write_pending(&batch.journal_batch)
+            .await?;
 
         self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
