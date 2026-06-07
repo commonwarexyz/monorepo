@@ -1,20 +1,20 @@
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
-use commonware_glue::stateful::db::{DatabaseSet, ManagedDb, Unmerkleized as _};
+use commonware_glue::stateful::db::{ManagedDb, Unmerkleized as _};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    Handle, Spawner, Supervisor as _, ThreadPooler,
+    Supervisor as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as JournalConfig,
-    merkle::{full::Config as MerkleConfig, mmb, Family, Location},
-    qmdb::keyless::fixed::{Config as KeylessConfig, Db},
+    merkle::{full::Config as MerkleConfig, mmb, Family},
+    qmdb::any::{unordered::fixed::Db, FixedConfig as AnyConfig},
+    translator::EightCap,
 };
 use commonware_utils::{sync::AsyncRwLock, NZUsize, NZU16, NZU64};
 use criterion::{criterion_group, Criterion};
-use futures::FutureExt as _;
 use std::{
     env,
     num::{NonZeroU16, NonZeroU64, NonZeroUsize},
@@ -25,48 +25,38 @@ use std::{
 const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 const THREADS: NonZeroUsize = NZUsize!(8);
-const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(50_000);
-const DEFAULT_BATCHES: u64 = 100;
-const DEFAULT_APPENDS_PER_BATCH: u64 = 256;
-const DEFAULT_PRUNE_EVERY: u64 = 25;
-const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
-const ENV_BATCHES: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_BATCHES";
-const ENV_APPENDS_PER_BATCH: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_APPENDS_PER_BATCH";
-const ENV_PRUNE_EVERY: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_PRUNE_EVERY";
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(2_000_000);
+const DEFAULT_BLOCKS: u64 = 100;
+const DEFAULT_APPENDS_PER_BLOCK: u64 = 100_000;
+const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(8 * 1024 * 1024);
+const ENV_BLOCKS: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_BATCHES";
+const ENV_APPENDS_PER_BLOCK: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_APPENDS_PER_BATCH";
 const ENV_WRITE_BUFFER_SIZE: &str = "COMMONWARE_GLUE_FINALIZE_BENCH_WRITE_BUFFER_SIZE";
 
-type BenchDb<F> = Db<F, Context, Digest, Sha256, Rayon>;
+type BenchDb<F> = Db<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 
 #[derive(Clone, Copy)]
 struct Workload {
-    batches: u64,
-    appends_per_batch: u64,
-    prune_every: u64,
+    blocks: u64,
+    appends_per_block: u64,
     write_buffer: NonZeroUsize,
 }
 
 impl Workload {
     fn from_env() -> Self {
         Self {
-            batches: env_u64(ENV_BATCHES, DEFAULT_BATCHES),
-            appends_per_batch: env_u64(ENV_APPENDS_PER_BATCH, DEFAULT_APPENDS_PER_BATCH),
-            prune_every: env_u64(ENV_PRUNE_EVERY, DEFAULT_PRUNE_EVERY),
+            blocks: env_u64(ENV_BLOCKS, DEFAULT_BLOCKS),
+            appends_per_block: env_u64(ENV_APPENDS_PER_BLOCK, DEFAULT_APPENDS_PER_BLOCK),
             write_buffer: env_nonzero_usize(ENV_WRITE_BUFFER_SIZE, WRITE_BUFFER_SIZE),
         }
     }
 
-    fn name(self, case: &str, extra: &str) -> String {
-        let prefix = if extra.is_empty() {
-            String::new()
-        } else {
-            format!(" {extra}")
-        };
+    fn name(self, metric: &str) -> String {
         format!(
-            "{}/case={case} v=kfix{prefix} blocks={} keys={} prune={} buf={}",
+            "{}/v=any-fixed metric={metric} blocks={} keys={} buf={}",
             module_path!(),
-            self.batches,
-            self.appends_per_batch,
-            self.prune_every,
+            self.blocks,
+            self.appends_per_block,
             self.write_buffer,
         )
     }
@@ -86,8 +76,20 @@ fn env_u64(name: &str, default: u64) -> u64 {
     }
 }
 
-fn value(batch: u64, append: u64) -> Digest {
-    Sha256::hash(&[batch.to_be_bytes(), append.to_be_bytes()].concat())
+fn digest(domain: u8, block: u64, append: u64) -> Digest {
+    let mut hasher = Sha256::new();
+    hasher.update(&[domain]);
+    hasher.update(&block.to_be_bytes());
+    hasher.update(&append.to_be_bytes());
+    hasher.finalize()
+}
+
+fn key(block: u64, append: u64) -> Digest {
+    digest(b'k', block, append)
+}
+
+fn value(block: u64, append: u64) -> Digest {
+    digest(b'v', block, append)
 }
 
 fn env_nonzero_usize(name: &str, default: NonZeroUsize) -> NonZeroUsize {
@@ -103,10 +105,14 @@ fn env_nonzero_usize(name: &str, default: NonZeroUsize) -> NonZeroUsize {
     }
 }
 
-fn db_config(ctx: &Context, suffix: &str, write_buffer: NonZeroUsize) -> KeylessConfig<Rayon> {
+fn db_config(
+    ctx: &Context,
+    suffix: &str,
+    write_buffer: NonZeroUsize,
+) -> AnyConfig<EightCap, Rayon> {
     let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
-    KeylessConfig {
-        merkle: MerkleConfig {
+    AnyConfig {
+        merkle_config: MerkleConfig {
             journal_partition: format!("merkle-journal-{suffix}"),
             metadata_partition: format!("merkle-metadata-{suffix}"),
             items_per_blob: ITEMS_PER_BLOB,
@@ -114,12 +120,13 @@ fn db_config(ctx: &Context, suffix: &str, write_buffer: NonZeroUsize) -> Keyless
             strategy: ctx.create_strategy(THREADS).unwrap(),
             page_cache: page_cache.clone(),
         },
-        log: JournalConfig {
+        journal_config: JournalConfig {
             partition: format!("log-journal-{suffix}"),
             items_per_blob: ITEMS_PER_BLOB,
             page_cache,
             write_buffer,
         },
+        translator: EightCap,
     }
 }
 
@@ -132,322 +139,18 @@ async fn open_db<F: Family>(ctx: &Context, suffix: &str, workload: Workload) -> 
     .unwrap()
 }
 
-async fn bench_managed_finalize<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let db = open_db::<F>(ctx, "managed-finalize", workload).await;
+async fn bench_finalize_loop<F: Family + 'static>(ctx: &Context, workload: Workload) -> Duration {
+    let db = open_db::<F>(ctx, "finalize-loop", workload).await;
     let db = Arc::new(AsyncRwLock::new(db));
-    let mut elapsed = Duration::ZERO;
+    let start = Instant::now();
 
-    for batch_idx in 0..workload.batches {
+    for block_idx in 0..workload.blocks {
         let mut batch = <BenchDb<F> as ManagedDb<Context>>::new_batch(&db).await;
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize().await.unwrap();
-
-        let start = Instant::now();
-        {
-            let mut guard = db.write().await;
-            <BenchDb<F> as ManagedDb<Context>>::finalize(&mut *guard, merkleized)
-                .await
-                .unwrap();
-        }
-        elapsed += start.elapsed();
-    }
-
-    let db = Arc::try_unwrap(db)
-        .ok()
-        .expect("benchmark should hold the only db reference")
-        .into_inner();
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_apply_then_commit<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-commit", workload).await;
-    let mut elapsed = Duration::ZERO;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = db.new_batch();
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-
-        let start = Instant::now();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        elapsed += start.elapsed();
-    }
-
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_apply_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-only", workload).await;
-    let mut elapsed = Duration::ZERO;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = db.new_batch();
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-
-        let start = Instant::now();
-        db.apply_batch(merkleized).await.unwrap();
-        elapsed += start.elapsed();
-    }
-
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_write_pending_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "write-pending-only", workload).await;
-    let mut elapsed = Duration::ZERO;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = db.new_batch();
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-        db.apply_batch(merkleized).await.unwrap();
-
-        let start = Instant::now();
-        db.write_pending().await.unwrap();
-        elapsed += start.elapsed();
-    }
-
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_commit_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "commit-only", workload).await;
-    let mut elapsed = Duration::ZERO;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = db.new_batch();
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-        db.apply_batch(merkleized).await.unwrap();
-
-        let start = Instant::now();
-        db.commit().await.unwrap();
-        elapsed += start.elapsed();
-    }
-
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_sync_start_pending_only<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "sync-start-pending-only", workload).await;
-    let mut elapsed = Duration::ZERO;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = db.new_batch();
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize(&db, None, db.inactivity_floor_loc());
-        db.apply_batch(merkleized).await.unwrap();
-
-        let start = Instant::now();
-        db.sync_start_pending().await.unwrap();
-        elapsed += start.elapsed();
-    }
-
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-fn spawn_background_preflush<F>(
-    ctx: &Context,
-    db: Arc<AsyncRwLock<BenchDb<F>>>,
-    target: <Arc<AsyncRwLock<BenchDb<F>>> as DatabaseSet<Context>>::SyncTargets,
-) -> Handle<()>
-where
-    F: Family + 'static,
-    <Arc<AsyncRwLock<BenchDb<F>>> as DatabaseSet<Context>>::SyncTargets: Send + 'static,
-{
-    ctx.child("background_preflush").spawn(|_| async move {
-        <Arc<AsyncRwLock<BenchDb<F>>> as DatabaseSet<Context>>::preflush_to(&db, &target).await;
-    })
-}
-
-async fn await_background_preflush(sync: &mut Option<Handle<()>>) {
-    if let Some(handle) = sync.take() {
-        handle
-            .await
-            .expect("background preflush task should complete");
-    }
-}
-
-fn clear_finished_background_preflush(sync: &mut Option<Handle<()>>) {
-    let Some(handle) = sync.as_mut() else {
-        return;
-    };
-    let Some(result) = handle.now_or_never() else {
-        return;
-    };
-    result.expect("background preflush task should complete");
-    *sync = None;
-}
-
-async fn bench_managed_pipeline<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let db = open_db::<F>(ctx, "managed-pipeline", workload).await;
-    let db = Arc::new(AsyncRwLock::new(db));
-    let mut elapsed = Duration::ZERO;
-    let mut next_loc = 1;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = <BenchDb<F> as ManagedDb<Context>>::new_batch(&db)
-            .await
-            .with_inactivity_floor(Location::new(next_loc));
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize().await.unwrap();
-
-        let start = Instant::now();
-        {
-            let mut guard = db.write().await;
-            <BenchDb<F> as ManagedDb<Context>>::finalize(&mut *guard, merkleized)
-                .await
-                .unwrap();
-        }
-        elapsed += start.elapsed();
-        next_loc += workload.appends_per_batch + 1;
-
-        if (batch_idx + 1) % workload.prune_every == 0 {
-            let start = Instant::now();
-            {
-                let mut guard = db.write().await;
-                let target = <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await;
-                <BenchDb<F> as ManagedDb<Context>>::prune(&mut *guard, &target)
-                    .await
-                    .unwrap();
-            }
-            elapsed += start.elapsed();
-        }
-    }
-
-    let db = Arc::try_unwrap(db)
-        .ok()
-        .expect("benchmark should hold the only db reference")
-        .into_inner();
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_managed_preflushed_pipeline<F: Family + 'static>(
-    ctx: &Context,
-    workload: Workload,
-) -> Duration {
-    let db = open_db::<F>(ctx, "managed-preflushed-pipeline", workload).await;
-    let db = Arc::new(AsyncRwLock::new(db));
-    let mut elapsed = Duration::ZERO;
-    let mut next_loc = 1;
-    let mut background_preflush = None;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = <BenchDb<F> as ManagedDb<Context>>::new_batch(&db)
-            .await
-            .with_inactivity_floor(Location::new(next_loc));
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize().await.unwrap();
-
-        clear_finished_background_preflush(&mut background_preflush);
-        let start = Instant::now();
-        {
-            let mut guard = db.write().await;
-            <BenchDb<F> as ManagedDb<Context>>::finalize(&mut *guard, merkleized)
-                .await
-                .unwrap();
-        }
-        if background_preflush.is_none() {
-            let target = {
-                let guard = db.read().await;
-                <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await
-            };
-            background_preflush = Some(spawn_background_preflush(ctx, db.clone(), target));
-        }
-        elapsed += start.elapsed();
-        next_loc += workload.appends_per_batch + 1;
-
-        if (batch_idx + 1) % workload.prune_every == 0 {
-            let target = {
-                let guard = db.read().await;
-                <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await
-            };
-            let start = Instant::now();
-            {
-                let mut guard = db.write().await;
-                <BenchDb<F> as ManagedDb<Context>>::prune(&mut *guard, &target)
-                    .await
-                    .unwrap();
-            }
-            elapsed += start.elapsed();
-        }
-    }
-    await_background_preflush(&mut background_preflush).await;
-
-    let db = Arc::try_unwrap(db)
-        .ok()
-        .expect("benchmark should hold the only db reference")
-        .into_inner();
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_apply_commit_pipeline<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-commit-pipeline", workload).await;
-    let mut elapsed = Duration::ZERO;
-    let mut next_loc = 1;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = db.new_batch();
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize(&db, None, Location::new(next_loc));
-
-        let start = Instant::now();
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        elapsed += start.elapsed();
-        next_loc += workload.appends_per_batch + 1;
-
-        if (batch_idx + 1) % workload.prune_every == 0 {
-            let start = Instant::now();
-            db.prune_and_sync(db.sync_boundary()).await.unwrap();
-            elapsed += start.elapsed();
-        }
-    }
-
-    db.destroy().await.unwrap();
-    elapsed
-}
-
-async fn bench_managed_boundary_stall<F: Family>(ctx: &Context, workload: Workload) -> Duration {
-    let db = open_db::<F>(ctx, "managed-boundary-stall", workload).await;
-    let db = Arc::new(AsyncRwLock::new(db));
-    let mut max_boundary = Duration::ZERO;
-    let mut next_loc = 1;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = <BenchDb<F> as ManagedDb<Context>>::new_batch(&db)
-            .await
-            .with_inactivity_floor(Location::new(next_loc));
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
+        for append_idx in 0..workload.appends_per_block {
+            batch = batch.write(
+                key(block_idx, append_idx),
+                Some(value(block_idx, append_idx)),
+            );
         }
         let merkleized = batch.merkleize().await.unwrap();
 
@@ -457,254 +160,27 @@ async fn bench_managed_boundary_stall<F: Family>(ctx: &Context, workload: Worklo
                 .await
                 .unwrap();
         }
-        next_loc += workload.appends_per_batch + 1;
-
-        if (batch_idx + 1) % workload.prune_every == 0 {
-            let target = {
-                let guard = db.read().await;
-                <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await
-            };
-            let start = Instant::now();
-            {
-                let mut guard = db.write().await;
-                <BenchDb<F> as ManagedDb<Context>>::prune(&mut *guard, &target)
-                    .await
-                    .unwrap();
-            }
-            max_boundary = max_boundary.max(start.elapsed());
-        }
     }
+    let elapsed = start.elapsed();
 
     let db = Arc::try_unwrap(db)
         .ok()
         .expect("benchmark should hold the only db reference")
         .into_inner();
     db.destroy().await.unwrap();
-    max_boundary
-}
-
-async fn bench_apply_commit_boundary_stall<F: Family>(
-    ctx: &Context,
-    workload: Workload,
-) -> Duration {
-    let mut db = open_db::<F>(ctx, "apply-commit-boundary-stall", workload).await;
-    let mut max_boundary = Duration::ZERO;
-    let mut next_loc = 1;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = db.new_batch();
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize(&db, None, Location::new(next_loc));
-
-        db.apply_batch(merkleized).await.unwrap();
-        db.commit().await.unwrap();
-        next_loc += workload.appends_per_batch + 1;
-
-        if (batch_idx + 1) % workload.prune_every == 0 {
-            let start = Instant::now();
-            db.prune_and_sync(db.sync_boundary()).await.unwrap();
-            max_boundary = max_boundary.max(start.elapsed());
-        }
-    }
-
-    db.destroy().await.unwrap();
-    max_boundary
-}
-
-async fn bench_managed_preflushed_boundary_stall<F: Family + 'static>(
-    ctx: &Context,
-    workload: Workload,
-) -> Duration {
-    let db = open_db::<F>(ctx, "managed-preflushed-boundary-stall", workload).await;
-    let db = Arc::new(AsyncRwLock::new(db));
-    let mut max_boundary = Duration::ZERO;
-    let mut next_loc = 1;
-    let mut background_preflush = None;
-
-    for batch_idx in 0..workload.batches {
-        let mut batch = <BenchDb<F> as ManagedDb<Context>>::new_batch(&db)
-            .await
-            .with_inactivity_floor(Location::new(next_loc));
-        for append_idx in 0..workload.appends_per_batch {
-            batch = batch.append(value(batch_idx, append_idx));
-        }
-        let merkleized = batch.merkleize().await.unwrap();
-
-        clear_finished_background_preflush(&mut background_preflush);
-        {
-            let mut guard = db.write().await;
-            <BenchDb<F> as ManagedDb<Context>>::finalize(&mut *guard, merkleized)
-                .await
-                .unwrap();
-        }
-        if background_preflush.is_none() {
-            let target = {
-                let guard = db.read().await;
-                <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await
-            };
-            background_preflush = Some(spawn_background_preflush(ctx, db.clone(), target));
-        }
-        next_loc += workload.appends_per_batch + 1;
-
-        if (batch_idx + 1) % workload.prune_every == 0 {
-            let target = {
-                let guard = db.read().await;
-                <BenchDb<F> as ManagedDb<Context>>::sync_target(&*guard).await
-            };
-            let start = Instant::now();
-            {
-                let mut guard = db.write().await;
-                <BenchDb<F> as ManagedDb<Context>>::prune(&mut *guard, &target)
-                    .await
-                    .unwrap();
-            }
-            max_boundary = max_boundary.max(start.elapsed());
-        }
-    }
-    await_background_preflush(&mut background_preflush).await;
-
-    let db = Arc::try_unwrap(db)
-        .ok()
-        .expect("benchmark should hold the only db reference")
-        .into_inner();
-    db.destroy().await.unwrap();
-    max_boundary
+    elapsed
 }
 
 fn bench_finalize(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
     let workload = Workload::from_env();
 
-    c.bench_function(&workload.name("mf", ""), |b| {
+    c.bench_function(&workload.name("total"), |b| {
         b.to_async(&runner).iter_custom(|iters| async move {
             let ctx = context::get::<Context>();
             let mut total = Duration::ZERO;
             for _ in 0..iters {
-                total += bench_managed_finalize::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("ac", ""), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_apply_then_commit::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("apply", ""), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_apply_only::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("write", ""), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_write_pending_only::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("commit", ""), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_commit_only::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("start", "sync=start"), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_sync_start_pending_only::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("mpipe", ""), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_managed_pipeline::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("pfpipe", "pf=start"), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_managed_preflushed_pipeline::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("acpipe", ""), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_apply_commit_pipeline::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("mbound", "metric=max"), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_managed_boundary_stall::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("acbound", "metric=max"), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total += bench_apply_commit_boundary_stall::<mmb::Family>(&ctx, workload).await;
-            }
-            total
-        });
-    });
-
-    c.bench_function(&workload.name("pfbound", "pf=start metric=max"), |b| {
-        b.to_async(&runner).iter_custom(|iters| async move {
-            let ctx = context::get::<Context>();
-            let mut total = Duration::ZERO;
-            for _ in 0..iters {
-                total +=
-                    bench_managed_preflushed_boundary_stall::<mmb::Family>(&ctx, workload).await;
+                total += bench_finalize_loop::<mmb::Family>(&ctx, workload).await;
             }
             total
         });
