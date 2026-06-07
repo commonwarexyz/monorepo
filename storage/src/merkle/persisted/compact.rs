@@ -220,7 +220,6 @@ enum PersistMode {
 struct RetainedBases<F: Family, D: Digest> {
     bases: BTreeMap<u64, Base<F, D>>,
     by_target: BTreeMap<(u64, Vec<u8>), u64>,
-    by_leaf_count: BTreeMap<u64, u64>,
     current_position: Option<u64>,
 }
 
@@ -229,7 +228,6 @@ impl<F: Family, D: Digest> Default for RetainedBases<F, D> {
         Self {
             bases: BTreeMap::new(),
             by_target: BTreeMap::new(),
-            by_leaf_count: BTreeMap::new(),
             current_position: None,
         }
     }
@@ -239,7 +237,6 @@ impl<F: Family, D: Digest> RetainedBases<F, D> {
     fn insert(&mut self, position: u64, base: Base<F, D>) {
         self.by_target
             .insert((*base.leaf_count, base.root.to_vec()), position);
-        self.by_leaf_count.insert(*base.leaf_count, position);
         self.current_position = Some(position);
         self.bases.insert(position, base);
     }
@@ -258,17 +255,12 @@ impl<F: Family, D: Digest> RetainedBases<F, D> {
         self.by_target.get(&(*leaf_count, root.to_vec())).copied()
     }
 
-    fn position_for_leaf_count(&self, leaf_count: Location<F>) -> Option<u64> {
-        self.by_leaf_count.get(&*leaf_count).copied()
-    }
-
     fn truncate_after(&mut self, position: u64) {
         let removed = self
             .bases
             .split_off(&(position.checked_add(1).expect("position overflow")));
         for base in removed.values() {
             self.by_target.remove(&(*base.leaf_count, base.root.to_vec()));
-            self.by_leaf_count.remove(&*base.leaf_count);
         }
         self.current_position = self.bases.keys().next_back().copied();
     }
@@ -276,7 +268,6 @@ impl<F: Family, D: Digest> RetainedBases<F, D> {
     fn clear(&mut self) {
         self.bases.clear();
         self.by_target.clear();
-        self.by_leaf_count.clear();
         self.current_position = None;
     }
 }
@@ -587,6 +578,23 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
         self.rewind_to_position(position).await
     }
 
+    /// Start syncing the retained base matching `leaf_count` and `root`.
+    pub(crate) async fn sync_start_to_base(
+        &self,
+        leaf_count: Location<F>,
+        root: D,
+    ) -> Result<(), Error<F>> {
+        let _sync_guard = self.sync_lock.lock().await;
+        let position = self
+            .retained
+            .read()
+            .position_for_target(leaf_count, root)
+            .ok_or(Error::RewindBeyondHistory)?;
+        let end = position.checked_add(1).expect("base log position overflow");
+        self.base_log.sync_start_to(end).await?;
+        Ok(())
+    }
+
     async fn rewind_to_position(&self, position: u64) -> Result<Base<F, D>, Error<F>> {
         let base = self
             .retained
@@ -605,15 +613,17 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Prune retained bases before the base at `leaf_count`.
-    pub(crate) async fn prune(&self, leaf_count: Location<F>) -> Result<(), Error<F>> {
+    pub(crate) async fn prune(&self, leaf_count: Location<F>, root: D) -> Result<(), Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
         let position = self
             .retained
             .read()
-            .position_for_leaf_count(leaf_count)
+            .position_for_target(leaf_count, root)
             .ok_or(Error::RewindBeyondHistory)?;
+        let end = position.checked_add(1).expect("base log position overflow");
+        self.base_log.wait_for_sync_to(end).await?;
         self.base_log.prune(position).await?;
-        self.base_log.sync().await?;
+        self.base_log.wait_for_sync_to(end).await?;
         *self.retained.write() = Self::load_retained_bases(&self.base_log).await?;
         Ok(())
     }

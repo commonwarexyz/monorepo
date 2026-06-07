@@ -573,6 +573,20 @@ where
         .await
     }
 
+    /// Start syncing the retained compact base for `target` without waiting for durability.
+    pub async fn sync_start_to(
+        &self,
+        target: compact_sync::Target<F, H::Digest>,
+    ) -> Result<(), Error<F>>
+    where
+        F: Family,
+    {
+        self.merkle
+            .sync_start_to_base(target.leaf_count, target.root)
+            .await?;
+        Ok(())
+    }
+
     /// Commit the current db state through the retained-base journal commit path.
     pub async fn commit(&self) -> Result<(), Error<F>>
     where
@@ -657,7 +671,7 @@ where
     where
         F: Family,
     {
-        self.merkle.prune(target.leaf_count).await?;
+        self.merkle.prune(target.leaf_count, target.root).await?;
         Ok(())
     }
 

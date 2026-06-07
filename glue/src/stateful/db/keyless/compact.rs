@@ -252,6 +252,10 @@ where
         self.sync_start_pending().await
     }
 
+    async fn preflush_to(&self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.sync_start_to(target.clone()).await
+    }
+
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
         Self::prune(self, target.clone()).await
     }
@@ -322,6 +326,10 @@ where
 
     async fn preflush(&self) -> Result<(), Error<F>> {
         self.sync_start_pending().await
+    }
+
+    async fn preflush_to(&self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.sync_start_to(target.clone()).await
     }
 
     async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
@@ -677,8 +685,19 @@ mod tests {
             assert_eq!(target.root, guard.root());
             assert_eq!(target.leaf_count, mmr::Location::new(3));
 
-            <FixedDb as ManagedDb<_>>::preflush(&*guard).await.unwrap();
+            <FixedDb as ManagedDb<_>>::preflush_to(&*guard, &target)
+                .await
+                .unwrap();
             assert_eq!(guard.current_target(), target);
+
+            let mut bad_target = target.clone();
+            bad_target.root = Sha256::hash(&[99]);
+            assert!(
+                <FixedDb as ManagedDb<_>>::preflush_to(&*guard, &bad_target)
+                    .await
+                    .is_err(),
+                "compact target preflush should resolve the exact retained base",
+            );
         });
     }
 
