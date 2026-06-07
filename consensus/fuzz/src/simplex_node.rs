@@ -68,6 +68,7 @@ pub struct NodeFuzzInput {
     pub events: Vec<NodeEvent>,
     pub forwarding: ForwardingPolicy,
     pub certify: crate::CertifyChoice,
+    pub reporting: crate::ReporterWiring,
 }
 
 impl Arbitrary<'_> for NodeFuzzInput {
@@ -90,6 +91,8 @@ impl Arbitrary<'_> for NodeFuzzInput {
         // halts liveness.
         let certify = crate::CertifyChoice::Always;
 
+        let reporting = crate::ReporterWiring::arbitrary(u)?;
+
         let remaining = u.len().min(crate::MAX_RAW_BYTES);
         let raw_bytes = if remaining == 0 {
             vec![0]
@@ -102,6 +105,7 @@ impl Arbitrary<'_> for NodeFuzzInput {
             events,
             forwarding,
             certify,
+            reporting,
         })
     }
 }
@@ -1505,6 +1509,7 @@ where
         messaging_faults: Vec::new(),
         forwarding: input.forwarding,
         certify: input.certify,
+        reporting: input.reporting,
     };
 
     let (oracle, participants, schemes, mut registrations) =
@@ -1561,6 +1566,7 @@ where
         recovered,
         resolver,
         base.certify,
+        base.reporting,
     );
     let (mut latest, mut monitor): (View, Receiver<View>) = reporter.subscribe().await;
     let elector = RoundRobin::<Sha256>::default().build(fuzzer_schemes[0].participants());
@@ -1599,6 +1605,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
     schemes: Vec<P::Scheme>,
     forwarding: ForwardingPolicy,
     certify: crate::CertifyChoice,
+    wiring: crate::ReporterWiring,
 ) where
     PublicKeyOf<P>: Send,
 {
@@ -1636,6 +1643,7 @@ pub(crate) fn run_recovery<P: simplex::Simplex>(
             recovered,
             resolver,
             certify,
+            wiring,
         );
 
         let _ = reporter.subscribe().await;
@@ -1670,6 +1678,7 @@ mod tests {
             ],
             forwarding: ForwardingPolicy::Disabled,
             certify: crate::CertifyChoice::Always,
+            reporting: crate::ReporterWiring::Solo,
         };
         fuzz_node::<simplex::SimplexEd25519, WithoutRecovery>(input);
     }
@@ -1695,6 +1704,7 @@ mod tests {
             ],
             forwarding: ForwardingPolicy::Disabled,
             certify: crate::CertifyChoice::Always,
+            reporting: crate::ReporterWiring::Solo,
         };
         fuzz_node::<simplex::SimplexEd25519, WithRecovery>(input);
     }
