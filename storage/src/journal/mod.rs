@@ -27,6 +27,8 @@ pub enum Error {
     Codec(#[from] commonware_codec::Error),
     #[error("metadata error: {0}")]
     Metadata(#[from] crate::metadata::Error),
+    #[error("blob in use by a reader: {0}")]
+    BlobInUse(u64),
     #[error("invalid blob name: {0}")]
     InvalidBlobName(String),
     #[error("invalid blob size: index={0} size={1}")]
@@ -76,4 +78,6 @@ pub enum Error {
     ChecksumMismatch(u32, u32),
     #[error("empty append")]
     EmptyAppend,
+    #[error("positions must be strictly increasing")]
+    PositionsNotIncreasing,
 }

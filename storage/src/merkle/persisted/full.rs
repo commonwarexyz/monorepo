@@ -205,7 +205,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
         // If a node isn't found in the metadata, it might still be in the journal.
         debug!(?pos, "reading node from journal");
-        let node = journal.reader().await.read(*pos).await;
+        let node = journal.reader().read(*pos).await;
         match node {
             Ok(node) => Ok(node),
             Err(JError::ItemPruned(_)) => {
@@ -253,8 +253,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             page_cache: cfg.page_cache,
             write_buffer: cfg.write_buffer,
         };
-        let journal = Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
-        let mut journal_size = Position::<F>::new(journal.size().await);
+        let mut journal =
+            Journal::<E, D>::init(context.child("merkle_journal"), journal_cfg).await?;
+        let mut journal_size = Position::<F>::new(journal.size());
 
         let metadata_cfg = MConfig {
             partition: cfg.metadata_partition,
@@ -295,12 +296,12 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             )
         }));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
-        let journal_bounds_start = journal.reader().await.bounds().start;
+        let journal_bounds_start = journal.reader().bounds().start;
         if *metadata_prune_pos > journal_bounds_start {
             // Metadata is ahead of journal (crashed before completing journal prune).
             // Prune the journal to match metadata.
             journal.prune(*metadata_prune_pos).await?;
-            if journal.reader().await.bounds().start != journal_bounds_start {
+            if journal.reader().bounds().start != journal_bounds_start {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
@@ -346,7 +347,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             );
             // Check if there is an intact leaf following the last valid size, from which we can
             // recover its missing parents.
-            let recovered_item = journal.reader().await.read(*last_valid_size).await;
+            let recovered_item = journal.reader().read(*last_valid_size).await;
             if let Ok(item) = recovered_item {
                 orphaned_leaf = Some(item);
             }
@@ -381,13 +382,13 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             assert_eq!(pos, journal_size);
 
             // Inline sync: flush recovered nodes to journal.
-            for p in journal.size().await..*mem.size() {
+            for p in journal.size()..*mem.size() {
                 let p = Position::new(p);
                 let node = *mem.get_node_unchecked(p);
                 journal.append(&node).await?;
             }
             journal.sync().await?;
-            assert_eq!(mem.size(), journal.size().await);
+            assert_eq!(mem.size(), journal.size());
 
             // Prune mem and reinstate pinned nodes.
             let effective_prune_loc =
@@ -438,9 +439,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         };
 
         // Open the journal, performing a rewind if necessary for crash recovery.
-        let journal: Journal<E, D> =
+        let mut journal: Journal<E, D> =
             Journal::init(context.child("merkle_journal"), journal_cfg).await?;
-        let mut journal_size = Position::<F>::new(journal.size().await);
+        let mut journal_size = Position::<F>::new(journal.size());
 
         // If a crash left the journal at an invalid size (e.g., a leaf was written
         // but its parent nodes were not), rewind to the last valid size.
@@ -461,7 +462,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         }
         if journal_size <= *prune_pos && *prune_pos != 0 {
             journal.clear_to_size(*prune_pos).await?;
-            journal_size = Position::new(journal.size().await);
+            journal_size = Position::new(journal.size());
         }
 
         // Open the metadata.
@@ -575,7 +576,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             }
         }
 
-        match self.journal.reader().await.read(*position).await {
+        match self.journal.reader().read(*position).await {
             Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::Journal(e)),
@@ -594,10 +595,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     }
 
     /// Sync the structure to disk.
-    pub async fn sync(&self) -> Result<(), Error<F>> {
+    pub async fn sync(&mut self) -> Result<(), Error<F>> {
         let _sync_guard = self.sync_lock.lock().await;
 
-        let journal_size = Position::<F>::new(self.journal.size().await);
+        let journal_size = Position::<F>::new(self.journal.size());
 
         // Snapshot nodes in the mem that are missing from the journal, along with the pinned
         // node set for the current pruning boundary.
@@ -723,7 +724,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         }
 
         let inner = self.inner.get_mut();
-        let journal_size = Position::<F>::new(self.journal.size().await);
+        let journal_size = Position::<F>::new(self.journal.size());
 
         // Write the nodes cached in the memory-resident structure to the journal, aborting after
         // write_count nodes have been written.
@@ -838,7 +839,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         }
 
         // Rewind the journal if needed.
-        let journal_size = Position::<F>::new(self.journal.size().await);
+        let journal_size = Position::<F>::new(self.journal.size());
         if new_size < journal_size {
             self.journal.rewind(*new_size).await?;
             self.journal.sync().await?;
@@ -1258,7 +1259,7 @@ mod tests {
     async fn full_basic_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         let cfg = test_config(&context);
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
         // Build a test structure with 255 leaves
@@ -1328,7 +1329,7 @@ mod tests {
         use crate::journal::contiguous::fixed::{Config as JConfig, Journal};
 
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
             &hasher,
             test_config(&context),
@@ -1357,7 +1358,7 @@ mod tests {
         // Simulate a crash that wrote a leaf but not its parent nodes by appending one
         // extra digest to the journal. This creates an invalid structure size.
         {
-            let journal: Journal<_, Digest> = Journal::init(
+            let mut journal: Journal<_, Digest> = Journal::init(
                 context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
@@ -1368,10 +1369,10 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(journal.size().await, expected_size);
+            assert_eq!(journal.size(), expected_size);
             journal.append(&Sha256::hash(b"orphan")).await.unwrap();
             journal.sync().await.unwrap();
-            assert_eq!(journal.size().await, expected_size + 1);
+            assert_eq!(journal.size(), expected_size + 1);
         }
 
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
@@ -1587,7 +1588,7 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         const LEAF_COUNT: usize = 2000;
         let mut leaves = Vec::with_capacity(LEAF_COUNT);
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2027,7 +2028,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Create initial structure with elements.
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2371,7 +2372,7 @@ mod tests {
         };
 
         // Create structure with enough elements to span multiple sections.
-        let mmr =
+        let mut mmr =
             Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
                 .await
                 .unwrap();
@@ -2549,7 +2550,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2939,7 +2940,7 @@ mod tests {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
         // Build a structure with 3 leaves, sync, and drop.
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
             test_config(&context),
@@ -2961,7 +2962,7 @@ mod tests {
         // leaf (for the 4th element) but not its parent nodes. This makes the
         // journal size invalid.
         {
-            let journal: Journal<_, Digest> = Journal::init(
+            let mut journal: Journal<_, Digest> = Journal::init(
                 context.child("corrupt"),
                 JConfig {
                     partition: "journal-partition".into(),
@@ -2972,10 +2973,10 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(journal.size().await, valid_size);
+            assert_eq!(journal.size(), valid_size);
             journal.append(&Sha256::hash(b"orphan")).await.unwrap();
             journal.sync().await.unwrap();
-            assert_eq!(journal.size().await, valid_size + 1);
+            assert_eq!(journal.size(), valid_size + 1);
         }
 
         // init_sync should recover by rewinding to the last valid size.
@@ -3086,7 +3087,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let mmr = Merkle::<F, _, Digest, Sequential>::init(
+        let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("storage"),
             &hasher,
             test_config(&context),

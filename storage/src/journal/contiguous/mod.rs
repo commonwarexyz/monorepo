@@ -9,6 +9,8 @@ use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
 
+mod blobs;
+mod checkpoint;
 pub mod fixed;
 mod metrics;
 pub mod variable;
@@ -16,14 +18,14 @@ pub mod variable;
 #[cfg(test)]
 mod tests;
 
-/// A reader guard that holds a consistent view of the journal.
+/// A consistent view of the journal.
 ///
-/// While this guard exists, the reader's logical bounds remain stable, and any position within
-/// `bounds()` remains readable through this guard.
+/// Bounds are stable for the reader's lifetime, and every position within `bounds()` stays
+/// readable through it, even if the journal prunes those items afterward. A reader never
+/// observes appends made after it was created.
 ///
-/// Implementations may still make physical storage progress, such as unlinking backing blobs from
-/// future namespace lookups, but they must not invalidate reads within the captured bounds or
-/// change the bounds visible through this reader.
+/// The sole exception is rewind: if the journal rewinds below `bounds().end` while the reader
+/// is alive, reads of the rewound positions may fail with an error but never return invalid data.
 pub trait Reader: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
@@ -63,10 +65,7 @@ pub trait Reader: Send + Sync {
         None
     }
 
-    /// Return a stream of all items starting from `start_pos`.
-    ///
-    /// Because the reader holds the lock, validation and stream setup happen
-    /// atomically with respect to `prune()`.
+    /// Return a stream of all items starting from `start_pos`, bounded by the reader's `bounds()`.
     fn replay(
         &self,
         buffer: NonZeroUsize,
@@ -84,12 +83,10 @@ pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
-    /// Acquire a reader guard that holds a consistent view of the journal.
+    /// Acquire a reader that holds a consistent view of the journal.
     ///
-    /// While the returned guard exists, operations that need the journal's
-    /// internal write lock (such as `append`, `prune`, and `rewind`) may block
-    /// until the guard is dropped. This ensures any position within
-    /// `reader.bounds()` remains readable.
+    /// Any position within `reader.bounds()` remains readable for the
+    /// reader's lifetime (see [Reader]).
     fn reader(&self) -> impl Future<Output = impl Reader<Item = Self::Item> + '_> + Send;
 
     /// Return the total number of items that have been appended to the journal.
