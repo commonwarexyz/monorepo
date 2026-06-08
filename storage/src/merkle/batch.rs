@@ -231,8 +231,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// front to avoid repeated reallocation.
     pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         let digests = digests.into_iter();
-        // Each leaf also appends its parent placeholders, so reserve for the full node count
-        // `position(leaves + n) - position(leaves)`, not just the `n` leaves.
+        // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let n = digests.size_hint().0 as u64;
         let additional =
             Position::try_from(self.leaves() + n).map_or(0, |end| (*end - *self.size()) as usize);

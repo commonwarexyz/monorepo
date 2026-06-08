@@ -258,8 +258,6 @@ where
         E: Context,
         C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
     {
-        let base = self.base_size;
-
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
         for value in self.appends {
@@ -267,22 +265,25 @@ where
         }
         ops.push(Operation::Commit(metadata, inactivity_floor));
 
-        let total_size = base + ops.len() as u64;
+        let total_size = self.base_size + ops.len() as u64;
 
-        // Hash the operations' leaf digests in parallel, then merkleize the journal batch.
+        // Merkleize the journal batch.
         let ops = Arc::new(ops);
+        let journal = db
+            .journal
+            .with_mem(|mem| self.journal_batch.merkleize_with(mem, ops));
+
+        // Compute the root.
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let journal = db
-            .journal
-            .with_mem(|mem| self.journal_batch.merkleize_with(mem, ops));
         let root = db
             .journal
             .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
+        // Compute the batch chain bounds.
         let ancestors =
             batch_chain::parent_and_ancestors(self.parent.as_ref(), |parent| parent.ancestors());
         let ancestors = batch_chain::collect_ancestor_bounds(
