@@ -1890,6 +1890,33 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_journal_rewind_max_section() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context, cfg).await.unwrap();
+
+            // Append to the maximal section. `section + 1` has no representable successor.
+            let (offset, _) = journal.append(u64::MAX, &42i32).await.unwrap();
+            let size = journal.size(u64::MAX).await.unwrap();
+            assert!(size > 0);
+
+            // Rewinding the maximal section removes no sections above it and must not panic.
+            journal.rewind(u64::MAX, size).await.unwrap();
+
+            // The section is intact and readable.
+            assert_eq!(journal.size(u64::MAX).await.unwrap(), size);
+            assert_eq!(journal.get(u64::MAX, offset).await.unwrap(), 42i32);
+        });
+    }
+
+    #[test_traced]
     fn test_journal_rewind_section() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

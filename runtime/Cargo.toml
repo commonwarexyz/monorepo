@@ -96,7 +96,7 @@ harness = false
 path = "src/utils/buffer/benches/bench.rs"
 
 [[bench]]
-name = "buffer_pool"
+name = "iobuf"
 harness = false
 path = "src/iobuf/benches/bench.rs"
 required-features = ["bench"]
