@@ -2,6 +2,95 @@
 
 use commonware_macros::stability_scope;
 
+stability_scope!(BETA, cfg(not(target_arch = "wasm32")) {
+    /// Flush the whole filesystem containing `dir` at startup so that bytes a prior process wrote
+    /// but did not `fsync` are crash-durable before any storage structure reads.
+    ///
+    /// Per-platform guarantee:
+    /// - **Linux**: `syncfs(2)` makes all data on the storage filesystem crash-durable.
+    /// - **macOS/BSD**: best-effort `sync(2)`; it does not flush the drive cache, so it is **not**
+    ///   crash-durable.
+    /// - **Windows**: best-effort whole-volume `FlushFileBuffers`; it needs admin and is skipped
+    ///   otherwise, so it is **not** crash-durable.
+    ///
+    /// Assumes storage lives on a single filesystem; on Linux reliable error detection needs kernel
+    /// >= 5.8. A missing `dir` is treated as success.
+    pub(crate) fn sync(dir: &std::path::Path) -> std::io::Result<()> {
+        cfg_if::cfg_if! {
+            if #[cfg(target_os = "linux")] {
+                use std::os::fd::AsRawFd;
+                let file = match std::fs::File::open(dir) {
+                    Ok(file) => file,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                    Err(e) => return Err(e),
+                };
+                // SAFETY: `file` owns a valid fd that lives across the call; `syncfs` takes only
+                // that fd, performs no memory access, and returns -1 on error.
+                if unsafe { libc::syncfs(file.as_raw_fd()) } == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                tracing::debug!(
+                    storage_directory = %dir.display(),
+                    "made storage filesystem durable at startup (syncfs)"
+                );
+                Ok(())
+            } else if #[cfg(unix)] {
+                // SAFETY: `sync` takes no arguments and cannot fail.
+                unsafe { libc::sync() };
+                tracing::debug!(
+                    storage_directory = %dir.display(),
+                    "best-effort storage flush at startup (sync(); not a crash-durability guarantee)"
+                );
+                Ok(())
+            } else if #[cfg(windows)] {
+                // Resolve the volume containing `dir` (e.g. `C:\...` -> `\\.\C:`). `sync_all` on a
+                // volume handle is `FlushFileBuffers`, which flushes every open file on the volume.
+                // Best-effort (see fn docs): opening the volume needs admin, so a failure (or a
+                // non-disk storage path) is logged, not fatal.
+                use std::path::{Component, Prefix};
+                let volume = dir.components().next().and_then(|component| match component {
+                    Component::Prefix(prefix) => match prefix.kind() {
+                        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => {
+                            Some(format!(r"\\.\{}:", drive as char))
+                        }
+                        _ => None,
+                    },
+                    _ => None,
+                });
+                let flushed = volume.as_deref().map(|volume| {
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(volume)
+                        .and_then(|handle| handle.sync_all())
+                });
+                match flushed {
+                    Some(Ok(())) => tracing::debug!(
+                        storage_directory = %dir.display(),
+                        "made storage volume durable at startup (FlushFileBuffers)"
+                    ),
+                    Some(Err(e)) => tracing::debug!(
+                        storage_directory = %dir.display(),
+                        error = %e,
+                        "best-effort volume flush skipped at startup; not crash-durable"
+                    ),
+                    None => tracing::debug!(
+                        storage_directory = %dir.display(),
+                        "unable to guarantee storage durability at startup"
+                    ),
+                }
+                Ok(())
+            } else {
+                tracing::debug!(
+                    storage_directory = %dir.display(),
+                    "no whole-filesystem durable flush on this platform; recovered-data durability not guaranteed"
+                );
+                Ok(())
+            }
+        }
+    }
+});
+
 stability_scope!(ALPHA {
     pub mod audited;
     pub mod faulty;
@@ -285,6 +374,13 @@ pub(crate) mod tests {
     {
         test_open_and_write(&storage).await;
         test_remove(&storage).await;
+        test_read_after_remove_blob(&storage).await;
+        test_read_after_remove_partition(&storage).await;
+        test_recreate_after_remove(&storage).await;
+        test_read_after_remove_unsynced(&storage).await;
+        test_read_after_remove_handle_clones(&storage).await;
+        test_recreate_generations(&storage).await;
+        test_read_after_remove_partition_multi(&storage).await;
         test_scan(&storage).await;
         test_concurrent_access(&storage).await;
         test_large_data(&storage).await;
@@ -341,6 +437,262 @@ pub(crate) mod tests {
 
         let blobs = storage.scan("partition").await.unwrap();
         assert!(blobs.is_empty(), "Blob was not removed as expected");
+    }
+
+    /// An already-open handle remains fully readable after the blob is removed by name.
+    async fn test_read_after_remove_blob<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage.open("read_after_remove", b"by_name").await.unwrap();
+        let data: Vec<u8> = (0u8..=255).collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        storage
+            .remove("read_after_remove", Some(b"by_name"))
+            .await
+            .unwrap();
+
+        // The name is gone but the open handle keeps reading the removed blob's bytes.
+        let blobs = storage.scan("read_after_remove").await.unwrap();
+        assert!(blobs.is_empty(), "Blob was not removed as expected");
+        let read = blob.read_at(0, data.len()).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            data.as_slice(),
+            "open handle must remain readable after blob removal"
+        );
+    }
+
+    /// An already-open handle remains fully readable after its entire partition is removed.
+    async fn test_read_after_remove_partition<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("read_after_remove_partition", b"victim")
+            .await
+            .unwrap();
+        let data: Vec<u8> = (0u8..=255).rev().collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+        blob.sync().await.unwrap();
+
+        storage
+            .remove("read_after_remove_partition", None)
+            .await
+            .unwrap();
+
+        let read = blob.read_at(0, data.len()).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            data.as_slice(),
+            "open handle must remain readable after partition removal"
+        );
+    }
+
+    /// Re-opening a removed blob's name creates an independent blob; the pre-removal handle keeps
+    /// observing the removed blob's contents.
+    async fn test_recreate_after_remove<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (old, _) = storage
+            .open("recreate_after_remove", b"name")
+            .await
+            .unwrap();
+        old.write_at(0, b"old contents").await.unwrap();
+        old.sync().await.unwrap();
+
+        storage
+            .remove("recreate_after_remove", Some(b"name"))
+            .await
+            .unwrap();
+
+        // Re-creating the name yields a fresh, empty, independent blob.
+        let (new, len) = storage
+            .open("recreate_after_remove", b"name")
+            .await
+            .unwrap();
+        assert_eq!(len, 0, "recreated blob must start empty");
+        new.write_at(0, b"new contents").await.unwrap();
+        new.sync().await.unwrap();
+
+        let old_read = old.read_at(0, 12).await.unwrap();
+        assert_eq!(
+            old_read.coalesce().as_ref(),
+            b"old contents",
+            "pre-removal handle must keep observing the removed blob"
+        );
+        let new_read = new.read_at(0, 12).await.unwrap();
+        assert_eq!(new_read.coalesce().as_ref(), b"new contents");
+    }
+
+    /// Bytes written but never synced remain readable through an open handle after removal.
+    async fn test_read_after_remove_unsynced<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, _) = storage
+            .open("read_after_remove_unsynced", b"name")
+            .await
+            .unwrap();
+        let data: Vec<u8> = (0u8..=255).cycle().take(64 * 1024).collect();
+        blob.write_at(0, data.clone()).await.unwrap();
+
+        // Read through the handle before removal so the removal crosses an actively-used handle.
+        let read = blob.read_at(0, 16).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), &data[..16]);
+
+        storage
+            .remove("read_after_remove_unsynced", Some(b"name"))
+            .await
+            .unwrap();
+
+        // Unsynced bytes are still served in full.
+        let read = blob.read_at(0, data.len()).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            data.as_slice(),
+            "unsynced bytes must remain readable after removal"
+        );
+        let read = blob.read_at(data.len() as u64 - 1, 1).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), &data[data.len() - 1..]);
+    }
+
+    /// Removal liveness is per-blob, not per-handle: clones taken before or after removal keep
+    /// reading regardless of other handles' lifetimes, and out-of-bounds reads still fail.
+    async fn test_read_after_remove_handle_clones<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (first, _) = storage
+            .open("read_after_remove_clones", b"name")
+            .await
+            .unwrap();
+        let data: Vec<u8> = (0u8..=255).collect();
+        first.write_at(0, data.clone()).await.unwrap();
+        first.sync().await.unwrap();
+        let second = first.clone();
+        // Opened independently: a distinct handle to the same blob, not a clone.
+        let (independent, _) = storage
+            .open("read_after_remove_clones", b"name")
+            .await
+            .unwrap();
+
+        storage
+            .remove("read_after_remove_clones", Some(b"name"))
+            .await
+            .unwrap();
+
+        // A clone taken after removal reads too, and outlives the handle it was cloned from.
+        let third = first.clone();
+        drop(first);
+
+        for handle in [&second, &third, &independent] {
+            let read = handle.read_at(0, data.len()).await.unwrap();
+            assert_eq!(read.coalesce().as_ref(), data.as_slice());
+            assert!(
+                handle.read_at(data.len() as u64, 1).await.is_err(),
+                "out-of-bounds read must still fail after removal"
+            );
+        }
+    }
+
+    /// Every removed generation of a name stays readable through its own handle while the name
+    /// is recreated and removed repeatedly.
+    async fn test_recreate_generations<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let partition = "recreate_generations";
+
+        // Hold a handle on each of three generations of the same name, each removed while open.
+        let mut handles = Vec::new();
+        for generation in 0u8..3 {
+            let (blob, len) = storage.open(partition, b"name").await.unwrap();
+            assert_eq!(len, 0, "each recreation must start empty");
+            let data = vec![generation; 32];
+            blob.write_at(0, data.clone()).await.unwrap();
+            blob.sync().await.unwrap();
+            storage.remove(partition, Some(b"name")).await.unwrap();
+            handles.push((blob, data));
+        }
+
+        // Churn the name further with the removed generations still held.
+        for _ in 0..5 {
+            let (blob, _) = storage.open(partition, b"name").await.unwrap();
+            blob.write_at(0, vec![0xFF; 8]).await.unwrap();
+            blob.sync().await.unwrap();
+            drop(blob);
+            storage.remove(partition, Some(b"name")).await.unwrap();
+        }
+
+        for (blob, data) in &handles {
+            let read = blob.read_at(0, data.len()).await.unwrap();
+            assert_eq!(
+                read.coalesce().as_ref(),
+                data.as_slice(),
+                "each handle must keep observing its own generation"
+            );
+        }
+    }
+
+    /// Every handle into a removed partition stays readable, including a large blob at interior
+    /// offsets, and recreating the partition yields independent blobs.
+    async fn test_read_after_remove_partition_multi<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let partition = "read_after_remove_partition_multi";
+        let (small_a, _) = storage.open(partition, b"a").await.unwrap();
+        small_a.write_at(0, b"alpha").await.unwrap();
+        small_a.sync().await.unwrap();
+        // Deliberately never synced: partition removal must not lose unsynced bytes either.
+        let (small_b, _) = storage.open(partition, b"b").await.unwrap();
+        small_b.write_at(0, b"bravo").await.unwrap();
+
+        const LARGE_LEN: usize = 1 << 20;
+        let (large, _) = storage.open(partition, b"large").await.unwrap();
+        let data: Vec<u8> = (0u8..=255).cycle().take(LARGE_LEN).collect();
+        large.write_at(0, data.clone()).await.unwrap();
+        large.sync().await.unwrap();
+
+        storage.remove(partition, None).await.unwrap();
+
+        let read = small_a.read_at(0, 5).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), b"alpha");
+        let read = small_b.read_at(0, 5).await.unwrap();
+        assert_eq!(read.coalesce().as_ref(), b"bravo");
+
+        // Start, unaligned interior, and final-byte reads of the large blob.
+        for (offset, len) in [(0usize, 4096), (123_457, 8192), (LARGE_LEN - 1, 1)] {
+            let read = large.read_at(offset as u64, len).await.unwrap();
+            assert_eq!(
+                read.coalesce().as_ref(),
+                &data[offset..offset + len],
+                "offset={offset} len={len}"
+            );
+        }
+
+        // Recreating the partition and a same-named blob yields an independent blob.
+        let (fresh, len) = storage.open(partition, b"a").await.unwrap();
+        assert_eq!(len, 0, "recreated blob must start empty");
+        fresh.write_at(0, b"fresh").await.unwrap();
+        fresh.sync().await.unwrap();
+        let read = small_a.read_at(0, 5).await.unwrap();
+        assert_eq!(
+            read.coalesce().as_ref(),
+            b"alpha",
+            "pre-removal handle must keep observing the removed partition's blob"
+        );
     }
 
     /// Test scanning a partition for blobs.

@@ -1,7 +1,7 @@
 //! Utility functions for interacting with EC2 instances
 
 use crate::aws::Error;
-use std::path::Path;
+use std::{net::IpAddr, path::Path, process::Stdio};
 use tokio::{
     fs::File,
     io::AsyncWriteExt,
@@ -28,6 +28,25 @@ pub const DEPLOYER_MIN_PORT: i32 = 0;
 /// Maximum port for deployer ingress
 pub const DEPLOYER_MAX_PORT: i32 = 65535;
 
+fn scp_host(ip: &str) -> String {
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V6(ip)) => format!("[{ip}]"),
+        _ => ip.to_string(),
+    }
+}
+
+fn ssh_target(ip: &str) -> String {
+    format!("ubuntu@{ip}")
+}
+
+fn scp_target(ip: &str, remote_path: &str) -> String {
+    format!("ubuntu@{}:{remote_path}", scp_host(ip))
+}
+
+fn ssh_attach_code_ok(code: Option<i32>) -> bool {
+    matches!(code, Some(0 | 130))
+}
+
 /// Fetch the current machine's public IPv4 address
 pub async fn get_public_ip() -> Result<String, Error> {
     // icanhazip.com is maintained by Cloudflare as of 6/6/2021 (https://major.io/p/a-new-future-for-icanhazip/)
@@ -52,7 +71,7 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
             .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
-            .arg(format!("ubuntu@{ip}"))
+            .arg(ssh_target(ip))
             .arg(command)
             .output()
             .await?;
@@ -61,6 +80,29 @@ pub async fn ssh_execute(key_file: &str, ip: &str, command: &str) -> Result<(), 
         }
         warn!(ip, stderr = ?String::from_utf8_lossy(&output.stderr), stdout = ?String::from_utf8_lossy(&output.stdout), "SSH command failed");
         sleep(RETRY_INTERVAL).await;
+    }
+    Err(Error::SshFailed)
+}
+
+/// Opens an interactive SSH session to a remote instance
+pub async fn ssh_attach(key_file: &str, ip: &str) -> Result<(), Error> {
+    let status = Command::new("ssh")
+        .arg("-i")
+        .arg(key_file)
+        .arg("-o")
+        .arg("IdentitiesOnly=yes")
+        .arg("-o")
+        .arg("ServerAliveInterval=600")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg(ssh_target(ip))
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .await?;
+    if ssh_attach_code_ok(status.code()) {
+        return Ok(());
     }
     Err(Error::SshFailed)
 }
@@ -77,7 +119,7 @@ pub async fn poll_service_active(key_file: &str, ip: &str, service: &str) -> Res
             .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
-            .arg(format!("ubuntu@{ip}"))
+            .arg(ssh_target(ip))
             .arg(format!("systemctl is-active {service}"))
             .output()
             .await?;
@@ -108,7 +150,7 @@ pub async fn poll_service_inactive(key_file: &str, ip: &str, service: &str) -> R
             .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
-            .arg(format!("ubuntu@{ip}"))
+            .arg(ssh_target(ip))
             .arg(format!("systemctl is-active {service}"))
             .output()
             .await?;
@@ -144,7 +186,7 @@ pub async fn scp_download(
             .arg("ServerAliveInterval=600")
             .arg("-o")
             .arg("StrictHostKeyChecking=no")
-            .arg(format!("ubuntu@{ip}:{remote_path}"))
+            .arg(scp_target(ip, remote_path))
             .arg(local_path)
             .output()
             .await?;
@@ -211,4 +253,36 @@ async fn download_file_once(url: &str, dest: &Path) -> Result<(), Error> {
     file.flush().await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{scp_target, ssh_attach_code_ok, ssh_target};
+
+    #[test]
+    fn test_ssh_target_ipv4() {
+        assert_eq!(ssh_target("1.2.3.4"), "ubuntu@1.2.3.4");
+    }
+
+    #[test]
+    fn test_ssh_target_ipv6() {
+        assert_eq!(ssh_target("2001:db8::1"), "ubuntu@2001:db8::1");
+    }
+
+    #[test]
+    fn test_scp_target_ipv6() {
+        assert_eq!(
+            scp_target("2001:db8::1", "/tmp/profile.json"),
+            "ubuntu@[2001:db8::1]:/tmp/profile.json"
+        );
+    }
+
+    #[test]
+    fn test_ssh_attach_code_ok() {
+        assert!(ssh_attach_code_ok(Some(0)));
+        assert!(ssh_attach_code_ok(Some(130)));
+        assert!(!ssh_attach_code_ok(Some(1)));
+        assert!(!ssh_attach_code_ok(Some(255)));
+        assert!(!ssh_attach_code_ok(None));
+    }
 }

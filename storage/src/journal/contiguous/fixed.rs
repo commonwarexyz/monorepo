@@ -767,6 +767,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
+        // A journal sized at `u64::MAX` can never accept an append (the successor size
+        // overflows), so reject it before staging any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+
         // Stage the reset intent durably. `init_with_metadata` will detect CLEAR_TARGET_KEY and
         // complete the clear via complete_clear_to_size before recovering bounds.
         let mut metadata = Self::open_metadata(context.child("meta"), &cfg).await?;
@@ -926,6 +932,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
+
+        // Reject the append before writing anything if it would push the size past `u64::MAX`.
+        // This keeps the in-loop `inner.size += batch_count` and `section + 1` arithmetic safe.
+        inner
+            .size
+            .checked_add(items_count as u64)
+            .ok_or(Error::SizeOverflow)?;
+
         let mut written = 0;
         while written < items_count {
             let (section, pos_in_section) = self.position_to_section(inner.size);
@@ -1041,6 +1055,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Remove any persisted data created by the journal.
+    ///
+    /// # Crash Safety
+    ///
+    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
+    /// reopening the same partition may observe partially removed state. Use [Self::init_at_size]
+    /// for a recoverable reset.
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy inner journal
         let inner = self.inner.into_inner();

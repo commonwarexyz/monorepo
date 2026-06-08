@@ -149,10 +149,49 @@ function trimCode() {
     }
 }
 
+// Open figure images in a zoomable modal when clicked
+function initializeImageZoom() {
+    const images = document.querySelectorAll('.image-container img');
+    if (images.length === 0) {
+        return;
+    }
+
+    // Build the modal overlay once and reuse it for every image.
+    const overlay = document.createElement('div');
+    overlay.className = 'image-modal';
+    const overlayImg = document.createElement('img');
+    overlayImg.alt = '';
+    overlay.appendChild(overlayImg);
+    document.body.appendChild(overlay);
+
+    function close() {
+        overlay.classList.remove('open');
+        document.body.style.overflow = '';
+    }
+
+    for (const img of images) {
+        img.style.cursor = 'zoom-in';
+        img.addEventListener('click', () => {
+            overlayImg.src = img.currentSrc || img.src;
+            overlayImg.alt = img.alt;
+            overlay.classList.add('open');
+            document.body.style.overflow = 'hidden';
+        });
+    }
+
+    overlay.addEventListener('click', close);
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape' && overlay.classList.contains('open')) {
+            close();
+        }
+    });
+}
+
 // Load the logo when the DOM content is loaded
 document.addEventListener('DOMContentLoaded', () => {
     insertLogo();
     insertFooter();
     setExternalLinksToOpenInNewTab();
     trimCode();
+    initializeImageZoom();
 });

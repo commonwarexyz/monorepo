@@ -482,3 +482,37 @@ details.podcast-episode summary.podcast-title {
     white-space: pre-wrap;
     word-wrap: break-word;
 }
+
+.image-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.85);
+    cursor: zoom-out;
+    opacity: 0;
+    visibility: hidden;
+    transition: opacity 0.2s ease;
+}
+
+.image-modal.open {
+    opacity: 1;
+    visibility: visible;
+}
+
+.image-modal img {
+    max-width: 95%;
+    max-height: 95%;
+    margin: 0;
+    object-fit: contain;
+    transform: scale(0.92);
+    transition: transform 0.2s ease;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+.image-modal.open img {
+    transform: scale(1);
+}

@@ -31,6 +31,10 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Configure Cargo network
+      shell: bash
+      run: echo "CARGO_NET_RETRY=30" >> "$GITHUB_ENV"
+
     # Use /mnt for Cargo builds on Linux (has ~70GB vs ~14GB on /)
     - name: Relocate Cargo directories to /mnt on Linux
       if: runner.os == 'Linux'
