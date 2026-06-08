@@ -144,7 +144,8 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     ///
     /// # Panics
     ///
-    /// Panics if items were previously added via [`add`](Self::add).
+    /// - If items were previously added via [`add`](Self::add).
+    /// - If `digests` and `items` have different lengths.
     pub(crate) fn merkleize_with_leaf_digests(
         self,
         base: &Mem<F, H::Digest>,
