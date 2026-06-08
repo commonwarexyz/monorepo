@@ -23,11 +23,12 @@ where
     Op: EncodeShared,
 {
     // Compute the leaf digests in parallel.
+    let hasher = qmdb::hasher::<H>();
     let first_leaf = batch.leaves();
     let leaf_digests = merkle.strategy().map_init_collect_vec(
         ops.iter().enumerate(),
-        || (qmdb::hasher::<H>(), Vec::new()),
-        |(hasher, buf), (i, op)| {
+        Vec::new,
+        |buf, (i, op)| {
             let offset = u64::try_from(i).expect("operation offset exceeds u64");
             let pos = F::location_to_position(first_leaf + offset);
             buf.clear();
@@ -40,5 +41,5 @@ where
     batch = batch.add_leaf_digests(leaf_digests);
 
     // Merkleize the batch.
-    merkle.with_mem(|mem| batch.merkleize(mem, &qmdb::hasher::<H>()))
+    merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
 }
