@@ -4,7 +4,8 @@ use crate::stateful::{
             mailbox::{ErasedAncestorStream, Message},
             processing::Processing,
         },
-        processor::{FinalizeStatus, Processor, ProcessorMetrics},
+        metrics::Metrics as StatefulMetrics,
+        processor::{FinalizeStatus, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -20,7 +21,9 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    telemetry::metrics::GaugeExt, Clock, ContextCell, Metrics, Spawner, Storage,
+};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
@@ -96,6 +99,9 @@ where
 
     /// Periodic prune configuration.
     pub(super) prune_config: Option<PruneConfig>,
+
+    /// Metrics shared across syncing and processing.
+    pub(super) metrics: StatefulMetrics,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -226,12 +232,12 @@ where
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
 
-        let metrics = ProcessorMetrics::new(self.context.child("processor_metrics"));
+        let _ = self.metrics.sync_done.try_set(1);
         let mut processor = Processor::new(
             self.application,
             artifact.databases,
             artifact.anchor,
-            metrics,
+            self.metrics,
             self.max_pending_acks,
             self.prune_config,
         );
@@ -309,7 +315,10 @@ where
 mod tests {
     use super::{FinalizedHandoff, Syncing};
     use crate::stateful::{
-        actor::syncer::{self, StateSyncMetadata, SyncResult},
+        actor::{
+            metrics::Metrics as StatefulMetrics,
+            syncer::{self, StateSyncMetadata, SyncResult},
+        },
         db::{Anchor, AttachableResolver},
         tests::mocks::{anchor, test_databases, TestApp, TestBlock, TestScheme, TestVariant},
     };
@@ -375,6 +384,7 @@ mod tests {
                     sync_completed,
                     max_pending_acks: NZUsize!(1),
                     prune_config: None,
+                    metrics: StatefulMetrics::new(&context),
                 },
             }
         }
