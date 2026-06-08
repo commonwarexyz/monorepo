@@ -225,14 +225,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self
     }
 
-    /// Append a run of pre-computed leaf digests and merkleize.
+    /// Add a run of pre-computed leaf digests, in order.
     #[cfg(any(feature = "std", test))]
-    pub(crate) fn merkleize_leaf_digests(
-        mut self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
-        digests: impl IntoIterator<Item = D>,
-    ) -> Arc<MerkleizedBatch<F, D, S>> {
+    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         let digests = digests.into_iter();
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let n = digests.size_hint().0 as u64;
@@ -242,7 +237,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         for digest in digests {
             self = self.add_leaf_digest(digest);
         }
-        self.merkleize(base, hasher)
+        self
     }
 
     /// Hash `element` and add it as a leaf.
@@ -665,37 +660,6 @@ mod tests {
                 assert_eq!(
                     mem_root(&result, &hasher),
                     mem_root(&reference, &hasher),
-                    "root mismatch for n={n}"
-                );
-            }
-        });
-    }
-
-    fn merkleize_leaf_digests_matches_individual<F: Family>() {
-        let executor = deterministic::Runner::default();
-        executor.start(|_| async move {
-            let hasher: H = Standard::new(ForwardFold);
-            for &n in &[0u64, 1, 2, 10, 199] {
-                let base = build_reference::<F>(&hasher, 7);
-                let digests: Vec<D> = (0..n).map(|i| hasher.digest(&i.to_be_bytes())).collect();
-
-                // Append the leaves one at a time.
-                let mut individual = base.new_batch();
-                for &digest in &digests {
-                    individual = individual.add_leaf_digest(digest);
-                }
-                let individual = individual.merkleize(&base, &hasher);
-
-                // Append the same leaves via the bulk helper.
-                let bulk = base.new_batch().merkleize_leaf_digests(
-                    &base,
-                    &hasher,
-                    digests.iter().copied(),
-                );
-
-                assert_eq!(
-                    batch_root(&base, &individual, &hasher),
-                    batch_root(&base, &bulk, &hasher),
                     "root mismatch for n={n}"
                 );
             }
@@ -1149,10 +1113,6 @@ mod tests {
         consistency_with_reference::<crate::mmr::Family>();
     }
     #[test]
-    fn mmr_merkleize_leaf_digests_matches_individual() {
-        merkleize_leaf_digests_matches_individual::<crate::mmr::Family>();
-    }
-    #[test]
     fn mmr_lifecycle() {
         lifecycle::<crate::mmr::Family>();
     }
@@ -1226,10 +1186,6 @@ mod tests {
     #[test]
     fn mmb_consistency() {
         consistency_with_reference::<crate::mmb::Family>();
-    }
-    #[test]
-    fn mmb_merkleize_leaf_digests_matches_individual() {
-        merkleize_leaf_digests_matches_individual::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_lifecycle() {

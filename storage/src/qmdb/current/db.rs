@@ -1153,15 +1153,12 @@ pub(super) async fn build_grafted_tree<
         Mem::new()
     };
 
-    // Append the pre-computed grafted leaf digests and merkleize.
+    // Add each grafted leaf digest.
     if !leaves.is_empty() {
         let batch = {
             let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
-            batch.merkleize_leaf_digests(
-                &grafted_tree,
-                &grafted_hasher,
-                leaves.iter().map(|&(_, digest)| digest),
-            )
+            let batch = batch.add_leaf_digests(leaves.iter().map(|&(_, digest)| digest));
+            batch.merkleize(&grafted_tree, &grafted_hasher)
         };
         grafted_tree.apply_batch(&batch)?;
     }

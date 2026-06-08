@@ -152,8 +152,14 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         items: Arc<Vec<Item>>,
         digests: Vec<H::Digest>,
     ) -> MerkleizedBatchArc<F, H, Item, S> {
+        let Self {
+            inner,
+            hasher,
+            items: batch_items,
+            parent,
+        } = self;
         assert!(
-            self.items.is_empty(),
+            batch_items.is_empty(),
             "merkleize_with_leaf_digests expects no items added via add"
         );
         assert_eq!(
@@ -162,15 +168,14 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             "pre-computed leaf digest count must match item count"
         );
 
-        let merkle = self
-            .inner
-            .merkleize_leaf_digests(base, &self.hasher, digests);
-        let ancestor_items = Self::collect_ancestor_items(&self.parent);
+        let inner = inner.add_leaf_digests(digests);
+        let merkle = inner.merkleize(base, &hasher);
+        let ancestor_items = Self::collect_ancestor_items(&parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,
-            bagging: self.hasher.root_bagging(),
+            bagging: hasher.root_bagging(),
             items,
-            parent: self.parent.as_ref().map(Arc::downgrade),
+            parent: parent.as_ref().map(Arc::downgrade),
             ancestor_items,
         })
     }

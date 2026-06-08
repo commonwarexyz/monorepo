@@ -63,14 +63,11 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Append a run of pre-computed leaf digests and merkleize.
-    pub(crate) fn merkleize_leaf_digests(
-        self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
-        digests: impl IntoIterator<Item = D>,
-    ) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        self.inner.merkleize_leaf_digests(base, hasher, digests)
+    /// Add a run of pre-computed leaf digests, in order.
+    pub(crate) fn add_leaf_digests(self, digests: impl IntoIterator<Item = D>) -> Self {
+        Self {
+            inner: self.inner.add_leaf_digests(digests),
+        }
     }
 
     /// The number of leaves visible through this batch.

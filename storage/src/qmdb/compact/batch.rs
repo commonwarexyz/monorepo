@@ -37,5 +37,6 @@ where
                 hasher.leaf_digest(pos, buf.as_slice())
             });
 
-    merkle.with_mem(|mem| batch.merkleize_leaf_digests(mem, &hasher, leaf_digests))
+    let batch = batch.add_leaf_digests(leaf_digests);
+    merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
 }
