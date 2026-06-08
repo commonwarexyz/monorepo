@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Run Gungraun benchmarks and compare them with a main-branch artifact."""
+"""Run configured Gungraun benchmarks and maintain benchmark artifacts.
+
+The script has two modes:
+
+* ``generate`` runs the configured benchmarks and writes ``current.toml``. This
+  is the baseline artifact uploaded from ``main``.
+* ``check`` runs the same benchmarks, compares them with a required baseline,
+  writes comparison artifacts, and renders ``comment.md`` for pull requests.
+"""
+
+from __future__ import annotations
 
 import argparse
 import fnmatch
@@ -9,178 +19,317 @@ import shlex
 import subprocess
 import sys
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
-SELECTED_METRICS = [
-    "Ir",
-    "L1hits",
-    "LLhits",
-    "RamHits",
-    "TotalRW",
-    "EstimatedCycles",
-]
+METRICS = ["Ir", "L1hits", "LLhits", "RamHits", "TotalRW", "EstimatedCycles"]
 GATE_METRIC = "EstimatedCycles"
 RAW_OUTPUT = "gungraun-output.jsonl"
+COMMENT_MARKER = "<!-- commonware-benchmark-tracking-results -->"
+
+
+@dataclass(frozen=True)
+class Benchmark:
+    package: str
+    target: str
+    name: str
+    filter: str
+    baseline_suite: str
+    cargo_flags: list[str]
+    threshold_percent: float
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.baseline_suite, self.name)
+
+
+@dataclass(frozen=True)
+class Result:
+    benchmark: Benchmark
+    metrics: dict[str, int]
+    commit: str = ""
+    run_id: str = ""
+    ref: str = ""
+
+    @classmethod
+    def from_toml(cls, item: dict[str, Any]) -> Self:
+        benchmark = Benchmark(
+            package=required_str(item, "package"),
+            target=required_str(item, "target"),
+            name=required_str(item, "name"),
+            filter=required_str(item, "filter"),
+            baseline_suite=required_str(item, "baseline_suite"),
+            cargo_flags=required_str_list(item.get("cargo_flags", []), "cargo_flags"),
+            threshold_percent=required_float(item.get("threshold_percent"), "threshold_percent"),
+        )
+        metrics = read_metrics(item)
+        return cls(
+            benchmark=benchmark,
+            metrics=metrics,
+            commit=optional_str(item, "commit"),
+            run_id=optional_str(item, "run_id"),
+            ref=optional_str(item, "ref"),
+        )
+
+    def to_toml(self) -> dict[str, Any]:
+        values: dict[str, Any] = {
+            "package": self.benchmark.package,
+            "target": self.benchmark.target,
+            "name": self.benchmark.name,
+            "filter": self.benchmark.filter,
+            "baseline_suite": self.benchmark.baseline_suite,
+            "cargo_flags": self.benchmark.cargo_flags,
+            "threshold_percent": self.benchmark.threshold_percent,
+            "value": self.metrics[GATE_METRIC],
+            "value_metric": GATE_METRIC,
+            "metrics": self.metrics,
+        }
+        if self.commit:
+            values["commit"] = self.commit
+        if self.run_id:
+            values["run_id"] = self.run_id
+        if self.ref:
+            values["ref"] = self.ref
+        return values
+
+
+@dataclass(frozen=True)
+class Comparison:
+    current: Result
+    baseline: Result
+    deltas: dict[str, float]
+
+    @property
+    def gate_delta(self) -> float:
+        return self.deltas[GATE_METRIC]
+
+    @property
+    def regressed(self) -> bool:
+        return self.gate_delta > self.current.benchmark.threshold_percent
+
+    def to_toml(self) -> dict[str, Any]:
+        return {
+            **self.current.to_toml(),
+            "baseline_metrics": self.baseline.metrics,
+            "metric_deltas": self.deltas,
+            "delta_percent": self.gate_delta,
+            "regressed": self.regressed,
+        }
 
 
 def parse_args() -> argparse.Namespace:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--config", required=True, type=Path)
+    common.add_argument("--output-dir", required=True, type=Path)
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", required=True, help="Path to benchmark tracking config TOML")
-    parser.add_argument("--output-dir", required=True, help="Directory for result artifacts")
-    parser.add_argument(
-        "--baseline",
-        help="Path to a previous Gungraun benchmark-tracking current.toml artifact from main",
-    )
-    parser.add_argument(
-        "--no-compare",
-        action="store_true",
-        help="Only write current benchmark results without comparing to a baseline",
-    )
-    parser.add_argument(
-        "--skip-run",
-        action="store_true",
-        help=f"Only process an existing {RAW_OUTPUT} file in the output directory",
-    )
+    subcommands = parser.add_subparsers(dest="mode", required=True)
+
+    check = subcommands.add_parser("check", parents=[common])
+    check.add_argument("--baseline", required=True, type=Path)
+
+    subcommands.add_parser("generate", parents=[common])
     return parser.parse_args()
 
 
 def read_toml(path: Path) -> dict[str, Any]:
     with path.open("rb") as f:
-        return tomllib.load(f)
-
-
-def string_array(value: Any, field: str) -> list[str]:
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
-        raise ValueError(f"`{field}` must be a string array")
+        value = tomllib.load(f)
+    if not isinstance(value, dict):
+        raise ValueError(f"`{path}` must contain a TOML table")
     return value
 
 
-def threshold(value: Any, field: str) -> float:
-    threshold_percent = float(value)
-    if threshold_percent < 0:
-        raise ValueError(f"`{field}` must be non-negative")
-    return threshold_percent
+def required_str(item: dict[str, Any], key: str) -> str:
+    value = item.get(key)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"`{key}` must be a non-empty string")
+    return value
 
 
-def reject_criterion_args(value: dict[str, Any], prefix: str) -> None:
-    if "criterion_args" in value:
-        raise ValueError(f"`{prefix}.criterion_args` is not supported for Gungraun tracking")
+def optional_str(item: dict[str, Any], key: str) -> str:
+    value = item.get(key, "")
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"`{key}` must be a string")
+    return value
 
 
-def validate_config(config: dict[str, Any]) -> list[dict[str, Any]]:
+def required_str_list(value: Any, key: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"`{key}` must be a string array")
+    return value
+
+
+def required_float(value: Any, key: str) -> float:
+    if isinstance(value, bool):
+        raise ValueError(f"`{key}` must be a number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as err:
+        raise ValueError(f"`{key}` must be a number") from err
+    if parsed < 0:
+        raise ValueError(f"`{key}` must be non-negative")
+    return parsed
+
+
+def read_metrics(item: dict[str, Any]) -> dict[str, int]:
+    metrics = item.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError(f"benchmark `{item.get('name', '')}` is missing metrics")
+    parsed = {}
+    for metric in METRICS:
+        value = parse_metric_value(metrics.get(metric))
+        if value is None:
+            raise ValueError(f"benchmark `{item.get('name', '')}` is missing `{metric}`")
+        parsed[metric] = value
+    return parsed
+
+
+def validate_config(config: dict[str, Any]) -> list[Benchmark]:
     packages = config.get("packages")
     if not isinstance(packages, list) or not packages:
         raise ValueError("config must contain a non-empty `packages` array")
 
-    default_threshold = threshold(
+    default_threshold = required_float(
         config.get("default_threshold_percent", 10.0), "default_threshold_percent"
     )
-    validated = []
+    benchmarks = []
     seen = set()
-    for package_idx, package in enumerate(packages):
-        prefix = f"packages[{package_idx}]"
-        if not isinstance(package, dict):
-            raise ValueError(f"`{prefix}` must be an object")
-        reject_criterion_args(package, prefix)
 
-        package_name = package.get("name")
-        if not isinstance(package_name, str) or not package_name:
-            raise ValueError(f"`{prefix}.name` must be a non-empty string")
+    for package_index, package in enumerate(packages):
+        if not isinstance(package, dict):
+            raise ValueError(f"`packages[{package_index}]` must be a table")
+
+        package_name = required_str(package, "name")
         baseline_suite = package.get("baseline_suite", package_name)
         if not isinstance(baseline_suite, str) or not baseline_suite:
-            raise ValueError(f"`{prefix}.baseline_suite` must be a non-empty string")
-        cargo_flags = string_array(package.get("cargo_flags", []), f"{prefix}.cargo_flags")
-        package_threshold = threshold(
-            package.get("threshold_percent", default_threshold), f"{prefix}.threshold_percent"
+            raise ValueError(f"`packages[{package_index}].baseline_suite` must be a string")
+        cargo_flags = required_str_list(
+            package.get("cargo_flags", []), f"packages[{package_index}].cargo_flags"
         )
-        benchmarks = package.get("benchmarks")
-        if not isinstance(benchmarks, list) or not benchmarks:
-            raise ValueError(f"`{prefix}.benchmarks` must be a non-empty array")
+        package_threshold = required_float(
+            package.get("threshold_percent", default_threshold),
+            f"packages[{package_index}].threshold_percent",
+        )
 
-        for benchmark_idx, benchmark in enumerate(benchmarks):
-            bench_prefix = f"{prefix}.benchmarks[{benchmark_idx}]"
-            if not isinstance(benchmark, dict):
-                raise ValueError(f"`{bench_prefix}` must be an object")
-            reject_criterion_args(benchmark, bench_prefix)
+        target_tables = package.get("benchmarks")
+        if not isinstance(target_tables, list) or not target_tables:
+            raise ValueError(f"`packages[{package_index}].benchmarks` must be non-empty")
 
-            bench_name = benchmark.get("name")
-            if not isinstance(bench_name, str) or not bench_name:
-                raise ValueError(f"`{bench_prefix}.name` must be a non-empty string")
-            benchmark_threshold = threshold(
-                benchmark.get("threshold_percent", package_threshold),
-                f"{bench_prefix}.threshold_percent",
+        for target_index, target_table in enumerate(target_tables):
+            if not isinstance(target_table, dict):
+                raise ValueError(
+                    f"`packages[{package_index}].benchmarks[{target_index}]` must be a table"
+                )
+            target = required_str(
+                target_table, "name"
             )
-            variants = benchmark.get("variants")
+            target_threshold = required_float(
+                target_table.get("threshold_percent", package_threshold),
+                f"packages[{package_index}].benchmarks[{target_index}].threshold_percent",
+            )
+            variants = target_table.get("variants")
             if not isinstance(variants, list) or not variants:
-                raise ValueError(f"`{bench_prefix}.variants` must be a non-empty array")
+                raise ValueError(
+                    f"`packages[{package_index}].benchmarks[{target_index}].variants` "
+                    "must be non-empty"
+                )
 
-            for variant_idx, variant in enumerate(variants):
-                variant_prefix = f"{bench_prefix}.variants[{variant_idx}]"
-                if isinstance(variant, str):
-                    raise ValueError(f"`{variant_prefix}` must be a Gungraun variant object")
+            for variant_index, variant in enumerate(variants):
                 if not isinstance(variant, dict):
-                    raise ValueError(f"`{variant_prefix}` must be an object")
-                reject_criterion_args(variant, variant_prefix)
-
-                variant_name = variant.get("name")
-                if not isinstance(variant_name, str) or not variant_name:
-                    raise ValueError(f"`{variant_prefix}.name` must be a non-empty string")
-                variant_filter = variant.get("filter")
-                if not isinstance(variant_filter, str) or not variant_filter:
-                    raise ValueError(f"`{variant_prefix}.filter` must be a non-empty string")
-                variant_threshold = threshold(
-                    variant.get("threshold_percent", benchmark_threshold),
-                    f"{variant_prefix}.threshold_percent",
+                    raise ValueError(
+                        f"`packages[{package_index}].benchmarks[{target_index}]"
+                        f".variants[{variant_index}]` must be a table"
+                    )
+                name = required_str(variant, "name")
+                filter_pattern = required_str(variant, "filter")
+                threshold = required_float(
+                    variant.get("threshold_percent", target_threshold),
+                    "variant.threshold_percent",
                 )
-
-                key = (baseline_suite, package_name, bench_name, variant_name)
-                if key in seen:
-                    raise ValueError(f"duplicate benchmark variant `{variant_name}`")
-                seen.add(key)
-                validated.append(
-                    {
-                        "package": package_name,
-                        "bench": bench_name,
-                        "name": variant_name,
-                        "filter": variant_filter,
-                        "baseline_suite": baseline_suite,
-                        "cargo_flags": cargo_flags,
-                        "threshold_percent": variant_threshold,
-                    }
+                benchmark = Benchmark(
+                    package=package_name,
+                    target=target,
+                    name=name,
+                    filter=filter_pattern,
+                    baseline_suite=baseline_suite,
+                    cargo_flags=cargo_flags,
+                    threshold_percent=threshold,
                 )
-    return validated
+                if benchmark.key in seen:
+                    raise ValueError(f"duplicate benchmark `{benchmark.name}`")
+                seen.add(benchmark.key)
+                benchmarks.append(benchmark)
+
+    return benchmarks
 
 
-def run_streamed(cmd: list[str], output: Path, env: dict[str, str]) -> str:
+def run_benchmarks(benchmarks: list[Benchmark], output_dir: Path) -> list[Result]:
+    raw_output = output_dir / RAW_OUTPUT
+    raw_output.write_text("", encoding="utf-8")
+
+    results = []
+    for benchmark in benchmarks:
+        output = run_one_benchmark(benchmark, raw_output)
+        summaries = parse_json_objects(output, benchmark.name)
+        matches = [summary for summary in summaries if matches_filter(summary, benchmark.filter)]
+        if len(matches) != 1:
+            raise ValueError(
+                f"expected one Gungraun result for `{benchmark.name}`, got {len(matches)}"
+            )
+        results.append(
+            Result(
+                benchmark=benchmark,
+                metrics=extract_metrics(matches[0]),
+                commit=os.environ.get("GITHUB_SHA", ""),
+                run_id=os.environ.get("GITHUB_RUN_ID", ""),
+                ref=os.environ.get("GITHUB_REF_NAME", ""),
+            )
+        )
+    return results
+
+
+def run_one_benchmark(benchmark: Benchmark, raw_output: Path) -> str:
+    cmd = (
+        ["cargo", "bench"]
+        + benchmark.cargo_flags
+        + ["-p", benchmark.package, "--bench", benchmark.target, "--"]
+        + [
+            benchmark.filter,
+            "--output-format=json",
+            f"--callgrind-metrics={','.join(METRICS)}",
+        ]
+    )
     print("$ " + shlex.join(cmd), flush=True)
-    stdout_lines = []
-    with output.open("a", encoding="utf-8") as f:
+
+    lines = []
+    with raw_output.open("a", encoding="utf-8") as f:
         f.write("$ " + shlex.join(cmd) + "\n")
-        f.flush()
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=env,
+            env=os.environ.copy(),
         )
         assert proc.stdout is not None
         for line in proc.stdout:
             print(line, end="")
             f.write(line)
-            stdout_lines.append(line)
-        code = proc.wait()
-        if code != 0:
-            raise subprocess.CalledProcessError(code, cmd)
-    return "".join(stdout_lines)
+            lines.append(line)
+        if proc.wait() != 0:
+            raise subprocess.CalledProcessError(proc.returncode, cmd)
+    return "".join(lines)
 
 
 def parse_json_objects(text: str, source: str) -> list[dict[str, Any]]:
     objects = []
     for line_number, line in enumerate(text.splitlines(), start=1):
         line = line.strip()
-        if not line or not line.startswith("{"):
+        if not line.startswith("{"):
             continue
         try:
             value = json.loads(line)
@@ -190,6 +339,67 @@ def parse_json_objects(text: str, source: str) -> list[dict[str, Any]]:
             raise ValueError(f"expected JSON object in {source}:{line_number}")
         objects.append(value)
     return objects
+
+
+def matches_filter(summary: dict[str, Any], pattern: str) -> bool:
+    module_path = summary.get("module_path")
+    bench_id = summary.get("id")
+    candidates = []
+    if isinstance(module_path, str):
+        candidates.append(module_path)
+    if isinstance(module_path, str) and isinstance(bench_id, str):
+        candidates.append(f"{module_path}::{bench_id}")
+    if isinstance(bench_id, str):
+        candidates.append(bench_id)
+    return any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates)
+
+
+def extract_metrics(summary: dict[str, Any]) -> dict[str, int]:
+    callgrind = callgrind_summary(summary)
+    metrics = {}
+    for metric in METRICS:
+        value = current_metric_value(callgrind.get(metric))
+        if value is None:
+            raise ValueError(f"Gungraun result is missing `{metric}`")
+        metrics[metric] = value
+    return metrics
+
+
+def callgrind_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    profiles = summary.get("profiles")
+    if not isinstance(profiles, list):
+        raise ValueError("Gungraun result is missing `profiles`")
+    for profile in profiles:
+        if not isinstance(profile, dict) or profile.get("tool") != "Callgrind":
+            continue
+        summaries = profile.get("summaries")
+        if not isinstance(summaries, dict):
+            continue
+        total = summaries.get("total")
+        if not isinstance(total, dict):
+            continue
+        total_summary = total.get("summary")
+        if not isinstance(total_summary, dict):
+            continue
+        callgrind = total_summary.get("Callgrind")
+        if isinstance(callgrind, dict):
+            return callgrind
+    raise ValueError("Gungraun result is missing total Callgrind metrics")
+
+
+def current_metric_value(summary: Any) -> int | None:
+    if not isinstance(summary, dict):
+        return None
+    metrics = summary.get("metrics")
+    if not isinstance(metrics, dict):
+        return None
+    value = parse_metric_value(metrics.get("Left"))
+    if value is not None:
+        return value
+    both = metrics.get("Both")
+    if isinstance(both, list) and both:
+        return parse_metric_value(both[0])
+    return None
 
 
 def parse_metric_value(value: Any) -> int | None:
@@ -202,226 +412,140 @@ def parse_metric_value(value: Any) -> int | None:
     return None
 
 
-def current_metric_value(metric_summary: Any) -> int | None:
-    if not isinstance(metric_summary, dict):
-        return None
-
-    metrics = metric_summary.get("metrics")
-    if not isinstance(metrics, dict):
-        return None
-
-    value = parse_metric_value(metrics.get("Left"))
-    if value is not None:
-        return value
-
-    both = metrics.get("Both")
-    if isinstance(both, list) and both:
-        return parse_metric_value(both[0])
-    return None
-
-
-def callgrind_summary(summary: dict[str, Any]) -> dict[str, Any]:
-    profiles = summary.get("profiles")
-    if not isinstance(profiles, list):
-        raise ValueError("Gungraun JSON object is missing `profiles`")
-
-    for profile in profiles:
-        if not isinstance(profile, dict):
-            continue
-        if profile.get("tool") != "Callgrind":
-            continue
-
-        summaries = profile.get("summaries")
-        if not isinstance(summaries, dict):
-            continue
-
-        total = summaries.get("total")
-        if not isinstance(total, dict):
-            continue
-
-        total_summary = total.get("summary")
-        if not isinstance(total_summary, dict):
-            continue
-
-        callgrind = total_summary.get("Callgrind")
-        if isinstance(callgrind, dict):
-            return callgrind
-    raise ValueError("Gungraun JSON object is missing total Callgrind metrics")
-
-
-def extract_metrics(summary: dict[str, Any]) -> dict[str, int]:
-    callgrind = callgrind_summary(summary)
-    metrics = {}
-    for metric in SELECTED_METRICS:
-        value = current_metric_value(callgrind.get(metric))
-        if value is None:
-            raise ValueError(f"Gungraun JSON object is missing `{metric}`")
-        metrics[metric] = value
-    return metrics
-
-
-def benchmark_paths(summary: dict[str, Any]) -> list[str]:
-    module_path = summary.get("module_path")
-    bench_id = summary.get("id")
-
-    paths = []
-    if isinstance(module_path, str):
-        paths.append(module_path)
-    if isinstance(module_path, str) and isinstance(bench_id, str):
-        paths.append(f"{module_path}::{bench_id}")
-    if isinstance(bench_id, str):
-        paths.append(bench_id)
-    return paths
-
-
-def matches_filter(summary: dict[str, Any], pattern: str) -> bool:
-    for candidate in benchmark_paths(summary):
-        if fnmatch.fnmatchcase(candidate, pattern):
-            return True
-    return False
-
-
-def result_from_summary(bench: dict[str, Any], summary: dict[str, Any]) -> dict[str, Any]:
-    metrics = extract_metrics(summary)
-    return {
-        **bench,
-        "metrics": metrics,
-        "value": metrics[GATE_METRIC],
-        "value_metric": GATE_METRIC,
-    }
-
-
-def run_benchmarks(benchmarks: list[dict[str, Any]], output_dir: Path) -> list[dict[str, Any]]:
-    raw_output = output_dir / RAW_OUTPUT
-    raw_output.write_text("", encoding="utf-8")
-    env = os.environ.copy()
-
-    results = []
-    metrics = ",".join(SELECTED_METRICS)
-    for bench in benchmarks:
-        cmd = (
-            ["cargo", "bench"]
-            + bench["cargo_flags"]
-            + ["-p", bench["package"], "--bench", bench["bench"], "--"]
-            + [bench["filter"], "--output-format=json", f"--callgrind-metrics={metrics}"]
-        )
-        stdout = run_streamed(cmd, raw_output, env)
-        summaries = parse_json_objects(stdout, bench["filter"])
-        if len(summaries) != 1:
-            raise RuntimeError(
-                f"expected exactly one Gungraun JSON result for `{bench['name']}`, "
-                f"got {len(summaries)}"
-            )
-        results.append(result_from_summary(bench, summaries[0]))
-    return results
-
-
-def load_skip_run_results(benchmarks: list[dict[str, Any]], output_dir: Path) -> list[dict[str, Any]]:
-    path = output_dir / RAW_OUTPUT
-    summaries = parse_json_objects(path.read_text(encoding="utf-8"), str(path))
-    results = []
-    for bench in benchmarks:
-        matches = [summary for summary in summaries if matches_filter(summary, bench["filter"])]
-        if len(matches) != 1:
-            raise RuntimeError(
-                f"expected exactly one Gungraun JSON result for `{bench['name']}`, "
-                f"got {len(matches)}"
-            )
-        results.append(result_from_summary(bench, matches[0]))
-    return results
-
-
-def load_baseline(path: str | None) -> list[dict[str, Any]] | None:
-    if path is None:
-        return None
-    baseline_path = Path(path)
-    if not baseline_path.exists():
-        return None
-    baseline = read_toml(baseline_path).get("benchmarks")
-    if not isinstance(baseline, list):
+def load_baseline(path: Path) -> dict[tuple[str, str], Result]:
+    if not path.exists():
+        raise ValueError(f"baseline `{path}` does not exist")
+    values = read_toml(path).get("benchmarks")
+    if not isinstance(values, list):
         raise ValueError(f"baseline `{path}` must contain a `benchmarks` array")
+    baseline = {}
+    for item in values:
+        if not isinstance(item, dict):
+            raise ValueError(f"baseline `{path}` contains a non-table benchmark")
+        result = Result.from_toml(item)
+        baseline[result.benchmark.key] = result
     return baseline
 
 
-def find_baseline(
-    data: list[dict[str, Any]] | None, baseline_suite: str, name: str
-) -> dict[str, Any] | None:
-    if data is None:
-        return None
-    for bench in data:
-        if bench.get("baseline_suite") == baseline_suite and bench.get("name") == name:
-            return bench
-    return None
-
-
-def baseline_metrics(bench: dict[str, Any]) -> dict[str, int]:
-    metrics = bench.get("metrics")
-    if not isinstance(metrics, dict):
-        raise ValueError(f"baseline `{bench.get('name', '')}` is missing Gungraun metrics")
-    parsed = {}
-    for metric in SELECTED_METRICS:
-        value = parse_metric_value(metrics.get(metric))
-        if value is None:
-            raise ValueError(f"baseline `{bench.get('name', '')}` is missing `{metric}`")
-        parsed[metric] = value
-    return parsed
-
-
-def compare_results(
-    current: list[dict[str, Any]], baseline_data: list[dict[str, Any]] | None
-) -> list[dict[str, Any]]:
+def compare(current: list[Result], baseline: dict[tuple[str, str], Result]) -> list[Comparison]:
     comparisons = []
     for result in current:
-        baseline = find_baseline(baseline_data, result["baseline_suite"], result["name"])
-        if baseline is None:
-            comparisons.append(
-                {
-                    **result,
-                    "baseline": None,
-                    "baseline_metrics": None,
-                    "metric_deltas": None,
-                    "delta_percent": None,
-                    "regressed": False,
-                    "status": "missing baseline",
-                }
-            )
-            continue
-
-        base_metrics = baseline_metrics(baseline)
-        gate_baseline = base_metrics[GATE_METRIC]
-        if gate_baseline == 0:
-            raise ValueError(f"baseline `{result['name']}` has zero `{GATE_METRIC}`")
-        delta_percent = ((result["value"] - gate_baseline) / gate_baseline) * 100
-        regressed = delta_percent > result["threshold_percent"]
-        metric_deltas = {}
-        for metric in SELECTED_METRICS:
-            base = base_metrics[metric]
-            current_value = result["metrics"][metric]
-            metric_deltas[metric] = None if base == 0 else ((current_value - base) / base) * 100
-
-        comparisons.append(
-            {
-                **result,
-                "baseline": baseline,
-                "baseline_metrics": base_metrics,
-                "metric_deltas": metric_deltas,
-                "delta_percent": delta_percent,
-                "regressed": regressed,
-                "status": "regressed" if regressed else "ok",
-            }
-        )
+        previous = baseline.get(result.benchmark.key)
+        if previous is None:
+            raise ValueError(f"baseline is missing `{result.benchmark.name}`")
+        deltas = {}
+        for metric in METRICS:
+            if previous.metrics[metric] == 0:
+                raise ValueError(f"baseline `{result.benchmark.name}` has zero `{metric}`")
+            deltas[metric] = percent_delta(result.metrics[metric], previous.metrics[metric])
+        comparisons.append(Comparison(current=result, baseline=previous, deltas=deltas))
     return comparisons
 
 
-def format_count(value: int | None) -> str:
-    if value is None:
-        return "-"
+def percent_delta(current: int, baseline: int) -> float:
+    return ((current - baseline) / baseline) * 100
+
+
+def write_outputs(
+    output_dir: Path,
+    current: list[Result],
+    comparisons: list[Comparison] | None = None,
+) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    write_toml_array(output_dir / "current.toml", "benchmarks", [r.to_toml() for r in current])
+
+    summary: dict[str, Any] = {
+        "benchmark_count": len(current),
+        "gate_metric": GATE_METRIC,
+        "metrics": METRICS,
+    }
+    if comparisons is not None:
+        write_toml_array(
+            output_dir / "comparison.toml",
+            "comparisons",
+            [c.to_toml() for c in comparisons],
+        )
+        summary["regression_count"] = sum(1 for c in comparisons if c.regressed)
+        (output_dir / "comment.md").write_text(render_report(comparisons), encoding="utf-8")
+
+    write_toml_table(output_dir / "summary.toml", summary)
+
+
+def render_report(comparisons: list[Comparison]) -> str:
+    regressions = sum(1 for item in comparisons if item.regressed)
+    lines = [
+        COMMENT_MARKER,
+        "## Benchmark results",
+        "",
+        f"Gate: `{GATE_METRIC}`. Regressions: `{regressions}`.",
+    ]
+    for item in comparisons:
+        lines.extend(["", f"<details><summary>{summary_line(item)}</summary>", ""])
+        render_metadata(lines, item.current.benchmark)
+        render_metrics(lines, item)
+        lines.extend(["", "</details>"])
+
+    commits = sorted(
+        {item.baseline.commit[:12] for item in comparisons if item.baseline.commit}
+    )
+    if commits:
+        lines.extend(["", f"Baseline commit(s): `{', '.join(commits)}`"])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def summary_line(item: Comparison) -> str:
+    status = "FAIL" if item.regressed else "PASS"
+    current = format_count(item.current.metrics[GATE_METRIC])
+    delta = format_delta(item.gate_delta)
+    threshold = f"{item.current.benchmark.threshold_percent:.2f}%"
+    return (
+        f"{status} {escape_summary(item.current.benchmark.name)} "
+        f"({GATE_METRIC}: {current}, delta: {delta}, threshold: {threshold})"
+    )
+
+
+def render_metadata(lines: list[str], benchmark: Benchmark) -> None:
+    rows = [
+        ("Package", benchmark.package),
+        ("Benchmark target", benchmark.target),
+        ("Variant", benchmark.name),
+        ("Filter", benchmark.filter),
+        ("Baseline suite", benchmark.baseline_suite),
+        ("Threshold", f"{benchmark.threshold_percent:.2f}%"),
+    ]
+    if benchmark.cargo_flags:
+        rows.append(("Cargo flags", " ".join(benchmark.cargo_flags)))
+
+    lines.extend(["| Field | Value |", "|---|---|"])
+    for key, value in rows:
+        lines.append(f"| {key} | `{escape_cell(value)}` |")
+
+
+def render_metrics(lines: list[str], item: Comparison) -> None:
+    lines.extend(["", "| Metric | Baseline | Current | Delta | Gated |", "|---|---:|---:|---:|---|"])
+    for metric in METRICS:
+        gated = "yes" if metric == GATE_METRIC else ""
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{metric}`",
+                    format_count(item.baseline.metrics[metric]),
+                    format_count(item.current.metrics[metric]),
+                    format_delta(item.deltas[metric]),
+                    gated,
+                ]
+            )
+            + " |"
+        )
+
+
+def format_count(value: int) -> str:
     return f"{value:,}"
 
 
-def format_delta(value: float | None) -> str:
-    if value is None:
-        return "-"
+def format_delta(value: float) -> str:
     return f"{value:+.2f}%"
 
 
@@ -438,44 +562,8 @@ def escape_summary(value: str) -> str:
     )
 
 
-def toml_quote(value: str) -> str:
-    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-    return f'"{escaped}"'
-
-
-def toml_value(value: Any) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int | float):
-        return str(value)
-    if isinstance(value, str):
-        return toml_quote(value)
-    if isinstance(value, list):
-        return "[" + ", ".join(toml_value(item) for item in value) + "]"
-    raise TypeError(f"unsupported TOML value: {value!r}")
-
-
 def write_toml_table(path: Path, values: dict[str, Any]) -> None:
-    lines = []
-    for key, value in values.items():
-        if value is None:
-            continue
-        lines.append(f"{key} = {toml_value(value)}")
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
-def append_toml_values(lines: list[str], values: dict[str, Any], prefix: str) -> None:
-    nested = []
-    for key, value in values.items():
-        if value is None:
-            continue
-        if isinstance(value, dict):
-            nested.append((key, value))
-        else:
-            lines.append(f"{key} = {toml_value(value)}")
-    for key, value in nested:
-        lines.extend(["", f"[{prefix}.{key}]"])
-        append_toml_values(lines, value, f"{prefix}.{key}")
+    path.write_text("\n".join(f"{k} = {toml_value(v)}" for k, v in values.items()) + "\n")
 
 
 def write_toml_array(path: Path, name: str, values: list[dict[str, Any]]) -> None:
@@ -484,202 +572,50 @@ def write_toml_array(path: Path, name: str, values: list[dict[str, Any]]) -> Non
         if lines:
             lines.append("")
         lines.append(f"[[{name}]]")
-        append_toml_values(lines, value, name)
+        append_toml(lines, value, name)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def status_text(item: dict[str, Any]) -> str:
-    if item["status"] == "regressed":
-        return "FAIL"
-    if item["status"] == "missing baseline":
-        return "WARN missing baseline"
-    return "PASS"
+def append_toml(lines: list[str], values: dict[str, Any], prefix: str) -> None:
+    nested = []
+    for key, value in values.items():
+        if isinstance(value, dict):
+            nested.append((key, value))
+        else:
+            lines.append(f"{key} = {toml_value(value)}")
+    for key, value in nested:
+        lines.extend(["", f"[{prefix}.{key}]"])
+        append_toml(lines, value, f"{prefix}.{key}")
 
 
-def metadata_rows(item: dict[str, Any]) -> list[tuple[str, str]]:
-    rows = [
-        ("Package", item["package"]),
-        ("Benchmark target", item["bench"]),
-        ("Variant", item["name"]),
-        ("Filter", item["filter"]),
-        ("Baseline suite", item["baseline_suite"]),
-        ("Gate metric", GATE_METRIC),
-        ("Threshold", f"{item['threshold_percent']:.2f}%"),
-    ]
-    cargo_flags = item.get("cargo_flags", [])
-    if cargo_flags:
-        rows.append(("Cargo flags", " ".join(cargo_flags)))
-    return rows
-
-
-def render_metadata_table(lines: list[str], item: dict[str, Any]) -> None:
-    lines.extend(
-        [
-            "| Field | Value |",
-            "|---|---|",
-        ]
-    )
-    for field, value in metadata_rows(item):
-        lines.append(f"| {field} | `{escape_cell(value)}` |")
-
-
-def render_comparison_metric_table(lines: list[str], item: dict[str, Any]) -> None:
-    lines.extend(
-        [
-            "",
-            "| Metric | Baseline | Current | Delta | Gated |",
-            "|---|---:|---:|---:|---|",
-        ]
-    )
-    for metric in SELECTED_METRICS:
-        baseline = None
-        if item["baseline_metrics"] is not None:
-            baseline = item["baseline_metrics"][metric]
-        delta = None if item["metric_deltas"] is None else item["metric_deltas"][metric]
-        gated = "yes" if metric == GATE_METRIC else ""
-        lines.append(
-            "| "
-            + " | ".join(
-                [
-                    f"`{metric}`",
-                    format_count(baseline),
-                    format_count(item["metrics"][metric]),
-                    format_delta(delta),
-                    gated,
-                ]
-            )
-            + " |"
-        )
-
-
-def render_current_metric_table(lines: list[str], item: dict[str, Any]) -> None:
-    lines.extend(
-        [
-            "",
-            "| Metric | Current |",
-            "|---|---:|",
-        ]
-    )
-    for metric in SELECTED_METRICS:
-        lines.append(f"| `{metric}` | {format_count(item['metrics'][metric])} |")
-
-
-def comparison_summary(item: dict[str, Any]) -> str:
-    status = status_text(item)
-    delta = format_delta(item["delta_percent"])
-    current = format_count(item["metrics"][GATE_METRIC])
-    threshold = f"{item['threshold_percent']:.2f}%"
-    return (
-        f"{status} {escape_summary(item['name'])} "
-        f"({GATE_METRIC}: {current}, delta: {delta}, threshold: {threshold})"
-    )
-
-
-def current_summary(item: dict[str, Any]) -> str:
-    current = format_count(item["metrics"][GATE_METRIC])
-    return f"{escape_summary(item['name'])} ({GATE_METRIC}: {current})"
-
-
-def render_comparison_details(lines: list[str], item: dict[str, Any]) -> None:
-    lines.extend(["", f"<details><summary>{comparison_summary(item)}</summary>", ""])
-    render_metadata_table(lines, item)
-    render_comparison_metric_table(lines, item)
-    lines.extend(["", "</details>"])
-
-
-def render_current_details(lines: list[str], item: dict[str, Any]) -> None:
-    lines.extend(["", f"<details><summary>{current_summary(item)}</summary>", ""])
-    render_metadata_table(lines, item)
-    render_current_metric_table(lines, item)
-    lines.extend(["", "</details>"])
-
-
-def render_markdown(comparisons: list[dict[str, Any]], current: list[dict[str, Any]]) -> str:
-    regression_count = sum(1 for item in comparisons if item["regressed"])
-    missing_count = sum(1 for item in comparisons if item["baseline"] is None)
-    lines = [
-        "<!-- commonware-benchmark-tracking-results -->",
-        "## Benchmark results",
-        "",
-    ]
-    if comparisons:
-        lines.append(
-            f"Gate: `{GATE_METRIC}` only. "
-            f"Regressions: `{regression_count}`. Missing baselines: `{missing_count}`."
-        )
-    else:
-        lines.append(f"Recorded current Gungraun metrics. Gate metric: `{GATE_METRIC}`.")
-
-    if comparisons:
-        for item in comparisons:
-            render_comparison_details(lines, item)
-    else:
-        for item in current:
-            render_current_details(lines, item)
-
-    commits = sorted(
-        {
-            item["baseline"].get("commit", "")[:12]
-            for item in comparisons
-            if item["baseline"] and item["baseline"].get("commit")
-        }
-    )
-    if commits:
-        lines.extend(["", f"Baseline commit(s): `{', '.join(commits)}`"])
-    lines.append("")
-    return "\n".join(lines)
+def toml_value(value: Any) -> str:
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, str):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n") + '"'
+    if isinstance(value, list):
+        return "[" + ", ".join(toml_value(item) for item in value) + "]"
+    raise TypeError(f"unsupported TOML value: {value!r}")
 
 
 def main() -> int:
     args = parse_args()
-    config_path = Path(args.config)
-    output_dir = Path(args.output_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+    benchmarks = validate_config(read_toml(args.config))
+    current = run_benchmarks(benchmarks, args.output_dir)
 
-    config = read_toml(config_path)
-    benchmarks = validate_config(config)
+    if args.mode == "generate":
+        write_outputs(args.output_dir, current)
+        print(f"benchmark_count: {len(current)}")
+        return 0
 
-    if args.skip_run:
-        current = load_skip_run_results(benchmarks, output_dir)
-    else:
-        current = run_benchmarks(benchmarks, output_dir)
-
-    commit = os.environ.get("GITHUB_SHA")
-    run_id = os.environ.get("GITHUB_RUN_ID")
-    ref = os.environ.get("GITHUB_REF_NAME")
-    for result in current:
-        if commit:
-            result["commit"] = commit
-        if run_id:
-            result["run_id"] = run_id
-        if ref:
-            result["ref"] = ref
-
-    if args.no_compare:
-        comparisons = []
-    else:
-        baseline_data = load_baseline(args.baseline)
-        comparisons = compare_results(current, baseline_data)
-
-    regression_count = sum(1 for item in comparisons if item["regressed"])
-    missing_count = sum(1 for item in comparisons if item["baseline"] is None)
-    summary = {
-        "benchmark_count": len(current),
-        "regression_count": regression_count,
-        "missing_baseline_count": missing_count,
-        "gate_metric": GATE_METRIC,
-        "metrics": SELECTED_METRICS,
-    }
-
-    write_toml_array(output_dir / "current.toml", "benchmarks", current)
-    write_toml_array(output_dir / "comparison.toml", "comparisons", comparisons)
-    write_toml_table(output_dir / "summary.toml", summary)
-    (output_dir / "comment.md").write_text(
-        render_markdown(comparisons, current), encoding="utf-8"
-    )
-
-    for key, value in summary.items():
-        print(f"{key}: {value}")
+    baseline = load_baseline(args.baseline)
+    comparisons = compare(current, baseline)
+    write_outputs(args.output_dir, current, comparisons)
+    regressions = sum(1 for item in comparisons if item.regressed)
+    print(f"benchmark_count: {len(current)}")
+    print(f"regression_count: {regressions}")
     return 0
 
 

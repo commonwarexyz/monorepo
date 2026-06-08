@@ -84,15 +84,15 @@ jobs:
       - name: Run benchmark tracking
         id: run
         run: |
-          args=()
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            if [ -f benchmark-tracking-baseline/current.toml ]; then
-              args=(--baseline benchmark-tracking-baseline/current.toml)
-            fi
+            mode=check
+            args=(--baseline benchmark-tracking-baseline/current.toml)
           else
-            args=(--no-compare)
+            mode=generate
+            args=()
           fi
           python3 .github/scripts/benchmark-tracking.py \
+            "$mode" \
             --config "$BENCHMARK_TRACKING_CONFIG" \
             --output-dir benchmark-tracking-results \
             "${args[@]}"

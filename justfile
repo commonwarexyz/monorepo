@@ -57,20 +57,15 @@ test-benches crate test_flags='' lint_flags='':
     RUSTFLAGS="{{ lint_flags }}" cargo test --benches -p {{ crate }} {{ test_flags }} -- --list | python3 .github/scripts/lint_benchmark_names.py -
 
 # Run the Gungraun benchmark tracking suite
-benchmark-tracking *args='':
+benchmark-tracking mode='generate' *args='':
     #!/usr/bin/env bash
     set -euo pipefail
 
-    extra_args=()
-    if [ "$#" -gt 1 ] || [ "${1:-}" != "" ]; then
-        extra_args=("$@")
-    fi
-
     run_tracking() {
         python3 .github/scripts/benchmark-tracking.py \
+            {{ mode }} \
             --config .github/benchmark-tracking.toml \
-            --output-dir benchmark-tracking-results \
-            "${extra_args[@]}"
+            --output-dir benchmark-tracking-results {{ args }}
     }
 
     case "$(uname -s)" in
@@ -100,9 +95,9 @@ benchmark-tracking *args='':
                 --env CARGO_TARGET_DIR=/workspace/target/gungraun-docker \
                 "$image" \
                 python3 .github/scripts/benchmark-tracking.py \
+                    {{ mode }} \
                     --config .github/benchmark-tracking.toml \
-                    --output-dir benchmark-tracking-results \
-                    "${extra_args[@]}"
+                    --output-dir benchmark-tracking-results {{ args }}
             ;;
         *)
             echo "unsupported platform: $(uname -s)" >&2
