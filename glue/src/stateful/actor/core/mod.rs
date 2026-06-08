@@ -45,13 +45,9 @@ pub struct MaintenanceConfig {
     /// Number of finalized target pairs to retain, including the tip.
     ///
     /// With pruning enabled, glue prunes to the oldest retained target. For example,
-    /// `retention = 1024` keeps 1024 finalized targets and prunes to the oldest one.
-    pub retention: NonZeroUsize,
-
-    /// Prune databases and marshal history on the configured interval.
-    ///
-    /// When `false`, no periodic durable database maintenance is scheduled.
-    pub prune: bool,
+    /// `Some(1024)` keeps 1024 finalized targets and prunes to the oldest one.
+    /// When `None`, no periodic durable database maintenance is scheduled.
+    pub retention: Option<NonZeroUsize>,
 }
 
 /// Configuration for constructing a [`Stateful`] application.
@@ -415,8 +411,7 @@ mod tests {
                     },
                     maintenance: MaintenanceConfig {
                         interval: NZUsize!(usize::MAX),
-                        retention: NZUsize!(1),
-                        prune: false,
+                        retention: None,
                     },
                 },
             );

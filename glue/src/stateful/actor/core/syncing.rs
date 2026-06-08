@@ -386,8 +386,7 @@ mod tests {
                     sync_completed,
                     maintenance: MaintenanceConfig {
                         interval: NZUsize!(usize::MAX),
-                        retention: NZUsize!(1),
-                        prune: false,
+                        retention: None,
                     },
                 },
             }
@@ -564,8 +563,7 @@ mod tests {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             harness.syncing.maintenance = MaintenanceConfig {
                 interval: NZUsize!(9),
-                retention: NZUsize!(2),
-                prune: true,
+                retention: Some(NZUsize!(2)),
             };
             let events = harness
                 .syncing

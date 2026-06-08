@@ -126,14 +126,17 @@ impl<T> MaintenanceAction<T> {
 /// finalized sync targets needed to make pruning safe.
 struct Maintenance<T> {
     config: MaintenanceConfig,
-    prune_retention_window: usize,
+    prune_retention_window: Option<usize>,
     retained_targets: VecDeque<(Height, T)>,
     preflush_started_prune_height: Option<Height>,
 }
 
 impl<T: Clone> Maintenance<T> {
     const fn new(config: MaintenanceConfig) -> Self {
-        let prune_retention_window = config.retention.get();
+        let prune_retention_window = match config.retention {
+            Some(retention) => Some(retention.get()),
+            None => None,
+        };
         Self {
             config,
             prune_retention_window,
@@ -142,9 +145,8 @@ impl<T: Clone> Maintenance<T> {
         }
     }
 
-    fn prune_lag(&self) -> u64 {
-        u64::try_from(self.prune_retention_window - 1)
-            .expect("prune retention window should fit in u64")
+    fn prune_lag(retention_window: usize) -> u64 {
+        u64::try_from(retention_window - 1).expect("prune retention window should fit in u64")
     }
 
     const fn next_prune_height_after(height: Height, interval: u64) -> Height {
@@ -162,8 +164,9 @@ impl<T: Clone> Maintenance<T> {
         )
     }
 
-    fn preflush_target_for(&self, prune_height: Height) -> Option<T> {
-        let target_height = Height::new(prune_height.get().checked_sub(self.prune_lag())?);
+    fn preflush_target_for(&self, prune_height: Height, retention_window: usize) -> Option<T> {
+        let target_height =
+            Height::new(prune_height.get().checked_sub(Self::prune_lag(retention_window))?);
         self.retained_targets
             .iter()
             .find_map(|(height, targets)| (*height == target_height).then(|| targets.clone()))
@@ -180,22 +183,20 @@ impl<T: Clone> Maintenance<T> {
     /// is the oldest retained finalized target and its corresponding finalized
     /// block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
-        if self.config.prune {
-            self.retained_targets.push_back((height, targets));
-            if self.retained_targets.len() > self.prune_retention_window {
-                self.retained_targets.pop_front();
-            }
-        }
-
-        if !self.config.prune {
+        let Some(retention_window) = self.prune_retention_window else {
             return MaintenanceAction::None;
+        };
+
+        self.retained_targets.push_back((height, targets));
+        if self.retained_targets.len() > retention_window {
+            self.retained_targets.pop_front();
         }
 
         let interval = u64::try_from(self.config.interval.get())
             .expect("maintenance interval should fit in u64");
         let at_prune_boundary = height.get().is_multiple_of(interval);
 
-        if at_prune_boundary && self.retained_targets.len() >= self.prune_retention_window {
+        if at_prune_boundary && self.retained_targets.len() >= retention_window {
             let (prune_height, targets) = self
                 .retained_targets
                 .front()
@@ -210,7 +211,7 @@ impl<T: Clone> Maintenance<T> {
             let next_preflush = if self.preflush_started_prune_height == Some(next_prune_height) {
                 None
             } else {
-                self.preflush_target_for(next_prune_height)
+                self.preflush_target_for(next_prune_height, retention_window)
                     .map(|targets| (next_prune_height, targets))
             };
             return MaintenanceAction::Prune {
@@ -235,7 +236,7 @@ impl<T: Clone> Maintenance<T> {
         if self.preflush_started_prune_height == Some(prune_height) {
             return MaintenanceAction::None;
         }
-        let Some(targets) = self.preflush_target_for(prune_height) else {
+        let Some(targets) = self.preflush_target_for(prune_height, retention_window) else {
             return MaintenanceAction::None;
         };
         MaintenanceAction::Preflush {
@@ -1505,8 +1506,7 @@ mod tests {
                     metrics,
                     MaintenanceConfig {
                         interval: NZUsize!(usize::MAX),
-                        retention: NZUsize!(1),
-                        prune: false,
+                        retention: None,
                     },
                 ),
                 provider,
@@ -1794,8 +1794,7 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(2),
-                retention: NZUsize!(1),
-                prune: false,
+                retention: None,
             },
         );
 
@@ -1814,8 +1813,7 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(1),
-                retention: NZUsize!(3),
-                prune: true,
+                retention: Some(NZUsize!(3)),
             },
         );
 
@@ -1845,8 +1843,7 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(3),
-                retention: NZUsize!(2),
-                prune: true,
+                retention: Some(NZUsize!(2)),
             },
         );
 
@@ -1895,8 +1892,7 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(3),
-                retention: NZUsize!(2),
-                prune: true,
+                retention: Some(NZUsize!(2)),
             },
         );
 
@@ -1919,8 +1915,7 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(1),
-                retention: NZUsize!(2),
-                prune: true,
+                retention: Some(NZUsize!(2)),
             },
         );
 
@@ -1954,8 +1949,7 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(5),
-                retention: NZUsize!(3),
-                prune: true,
+                retention: Some(NZUsize!(3)),
             },
         );
 
@@ -2106,8 +2100,7 @@ mod tests {
                 ProcessorMetrics::new(harness.context_cell.child("staged_processor_metrics")),
                 MaintenanceConfig {
                     interval: NZUsize!(1),
-                    retention: NZUsize!(1),
-                    prune: false,
+                    retention: None,
                 },
             );
 
@@ -2496,8 +2489,7 @@ mod tests {
                 ProcessorMetrics::new(harness.context_cell.child("durable_prune_metrics")),
                 MaintenanceConfig {
                     interval: NZUsize!(1),
-                    retention: NZUsize!(2),
-                    prune: true,
+                    retention: Some(NZUsize!(2)),
                 },
             );
 

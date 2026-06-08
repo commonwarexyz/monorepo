@@ -520,8 +520,7 @@ impl EngineDefinition for SingleDbEngine {
                 sync_config: self.sync_config,
                 maintenance: MaintenanceConfig {
                     interval: NZUsize!(10),
-                    retention: NZUsize!(2),
-                    prune: true,
+                    retention: Some(NZUsize!(2)),
                 },
             },
         );
