@@ -226,7 +226,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Add a run of pre-computed leaf digests, in order.
-    #[cfg(any(feature = "std", test))]
+    #[cfg(feature = "std")]
     pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         let digests = digests.into_iter();
         // Each leaf also appends its parent placeholders, so reserve for the full node count.

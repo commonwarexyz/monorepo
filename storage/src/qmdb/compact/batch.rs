@@ -25,7 +25,7 @@ where
     let hasher = qmdb::hasher::<H>();
     let first_leaf = batch.leaves();
 
-    // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
+    // Hash before `with_mem` borrows committed Merkle state under its read lock.
     let leaf_digests =
         merkle
             .strategy()

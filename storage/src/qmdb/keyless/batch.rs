@@ -267,9 +267,8 @@ where
 
         let total_size = self.base_size + ops.len() as u64;
 
-        // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
-        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
-        let journal_batch = self.journal_batch.add_leaf_digests(ops, leaf_digests);
+        // Hash before `with_mem` borrows committed Merkle state under its read lock.
+        let journal_batch = self.journal_batch.add_many(ops);
         let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
         // Compute the root.

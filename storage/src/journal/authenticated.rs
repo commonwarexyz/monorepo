@@ -115,20 +115,20 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         })
     }
 
-    /// Compute leaf digests for caller-supplied items without consuming the batch.
+    /// Add caller-supplied items to the batch.
     ///
     /// # Panics
     ///
     /// Panics if items were previously added via [`add`](Self::add).
-    pub(crate) fn leaf_digests_with(&self, items: &[Item]) -> Vec<H::Digest> {
+    pub(crate) fn add_many(mut self, items: Vec<Item>) -> Self {
         assert!(
             self.items.is_empty(),
-            "leaf_digests_with expects no items added via add"
+            "add_many expects no items added via add"
         );
 
         let first = self.inner.leaves();
         let hasher = &self.hasher;
-        self.inner.strategy().map_init_collect_vec(
+        let digests = self.inner.strategy().map_init_collect_vec(
             items.iter().enumerate(),
             Vec::new,
             |buf, (i, item)| {
@@ -137,24 +137,6 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
                 item.write(buf);
                 hasher.leaf_digest(pos, buf.as_slice())
             },
-        )
-    }
-
-    /// Add caller-supplied items using pre-computed leaf digests.
-    ///
-    /// # Panics
-    ///
-    /// - If items were previously added via [`add`](Self::add).
-    /// - If `digests` and `items` have different lengths.
-    pub(crate) fn add_leaf_digests(mut self, items: Vec<Item>, digests: Vec<H::Digest>) -> Self {
-        assert!(
-            self.items.is_empty(),
-            "add_leaf_digests expects no items added via add"
-        );
-        assert_eq!(
-            digests.len(),
-            items.len(),
-            "pre-computed leaf digest count must match item count"
         );
 
         self.inner = self.inner.add_leaf_digests(digests);
@@ -912,8 +894,7 @@ mod tests {
         base: &Mem<F, Digest>,
         items: Vec<TestOp<F>>,
     ) -> MerkleizedBatchArc<F, Sha256, TestOp<F>, Sequential> {
-        let digests = batch.leaf_digests_with(items.as_slice());
-        batch.add_leaf_digests(items, digests).merkleize(base)
+        batch.add_many(items).merkleize(base)
     }
 
     /// Create Merkle configuration for tests.

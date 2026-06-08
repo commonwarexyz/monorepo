@@ -821,9 +821,8 @@ where
         let leaves = Location::new(self.base_size + ops.len() as u64);
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
-        // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
-        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
-        let journal_batch = self.journal_batch.add_leaf_digests(ops, leaf_digests);
+        // Hash before `with_mem` borrows committed Merkle state under its read lock.
+        let journal_batch = self.journal_batch.add_many(ops);
         let journal = db.log.with_mem(|base| journal_batch.merkleize(base));
         let root = db
             .log
