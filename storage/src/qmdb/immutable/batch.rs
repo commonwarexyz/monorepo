@@ -260,24 +260,27 @@ where
 
         let total_size = base + ops.len() as u64;
 
-        // Hash the operations' leaf digests in parallel, then merkleize the journal batch.
+        // Merkleize the journal batch.
         let ops = Arc::new(ops);
+        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
+
+        // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
+        let journal = db.journal.with_mem(|mem| {
+            self.journal_batch
+                .merkleize_with_leaf_digests(mem, ops, leaf_digests)
+        });
+
+        // Compute the root.
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
-
-        // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
-        let journal_merkleized = db.journal.with_mem(|mem| {
-            self.journal_batch
-                .merkleize_with_leaf_digests(mem, ops, leaf_digests)
-        });
         let root = db
             .journal
-            .with_mem(|mem| journal_merkleized.root(mem, &db.journal.hasher, inactive_peaks))
+            .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
             .expect("inactive_peaks computed from batch size");
 
+        // Compute the batch chain bounds.
         let mut ancestor_diffs = Vec::new();
         let mut ancestors = Vec::new();
         for batch in
@@ -291,7 +294,7 @@ where
         }
 
         Arc::new(MerkleizedBatch {
-            journal_batch: journal_merkleized,
+            journal_batch: journal,
             root,
             diff: Arc::new(diff),
             parent: self.parent.as_ref().map(Arc::downgrade),

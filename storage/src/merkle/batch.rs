@@ -226,6 +226,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     }
 
     /// Append a run of pre-computed leaf digests and merkleize.
+    #[cfg(any(feature = "std", test))]
     pub(crate) fn merkleize_leaf_digests(
         mut self,
         base: &Mem<F, D>,
