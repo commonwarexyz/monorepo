@@ -138,11 +138,13 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         let starting_leaves = self.inner.leaves();
         let digests: Vec<H::Digest> = self.inner.strategy().map_init_collect_vec(
             items.iter().enumerate(),
-            || self.hasher.clone(),
-            |h, (i, item)| {
+            || (self.hasher.clone(), Vec::new()),
+            |(h, buf), (i, item)| {
                 let loc = Location::<F>::new(*starting_leaves + i as u64);
                 let pos = Position::try_from(loc).expect("valid leaf location");
-                h.leaf_digest(pos, &item.encode())
+                buf.clear();
+                item.write(buf);
+                h.leaf_digest(pos, buf.as_slice())
             },
         );
         self.inner = self.inner.add_leaf_digests(digests);

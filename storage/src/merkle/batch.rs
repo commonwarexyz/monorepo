@@ -227,12 +227,16 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a run of pre-computed leaf digests, in order.
     ///
-    /// Equivalent to calling [`Self::add_leaf_digest`] for each digest, but reserves capacity for
-    /// the incoming leaves up front to avoid repeated reallocation. Pairs with computing the
-    /// digests in parallel (e.g. via [`commonware_parallel::Strategy::map_init_collect_vec`]).
+    /// Equivalent to calling [`Self::add_leaf_digest`] for each digest, but reserves capacity up
+    /// front to avoid repeated reallocation.
     pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         let digests = digests.into_iter();
-        self.appended.reserve(digests.size_hint().0);
+        // Each leaf also appends its parent placeholders, so reserve for the full node count
+        // `position(leaves + n) - position(leaves)`, not just the `n` leaves.
+        let n = digests.size_hint().0 as u64;
+        let additional =
+            Position::try_from(self.leaves() + n).map_or(0, |end| (*end - *self.size()) as usize);
+        self.appended.reserve(additional);
         for digest in digests {
             self = self.add_leaf_digest(digest);
         }
