@@ -126,7 +126,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     ///
     /// Panics if items were previously added via [`add`](Self::add).
     pub(crate) fn merkleize_with(
-        mut self,
+        self,
         base: &Mem<F, H::Digest>,
         items: Arc<Vec<Item>>,
     ) -> MerkleizedBatchArc<F, H, Item, S> {
@@ -135,22 +135,18 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             "merkleize_with expects no items added via add"
         );
 
-        let starting_leaves = self.inner.leaves();
         let hasher = &self.hasher;
-        let digests: Vec<H::Digest> = self.inner.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
+        let merkle = self.inner.merkleize_leaves(
+            base,
+            hasher,
+            items.as_slice(),
             Vec::new,
-            |buf, (i, item)| {
-                let loc = Location::<F>::new(*starting_leaves + i as u64);
-                let pos = Position::try_from(loc).expect("valid leaf location");
+            |buf, item, pos| {
                 buf.clear();
                 item.write(buf);
                 hasher.leaf_digest(pos, buf.as_slice())
             },
         );
-        self.inner = self.inner.add_leaf_digests(digests);
-
-        let merkle = self.inner.merkleize(base, &self.hasher);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);
         Arc::new(MerkleizedBatch {
             inner: merkle,

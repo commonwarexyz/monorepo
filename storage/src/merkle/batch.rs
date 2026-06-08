@@ -229,7 +229,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     ///
     /// Equivalent to calling [`Self::add_leaf_digest`] for each digest, but reserves capacity up
     /// front to avoid repeated reallocation.
-    pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+    fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
         let digests = digests.into_iter();
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let n = digests.size_hint().0 as u64;
@@ -240,6 +240,31 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             self = self.add_leaf_digest(digest);
         }
         self
+    }
+
+    /// Hash `leaves` in parallel, append them, and merkleize.
+    pub fn merkleize_leaves<L, T>(
+        self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        leaves: &[L],
+        init: impl Fn() -> T + Send + Sync,
+        leaf: impl Fn(&mut T, &L, Position<F>) -> D + Send + Sync,
+    ) -> Arc<MerkleizedBatch<F, D, S>>
+    where
+        L: Sync,
+        T: Send,
+    {
+        let first = self.leaves();
+        let digests: Vec<D> = self.strategy().map_init_collect_vec(
+            leaves.iter().enumerate(),
+            init,
+            |state, (i, value)| {
+                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
+                leaf(state, value, pos)
+            },
+        );
+        self.add_leaf_digests(digests).merkleize(base, hasher)
     }
 
     /// Hash `element` and add it as a leaf.
