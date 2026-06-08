@@ -61,16 +61,21 @@ benchmark-tracking *args='':
     #!/usr/bin/env bash
     set -euo pipefail
 
+    extra_args=()
+    if [ "$#" -gt 1 ] || [ "${1:-}" != "" ]; then
+        extra_args=("$@")
+    fi
+
     run_tracking() {
         python3 .github/scripts/benchmark-tracking.py \
             --config .github/benchmark-tracking.toml \
             --output-dir benchmark-tracking-results \
-            "$@"
+            "${extra_args[@]}"
     }
 
     case "$(uname -s)" in
         Linux)
-            run_tracking "$@"
+            run_tracking
             ;;
         Darwin)
             image="commonware-gungraun:local"
@@ -97,7 +102,7 @@ benchmark-tracking *args='':
                 python3 .github/scripts/benchmark-tracking.py \
                     --config .github/benchmark-tracking.toml \
                     --output-dir benchmark-tracking-results \
-                    "$@"
+                    "${extra_args[@]}"
             ;;
         *)
             echo "unsupported platform: $(uname -s)" >&2

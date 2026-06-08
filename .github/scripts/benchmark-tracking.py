@@ -429,6 +429,15 @@ def escape_cell(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", "<br>")
 
 
+def escape_summary(value: str) -> str:
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", " ")
+    )
+
+
 def toml_quote(value: str) -> str:
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
     return f'"{escaped}"'
@@ -487,6 +496,104 @@ def status_text(item: dict[str, Any]) -> str:
     return "PASS"
 
 
+def metadata_rows(item: dict[str, Any]) -> list[tuple[str, str]]:
+    rows = [
+        ("Package", item["package"]),
+        ("Benchmark target", item["bench"]),
+        ("Variant", item["name"]),
+        ("Filter", item["filter"]),
+        ("Baseline suite", item["baseline_suite"]),
+        ("Gate metric", GATE_METRIC),
+        ("Threshold", f"{item['threshold_percent']:.2f}%"),
+    ]
+    cargo_flags = item.get("cargo_flags", [])
+    if cargo_flags:
+        rows.append(("Cargo flags", " ".join(cargo_flags)))
+    return rows
+
+
+def render_metadata_table(lines: list[str], item: dict[str, Any]) -> None:
+    lines.extend(
+        [
+            "| Field | Value |",
+            "|---|---|",
+        ]
+    )
+    for field, value in metadata_rows(item):
+        lines.append(f"| {field} | `{escape_cell(value)}` |")
+
+
+def render_comparison_metric_table(lines: list[str], item: dict[str, Any]) -> None:
+    lines.extend(
+        [
+            "",
+            "| Metric | Baseline | Current | Delta | Gated |",
+            "|---|---:|---:|---:|---|",
+        ]
+    )
+    for metric in SELECTED_METRICS:
+        baseline = None
+        if item["baseline_metrics"] is not None:
+            baseline = item["baseline_metrics"][metric]
+        delta = None if item["metric_deltas"] is None else item["metric_deltas"][metric]
+        gated = "yes" if metric == GATE_METRIC else ""
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{metric}`",
+                    format_count(baseline),
+                    format_count(item["metrics"][metric]),
+                    format_delta(delta),
+                    gated,
+                ]
+            )
+            + " |"
+        )
+
+
+def render_current_metric_table(lines: list[str], item: dict[str, Any]) -> None:
+    lines.extend(
+        [
+            "",
+            "| Metric | Current |",
+            "|---|---:|",
+        ]
+    )
+    for metric in SELECTED_METRICS:
+        lines.append(f"| `{metric}` | {format_count(item['metrics'][metric])} |")
+
+
+def comparison_summary(item: dict[str, Any]) -> str:
+    status = status_text(item)
+    delta = format_delta(item["delta_percent"])
+    current = format_count(item["metrics"][GATE_METRIC])
+    threshold = f"{item['threshold_percent']:.2f}%"
+    return (
+        f"{status} {escape_summary(item['name'])} "
+        f"({GATE_METRIC}: {current}, delta: {delta}, threshold: {threshold})"
+    )
+
+
+def current_summary(item: dict[str, Any]) -> str:
+    current = format_count(item["metrics"][GATE_METRIC])
+    return f"{escape_summary(item['name'])} ({GATE_METRIC}: {current})"
+
+
+def render_comparison_details(lines: list[str], item: dict[str, Any]) -> None:
+    lines.extend(["", f"<details><summary>{comparison_summary(item)}</summary>", ""])
+    render_metadata_table(lines, item)
+    render_comparison_metric_table(lines, item)
+    lines.extend(["", "</details>"])
+
+
+def render_current_details(lines: list[str], item: dict[str, Any]) -> None:
+    lines.extend(["", f"<details><summary>{current_summary(item)}</summary>", ""])
+    render_metadata_table(lines, item)
+    render_current_metric_table(lines, item)
+    lines.extend(["", "</details>"])
+
+
 def render_markdown(comparisons: list[dict[str, Any]], current: list[dict[str, Any]]) -> str:
     regression_count = sum(1 for item in comparisons if item["regressed"])
     missing_count = sum(1 for item in comparisons if item["baseline"] is None)
@@ -504,57 +611,11 @@ def render_markdown(comparisons: list[dict[str, Any]], current: list[dict[str, A
         lines.append(f"Recorded current Gungraun metrics. Gate metric: `{GATE_METRIC}`.")
 
     if comparisons:
-        lines.extend(
-            [
-                "",
-                "| Benchmark | Metric | Baseline | Current | Delta | Threshold | Status |",
-                "|---|---|---:|---:|---:|---:|---|",
-            ]
-        )
         for item in comparisons:
-            for metric in SELECTED_METRICS:
-                baseline = None
-                if item["baseline_metrics"] is not None:
-                    baseline = item["baseline_metrics"][metric]
-                threshold = f"{item['threshold_percent']:.2f}%" if metric == GATE_METRIC else "-"
-                status = status_text(item) if metric == GATE_METRIC else "-"
-                delta = None if item["metric_deltas"] is None else item["metric_deltas"][metric]
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            f"`{escape_cell(item['name'])}`",
-                            f"`{metric}`",
-                            format_count(baseline),
-                            format_count(item["metrics"][metric]),
-                            format_delta(delta),
-                            threshold,
-                            status,
-                        ]
-                    )
-                    + " |"
-                )
+            render_comparison_details(lines, item)
     else:
-        lines.extend(
-            [
-                "",
-                "| Benchmark | Metric | Current |",
-                "|---|---|---:|",
-            ]
-        )
         for item in current:
-            for metric in SELECTED_METRICS:
-                lines.append(
-                    "| "
-                    + " | ".join(
-                        [
-                            f"`{escape_cell(item['name'])}`",
-                            f"`{metric}`",
-                            format_count(item["metrics"][metric]),
-                        ]
-                    )
-                    + " |"
-                )
+            render_current_details(lines, item)
 
     commits = sorted(
         {
