@@ -1,8 +1,6 @@
 use super::{Config, Error};
-use crate::{rmap::RMap, Context, Persistable};
-use commonware_codec::{
-    CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
-};
+use crate::{rmap::RMap, Context};
+use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
@@ -419,6 +417,13 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
+    /// Durably persist the ordinal, guaranteeing the current state will survive a crash.
+    ///
+    /// This is an alias for [Self::sync].
+    pub async fn commit(&self) -> Result<(), Error> {
+        self.sync().await
+    }
+
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
@@ -436,22 +441,6 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
-    }
-}
-
-impl<E: BufferPooler + Context, V: CodecFixedShared> Persistable for Ordinal<E, V> {
-    type Error = Error;
-
-    async fn commit(&self) -> Result<(), Self::Error> {
-        self.sync().await
-    }
-
-    async fn sync(&self) -> Result<(), Self::Error> {
-        self.sync().await
-    }
-
-    async fn destroy(self) -> Result<(), Self::Error> {
-        self.destroy().await
     }
 }
 

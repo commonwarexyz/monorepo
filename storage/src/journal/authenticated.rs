@@ -17,7 +17,7 @@ use crate::{
         mem::Mem,
         Bagging, Family, Location, Position, Proof, Readable,
     },
-    Context, Persistable,
+    Context,
 };
 use alloc::{
     sync::{Arc, Weak},
@@ -352,7 +352,7 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
+    C: Mutable<Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -657,7 +657,7 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
+    C: Mutable<Item: EncodeShared>,
     H: Hasher,
     S: Strategy,
 {
@@ -782,10 +782,22 @@ where
     async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
         self.rewind(size).await.map_err(Self::map_error)
     }
+
+    async fn commit(&self) -> Result<(), JournalError> {
+        Self::commit(self).await.map_err(Self::map_error)
+    }
+
+    async fn sync(&self) -> Result<(), JournalError> {
+        Self::sync(self).await.map_err(Self::map_error)
+    }
+
+    async fn destroy(self) -> Result<(), JournalError> {
+        Self::destroy(self).await.map_err(Self::map_error)
+    }
 }
 
 /// A [Mutable] journal that can serve as the inner journal of an authenticated [Journal].
-pub trait Inner<E: Context>: Mutable + Persistable<Error = JournalError> {
+pub trait Inner<E: Context>: Mutable {
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send;
 
@@ -800,29 +812,6 @@ pub trait Inner<E: Context>: Mutable + Persistable<Error = JournalError> {
     where
         Self: Sized,
         Self::Item: EncodeShared;
-}
-
-impl<F, E, C, H, S> Persistable for Journal<F, E, C, H, S>
-where
-    F: Family,
-    E: Context,
-    C: Contiguous<Item: EncodeShared> + Persistable<Error = JournalError>,
-    H: Hasher,
-    S: Strategy,
-{
-    type Error = JournalError;
-
-    async fn commit(&self) -> Result<(), JournalError> {
-        self.commit().await.map_err(Self::map_error)
-    }
-
-    async fn sync(&self) -> Result<(), JournalError> {
-        self.sync().await.map_err(Self::map_error)
-    }
-
-    async fn destroy(self) -> Result<(), JournalError> {
-        self.destroy().await.map_err(Self::map_error)
-    }
 }
 
 #[cfg(test)]

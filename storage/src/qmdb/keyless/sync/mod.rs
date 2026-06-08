@@ -2,7 +2,6 @@ use crate::{
     journal::{
         authenticated,
         contiguous::{Contiguous as _, Mutable, Reader as _},
-        Error as JournalError,
     },
     merkle::{
         full::{self, Merkle},
@@ -14,7 +13,7 @@ use crate::{
         keyless::{operation::Codec, CompactDb, Keyless, Metrics, Operation},
         sync,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::Hasher;
@@ -26,9 +25,7 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding + Codec,
-    C: Mutable<Item = Operation<F, V>>
-        + Persistable<Error = JournalError>
-        + sync::Journal<F, Context = E, Op = Operation<F, V>>,
+    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
     C::Config: Clone + Send,
     H: Hasher,
     S: Strategy,

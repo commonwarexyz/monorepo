@@ -39,7 +39,6 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
-    Persistable,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
@@ -73,8 +72,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>
-        + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
@@ -169,8 +167,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>
-        + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
@@ -239,8 +236,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>
-        + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<F, unordered::Update<K, V>>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
@@ -267,8 +263,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding + 'static,
-    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>
-        + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<F, ordered::Update<K, V>>>,
     I: OrderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,
@@ -294,7 +289,7 @@ where
     F: Graftable,
     E: Storage + Clock + Metrics,
     U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = commonware_storage::journal::Error>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>> + 'static,
     H: Hasher,
     S: Strategy,

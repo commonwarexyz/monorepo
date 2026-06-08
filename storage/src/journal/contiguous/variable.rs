@@ -10,7 +10,7 @@ use crate::{
         segmented::variable,
         Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::buffer::paged::CacheRef;
@@ -1340,21 +1340,17 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         Self::rewind(self, size).await
     }
-}
-
-impl<E: Context, V: CodecShared> Persistable for Journal<E, V> {
-    type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
-        self.commit().await
+        Self::commit(self).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 

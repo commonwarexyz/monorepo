@@ -82,7 +82,6 @@ use crate::{
     journal::{
         authenticated,
         contiguous::{Contiguous, Mutable, Reader},
-        Error as JournalError,
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
@@ -93,7 +92,7 @@ use crate::{
         Error,
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
@@ -163,7 +162,7 @@ pub struct Immutable<
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: CHasher,
     T: Translator,
     S: Strategy,
@@ -201,7 +200,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
@@ -768,7 +767,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("first")).await;
@@ -813,7 +812,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -848,7 +847,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with 2 keys.
@@ -923,7 +922,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -954,7 +953,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -996,7 +995,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -1047,7 +1046,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
@@ -1096,7 +1095,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Insert 1000 keys then sync.
@@ -1151,7 +1150,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -1189,7 +1188,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs then prune some of them.
@@ -1297,7 +1296,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -1360,7 +1359,7 @@ pub(super) mod test {
     ) -> Range<Location<F>>
     where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         commit_sets_with_floor(db, sets, metadata, Location::new(0)).await
@@ -1374,7 +1373,7 @@ pub(super) mod test {
     ) -> Range<Location<F>>
     where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut batch = db.new_batch();
@@ -1396,7 +1395,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1463,7 +1462,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1506,7 +1505,7 @@ pub(super) mod test {
             -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_small_sections_db(context.child("db")).await;
@@ -1573,7 +1572,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1614,7 +1613,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("db")).await;
@@ -1650,7 +1649,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1700,7 +1699,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1737,7 +1736,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1782,7 +1781,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1823,7 +1822,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1872,7 +1871,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1911,7 +1910,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1966,7 +1965,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2009,7 +2008,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2057,7 +2056,7 @@ pub(super) mod test {
             -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db_small_sections(context.child("db")).await;
@@ -2107,7 +2106,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2140,7 +2139,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2190,7 +2189,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2235,7 +2234,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2282,7 +2281,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2323,7 +2322,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2363,7 +2362,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2405,7 +2404,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2450,7 +2449,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2500,7 +2499,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2551,7 +2550,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2604,7 +2603,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2652,7 +2651,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2693,7 +2692,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2751,7 +2750,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2805,7 +2804,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2854,7 +2853,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -2914,7 +2913,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -2975,7 +2974,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -3021,7 +3020,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -3076,7 +3075,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -3187,7 +3186,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -3249,7 +3248,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;

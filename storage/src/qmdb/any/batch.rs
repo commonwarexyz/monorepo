@@ -1717,7 +1717,7 @@ where
     F: Family,
     E: Context,
     U: update::Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<F, U>> + crate::Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -1969,8 +1969,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
-            + crate::Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
         S: Strategy,
@@ -2001,8 +2000,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
-            + crate::Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher,
         S: Strategy,

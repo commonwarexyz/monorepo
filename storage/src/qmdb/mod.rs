@@ -32,7 +32,7 @@
 //! # Traits
 //!
 //! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny` and
-//! [crate::Persistable].
+//! persistence methods exposed by each database type.
 //!
 //! # Acknowledgments
 //!
