@@ -1,0 +1,58 @@
+name: AWS-LC SHA-256 X86
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sha256-x86:
+    name: SHA-256 aws-lc-rs on x86_64
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          additional-cache-key: aws-lc-rs-sha-x86
+
+      - name: Confirm x86_64 runner
+        run: |
+          uname -a
+          rustc -vV
+          test "$(uname -m)" = "x86_64"
+
+      - name: Test SHA-256 behavior
+        run: cargo test -p commonware-cryptography --lib sha256
+
+      - name: Compile SHA-256 benchmark
+        run: cargo bench -p commonware-cryptography --bench sha256 --no-run
+
+      - name: Run SHA-256 benchmark comparison
+        run: |
+          cargo bench -p commonware-cryptography --bench sha256 -- \
+            --sample-size 20 \
+            --warm-up-time 1 \
+            --measurement-time 3 \
+            | tee sha256-x86.txt
+
+      - name: Add benchmark summary
+        run: |
+          {
+            echo "## SHA-256 x86_64 comparison"
+            echo
+            echo '```text'
+            grep -E 'sha256::hash_message|time:' sha256-x86.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload benchmark output
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sha256-x86-benchmark
+          path: sha256-x86.txt
+          if-no-files-found: error
