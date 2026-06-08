@@ -1,0 +1,165 @@
+name: Cache Factory
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+  schedule:
+    - cron: "30 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cache-factory-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  FUZZ_VERSION: 0.12.0
+  NIGHTLY_VERSION: nightly
+
+jobs:
+  debug:
+    name: "Debug (${{ matrix.name }})"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-stable
+            os: ubuntu-latest
+            toolchain: stable
+          - name: windows-stable
+            os: windows-latest
+            toolchain: stable
+          - name: macos-stable
+            os: macos-latest
+            toolchain: stable
+          - name: linux-msrv
+            os: ubuntu-latest
+            toolchain: msrv
+          - name: linux-nightly
+            os: ubuntu-latest
+            toolchain: nightly
+          - name: linux-stable-nightly
+            os: ubuntu-latest
+            toolchain: stable
+            additional_toolchain: nightly
+            additional_components: rustfmt,rustc-dev,llvm-tools-preview
+          - name: windows-stable-nightly
+            os: windows-latest
+            toolchain: stable
+            additional_toolchain: nightly
+            additional_components: rustfmt
+          - name: macos-stable-nightly
+            os: macos-latest
+            toolchain: stable
+            additional_toolchain: nightly
+            additional_components: rustfmt
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      - name: Clear disk space
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/disk
+      - name: Determine toolchain version
+        id: toolchain
+        shell: bash
+        run: |
+          case "${{ matrix.toolchain }}" in
+            msrv)
+              echo "version=$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)"/\1/')" >> "$GITHUB_OUTPUT"
+              ;;
+            nightly)
+              echo "version=${{ env.NIGHTLY_VERSION }}" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "version=${{ matrix.toolchain }}" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          toolchain: ${{ steps.toolchain.outputs.version }}
+          additional-toolchain: ${{ matrix.additional_toolchain == 'nightly' && env.NIGHTLY_VERSION || matrix.additional_toolchain || '' }}
+          additional-components: ${{ matrix.additional_components || '' }}
+          cache-key: debug
+          cache-workspace-crates: true
+          save-cache: true
+      - name: Warm debug cache
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${{ matrix.name }}" in
+            linux-msrv)
+              cargo check --workspace
+              ;;
+            linux-stable)
+              cargo test --workspace --no-run
+              cargo test --workspace --no-default-features --no-run
+              cargo test --workspace --features commonware-runtime/iouring-storage --no-run
+              cargo test --workspace --features commonware-runtime/iouring-network --no-run
+              cargo build --workspace --all-targets
+              ;;
+            linux-nightly)
+              cargo test --workspace --no-run
+              cargo +${{ env.NIGHTLY_VERSION }} check --workspace --all-targets
+              ;;
+            linux-stable-nightly)
+              cargo test --workspace --no-run
+              cargo +${{ env.NIGHTLY_VERSION }} check --workspace --all-targets
+              cargo +${{ env.NIGHTLY_VERSION }} install cargo-fuzz --version ${{ env.FUZZ_VERSION }}
+              ;;
+            *)
+              cargo test --workspace --no-run
+              ;;
+          esac
+      - name: Save source mtime state
+        shell: bash
+        run: bash .github/scripts/retimer.sh save
+
+  release:
+    name: "Release (${{ matrix.name }})"
+    runs-on: ubuntu-latest-8
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stable
+            toolchain: stable
+          - name: nightly
+            toolchain: nightly
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+      - name: Clear disk space
+        uses: ./.github/actions/disk
+      - name: Run setup
+        uses: ./.github/actions/setup
+        with:
+          toolchain: ${{ matrix.toolchain == 'nightly' && env.NIGHTLY_VERSION || matrix.toolchain }}
+          cache-key: release
+          cache-workspace-crates: true
+          save-cache: true
+      - name: Warm release cache
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${{ matrix.name }}" in
+            stable)
+              cargo test --release --features loom --lib --no-run loom_tests
+              cargo test --release --features loom,iouring --lib --no-run loom_tests
+              ;;
+            nightly)
+              cargo bench --features test-traits --benches -p commonware-storage --no-run
+              ;;
+          esac
+      - name: Save source mtime state
+        shell: bash
+        run: bash .github/scripts/retimer.sh save

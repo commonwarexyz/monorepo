@@ -15,7 +15,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  CARGO_COOLDOWN_VERSION: 0.3.0
+  COOLDOWN_VERSION: 0.3.0
   UDEPS_VERSION: 0.1.57
   NIGHTLY_VERSION: nightly
   PANDOC_VERSION: 3.8.2.1
@@ -45,7 +45,7 @@ jobs:
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: ${{ matrix.os == 'ubuntu-latest' && matrix.flags == '' && 'rustfmt,rustc-dev,llvm-tools-preview' || 'rustfmt' }}
-        additional-cache-key: ${{ matrix.flags || 'default' }}
+        cache-key: debug
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -103,7 +103,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        cache-key: debug
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -133,7 +133,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}
+        cache-key: debug
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -158,7 +158,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: stability-${{ matrix.level }}
+        cache-key: debug
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -179,7 +179,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: unstable-public
+        cache-key: debug
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -223,6 +223,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
+        cache-key: debug
     - name: Install just & cargo-udeps
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -238,10 +239,12 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: debug
     - name: Install just & cargo-cooldown
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
-        tool: just@1.43.0,cargo-cooldown@${{ env.CARGO_COOLDOWN_VERSION }}
+        tool: just@1.43.0,cargo-cooldown@${{ env.COOLDOWN_VERSION }}
     - name: Check dependency cooldown
       run: just cooldown
 
@@ -255,6 +258,8 @@ jobs:
       uses: ./.github/actions/disk
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: debug
     - name: Build entire workspace
       run: cargo build --workspace --all-targets
     - name: Check Cargo.lock unchanged
@@ -300,6 +305,7 @@ jobs:
       uses: ./.github/actions/setup
       with:
         targets: wasm32-unknown-unknown
+        cache-key: debug
     - name: Build cryptography
       run: cargo rustc --target wasm32-unknown-unknown --release --manifest-path cryptography/Cargo.toml --crate-type cdylib && du -h "${CARGO_TARGET_DIR:-target}/wasm32-unknown-unknown/release/commonware_cryptography.wasm"
     - name: Build macros
@@ -323,6 +329,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: debug
     - name: Check no_std compatibility
       run: ./.github/scripts/check_no_std.sh
 
@@ -351,6 +359,8 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
+      with:
+        cache-key: debug
     - name: Check publish order
       run: python3 .github/scripts/check_publish_order.py
 
@@ -398,7 +408,7 @@ jobs:
         uses: ./.github/actions/setup
         with:
           toolchain: ${{ steps.toolchain.outputs.version }}
-          additional-cache-key: toolchain-${{ matrix.toolchain }}
+          cache-key: debug
       - name: Install just & cargo-hack
         uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
         with:

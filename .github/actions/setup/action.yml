@@ -24,10 +24,18 @@ inputs:
     description: "Rust targets to install for the additional toolchain."
     required: false
     default: ""
-  additional-cache-key:
-    description: "An additional cache key that is added alongside the automatic `job`-based cache key."
+  cache-key:
+    description: "A shared rust-cache key for this workload."
     required: false
     default: ""
+  save-cache:
+    description: "Whether rust-cache should save this workload cache."
+    required: false
+    default: "false"
+  cache-workspace-crates:
+    description: "Whether rust-cache should persist workspace crate artifacts when saving the cache."
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -62,16 +70,33 @@ runs:
       id: cache-key
       shell: bash
       run: |
-        key="${{ inputs.additional-cache-key }}"
+        key="${{ inputs.cache-key }}"
         key="${key// /-}"
         key="${key//\//-}"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
+    - name: Configure rust cache workspace
+      id: rust-cache-workspace
+      shell: bash
+      run: |
+        target="${CARGO_TARGET_DIR:-target}"
+        if [ "${RUNNER_OS:-}" = "Linux" ] && [ "${target#/}" != "$target" ]; then
+          target="$(realpath --relative-to="$GITHUB_WORKSPACE" "$target")"
+        fi
+        echo "target=${target}" >> "$GITHUB_OUTPUT"
     - name: Setup rust cache
+      if: inputs.cache-key != ''
+      id: rust-cache
       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
-        save-if: ${{ github.ref == 'refs/heads/main' }}
-        key: ${{ steps.cache-key.outputs.key }}
+        prefix-key: commonware-v3-rust
+        save-if: ${{ inputs.save-cache == 'true' }}
+        shared-key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
-        cache-workspace-crates: true
-        cache-directories: ${{ env.CARGO_TARGET_DIR }}
+        cache-workspace-crates: ${{ inputs.cache-workspace-crates }}
+        workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
+        cache-directories: .retimer-state
         cache-bin: true
+    - name: Restore source mtimes
+      if: inputs.cache-key != '' && steps.rust-cache.outputs.cache-hit == 'true'
+      shell: bash
+      run: bash .github/scripts/retimer.sh restore
