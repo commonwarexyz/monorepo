@@ -13,12 +13,9 @@ use commonware_cryptography::{
     ed25519, sha256::Digest as Sha256Digest, Digest as _, Digestible, Signer as _,
 };
 use commonware_runtime::{deterministic, Buf, BufMut};
-use commonware_utils::sync::AsyncRwLock;
+use commonware_utils::sync::{AsyncRwLock, Mutex};
 use futures::Stream;
-use std::{
-    convert::Infallible,
-    sync::{Arc, Mutex},
-};
+use std::{convert::Infallible, sync::Arc};
 
 pub(crate) type TestDatabases = Arc<AsyncRwLock<TestDb>>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -77,34 +74,22 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
-        self.events
-            .lock()
-            .expect("test db events mutex poisoned")
-            .push("finalize");
+        self.events.lock().push("finalize");
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Self::Error> {
-        self.events
-            .lock()
-            .expect("test db events mutex poisoned")
-            .push("persist");
+        self.events.lock().push("persist");
         Ok(())
     }
 
     async fn preflush_to(&self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
-        self.events
-            .lock()
-            .expect("test db events mutex poisoned")
-            .push("preflush_to");
+        self.events.lock().push("preflush_to");
         Ok(())
     }
 
     async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
-        self.events
-            .lock()
-            .expect("test db events mutex poisoned")
-            .push("prune");
+        self.events.lock().push("prune");
         Ok(())
     }
 

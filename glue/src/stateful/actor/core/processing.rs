@@ -2,7 +2,8 @@ use crate::stateful::{
     actor::{
         core::mailbox::Message,
         processor::{
-            run_maintenance, FinalizeStatus, MaintenanceAction, MaintenanceResult, Processor,
+            maintenance_outcome, run_maintenance, FinalizeStatus, MaintenanceAction,
+            MaintenanceKind, MaintenanceOutcome, MaintenanceResult, Processor,
         },
     },
     Application,
@@ -22,7 +23,7 @@ use commonware_runtime::{Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::{channel::fallible::OneshotExt, Acknowledgement};
 use futures::future::{self, Either};
 use rand::Rng;
-use std::collections::VecDeque;
+use std::{collections::VecDeque, time::SystemTime};
 use tracing::{debug, warn};
 
 pub(super) struct Processing<E, A, S, V, R>
@@ -61,6 +62,8 @@ where
 
 struct ActiveMaintenance {
     handle: Handle<MaintenanceResult>,
+    kind: MaintenanceKind,
+    started_at: SystemTime,
 }
 
 impl<E, A, S, V, R> Processing<E, A, S, V, R>
@@ -135,7 +138,13 @@ where
                         continue;
                     }
                     let (status, maintenance) = self.processor.finalize(&self.context, block).await;
+                    if let Some(kind) = maintenance.kind() {
+                        self.processor.metrics().maintenance_scheduled(kind);
+                    }
                     queue_maintenance(&mut pending_maintenance, maintenance);
+                    self.processor
+                        .metrics()
+                        .set_maintenance_pending(pending_maintenance.len());
                     if let FinalizeStatus::Applied { height } = status {
                         debug!(height = height.get(), "applied finalized database batch");
                     }
@@ -149,15 +158,31 @@ where
                 let maintenance = pending_maintenance
                     .pop_front()
                     .expect("start_maintenance should only run when work is queued");
+                let kind = maintenance
+                    .kind()
+                    .expect("start_maintenance should only run real work");
+                let started_at = self.context.current();
+                self.processor.metrics().maintenance_started(kind);
+                self.processor
+                    .metrics()
+                    .set_maintenance_pending(pending_maintenance.len());
+                self.processor.metrics().set_maintenance_running(true);
                 let databases = self.processor.databases().clone();
                 let marshal = self.marshal.clone();
                 let handle = self.context.child("maintenance").spawn(|_| async move {
                     run_maintenance::<E, _, _, _>(databases, marshal, maintenance).await
                 });
-                maintenance_task = Some(ActiveMaintenance { handle });
+                maintenance_task = Some(ActiveMaintenance {
+                    handle,
+                    kind,
+                    started_at,
+                });
             },
             result = maintenance_complete => {
-                match result {
+                let task = maintenance_task
+                    .take()
+                    .expect("maintenance completion should have active task");
+                let outcome = match result {
                     Ok(MaintenanceResult::PreflushStarted { height }) => {
                         self.processor.mark_preflush_started(height);
                         pending_maintenance.retain(|queued| {
@@ -169,13 +194,19 @@ where
                                 } if *queued_height == height
                             )
                         });
+                        MaintenanceOutcome::PreflushStarted
                     }
-                    Ok(MaintenanceResult::None) => {}
+                    Ok(MaintenanceResult::None) => maintenance_outcome(task.kind, MaintenanceResult::None),
                     Err(err) => {
                         warn!(?err, "maintenance task exited before completion");
+                        MaintenanceOutcome::Failed
                     }
-                }
-                maintenance_task = None;
+                };
+                let metrics = self.processor.metrics();
+                metrics.observe_maintenance_duration(task.kind, task.started_at, self.context.as_present());
+                metrics.maintenance_completed(task.kind, outcome);
+                metrics.set_maintenance_running(false);
+                metrics.set_maintenance_pending(pending_maintenance.len());
             }
         }
     }

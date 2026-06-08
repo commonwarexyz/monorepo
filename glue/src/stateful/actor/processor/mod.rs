@@ -50,6 +50,7 @@ use std::{
 use tracing::{debug, warn};
 
 mod metrics;
+pub(super) use metrics::{MaintenanceKind, MaintenanceOutcome};
 pub(crate) use metrics::Metrics as ProcessorMetrics;
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
@@ -112,6 +113,16 @@ pub(super) enum MaintenanceAction<T> {
     },
 }
 
+impl<T> MaintenanceAction<T> {
+    pub(super) const fn kind(&self) -> Option<MaintenanceKind> {
+        match self {
+            Self::None => None,
+            Self::Preflush { .. } => Some(MaintenanceKind::Preflush),
+            Self::Prune { .. } => Some(MaintenanceKind::Prune),
+        }
+    }
+}
+
 /// Tracks the configured finalized-block maintenance policy and any retained
 /// finalized sync targets needed to make pruning safe.
 struct Maintenance<T> {
@@ -140,7 +151,7 @@ impl<T: Clone> Maintenance<T> {
             .expect("prune retention window should fit in u64")
     }
 
-    fn next_prune_height_after(height: Height, interval: u64) -> Height {
+    const fn next_prune_height_after(height: Height, interval: u64) -> Height {
         let current = height.get();
         let remainder = current % interval;
         let delta = if remainder == 0 {
@@ -238,7 +249,7 @@ impl<T: Clone> Maintenance<T> {
         }
     }
 
-    fn mark_preflush_started(&mut self, prune_height: Height) {
+    const fn mark_preflush_started(&mut self, prune_height: Height) {
         self.preflush_started_prune_height = Some(prune_height);
     }
 }
@@ -247,6 +258,17 @@ impl<T: Clone> Maintenance<T> {
 pub(super) enum MaintenanceResult {
     None,
     PreflushStarted { height: Height },
+}
+
+pub(super) const fn maintenance_outcome(
+    action: MaintenanceKind,
+    result: MaintenanceResult,
+) -> MaintenanceOutcome {
+    match (action, result) {
+        (MaintenanceKind::Preflush, MaintenanceResult::None) => MaintenanceOutcome::NotStarted,
+        (MaintenanceKind::Prune, MaintenanceResult::None) => MaintenanceOutcome::Complete,
+        (_, MaintenanceResult::PreflushStarted { .. }) => MaintenanceOutcome::PreflushStarted,
+    }
 }
 
 /// Owns speculative execution and state persistence for a running stateful actor.
@@ -293,7 +315,11 @@ where
         &self.databases
     }
 
-    pub(super) fn mark_preflush_started(&mut self, prune_height: Height) {
+    pub(super) const fn metrics(&self) -> &ProcessorMetrics {
+        &self.metrics
+    }
+
+    pub(super) const fn mark_preflush_started(&mut self, prune_height: Height) {
         self.maintenance.mark_preflush_started(prune_height);
     }
 

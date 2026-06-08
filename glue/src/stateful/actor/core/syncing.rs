@@ -6,8 +6,8 @@ use crate::stateful::{
             MaintenanceConfig,
         },
         processor::{
-            run_maintenance, FinalizeStatus, MaintenanceAction, MaintenanceResult, Processor,
-            ProcessorMetrics,
+            maintenance_outcome, run_maintenance, FinalizeStatus, MaintenanceAction,
+            MaintenanceResult, Processor, ProcessorMetrics,
         },
         syncer::{self, StateSyncMetadata, SyncResult},
     },
@@ -250,12 +250,25 @@ where
                 .finalize(self.context.as_present(), handoff_finalized)
                 .await;
             if !matches!(maintenance, MaintenanceAction::None) {
+                let kind = maintenance
+                    .kind()
+                    .expect("handoff maintenance should be real work");
+                let started_at = self.context.current();
+                let metrics = processor.metrics();
+                metrics.maintenance_scheduled(kind);
+                metrics.set_maintenance_pending(1);
+                metrics.maintenance_started(kind);
+                metrics.set_maintenance_pending(0);
+                metrics.set_maintenance_running(true);
                 let result = run_maintenance::<E, _, _, _>(
                     processor.databases().clone(),
                     self.marshal.clone(),
                     maintenance,
                 )
                 .await;
+                metrics.observe_maintenance_duration(kind, started_at, self.context.as_present());
+                metrics.maintenance_completed(kind, maintenance_outcome(kind, result));
+                metrics.set_maintenance_running(false);
                 if let MaintenanceResult::PreflushStarted { height } = result {
                     processor.mark_preflush_started(height);
                 }
@@ -578,7 +591,7 @@ mod tests {
                 .expect("handoff acknowledgement should complete");
 
             assert_eq!(
-                &*events.lock().expect("test db events mutex poisoned"),
+                &*events.lock(),
                 &["finalize", "preflush_to"],
             );
         });
