@@ -18,14 +18,24 @@ env:
 
 jobs:
   Tests:
-    name: "Tests (flags: \"${{ matrix.flags }}\")"
+    name: "Tests${{ matrix.flags && format(' (flags: \"{0}\")', matrix.flags) }} (partition: ${{ matrix.partition }})"
     runs-on: ubuntu-latest
     timeout-minutes: 60
     strategy:
       matrix:
-        flags:
-          - "--features iouring"
-          - ""
+        include:
+          - flags: ""
+            partition: "1/1"
+          - flags: "--features iouring"
+            partition: "1/5"
+          - flags: "--features iouring"
+            partition: "2/5"
+          - flags: "--features iouring"
+            partition: "3/5"
+          - flags: "--features iouring"
+            partition: "4/5"
+          - flags: "--features iouring"
+            partition: "5/5"
     steps:
     - name: Checkout repository
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
@@ -34,10 +44,10 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
-        additional-cache-key: loom-${{ matrix.flags || 'default' }}
+        additional-cache-key: loom-${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
         tool: just@1.43.0,cargo-nextest@0.9.133
     - name: Run loom tests
-      run: just test-loom ${{ matrix.flags }} --verbose
+      run: just test-loom ${{ matrix.flags }} --partition hash:${{ matrix.partition }} --verbose

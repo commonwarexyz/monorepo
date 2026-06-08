@@ -41,6 +41,8 @@ pub enum Error {
     UsizeTooSmall,
     #[error("offset overflow")]
     OffsetOverflow,
+    #[error("size overflow")]
+    SizeOverflow,
     #[error("unexpected size: expected={0} actual={1}")]
     UnexpectedSize(u32, u32),
     #[error("missing blob: {0}")]
