@@ -297,12 +297,14 @@ where
                 .await;
         }
 
+        // Leak the resolver mailboxes to keep the resolvers alive to serve other peers.
+        std::mem::forget(self.resolvers);
+
         Processing {
             context: self.context,
             mailbox: self.mailbox,
             input_provider: self.input_provider,
             marshal: self.marshal,
-            resolvers: self.resolvers,
             processor,
             skip_finalized_until: Some(synced_height),
         }

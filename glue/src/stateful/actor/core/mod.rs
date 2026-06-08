@@ -275,6 +275,9 @@ where
         // so that this instance can serve peers database operations and proofs.
         self.resolvers.attach_databases(databases.clone()).await;
 
+        // Leak the resolver mailboxes to keep the resolvers alive to serve other peers.
+        std::mem::forget(self.resolvers);
+
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
         let processor = Processor::new(
@@ -290,7 +293,6 @@ where
             mailbox: self.mailbox,
             input_provider: self.input_provider,
             marshal: self.marshal,
-            resolvers: self.resolvers,
             processor,
             skip_finalized_until,
         }
