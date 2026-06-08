@@ -252,29 +252,26 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self.add_leaf_digests(digests).merkleize(base, hasher)
     }
 
-    /// Hash `leaves` in parallel, append them, and merkleize.
-    pub fn merkleize_leaves<L, T>(
-        self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
+    /// Hash `leaves` in parallel.
+    pub(crate) fn leaf_digests<L, T>(
+        &self,
         leaves: &[L],
         init: impl Fn() -> T + Send + Sync,
         leaf_digest: impl Fn(&mut T, &L, Position<F>) -> D + Send + Sync,
-    ) -> Arc<MerkleizedBatch<F, D, S>>
+    ) -> Vec<D>
     where
         L: Sync,
         T: Send,
     {
         let first = self.leaves();
-        let digests: Vec<D> = self.strategy().map_init_collect_vec(
+        self.strategy().map_init_collect_vec(
             leaves.iter().enumerate(),
             init,
             |state, (i, value)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
                 leaf_digest(state, value, pos)
             },
-        );
-        self.merkleize_leaf_digests(base, hasher, digests)
+        )
     }
 
     /// Hash `element` and add it as a leaf.

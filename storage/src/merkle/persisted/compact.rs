@@ -63,21 +63,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Hash `leaves` in parallel, append them, and merkleize.
-    pub fn merkleize_leaves<L, T>(
+    /// Append a run of pre-computed leaf digests and merkleize.
+    pub(crate) fn merkleize_leaf_digests(
         self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
-        leaves: &[L],
-        init: impl Fn() -> T + Send + Sync,
-        leaf: impl Fn(&mut T, &L, Position<F>) -> D + Send + Sync,
-    ) -> Arc<batch::MerkleizedBatch<F, D, S>>
-    where
-        L: Sync,
-        T: Send,
-    {
-        self.inner
-            .merkleize_leaves(base, hasher, leaves, init, leaf)
+        digests: impl IntoIterator<Item = D>,
+    ) -> Arc<batch::MerkleizedBatch<F, D, S>> {
+        self.inner.merkleize_leaf_digests(base, hasher, digests)
     }
 
     /// The number of leaves visible through this batch.

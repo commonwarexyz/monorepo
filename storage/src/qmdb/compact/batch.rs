@@ -22,13 +22,20 @@ where
     S: Strategy,
     Op: EncodeShared,
 {
-    // Hash each operation's leaf digest in parallel, then merkleize.
     let hasher = qmdb::hasher::<H>();
-    merkle.with_mem(|mem| {
-        batch.merkleize_leaves(mem, &hasher, ops, Vec::new, |buf, op, pos| {
-            buf.clear();
-            op.write(buf);
-            hasher.leaf_digest(pos, buf.as_slice())
-        })
-    })
+    let first_leaf = batch.leaves();
+
+    // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
+    let leaf_digests =
+        merkle
+            .strategy()
+            .map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
+                let offset = u64::try_from(i).expect("operation offset exceeds u64");
+                let pos = F::location_to_position(first_leaf + offset);
+                buf.clear();
+                op.write(buf);
+                hasher.leaf_digest(pos, buf.as_slice())
+            });
+
+    merkle.with_mem(|mem| batch.merkleize_leaf_digests(mem, &hasher, leaf_digests))
 }
