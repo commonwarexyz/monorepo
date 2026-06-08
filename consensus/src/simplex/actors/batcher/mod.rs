@@ -240,7 +240,7 @@ mod tests {
     fn certificate_forwarding_from_network<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum = quorum(n) as usize;
@@ -403,7 +403,7 @@ mod tests {
     fn old_notarization_after_nullification_is_forwarded<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -559,7 +559,7 @@ mod tests {
     fn quorum_votes_construct_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -708,7 +708,7 @@ mod tests {
     fn forward_emitted_on_view_advance_with_forwardable_proposal<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -889,7 +889,7 @@ mod tests {
     fn silent_leader_forwarding_respects_missing_vote<S, F>(mut fixture: F, leader_voted: bool)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let namespace = b"batcher_silent_leader_forwarding".to_vec();
@@ -1124,7 +1124,7 @@ mod tests {
     fn forward_emitted_for_network_notarization_on_view_advance<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -1345,7 +1345,7 @@ mod tests {
     fn self_excluded_from_forward_targets<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -1520,7 +1520,7 @@ mod tests {
     fn conflicting_notarize_voter_is_forwarded<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 7;
         let namespace = b"batcher_conflicting_notarize_forwarding".to_vec();
@@ -1738,7 +1738,7 @@ mod tests {
     fn finalize_voter_excluded_from_forwarding<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 7;
         let namespace = b"batcher_finalize_voter_forwarding".to_vec();
@@ -1933,7 +1933,7 @@ mod tests {
     fn votes_and_certificate_deduplication<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -2125,7 +2125,7 @@ mod tests {
     fn conflicting_votes_dont_produce_invalid_certificate<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 7;
         let namespace = b"batcher_test".to_vec();
@@ -2326,7 +2326,7 @@ mod tests {
     fn proposal_forwarded_after_leader_set<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -2449,7 +2449,7 @@ mod tests {
     fn proposal_forwarded_before_leader_set<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -2574,7 +2574,7 @@ mod tests {
     fn leader_activity_detection<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let namespace = b"batcher_test".to_vec();
@@ -2731,7 +2731,7 @@ mod tests {
     fn leader_nullify_marks_active<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let namespace = b"batcher_nullify_activity_test".to_vec();
@@ -2853,7 +2853,7 @@ mod tests {
     fn leader_certificate_marks_active<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -2993,7 +2993,7 @@ mod tests {
     fn leader_nullify_expire_on_view_entry<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let namespace = b"batcher_leader_nullify_expire_on_view_entry".to_vec();
@@ -3119,7 +3119,7 @@ mod tests {
     fn leader_nullify_wrong_view_no_expire<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let namespace = b"batcher_leader_nullify_wrong_view_no_expire".to_vec();
@@ -3232,7 +3232,7 @@ mod tests {
     fn votes_skipped_for_finalized_views<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -3414,7 +3414,7 @@ mod tests {
     fn latest_vote_metric_tracking<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let n = 5;
         let quorum_size = quorum(n) as usize;
@@ -3657,7 +3657,7 @@ mod tests {
     fn duplicate_vote_with_different_attestation_blocks_peer<S, F, V>(mut fixture: F, sign_vote: V)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         V: Fn(&S, Proposal<Sha256Digest>) -> Vote<S, Sha256Digest> + Send + 'static,
     {
         let n = 5;
@@ -3858,7 +3858,7 @@ mod tests {
         is_expected_activity: A,
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
         V: Fn(&S, Proposal<Sha256Digest>) -> Vote<S, Sha256Digest> + Send + 'static,
         A: Fn(&Activity<S, Sha256Digest>) -> bool + Send + 'static,
     {

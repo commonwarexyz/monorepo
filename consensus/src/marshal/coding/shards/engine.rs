@@ -1881,13 +1881,14 @@ mod tests {
         pub fn start<F: Future<Output = ()>>(
             self,
             f: impl FnOnce(
-                Self,
-                deterministic::Context,
-                O,
-                Vec<Peer<S>>,
-                Vec<NonParticipant<S>>,
-                CodingConfig,
-            ) -> F,
+                    Self,
+                    deterministic::Context,
+                    O,
+                    Vec<Peer<S>>,
+                    Vec<NonParticipant<S>>,
+                    CodingConfig,
+                ) -> F
+                + Send,
         ) {
             let executor = deterministic::Runner::default();
             executor.start(|context| async move {

@@ -147,8 +147,9 @@ stability_scope!(BETA {
         /// [Spawner::stopped] to coordinate clean shutdown.
         fn start<F, Fut>(self, f: F) -> Fut::Output
         where
-            F: FnOnce(Self::Context) -> Fut,
-            Fut: Future;
+            F: FnOnce(Self::Context) -> Fut + Send,
+            Fut: Future,
+            Fut::Output: Send;
     }
 
     /// The full identity of a [`Supervisor`] handle.

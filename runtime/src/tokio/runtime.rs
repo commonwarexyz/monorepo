@@ -348,12 +348,14 @@ impl Runner {
     }
 }
 
-impl crate::Runner for Runner {
-    type Context = Context;
-
-    fn start<F, Fut>(self, f: F) -> Fut::Output
+impl Runner {
+    /// Run the runtime on the current thread.
+    ///
+    /// Unlike [crate::Runner::start], the root future runs on the current
+    /// thread instead of a runtime thread with the configured stack size.
+    pub(crate) fn run<F, Fut>(self, f: F) -> Fut::Output
     where
-        F: FnOnce(Self::Context) -> Fut,
+        F: FnOnce(Context) -> Fut,
         Fut: Future,
     {
         // Create a new registry
@@ -504,6 +506,33 @@ impl crate::Runner for Runner {
         gauge.dec();
 
         output
+    }
+}
+
+impl crate::Runner for Runner {
+    type Context = Context;
+
+    fn start<F, Fut>(self, f: F) -> Fut::Output
+    where
+        F: FnOnce(Self::Context) -> Fut + Send,
+        Fut: Future,
+        Fut::Output: Send,
+    {
+        let thread_stack_size = self.cfg.thread_stack_size;
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("tokio-rt-root".to_string())
+                .stack_size(thread_stack_size)
+                .spawn_scoped(scope, move || {
+                    tracing::dispatcher::with_default(&dispatcher, || self.run(f))
+                })
+                .expect("failed to spawn thread");
+            match handle.join() {
+                Ok(output) => output,
+                Err(payload) => std::panic::resume_unwind(payload),
+            }
+        })
     }
 }
 

@@ -382,7 +382,7 @@ mod tests {
     fn all_online<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(120));
 
@@ -420,7 +420,7 @@ mod tests {
     fn unclean_shutdown<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Clone,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Clone + Send,
     {
         let mut prev_checkpoint = None;
         let epoch = Epoch::new(111);
@@ -501,7 +501,7 @@ mod tests {
     fn network_partition<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
@@ -558,7 +558,7 @@ mod tests {
     fn slow_and_lossy_links_seeded<S, F>(fixture: F, seed: u64) -> String
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let cfg = deterministic::Config::new()
             .with_seed(seed)
@@ -611,7 +611,7 @@ mod tests {
     fn slow_and_lossy_links<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         slow_and_lossy_links_seeded(fixture, 0);
     }
@@ -621,7 +621,7 @@ mod tests {
     fn determinism<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
+        F: Fn(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy + Send,
     {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -661,7 +661,7 @@ mod tests {
     fn invalid_signature_injection<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
 
@@ -699,7 +699,7 @@ mod tests {
     fn updated_epoch<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
 
@@ -837,7 +837,7 @@ mod tests {
     fn external_sequencer<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
         runner.start(|mut context| async move {
@@ -1011,7 +1011,7 @@ mod tests {
     fn run_1k<S, F>(fixture: F)
     where
         S: Scheme<PublicKey, Sha256Digest>,
-        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+        F: FnOnce(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Send,
     {
         let cfg = deterministic::Config::new();
         let runner = deterministic::Runner::new(cfg);

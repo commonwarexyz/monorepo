@@ -1,7 +1,7 @@
 //! Implements a [criterion]-compatible executor for the [tokio] runtime.
 
 use super::context;
-use crate::{tokio, Runner as _};
+use crate::tokio;
 use criterion::async_executor::AsyncExecutor;
 use futures::Future;
 
@@ -49,7 +49,7 @@ impl AsyncExecutor for &Runner {
     fn block_on<T>(&self, future: impl Future<Output = T>) -> T {
         let runner = tokio::Runner::new(self.cfg.clone());
 
-        let result = runner.start(|ctx| {
+        let result = runner.run(|ctx| {
             // Create and store our context
             context::set(ctx);
 

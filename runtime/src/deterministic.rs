@@ -61,7 +61,7 @@ use crate::{
     utils::{
         signal::{Signal, Stopper},
         supervision::Tree,
-        Panicker,
+        thread, Panicker,
     },
     BufferPool, BufferPoolConfig, Clock, Error, Execution, Handle, ListenerOf, Name, Panicked,
     Spawner as _, Supervisor as _, METRICS_PREFIX,
@@ -202,6 +202,14 @@ pub struct Config {
     /// If the runtime is still executing at this point (i.e. a test hasn't stopped), panic.
     timeout: Option<Duration>,
 
+    /// Stack size to use for the runtime thread.
+    ///
+    /// Defaults to the system stack size when the current platform exposes it,
+    /// and otherwise falls back to Rust's default spawned-thread stack size.
+    ///
+    /// See [thread::system_thread_stack_size].
+    thread_stack_size: usize,
+
     /// Whether spawned tasks should catch panics instead of propagating them.
     catch_panics: bool,
 
@@ -241,6 +249,7 @@ impl Config {
             cycle: Duration::from_millis(1),
             start_time: UNIX_EPOCH,
             timeout: None,
+            thread_stack_size: thread::system_thread_stack_size(),
             catch_panics: false,
             storage_fault_cfg: FaultConfig::default(),
             network_buffer_pool_cfg,
@@ -277,6 +286,11 @@ impl Config {
     /// See [Config]
     pub const fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
         self.timeout = timeout;
+        self
+    }
+    /// See [Config]
+    pub const fn with_thread_stack_size(mut self, n: usize) -> Self {
+        self.thread_stack_size = n;
         self
     }
     /// See [Config]
@@ -317,6 +331,10 @@ impl Config {
     /// See [Config]
     pub const fn timeout(&self) -> Option<Duration> {
         self.timeout
+    }
+    /// See [Config]
+    pub const fn thread_stack_size(&self) -> usize {
+        self.thread_stack_size
     }
     /// See [Config]
     pub const fn catch_panics(&self) -> bool {
@@ -368,6 +386,7 @@ pub struct Executor {
     shutdown: Mutex<Stopper>,
     panicker: Panicker,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
+    thread_stack_size: usize,
 }
 
 impl Executor {
@@ -453,6 +472,7 @@ pub struct Checkpoint {
     storage: Arc<Storage>,
     dns: Mutex<HashMap<String, Vec<IpAddr>>>,
     catch_panics: bool,
+    thread_stack_size: usize,
     network_buffer_pool_cfg: BufferPoolConfig,
     storage_buffer_pool_cfg: BufferPoolConfig,
 }
@@ -518,6 +538,36 @@ impl Runner {
     /// Like [crate::Runner::start], but also returns a [Checkpoint] that can be used
     /// to recover the state of the runtime in a subsequent run.
     pub fn start_and_recover<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
+    where
+        F: FnOnce(Context) -> Fut + Send,
+        Fut: Future,
+        Fut::Output: Send,
+    {
+        let thread_stack_size = match &self.state {
+            State::Config(config) => config.thread_stack_size,
+            State::Checkpoint(checkpoint) => checkpoint.thread_stack_size,
+        };
+        let dispatcher = tracing::dispatcher::get_default(Clone::clone);
+        std::thread::scope(|scope| {
+            let handle = std::thread::Builder::new()
+                .name("deterministic-rt-root".to_string())
+                .stack_size(thread_stack_size)
+                .spawn_scoped(scope, move || {
+                    tracing::dispatcher::with_default(&dispatcher, || self.run(f))
+                })
+                .expect("failed to spawn thread");
+            match handle.join() {
+                Ok(result) => result,
+                Err(payload) => resume_unwind(payload),
+            }
+        })
+    }
+
+    /// Run the runtime on the current thread and return a checkpoint.
+    ///
+    /// Unlike [Self::start_and_recover], the root future runs on the current
+    /// thread instead of a runtime thread with the configured stack size.
+    fn run<F, Fut>(self, f: F) -> (Fut::Output, Checkpoint)
     where
         F: FnOnce(Context) -> Fut,
         Fut: Future,
@@ -693,6 +743,7 @@ impl Runner {
             storage,
             dns: executor.dns,
             catch_panics: executor.panicker.catch(),
+            thread_stack_size: executor.thread_stack_size,
             network_buffer_pool_cfg,
             storage_buffer_pool_cfg,
         };
@@ -712,8 +763,9 @@ impl crate::Runner for Runner {
 
     fn start<F, Fut>(self, f: F) -> Fut::Output
     where
-        F: FnOnce(Self::Context) -> Fut,
+        F: FnOnce(Self::Context) -> Fut + Send,
         Fut: Future,
+        Fut::Output: Send,
     {
         let (output, _) = self.start_and_recover(f);
         output
@@ -944,6 +996,7 @@ impl Context {
             shutdown: Mutex::new(Stopper::default()),
             panicker,
             dns: Mutex::new(HashMap::new()),
+            thread_stack_size: cfg.thread_stack_size,
         });
 
         (
@@ -1007,6 +1060,7 @@ impl Context {
             rng: checkpoint.rng,
             time: checkpoint.time,
             dns: checkpoint.dns,
+            thread_stack_size: checkpoint.thread_stack_size,
 
             // New state for the new runtime
             registry,
