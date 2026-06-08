@@ -1,7 +1,7 @@
 use crate::stateful::{
     actor::{
         core::mailbox::Message,
-        processor::{run_prune, FinalizeStatus, Processor},
+        processor::{FinalizeStatus, Processor},
     },
     Application,
 };
@@ -23,7 +23,7 @@ use futures::{
     FutureExt,
 };
 use rand::Rng;
-use std::{collections::VecDeque, sync::mpsc::TryRecvError};
+use std::sync::mpsc::TryRecvError;
 use tracing::debug;
 
 /// A single unit of work for the processing loop: either a mailbox message to
@@ -76,7 +76,7 @@ where
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
-        let mut pending_prunes = VecDeque::new();
+        let mut pending_prune = None;
         select_loop! {
             self.context,
             on_start => {
@@ -86,7 +86,7 @@ where
                 let next = match self.mailbox.try_recv() {
                     // A message is ready: handle it now, regardless of any queued prune.
                     Ok(message) => Either::Left(ready(Some(Step::Message(message)))),
-                    Err(TryRecvError::Empty) => match pending_prunes.pop_front() {
+                    Err(TryRecvError::Empty) => match pending_prune.take() {
                         // No message, but a prune is queued: run it.
                         Some(prune) => Either::Left(ready(Some(Step::Prune(prune)))),
                         // No message and nothing to prune: wait on the mailbox as normal.
@@ -141,13 +141,15 @@ where
                     acknowledgement,
                 }) => {
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        self.processor.notify_finalized(self.context.as_present(), &block).await;
+                        self.processor
+                            .notify_finalized(self.context.as_present(), &block)
+                            .await;
                         acknowledgement.acknowledge();
                         continue;
                     }
                     let (status, prune) = self.processor.finalize(&self.context, block).await;
                     if let Some(prune) = prune {
-                        pending_prunes.push_back(prune);
+                        pending_prune = Some(prune);
                     }
                     if let FinalizeStatus::Persisted { height } = status {
                         debug!(height = height.get(), "persisted finalized database batch");
@@ -158,12 +160,9 @@ where
                     response.send_lossy(self.processor.databases().clone());
                 }
                 Step::Prune(prune) => {
-                    run_prune::<E, _, _, _>(
-                        self.processor.databases().clone(),
-                        self.marshal.clone(),
-                        prune,
-                    )
-                    .await;
+                    prune
+                        .run(self.processor.databases_mut(), &self.marshal)
+                        .await;
                 }
             },
         }

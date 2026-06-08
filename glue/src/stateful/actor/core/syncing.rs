@@ -4,11 +4,11 @@ use crate::stateful::{
             mailbox::{ErasedAncestorStream, Message},
             processing::Processing,
         },
-        processor::{run_prune, FinalizeStatus, Processor, ProcessorMetrics},
+        processor::{FinalizeStatus, Processor, ProcessorMetrics},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
-    Application,
+    Application, PruneConfig,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -94,8 +94,8 @@ where
     /// Marshal ack window, used to derive automatic prune retention.
     pub(super) max_pending_acks: NonZeroUsize,
 
-    /// Periodic prune cadence.
-    pub(super) prune_interval: Option<NonZeroUsize>,
+    /// Periodic prune configuration.
+    pub(super) prune_config: Option<PruneConfig>,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -233,7 +233,7 @@ where
             artifact.anchor,
             metrics,
             self.max_pending_acks,
-            self.prune_interval,
+            self.prune_config,
         );
 
         self.sync_metadata
@@ -254,7 +254,7 @@ where
                     let (status, prune) =
                         processor.finalize(self.context.as_present(), block).await;
                     if let Some(prune) = prune {
-                        run_prune(processor.databases().clone(), self.marshal.clone(), prune).await;
+                        prune.run(processor.databases_mut(), &self.marshal).await;
                     }
                     if let FinalizeStatus::Persisted { height } = status {
                         debug!(
@@ -374,7 +374,7 @@ mod tests {
                     resolvers: NoopResolver,
                     sync_completed,
                     max_pending_acks: NZUsize!(1),
-                    prune_interval: None,
+                    prune_config: None,
                 },
             }
         }

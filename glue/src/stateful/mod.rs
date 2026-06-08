@@ -98,7 +98,7 @@ use rand::Rng;
 use std::future::Future;
 
 mod actor;
-pub use actor::{Config, Mailbox, Stateful, SyncPlan};
+pub use actor::{Config, Mailbox, PruneConfig, Stateful, SyncPlan};
 
 pub mod db;
 pub mod probe;
