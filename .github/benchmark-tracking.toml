@@ -8,16 +8,31 @@
 # without io_uring. When doing this, set a distinct `baseline_suite` for each feature
 # configuration so results are matched against the correct main-branch baseline.
 #
-# Thresholds can be set globally with `default_threshold_percent`, per package, per benchmark, or
-# per variant table. More specific settings override less specific settings. Only
-# `EstimatedCycles` is gated by this threshold; other configured Gungraun metrics are reported.
+# Gates can be set globally, per package, per benchmark, or per variant. More specific `gates`
+# replace inherited gates. If no gates are supplied, the default gate is:
+#
+#   metric = "EstimatedCycles"
+#   direction = "down"
+#   threshold_percent = 10.0
+#
+# `direction = "down"` means lower is better, so increases beyond `threshold_percent` fail.
+# `direction = "up"` means higher is better, so decreases beyond `threshold_percent` fail.
 #
 # Variants must be specified as tables:
 #
 #   [[packages.benchmarks.variants]]
 #   name = "crate::bench/key=value"
 #   filter = "*::bench_id"
-#   threshold_percent = 20.0
+#
+#   [[packages.benchmarks.variants.gates]]
+#   metric = "EstimatedCycles"
+#   direction = "down"
+#   threshold_percent = 10.0
+#
+#   [[packages.benchmarks.variants.gates]]
+#   metric = "L1hits"
+#   direction = "up"
+#   threshold_percent = 5.0
 #
 # Example duplicate package configuration:
 #
@@ -44,8 +59,6 @@
 #   [[packages.benchmarks.variants]]
 #   name = "qmdb::merkleize/variant=... keys=10000 ch=false sync=false"
 #   filter = "*::bench_id"
-
-default_threshold_percent = 10.0
 
 [[packages]]
 name = "commonware-storage"

@@ -23,10 +23,44 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-METRICS = ["Ir", "L1hits", "LLhits", "RamHits", "TotalRW", "EstimatedCycles"]
-GATE_METRIC = "EstimatedCycles"
+REPORT_METRICS = ["Ir", "L1hits", "LLhits", "RamHits", "TotalRW", "EstimatedCycles"]
+DEFAULT_GATE_METRIC = "EstimatedCycles"
+DEFAULT_GATE_DIRECTION = "down"
+DEFAULT_GATE_THRESHOLD = 10.0
 RAW_OUTPUT = "gungraun-output.jsonl"
 COMMENT_MARKER = "<!-- commonware-benchmark-tracking-results -->"
+
+
+@dataclass(frozen=True)
+class Gate:
+    metric: str
+    direction: str
+    threshold_percent: float
+
+    @classmethod
+    def default(cls) -> Self:
+        return cls(
+            metric=DEFAULT_GATE_METRIC,
+            direction=DEFAULT_GATE_DIRECTION,
+            threshold_percent=DEFAULT_GATE_THRESHOLD,
+        )
+
+    @property
+    def description(self) -> str:
+        movement = "decrease" if self.direction == "down" else "increase"
+        return f"{self.metric} should {movement}; tolerance {self.threshold_percent:.2f}%"
+
+    def failed(self, delta: float) -> bool:
+        if self.direction == "down":
+            return delta > self.threshold_percent
+        return delta < -self.threshold_percent
+
+    def to_toml(self) -> dict[str, Any]:
+        return {
+            "metric": self.metric,
+            "direction": self.direction,
+            "threshold_percent": self.threshold_percent,
+        }
 
 
 @dataclass(frozen=True)
@@ -37,7 +71,7 @@ class Benchmark:
     filter: str
     baseline_suite: str
     cargo_flags: list[str]
-    threshold_percent: float
+    gates: list[Gate]
 
     @property
     def key(self) -> tuple[str, str]:
@@ -61,7 +95,7 @@ class Result:
             filter=required_str(item, "filter"),
             baseline_suite=required_str(item, "baseline_suite"),
             cargo_flags=required_str_list(item.get("cargo_flags", []), "cargo_flags"),
-            threshold_percent=required_float(item.get("threshold_percent"), "threshold_percent"),
+            gates=parse_gates(item.get("gates"), [Gate.default()], "gates"),
         )
         metrics = read_metrics(item)
         return cls(
@@ -80,9 +114,7 @@ class Result:
             "filter": self.benchmark.filter,
             "baseline_suite": self.benchmark.baseline_suite,
             "cargo_flags": self.benchmark.cargo_flags,
-            "threshold_percent": self.benchmark.threshold_percent,
-            "value": self.metrics[GATE_METRIC],
-            "value_metric": GATE_METRIC,
+            "gates": [gate.to_toml() for gate in self.benchmark.gates],
             "metrics": self.metrics,
         }
         if self.commit:
@@ -101,20 +133,24 @@ class Comparison:
     deltas: dict[str, float]
 
     @property
-    def gate_delta(self) -> float:
-        return self.deltas[GATE_METRIC]
+    def gate_failures(self) -> list[Gate]:
+        return [
+            gate
+            for gate in self.current.benchmark.gates
+            if gate.failed(self.deltas[gate.metric])
+        ]
 
     @property
     def regressed(self) -> bool:
-        return self.gate_delta > self.current.benchmark.threshold_percent
+        return bool(self.gate_failures)
 
     def to_toml(self) -> dict[str, Any]:
         return {
             **self.current.to_toml(),
             "baseline_metrics": self.baseline.metrics,
             "metric_deltas": self.deltas,
-            "delta_percent": self.gate_delta,
             "regressed": self.regressed,
+            "failed_gates": [gate.to_toml() for gate in self.gate_failures],
         }
 
 
@@ -175,12 +211,44 @@ def required_float(value: Any, key: str) -> float:
     return parsed
 
 
+def parse_gates(value: Any, inherited: list[Gate], field: str) -> list[Gate]:
+    if value is None:
+        return inherited
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"`{field}` must be a non-empty gate array")
+
+    gates = []
+    for index, gate in enumerate(value):
+        if not isinstance(gate, dict):
+            raise ValueError(f"`{field}[{index}]` must be a table")
+        metric = required_str(gate, "metric")
+        direction = required_str(gate, "direction")
+        if direction not in {"down", "up"}:
+            raise ValueError(f"`{field}[{index}].direction` must be `down` or `up`")
+        threshold = required_float(gate.get("threshold_percent"), "threshold_percent")
+        gates.append(Gate(metric=metric, direction=direction, threshold_percent=threshold))
+    return gates
+
+
+def metrics_for(benchmarks: list[Benchmark]) -> list[str]:
+    metrics = list(REPORT_METRICS)
+    for benchmark in benchmarks:
+        for gate in benchmark.gates:
+            if gate.metric not in metrics:
+                metrics.append(gate.metric)
+    return metrics
+
+
 def read_metrics(item: dict[str, Any]) -> dict[str, int]:
     metrics = item.get("metrics")
     if not isinstance(metrics, dict):
         raise ValueError(f"benchmark `{item.get('name', '')}` is missing metrics")
     parsed = {}
-    for metric in METRICS:
+    expected = list(REPORT_METRICS)
+    for gate in parse_gates(item.get("gates"), [Gate.default()], "gates"):
+        if gate.metric not in expected:
+            expected.append(gate.metric)
+    for metric in expected:
         value = parse_metric_value(metrics.get(metric))
         if value is None:
             raise ValueError(f"benchmark `{item.get('name', '')}` is missing `{metric}`")
@@ -193,9 +261,7 @@ def validate_config(config: dict[str, Any]) -> list[Benchmark]:
     if not isinstance(packages, list) or not packages:
         raise ValueError("config must contain a non-empty `packages` array")
 
-    default_threshold = required_float(
-        config.get("default_threshold_percent", 10.0), "default_threshold_percent"
-    )
+    config_gates = parse_gates(config.get("gates"), [Gate.default()], "gates")
     benchmarks = []
     seen = set()
 
@@ -210,9 +276,10 @@ def validate_config(config: dict[str, Any]) -> list[Benchmark]:
         cargo_flags = required_str_list(
             package.get("cargo_flags", []), f"packages[{package_index}].cargo_flags"
         )
-        package_threshold = required_float(
-            package.get("threshold_percent", default_threshold),
-            f"packages[{package_index}].threshold_percent",
+        package_gates = parse_gates(
+            package.get("gates"),
+            config_gates,
+            f"packages[{package_index}].gates",
         )
 
         target_tables = package.get("benchmarks")
@@ -227,9 +294,10 @@ def validate_config(config: dict[str, Any]) -> list[Benchmark]:
             target = required_str(
                 target_table, "name"
             )
-            target_threshold = required_float(
-                target_table.get("threshold_percent", package_threshold),
-                f"packages[{package_index}].benchmarks[{target_index}].threshold_percent",
+            target_gates = parse_gates(
+                target_table.get("gates"),
+                package_gates,
+                f"packages[{package_index}].benchmarks[{target_index}].gates",
             )
             variants = target_table.get("variants")
             if not isinstance(variants, list) or not variants:
@@ -246,9 +314,11 @@ def validate_config(config: dict[str, Any]) -> list[Benchmark]:
                     )
                 name = required_str(variant, "name")
                 filter_pattern = required_str(variant, "filter")
-                threshold = required_float(
-                    variant.get("threshold_percent", target_threshold),
-                    "variant.threshold_percent",
+                gates = parse_gates(
+                    variant.get("gates"),
+                    target_gates,
+                    f"packages[{package_index}].benchmarks[{target_index}]"
+                    f".variants[{variant_index}].gates",
                 )
                 benchmark = Benchmark(
                     package=package_name,
@@ -257,7 +327,7 @@ def validate_config(config: dict[str, Any]) -> list[Benchmark]:
                     filter=filter_pattern,
                     baseline_suite=baseline_suite,
                     cargo_flags=cargo_flags,
-                    threshold_percent=threshold,
+                    gates=gates,
                 )
                 if benchmark.key in seen:
                     raise ValueError(f"duplicate benchmark `{benchmark.name}`")
@@ -270,10 +340,11 @@ def validate_config(config: dict[str, Any]) -> list[Benchmark]:
 def run_benchmarks(benchmarks: list[Benchmark], output_dir: Path) -> list[Result]:
     raw_output = output_dir / RAW_OUTPUT
     raw_output.write_text("", encoding="utf-8")
+    metrics = metrics_for(benchmarks)
 
     results = []
     for benchmark in benchmarks:
-        output = run_one_benchmark(benchmark, raw_output)
+        output = run_one_benchmark(benchmark, raw_output, metrics)
         summaries = parse_json_objects(output, benchmark.name)
         matches = [summary for summary in summaries if matches_filter(summary, benchmark.filter)]
         if len(matches) != 1:
@@ -283,7 +354,7 @@ def run_benchmarks(benchmarks: list[Benchmark], output_dir: Path) -> list[Result
         results.append(
             Result(
                 benchmark=benchmark,
-                metrics=extract_metrics(matches[0]),
+                metrics=extract_metrics(matches[0], metrics),
                 commit=os.environ.get("GITHUB_SHA", ""),
                 run_id=os.environ.get("GITHUB_RUN_ID", ""),
                 ref=os.environ.get("GITHUB_REF_NAME", ""),
@@ -292,7 +363,7 @@ def run_benchmarks(benchmarks: list[Benchmark], output_dir: Path) -> list[Result
     return results
 
 
-def run_one_benchmark(benchmark: Benchmark, raw_output: Path) -> str:
+def run_one_benchmark(benchmark: Benchmark, raw_output: Path, metrics: list[str]) -> str:
     cmd = (
         ["cargo", "bench"]
         + benchmark.cargo_flags
@@ -300,7 +371,7 @@ def run_one_benchmark(benchmark: Benchmark, raw_output: Path) -> str:
         + [
             benchmark.filter,
             "--output-format=json",
-            f"--callgrind-metrics={','.join(METRICS)}",
+            f"--callgrind-metrics={','.join(metrics)}",
         ]
     )
     print("$ " + shlex.join(cmd), flush=True)
@@ -354,10 +425,10 @@ def matches_filter(summary: dict[str, Any], pattern: str) -> bool:
     return any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates)
 
 
-def extract_metrics(summary: dict[str, Any]) -> dict[str, int]:
+def extract_metrics(summary: dict[str, Any], selected_metrics: list[str]) -> dict[str, int]:
     callgrind = callgrind_summary(summary)
     metrics = {}
-    for metric in METRICS:
+    for metric in selected_metrics:
         value = current_metric_value(callgrind.get(metric))
         if value is None:
             raise ValueError(f"Gungraun result is missing `{metric}`")
@@ -434,7 +505,11 @@ def compare(current: list[Result], baseline: dict[tuple[str, str], Result]) -> l
         if previous is None:
             raise ValueError(f"baseline is missing `{result.benchmark.name}`")
         deltas = {}
-        for metric in METRICS:
+        for metric in metrics_for([result.benchmark]):
+            if metric not in result.metrics:
+                raise ValueError(f"current result `{result.benchmark.name}` is missing `{metric}`")
+            if metric not in previous.metrics:
+                raise ValueError(f"baseline `{result.benchmark.name}` is missing `{metric}`")
             if previous.metrics[metric] == 0:
                 raise ValueError(f"baseline `{result.benchmark.name}` has zero `{metric}`")
             deltas[metric] = percent_delta(result.metrics[metric], previous.metrics[metric])
@@ -456,8 +531,7 @@ def write_outputs(
 
     summary: dict[str, Any] = {
         "benchmark_count": len(current),
-        "gate_metric": GATE_METRIC,
-        "metrics": METRICS,
+        "metrics": metrics_for([result.benchmark for result in current]),
     }
     if comparisons is not None:
         write_toml_array(
@@ -477,7 +551,7 @@ def render_report(comparisons: list[Comparison]) -> str:
         COMMENT_MARKER,
         "## Benchmark results",
         "",
-        f"Gate: `{GATE_METRIC}`. Regressions: `{regressions}`.",
+        f"Regressions: `{regressions}`.",
     ]
     for item in comparisons:
         lines.extend(["", f"<details><summary>{summary_line(item)}</summary>", ""])
@@ -496,12 +570,20 @@ def render_report(comparisons: list[Comparison]) -> str:
 
 def summary_line(item: Comparison) -> str:
     status = "FAIL" if item.regressed else "PASS"
-    current = format_count(item.current.metrics[GATE_METRIC])
-    delta = format_delta(item.gate_delta)
-    threshold = f"{item.current.benchmark.threshold_percent:.2f}%"
+    gates = item.current.benchmark.gates
+    if len(gates) == 1:
+        gate = gates[0]
+        current = format_count(item.current.metrics[gate.metric])
+        delta = format_delta(item.deltas[gate.metric])
+        gate_summary = (
+            f"{gate.metric}: {current}, delta: {delta}, "
+            f"{gate.description}"
+        )
+    else:
+        gate_summary = f"{len(item.gate_failures)}/{len(gates)} gates failed"
     return (
         f"{status} {escape_summary(item.current.benchmark.name)} "
-        f"({GATE_METRIC}: {current}, delta: {delta}, threshold: {threshold})"
+        f"({gate_summary})"
     )
 
 
@@ -512,7 +594,7 @@ def render_metadata(lines: list[str], benchmark: Benchmark) -> None:
         ("Variant", benchmark.name),
         ("Filter", benchmark.filter),
         ("Baseline suite", benchmark.baseline_suite),
-        ("Threshold", f"{benchmark.threshold_percent:.2f}%"),
+        ("Gates", "; ".join(gate.description for gate in benchmark.gates)),
     ]
     if benchmark.cargo_flags:
         rows.append(("Cargo flags", " ".join(benchmark.cargo_flags)))
@@ -523,9 +605,9 @@ def render_metadata(lines: list[str], benchmark: Benchmark) -> None:
 
 
 def render_metrics(lines: list[str], item: Comparison) -> None:
-    lines.extend(["", "| Metric | Baseline | Current | Delta | Gated |", "|---|---:|---:|---:|---|"])
-    for metric in METRICS:
-        gated = "yes" if metric == GATE_METRIC else ""
+    lines.extend(["", "| Metric | Baseline | Current | Delta | Gate |", "|---|---:|---:|---:|---|"])
+    for metric in metrics_for([item.current.benchmark]):
+        gate = gate_text(item.current.benchmark, metric)
         lines.append(
             "| "
             + " | ".join(
@@ -534,11 +616,16 @@ def render_metrics(lines: list[str], item: Comparison) -> None:
                     format_count(item.baseline.metrics[metric]),
                     format_count(item.current.metrics[metric]),
                     format_delta(item.deltas[metric]),
-                    gated,
+                    gate,
                 ]
             )
             + " |"
         )
+
+
+def gate_text(benchmark: Benchmark, metric: str) -> str:
+    gates = [gate for gate in benchmark.gates if gate.metric == metric]
+    return "<br>".join(gate.description for gate in gates)
 
 
 def format_count(value: int) -> str:
@@ -578,14 +665,21 @@ def write_toml_array(path: Path, name: str, values: list[dict[str, Any]]) -> Non
 
 def append_toml(lines: list[str], values: dict[str, Any], prefix: str) -> None:
     nested = []
+    nested_arrays = []
     for key, value in values.items():
         if isinstance(value, dict):
             nested.append((key, value))
+        elif isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            nested_arrays.append((key, value))
         else:
             lines.append(f"{key} = {toml_value(value)}")
     for key, value in nested:
         lines.extend(["", f"[{prefix}.{key}]"])
         append_toml(lines, value, f"{prefix}.{key}")
+    for key, items in nested_arrays:
+        for item in items:
+            lines.extend(["", f"[[{prefix}.{key}]]"])
+            append_toml(lines, item, f"{prefix}.{key}")
 
 
 def toml_value(value: Any) -> str:
