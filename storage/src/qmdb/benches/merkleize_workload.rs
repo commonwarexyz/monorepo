@@ -505,8 +505,6 @@ variants! {
     }
 }
 
-pub(crate) use dispatch_variant;
-
 pub async fn prepare_db<F, C>(db: &mut C, num_keys: u64, seed_sync: bool)
 where
     F: merkle::Family,

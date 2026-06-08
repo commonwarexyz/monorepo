@@ -88,7 +88,7 @@ required-features = ["test-traits"]
 [[bench]]
 name = "qmdb_gungraun"
 harness = false
-path = "src/qmdb/benches/qmdb_gungraun.rs"
+path = "src/qmdb/benches/gungraun.rs"
 required-features = ["test-traits"]
 
 [[bench]]

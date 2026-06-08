@@ -7,8 +7,9 @@ mod chained_growth;
 mod common;
 mod generate;
 mod init;
-mod merkleize;
+#[macro_use]
 mod merkleize_workload;
+mod merkleize;
 
 criterion_main!(
     apply_batch::benches,

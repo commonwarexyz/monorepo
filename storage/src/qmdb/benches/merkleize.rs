@@ -9,7 +9,7 @@
 //!   update operations above the inactivity floor — the workload the floor-raise bitmap-skip
 //!   optimizes for.
 
-use crate::merkleize_workload::{dispatch_variant, *};
+use crate::merkleize_workload::*;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
