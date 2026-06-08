@@ -342,6 +342,7 @@ def validate_config(config: dict[str, Any]) -> list[Benchmark]:
 
 
 def run_benchmarks(benchmarks: list[Benchmark], output_dir: Path) -> list[Result]:
+    output_dir.mkdir(parents=True, exist_ok=True)
     raw_output = output_dir / RAW_OUTPUT
     raw_output.write_text("", encoding="utf-8")
     metrics = metrics_for(benchmarks)

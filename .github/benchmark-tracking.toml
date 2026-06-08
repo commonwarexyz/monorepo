@@ -39,7 +39,7 @@
 #   [[packages]]
 #   name = "commonware-storage"
 #   baseline_suite = "commonware-storage"
-#   cargo_flags = ["--features", "test-traits"]
+#   cargo_flags = ["--features", "test-traits,gungraun-bench"]
 #
 #   [[packages.benchmarks]]
 #   name = "qmdb_gungraun"
@@ -51,7 +51,7 @@
 #   [[packages]]
 #   name = "commonware-storage"
 #   baseline_suite = "commonware-storage-iouring"
-#   cargo_flags = ["--features", "commonware-runtime/iouring-storage,test-traits"]
+#   cargo_flags = ["--features", "commonware-runtime/iouring-storage,test-traits,gungraun-bench"]
 #
 #   [[packages.benchmarks]]
 #   name = "qmdb_gungraun"
@@ -62,7 +62,7 @@
 
 [[packages]]
 name = "commonware-storage"
-cargo_flags = ["--features", "test-traits"]
+cargo_flags = ["--features", "test-traits,gungraun-bench"]
 
 [[packages.benchmarks]]
 name = "qmdb_gungraun"
