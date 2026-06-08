@@ -15,16 +15,16 @@ pub enum CircuitIdx {
     Node(u32),
 }
 
-pub enum CircuitNode {
+pub(crate) enum CircuitNode {
     Add(CircuitIdx, CircuitIdx),
     Mul(CircuitIdx, CircuitIdx),
 }
 
 pub struct Circuit<F> {
-    pub witnesses: u32,
-    pub constants: Vec<F>,
-    pub nodes: Vec<CircuitNode>,
-    pub assertions: Vec<(CircuitIdx, CircuitIdx)>,
+    pub(crate) witnesses: u32,
+    pub(crate) constants: Vec<F>,
+    pub(crate) nodes: Vec<CircuitNode>,
+    pub(crate) assertions: Vec<(CircuitIdx, CircuitIdx)>,
 }
 
 impl<F> Default for Circuit<F> {
@@ -64,11 +64,12 @@ impl<F> Circuit<F> {
 /// constructed in prover mode. Witness indices resolve to `witnesses[i]`, and
 /// node indices to `nodes[i]`.
 pub struct ValuedCircuit<F> {
-    pub circuit: Circuit<F>,
-    pub witnesses: Vec<F>,
-    pub nodes: Vec<F>,
+    pub(crate) circuit: Circuit<F>,
+    pub(crate) witnesses: Vec<F>,
+    pub(crate) nodes: Vec<F>,
 }
 
+#[doc(hidden)]
 impl<F> Index<CircuitIdx> for ValuedCircuit<F> {
     type Output = F;
 
