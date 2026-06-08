@@ -275,8 +275,7 @@ where
         // so that this instance can serve peers database operations and proofs.
         self.resolvers.attach_databases(databases.clone()).await;
 
-        // Leak the resolver mailboxes to keep the resolvers alive to serve other peers.
-        std::mem::forget(self.resolvers);
+        keep_resolvers_alive(self.context.as_present(), self.resolvers);
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
@@ -299,6 +298,19 @@ where
         .start()
         .await
     }
+}
+
+fn keep_resolvers_alive<E, R>(context: &E, resolvers: R)
+where
+    E: Spawner,
+    R: Send + 'static,
+{
+    context
+        .child("resolver_keepalive")
+        .spawn(|context| async move {
+            let _ = context.stopped().await;
+            drop(resolvers);
+        });
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use crate::stateful::{
     actor::{
         core::{
+            keep_resolvers_alive,
             mailbox::{ErasedAncestorStream, Message},
             processing::Processing,
         },
@@ -297,8 +298,7 @@ where
                 .await;
         }
 
-        // Leak the resolver mailboxes to keep the resolvers alive to serve other peers.
-        std::mem::forget(self.resolvers);
+        keep_resolvers_alive(self.context.as_present(), self.resolvers);
 
         Processing {
             context: self.context,
