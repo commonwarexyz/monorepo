@@ -254,4 +254,24 @@ where
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+
+    /// Observe a block after its finalized batches are applied locally.
+    ///
+    /// Called after [`DatabaseSet::finalize`] publishes the block's batches to
+    /// the database handles and before deferred maintenance can prune
+    /// finalized state. Glue does not force a storage sync before this hook;
+    /// implementations that need their own durable side effects should persist
+    /// them here.
+    ///
+    /// # Panics
+    ///
+    /// Implementations should panic if post-finalization maintenance fails.
+    fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _databases: &Self::Databases,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }

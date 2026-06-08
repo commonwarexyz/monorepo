@@ -50,8 +50,8 @@ use std::{
 use tracing::{debug, warn};
 
 mod metrics;
-pub(super) use metrics::{MaintenanceKind, MaintenanceOutcome};
 pub(crate) use metrics::Metrics as ProcessorMetrics;
+pub(super) use metrics::{MaintenanceKind, MaintenanceOutcome};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
@@ -814,6 +814,13 @@ where
         };
 
         self.databases.finalize(batch).await;
+        self.app
+            .finalized(
+                (context.child("finalized"), block.context()),
+                &block,
+                &self.databases,
+            )
+            .await;
         let maintenance = self.maintenance.observe_finalized(height, sync_targets);
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor {
@@ -1265,13 +1272,26 @@ mod tests {
     #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
+        finalized_observer: Option<Arc<Mutex<Vec<u64>>>>,
     }
 
     impl ExecutionApp {
         fn new() -> Self {
             Self {
                 genesis: Block::genesis(),
+                finalized_observer: None,
             }
+        }
+
+        fn with_finalized_observer() -> (Self, Arc<Mutex<Vec<u64>>>) {
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            (
+                Self {
+                    genesis: Block::genesis(),
+                    finalized_observer: Some(observed.clone()),
+                },
+                observed,
+            )
         }
 
         async fn execute(
@@ -1351,6 +1371,25 @@ mod tests {
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
             Self::execute(block.height(), block.context.round.view(), batches).await
+        }
+
+        async fn finalized(
+            &mut self,
+            _context: (deterministic::Context, Self::Context),
+            _block: &Self::Block,
+            databases: &Self::Databases,
+        ) {
+            let Some(observed) = &self.finalized_observer else {
+                return;
+            };
+            let db = databases.read().await;
+            let counter = db
+                .get(&counter_key())
+                .await
+                .expect("finalized observer counter read should succeed")
+                .map_or(0, |value| digest_to_u64(&value));
+            drop(db);
+            observed.lock().push(counter);
         }
 
         fn sync_targets(
@@ -2406,6 +2445,40 @@ mod tests {
                     .await,
                 None,
                 "finalize publishes in-process state but does not force durability",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_finalized_hook_observes_applied_state() {
+        deterministic::Runner::default().start(|context| async move {
+            let provider = MapProvider::default();
+            let config = qmdb_config(&next_partition_prefix(), &context);
+            let (app, observed) = ExecutionApp::with_finalized_observer();
+            let mut harness =
+                Harness::with_app(context.child("harness"), provider, config, app).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let status = harness.finalize(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Applied {
+                    height: Height::new(1)
+                }
+            );
+            assert_eq!(
+                observed.lock().as_slice(),
+                &[1],
+                "finalized hook should observe the applied database state",
+            );
+
+            let status = harness.finalize(block1).await;
+            assert_eq!(status, FinalizeStatus::Duplicate);
+            assert_eq!(
+                observed.lock().as_slice(),
+                &[1],
+                "duplicate finalization should not run the hook again",
             );
         });
     }
