@@ -6,7 +6,6 @@ use curve25519_dalek::{
     scalar::Scalar,
     traits::IsIdentity,
 };
-use sha2::{digest::Update, Sha512};
 
 /// A refinement type for `[u8; 32]` indicating that the bytes represent an
 /// encoding of an Ed25519 verification key.
@@ -208,12 +207,20 @@ impl VerificationKey {
     /// [ps]: https://zips.z.cash/protocol/protocol.pdf#concreteed25519
     /// [ZIP215]: https://github.com/zcash/zips/blob/master/zip-0215.rst
     pub fn verify(&self, signature: &Signature, msg: &[u8]) -> Result<(), Error> {
-        let k = Scalar::from_hash(
-            Sha512::default()
-                .chain(&signature.R_bytes[..])
-                .chain(&self.A_bytes.0[..])
-                .chain(msg),
-        );
+        self.verify_ns(signature, None, msg)
+    }
+
+    /// Verify a purported `signature` on `msg` under an optional `namespace`.
+    ///
+    /// Streams the namespace and message into the challenge hash rather than
+    /// requiring the caller to first concatenate them (see [`super::challenge`]).
+    pub(crate) fn verify_ns(
+        &self,
+        signature: &Signature,
+        namespace: Option<&[u8]>,
+        msg: &[u8],
+    ) -> Result<(), Error> {
+        let k = super::challenge(&signature.R_bytes, &self.A_bytes.0, namespace, msg);
         self.verify_prehashed(signature, k)
     }
 

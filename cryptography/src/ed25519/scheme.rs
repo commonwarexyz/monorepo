@@ -148,11 +148,8 @@ impl crate::Verifier for PublicKey {
 impl PublicKey {
     #[inline(always)]
     fn verify_inner(&self, namespace: Option<&[u8]>, msg: &[u8], sig: &Signature) -> bool {
-        let payload = namespace
-            .map(|namespace| Cow::Owned(union_unique(namespace, msg)))
-            .unwrap_or_else(|| Cow::Borrowed(msg));
         self.key
-            .verify(&ed_core::Signature::from(sig.raw), &payload)
+            .verify_ns(&ed_core::Signature::from(sig.raw), namespace, msg)
             .is_ok()
     }
 }
@@ -355,14 +352,12 @@ impl Batch {
         public_key: &PublicKey,
         signature: &Signature,
     ) -> bool {
-        let payload = namespace
-            .map(|ns| Cow::Owned(union_unique(ns, message)))
-            .unwrap_or_else(|| Cow::Borrowed(message));
-        self.verifier.queue((
+        self.verifier.queue_ns(
             public_key.key,
             ed_core::Signature::from(signature.raw),
-            &payload,
-        ));
+            namespace,
+            message,
+        );
         true
     }
 }
@@ -739,6 +734,72 @@ mod tests {
     fn batch_verify_empty() {
         let batch = Batch::new();
         assert!(batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    #[test]
+    fn batch_verify_namespaced() {
+        use crate::BatchVerifier as _;
+
+        let namespace = b"_COMMONWARE_TEST_NS";
+        let mut rng = test_rng();
+        let sk1 = PrivateKey::random(&mut rng);
+        let sk2 = PrivateKey::random(&mut rng);
+        let pk1 = sk1.public_key();
+        let pk2 = sk2.public_key();
+        let m1 = b"message one";
+        let m2 = b"message two";
+        let sig1 = sk1.sign(namespace, m1);
+        let sig2 = sk2.sign(namespace, m2);
+
+        // Signatures produced by `sign(namespace, msg)` must verify in a batch
+        // added via `add(namespace, msg, ...)`, proving the streamed challenge
+        // hash agrees with the `union_unique`-based signing hash.
+        let mut batch = Batch::new();
+        assert!(batch.add(namespace, m1, &pk1, &sig1));
+        assert!(batch.add(namespace, m2, &pk2, &sig2));
+        assert!(batch.verify(&mut test_rng(), &Sequential));
+
+        // A mismatched message (same namespace) must fail.
+        let mut batch = Batch::new();
+        assert!(batch.add(namespace, m1, &pk1, &sig1));
+        assert!(batch.add(namespace, b"wrong message", &pk2, &sig2));
+        assert!(!batch.verify(&mut test_rng(), &Sequential));
+
+        // A mismatched namespace must fail.
+        let mut batch = Batch::new();
+        assert!(batch.add(b"other namespace", m1, &pk1, &sig1));
+        assert!(!batch.verify(&mut test_rng(), &Sequential));
+    }
+
+    // The streamed challenge must be byte-identical to hashing the
+    // `union_unique` concatenation, across namespace lengths that cross the
+    // varint size boundary and for empty/large messages.
+    #[test]
+    fn challenge_matches_union_unique() {
+        use curve25519_dalek::scalar::Scalar;
+        use sha2::{digest::Update, Sha512};
+
+        let r = [0x11u8; 32];
+        let a = [0x22u8; 32];
+        let msgs: [&[u8]; 3] = [b"", b"a message", &[0xCDu8; 5000]];
+        for ns_len in [0usize, 1, 127, 128, 255, 16384, 300] {
+            let ns = vec![0xABu8; ns_len];
+            for msg in msgs {
+                let expected = Scalar::from_hash(
+                    Sha512::default()
+                        .chain(r)
+                        .chain(a)
+                        .chain(union_unique(&ns, msg)),
+                );
+                let got = crate::ed25519::core::challenge(&r, &a, Some(&ns), msg);
+                assert_eq!(got, expected, "ns_len={ns_len} msg_len={}", msg.len());
+            }
+        }
+
+        // `None` namespace must hash the bare message.
+        let msg: &[u8] = b"no namespace";
+        let expected = Scalar::from_hash(Sha512::default().chain(r).chain(a).chain(msg));
+        assert_eq!(crate::ed25519::core::challenge(&r, &a, None, msg), expected);
     }
 
     #[test]

@@ -48,7 +48,6 @@ use curve25519_dalek::{
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
 use rand_core::{CryptoRng, RngCore};
-use sha2::{digest::Update, Sha512};
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(feature = "std")]
@@ -61,31 +60,6 @@ fn gen_u128<R: RngCore + CryptoRng>(mut rng: R) -> u128 {
     let mut bytes = [0u8; 16];
     rng.fill_bytes(&mut bytes[..]);
     u128::from_le_bytes(bytes)
-}
-
-/// A batch verification item.
-///
-/// This struct exists to allow batch processing to be decoupled from the
-/// lifetime of the message. This is useful when using the batch verification API
-/// in an async context.
-#[derive(Clone, Debug)]
-pub struct Item {
-    vk: VerificationKey,
-    sig: Signature,
-    k: Scalar,
-}
-
-impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKey, Signature, &'msg M)> for Item {
-    fn from(tup: (VerificationKey, Signature, &'msg M)) -> Self {
-        let (vk, sig, msg) = tup;
-        let k = Scalar::from_hash(
-            Sha512::default()
-                .chain(&sig.R_bytes[..])
-                .chain(vk.as_bytes())
-                .chain(msg),
-        );
-        Self { vk, sig, k }
-    }
 }
 
 /// A batch verification context.
@@ -104,14 +78,23 @@ impl Verifier {
         Self::default()
     }
 
-    /// Queue a `(key, signature, message)` tuple for verification.
-    pub fn queue<I: Into<Item>>(&mut self, item: I) {
-        let Item { vk, sig, k } = item.into();
-
+    /// Queue a `(key, signature, namespace, message)` tuple for verification.
+    ///
+    /// The namespace and message are streamed directly into the challenge hash
+    /// (see [`super::challenge`]) rather than requiring the caller to first
+    /// concatenate them, avoiding a per-signature allocation and message copy.
+    /// The common case is one signature per public key. We could also consider
+    /// using a `smallvec` for the per-key vector.
+    pub(crate) fn queue_ns(
+        &mut self,
+        vk: VerificationKey,
+        sig: Signature,
+        namespace: Option<&[u8]>,
+        msg: &[u8],
+    ) {
+        let k = super::challenge(&sig.R_bytes, vk.as_bytes(), namespace, msg);
         self.signatures
             .entry(vk)
-            // The common case is 1 signature per public key.
-            // We could also consider using a smallvec here.
             .or_insert_with(|| Vec::with_capacity(1))
             .push((k, sig));
         self.batch_size += 1;
