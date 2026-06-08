@@ -32,7 +32,7 @@ use commonware_utils::{
     Acknowledgement,
 };
 use rand::Rng;
-use std::{num::NonZeroUsize, sync::Arc};
+use std::sync::Arc;
 use tracing::{debug, error};
 
 /// Verify request buffered while state sync is still in progress.
@@ -89,9 +89,6 @@ where
 
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
-
-    /// Marshal ack window, used to derive automatic prune retention.
-    pub(super) max_pending_acks: NonZeroUsize,
 
     /// Periodic database maintenance.
     pub(super) maintenance: MaintenanceConfig,
@@ -235,7 +232,6 @@ where
             artifact.databases,
             artifact.anchor,
             metrics,
-            self.max_pending_acks,
             self.maintenance,
         );
 
@@ -388,9 +384,9 @@ mod tests {
                     }),
                     resolvers: NoopResolver,
                     sync_completed,
-                    max_pending_acks: NZUsize!(1),
                     maintenance: MaintenanceConfig {
                         interval: NZUsize!(usize::MAX),
+                        retention: NZUsize!(1),
                         prune: false,
                     },
                 },
@@ -568,6 +564,7 @@ mod tests {
             let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
             harness.syncing.maintenance = MaintenanceConfig {
                 interval: NZUsize!(9),
+                retention: NZUsize!(2),
                 prune: true,
             };
             let events = harness

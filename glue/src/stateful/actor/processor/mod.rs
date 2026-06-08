@@ -45,7 +45,6 @@ use rand::Rng;
 use std::{
     collections::{BTreeMap, HashSet, VecDeque},
     future::Future,
-    num::NonZeroUsize,
 };
 use tracing::{debug, warn};
 
@@ -133,11 +132,8 @@ struct Maintenance<T> {
 }
 
 impl<T: Clone> Maintenance<T> {
-    const fn new(config: MaintenanceConfig, max_pending_acks: NonZeroUsize) -> Self {
-        let prune_retention_window = max_pending_acks
-            .get()
-            .checked_add(1)
-            .expect("max_pending_acks retention window overflowed");
+    const fn new(config: MaintenanceConfig) -> Self {
+        let prune_retention_window = config.retention.get();
         Self {
             config,
             prune_retention_window,
@@ -178,12 +174,11 @@ impl<T: Clone> Maintenance<T> {
     ///
     /// When pruning is enabled, preflush maintenance targets the retained block
     /// that will be pruned at the next pruning boundary. Prune maintenance first
-    /// retains the last `max_pending_acks + 1` finalized `(height, sync_targets)`
-    /// pairs, so the oldest retained target stays `max_pending_acks` blocks
-    /// behind the tip. It then prunes only when that full window is populated
-    /// and the current finalized height matches the configured cadence. The
-    /// prune target is the oldest retained finalized target and its
-    /// corresponding finalized block height.
+    /// retains `retention` finalized `(height, sync_targets)` pairs, including
+    /// the tip. It then prunes only when that full window is populated and the
+    /// current finalized height matches the configured cadence. The prune target
+    /// is the oldest retained finalized target and its corresponding finalized
+    /// block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
         if self.config.prune {
             self.retained_targets.push_back((height, targets));
@@ -297,7 +292,6 @@ where
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: ProcessorMetrics,
-        max_pending_acks: NonZeroUsize,
         maintenance: MaintenanceConfig,
     ) -> Self {
         Self {
@@ -306,7 +300,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
-            maintenance: Maintenance::new(maintenance, max_pending_acks),
+            maintenance: Maintenance::new(maintenance),
         }
     }
 
@@ -1509,9 +1503,9 @@ mod tests {
                         digest: Block::genesis().digest(),
                     },
                     metrics,
-                    NZUsize!(1),
                     MaintenanceConfig {
                         interval: NZUsize!(usize::MAX),
+                        retention: NZUsize!(1),
                         prune: false,
                     },
                 ),
@@ -1800,9 +1794,9 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(2),
+                retention: NZUsize!(1),
                 prune: false,
             },
-            NZUsize!(1),
         );
 
         assert_eq!(
@@ -1820,9 +1814,9 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(1),
+                retention: NZUsize!(3),
                 prune: true,
             },
-            NZUsize!(2),
         );
 
         assert_eq!(
@@ -1851,9 +1845,9 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(3),
+                retention: NZUsize!(2),
                 prune: true,
             },
-            NZUsize!(1),
         );
 
         assert_eq!(
@@ -1901,9 +1895,9 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(3),
+                retention: NZUsize!(2),
                 prune: true,
             },
-            NZUsize!(1),
         );
 
         let mut preflushes = 0;
@@ -1925,9 +1919,9 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(1),
+                retention: NZUsize!(2),
                 prune: true,
             },
-            NZUsize!(1),
         );
 
         assert_eq!(
@@ -1960,9 +1954,9 @@ mod tests {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(5),
+                retention: NZUsize!(3),
                 prune: true,
             },
-            NZUsize!(2),
         );
 
         assert_eq!(
@@ -2110,9 +2104,9 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 ProcessorMetrics::new(harness.context_cell.child("staged_processor_metrics")),
-                NZUsize!(1),
                 MaintenanceConfig {
                     interval: NZUsize!(1),
+                    retention: NZUsize!(1),
                     prune: false,
                 },
             );
@@ -2500,9 +2494,9 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 ProcessorMetrics::new(harness.context_cell.child("durable_prune_metrics")),
-                NZUsize!(1),
                 MaintenanceConfig {
                     interval: NZUsize!(1),
+                    retention: NZUsize!(2),
                     prune: true,
                 },
             );

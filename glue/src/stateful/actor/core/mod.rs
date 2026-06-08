@@ -42,12 +42,15 @@ pub struct MaintenanceConfig {
     /// Run prune maintenance every `interval` finalized blocks.
     pub interval: NonZeroUsize,
 
+    /// Number of finalized target pairs to retain, including the tip.
+    ///
+    /// With pruning enabled, glue prunes to the oldest retained target. For example,
+    /// `retention = 1024` keeps 1024 finalized targets and prunes to the oldest one.
+    pub retention: NonZeroUsize,
+
     /// Prune databases and marshal history on the configured interval.
     ///
-    /// When `true`, glue retains a `max_pending_acks + 1` finalized-target
-    /// window before pruning, so the oldest retained target stays
-    /// `max_pending_acks` blocks behind the finalized tip. When `false`, no
-    /// periodic durable database maintenance is scheduled.
+    /// When `false`, no periodic durable database maintenance is scheduled.
     pub prune: bool,
 }
 
@@ -70,11 +73,6 @@ where
 
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     pub marshal: MarshalMailbox<S, V>,
-
-    /// Marshal ack window used by the provided marshal mailbox.
-    ///
-    /// This must match the marshal config used to construct [`Self::marshal`].
-    pub max_pending_acks: NonZeroUsize,
 
     /// Capacity of the stateful actor mailbox channel.
     pub mailbox_size: NonZeroUsize,
@@ -131,9 +129,6 @@ where
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
-    /// Marshal ack window, used to derive automatic prune retention.
-    max_pending_acks: NonZeroUsize,
-
     /// Periodic database maintenance.
     maintenance: MaintenanceConfig,
 }
@@ -165,7 +160,6 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
-                max_pending_acks: config.max_pending_acks,
                 maintenance: config.maintenance,
             },
             Mailbox::new(sender),
@@ -214,7 +208,6 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
-            max_pending_acks: self.max_pending_acks,
             maintenance: self.maintenance,
         };
         let _ = join!(syncer.start(), syncing.start());
@@ -244,7 +237,6 @@ where
             databases,
             anchor,
             processor_metrics,
-            self.max_pending_acks,
             self.maintenance,
         );
         Processing {
@@ -411,7 +403,6 @@ mod tests {
                     db_config: (),
                     input_provider: (),
                     marshal,
-                    max_pending_acks: NZUsize!(1),
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
@@ -424,6 +415,7 @@ mod tests {
                     },
                     maintenance: MaintenanceConfig {
                         interval: NZUsize!(usize::MAX),
+                        retention: NZUsize!(1),
                         prune: false,
                     },
                 },
