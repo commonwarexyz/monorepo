@@ -267,15 +267,10 @@ where
 
         let total_size = self.base_size + ops.len() as u64;
 
-        // Merkleize the journal batch.
-        let ops = Arc::new(ops);
-        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
-
         // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
-        let journal = db.journal.with_mem(|mem| {
-            self.journal_batch
-                .merkleize_with_leaf_digests(mem, ops, leaf_digests)
-        });
+        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
+        let journal_batch = self.journal_batch.add_leaf_digests(ops, leaf_digests);
+        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
 
         // Compute the root.
         let inactive_peaks = F::inactive_peaks(

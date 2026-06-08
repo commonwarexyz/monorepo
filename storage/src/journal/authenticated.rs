@@ -140,27 +140,16 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         )
     }
 
-    /// Like [`merkleize`](Self::merkleize), but uses pre-computed leaf digests for `items`.
+    /// Add caller-supplied items using pre-computed leaf digests.
     ///
     /// # Panics
     ///
     /// - If items were previously added via [`add`](Self::add).
     /// - If `digests` and `items` have different lengths.
-    pub(crate) fn merkleize_with_leaf_digests(
-        self,
-        base: &Mem<F, H::Digest>,
-        items: Arc<Vec<Item>>,
-        digests: Vec<H::Digest>,
-    ) -> MerkleizedBatchArc<F, H, Item, S> {
-        let Self {
-            inner,
-            hasher,
-            items: batch_items,
-            parent,
-        } = self;
+    pub(crate) fn add_leaf_digests(mut self, items: Vec<Item>, digests: Vec<H::Digest>) -> Self {
         assert!(
-            batch_items.is_empty(),
-            "merkleize_with_leaf_digests expects no items added via add"
+            self.items.is_empty(),
+            "add_leaf_digests expects no items added via add"
         );
         assert_eq!(
             digests.len(),
@@ -168,16 +157,9 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             "pre-computed leaf digest count must match item count"
         );
 
-        let inner = inner.add_leaf_digests(digests);
-        let merkle = inner.merkleize(base, &hasher);
-        let ancestor_items = Self::collect_ancestor_items(&parent);
-        Arc::new(MerkleizedBatch {
-            inner: merkle,
-            bagging: hasher.root_bagging(),
-            items,
-            parent: parent.as_ref().map(Arc::downgrade),
-            ancestor_items,
-        })
+        self.inner = self.inner.add_leaf_digests(digests);
+        self.items = items;
+        self
     }
 }
 
@@ -928,10 +910,10 @@ mod tests {
     fn merkleize_with<F: Family + PartialEq>(
         batch: UnmerkleizedBatch<F, Sha256, TestOp<F>, Sequential>,
         base: &Mem<F, Digest>,
-        items: Arc<Vec<TestOp<F>>>,
+        items: Vec<TestOp<F>>,
     ) -> MerkleizedBatchArc<F, Sha256, TestOp<F>, Sequential> {
         let digests = batch.leaf_digests_with(items.as_slice());
-        batch.merkleize_with_leaf_digests(base, items, digests)
+        batch.add_leaf_digests(items, digests).merkleize(base)
     }
 
     /// Create Merkle configuration for tests.
@@ -2754,7 +2736,7 @@ mod tests {
         let batch = journal.new_batch();
         let actual = journal
             .merkle
-            .with_mem(|mem| merkleize_with(batch, mem, Arc::new(ops)));
+            .with_mem(|mem| merkleize_with(batch, mem, ops));
 
         assert_eq!(
             batch_root(&journal, &actual),
@@ -2782,7 +2764,7 @@ mod tests {
         let batch = journal.new_batch();
         let merkleized = journal
             .merkle
-            .with_mem(|mem| merkleize_with(batch, mem, Arc::new(ops.clone())));
+            .with_mem(|mem| merkleize_with(batch, mem, ops.clone()));
 
         let expected_root = batch_root(&journal, &merkleized);
         journal.apply_batch(&merkleized).await.unwrap();
@@ -2805,33 +2787,6 @@ mod tests {
     fn test_merkleize_with_apply_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(test_merkleize_with_apply_inner::<mmb::Family>);
-    }
-
-    /// merkleize_with stores the caller's Arc directly (no deep copy).
-    async fn test_merkleize_with_shares_arc_inner<F: Family + PartialEq>(context: Context) {
-        let journal = create_journal_with_ops::<F>(context, "mw-arc", 3).await;
-
-        let ops = Arc::new(vec![create_operation::<F>(20), create_operation::<F>(21)]);
-        let ops_clone = Arc::clone(&ops);
-        let batch = journal.new_batch();
-        let merkleized = journal
-            .merkle
-            .with_mem(|mem| merkleize_with(batch, mem, ops_clone));
-
-        // The batch should hold the same Arc allocation, not a copy.
-        assert!(Arc::ptr_eq(&merkleized.items, &ops));
-    }
-
-    #[test_traced("INFO")]
-    fn test_merkleize_with_shares_arc_mmr() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_merkleize_with_shares_arc_inner::<mmr::Family>);
-    }
-
-    #[test_traced("INFO")]
-    fn test_merkleize_with_shares_arc_mmb() {
-        let executor = deterministic::Runner::default();
-        executor.start(test_merkleize_with_shares_arc_inner::<mmb::Family>);
     }
 
     /// Apply C (grandchild of A) after only A is committed. B's journal items

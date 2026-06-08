@@ -818,16 +818,13 @@ where
         // parent already contains all prior batches' Merkle state, so we only
         // add THIS batch's operations. Parent operations are never re-cloned,
         // re-encoded, or re-hashed.
-        let ops = Arc::new(ops);
         let leaves = Location::new(self.base_size + ops.len() as u64);
         let inactive_peaks = db.inactive_peaks(leaves, floor);
-        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
 
         // Hash before borrowing committed Merkle state so the read lock only covers merkleization.
-        let journal = db.log.with_mem(|base| {
-            self.journal_batch
-                .merkleize_with_leaf_digests(base, ops, leaf_digests)
-        });
+        let leaf_digests = self.journal_batch.leaf_digests_with(ops.as_slice());
+        let journal_batch = self.journal_batch.add_leaf_digests(ops, leaf_digests);
+        let journal = db.log.with_mem(|base| journal_batch.merkleize(base));
         let root = db
             .log
             .with_mem(|base| journal.root(base, &db.log.hasher, inactive_peaks))?;
