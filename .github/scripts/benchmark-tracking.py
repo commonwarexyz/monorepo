@@ -129,11 +129,13 @@ class Result:
 @dataclass(frozen=True)
 class Comparison:
     current: Result
-    baseline: Result
+    baseline: Result | None
     deltas: dict[str, float]
 
     @property
     def gate_failures(self) -> list[Gate]:
+        if self.baseline is None:
+            return []
         return [
             gate
             for gate in self.current.benchmark.gates
@@ -145,13 +147,15 @@ class Comparison:
         return bool(self.gate_failures)
 
     def to_toml(self) -> dict[str, Any]:
-        return {
+        values: dict[str, Any] = {
             **self.current.to_toml(),
-            "baseline_metrics": self.baseline.metrics,
             "metric_deltas": self.deltas,
-            "regressed": self.regressed,
             "failed_gates": [gate.to_toml() for gate in self.gate_failures],
         }
+        if self.baseline is not None:
+            values["baseline_metrics"] = self.baseline.metrics
+            values["regressed"] = self.regressed
+        return values
 
 
 def parse_args() -> argparse.Namespace:
@@ -503,7 +507,8 @@ def compare(current: list[Result], baseline: dict[tuple[str, str], Result]) -> l
     for result in current:
         previous = baseline.get(result.benchmark.key)
         if previous is None:
-            raise ValueError(f"baseline is missing `{result.benchmark.name}`")
+            comparisons.append(Comparison(current=result, baseline=None, deltas={}))
+            continue
         deltas = {}
         for metric in metrics_for([result.benchmark]):
             if metric not in result.metrics:
@@ -547,12 +552,16 @@ def write_outputs(
 
 def render_report(comparisons: list[Comparison]) -> str:
     regressions = sum(1 for item in comparisons if item.regressed)
+    warnings = report_warnings(comparisons)
     lines = [
         COMMENT_MARKER,
         "## Benchmark results",
         "",
         f"Regressions: `{regressions}`.",
     ]
+    if warnings:
+        lines.append("")
+        render_warnings(lines, warnings)
     for item in comparisons:
         lines.extend(["", f"<details><summary>{summary_line(item)}</summary>", ""])
         render_metadata(lines, item.current.benchmark)
@@ -560,7 +569,11 @@ def render_report(comparisons: list[Comparison]) -> str:
         lines.extend(["", "</details>"])
 
     commits = sorted(
-        {item.baseline.commit[:12] for item in comparisons if item.baseline.commit}
+        {
+            item.baseline.commit[:12]
+            for item in comparisons
+            if item.baseline is not None and item.baseline.commit
+        }
     )
     if commits:
         lines.extend(["", f"Baseline commit(s): `{', '.join(commits)}`"])
@@ -568,8 +581,26 @@ def render_report(comparisons: list[Comparison]) -> str:
     return "\n".join(lines)
 
 
+def report_warnings(comparisons: list[Comparison]) -> list[str]:
+    warnings = []
+    for item in comparisons:
+        if item.baseline is None:
+            warnings.append(f"Missing baseline for `{item.current.benchmark.name}`.")
+    return warnings
+
+
+def render_warnings(lines: list[str], warnings: list[str]) -> None:
+    lines.append("> [!WARN]")
+    for warning in warnings:
+        lines.append(f"> {warning}")
+
+
 def summary_line(item: Comparison) -> str:
-    status = "FAIL" if item.regressed else "PASS"
+    name = f"`{escape_summary(item.current.benchmark.name)}`"
+    if item.baseline is None:
+        return f"⚠️ {name} (baseline missing)"
+
+    status = "❌" if item.regressed else "✅"
     gates = item.current.benchmark.gates
     if len(gates) == 1:
         gate = gates[0]
@@ -581,10 +612,7 @@ def summary_line(item: Comparison) -> str:
         )
     else:
         gate_summary = f"{len(item.gate_failures)}/{len(gates)} gates failed"
-    return (
-        f"{status} {escape_summary(item.current.benchmark.name)} "
-        f"({gate_summary})"
-    )
+    return f"{status} {name} ({gate_summary})"
 
 
 def render_metadata(lines: list[str], benchmark: Benchmark) -> None:
@@ -605,6 +633,10 @@ def render_metadata(lines: list[str], benchmark: Benchmark) -> None:
 
 
 def render_metrics(lines: list[str], item: Comparison) -> None:
+    if item.baseline is None:
+        render_current_metrics(lines, item.current)
+        return
+
     lines.extend(["", "| Metric | Baseline | Current | Delta | Gate |", "|---|---:|---:|---:|---|"])
     for metric in metrics_for([item.current.benchmark]):
         gate = gate_text(item.current.benchmark, metric)
@@ -617,6 +649,22 @@ def render_metrics(lines: list[str], item: Comparison) -> None:
                     format_count(item.current.metrics[metric]),
                     format_delta(item.deltas[metric]),
                     gate,
+                ]
+            )
+            + " |"
+        )
+
+
+def render_current_metrics(lines: list[str], item: Result) -> None:
+    lines.extend(["", "| Metric | Current | Gate |", "|---|---:|---|"])
+    for metric in metrics_for([item.benchmark]):
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    f"`{metric}`",
+                    format_count(item.metrics[metric]),
+                    gate_text(item.benchmark, metric),
                 ]
             )
             + " |"
