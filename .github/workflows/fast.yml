@@ -68,7 +68,7 @@ jobs:
       run: just test-docs ${{ matrix.flags }}
 
   Tests:
-    name: "Tests (os: ${{ matrix.os }}, flags: \"${{ matrix.flags }}\") (partition: ${{ matrix.partition }}/2)"
+    name: "Tests (os: ${{ matrix.os }}${{ matrix.flags && format(', flags: \"{0}\"', matrix.flags) }}) (partition: ${{ matrix.partition }}/2)"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:

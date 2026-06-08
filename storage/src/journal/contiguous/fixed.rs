@@ -975,6 +975,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(), Error>>,
     {
+        // A journal sized at `u64::MAX` can never accept an append (the successor size
+        // overflows), so reject it before staging any reset intent.
+        if size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+
         // Stage the reset intent durably. Lower the recovery watermark first so external
         // consumers never see a persisted checkpoint beyond `size`. `init_with_metadata` will
         // detect CLEAR_TARGET_KEY and complete the clear via complete_clear_to_size before
@@ -1154,6 +1160,14 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
+
+        // Reject the append before writing anything if it would push the size past `u64::MAX`.
+        // This keeps the in-loop `inner.size += batch_count` and `section + 1` arithmetic safe.
+        inner
+            .size
+            .checked_add(items_count as u64)
+            .ok_or(Error::SizeOverflow)?;
+
         let first_dirty_section = inner.size / self.items_per_blob;
         Self::mark_dirty_from(&mut inner, first_dirty_section);
         let mut written = 0;

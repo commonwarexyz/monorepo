@@ -35,6 +35,19 @@ fn bounded_positions(u: &mut Unstructured<'_>) -> Result<Vec<u64>> {
     (0..len).map(|_| u64::arbitrary(u)).collect()
 }
 
+/// Generate a size for `init_at_size`, biased toward the `u64` boundary so the fuzzer reliably
+/// exercises the successor-arithmetic overflow paths (e.g. `init_at_size(u64::MAX)` rejection and
+/// appends that push the size to its representable limit).
+fn boundary_size(u: &mut Unstructured<'_>) -> Result<u64> {
+    Ok(match u.int_in_range(0..=4u8)? {
+        0 => u64::MAX,
+        1 => u64::MAX - 1,
+        2 => u64::MAX - u.int_in_range(0..=64u64)?,
+        3 => u.int_in_range(0..=256u64)?,
+        _ => u64::arbitrary(u)?,
+    })
+}
+
 #[derive(Arbitrary, Debug, Clone)]
 enum JournalOperation {
     Append {
@@ -82,6 +95,7 @@ enum JournalOperation {
     },
     PruningBoundary,
     InitAtSize {
+        #[arbitrary(with = boundary_size)]
         size: u64,
     },
 }
@@ -128,8 +142,11 @@ fn fuzz(input: FuzzInput) {
             match op {
                 JournalOperation::Append { value } => {
                     let digest = Sha256::hash(&value.to_be_bytes());
-                    let _pos = journal.append(&digest).await.unwrap();
-                    journal_size += 1;
+                    match journal.append(&digest).await {
+                        Ok(_pos) => journal_size += 1,
+                        Err(Error::SizeOverflow) => {}
+                        Err(e) => panic!("unexpected append error: {e:?}"),
+                    }
                 }
 
                 JournalOperation::Read { pos } => {
@@ -253,8 +270,11 @@ fn fuzz(input: FuzzInput) {
                                 d
                             })
                             .collect();
-                        journal.append_many(Many::Flat(&items)).await.unwrap();
-                        journal_size += *count as u64;
+                        match journal.append_many(Many::Flat(&items)).await {
+                            Ok(_) => journal_size += *count as u64,
+                            Err(Error::SizeOverflow) => {}
+                            Err(e) => panic!("unexpected append_many error: {e:?}"),
+                        }
                     }
                 }
 
@@ -284,8 +304,11 @@ fn fuzz(input: FuzzInput) {
                             })
                             .collect();
                         let slices: &[&[_]] = &[&items_a, &items_b];
-                        journal.append_many(Many::Nested(slices)).await.unwrap();
-                        journal_size += *count_a as u64 + *count_b as u64;
+                        match journal.append_many(Many::Nested(slices)).await {
+                            Ok(_) => journal_size += *count_a as u64 + *count_b as u64,
+                            Err(Error::SizeOverflow) => {}
+                            Err(e) => panic!("unexpected append_many error: {e:?}"),
+                        }
                     }
                 }
 
@@ -317,19 +340,24 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 JournalOperation::InitAtSize { size } => {
-                    // Cap to avoid excessive memory use
-                    let target_size = *size % 256;
                     drop(journal);
-                    journal = Journal::init_at_size(
-                        context
-                            .child("journal")
-                            .with_attribute("instance", restarts),
-                        cfg.clone(),
-                        target_size,
-                    )
-                    .await
-                    .unwrap();
+                    let attempt = context
+                        .child("journal")
+                        .with_attribute("instance", restarts);
                     restarts += 1;
+                    journal = match Journal::init_at_size(attempt, cfg.clone(), *size).await {
+                        Ok(j) => j,
+                        // `u64::MAX` is rejected (no append could ever succeed) before any reset
+                        // is staged, so the prior on-disk state is intact. Reopen it to continue.
+                        Err(Error::SizeOverflow) => {
+                            let reopen = context
+                                .child("journal")
+                                .with_attribute("instance", restarts);
+                            restarts += 1;
+                            Journal::init(reopen, cfg.clone()).await.unwrap()
+                        }
+                        Err(e) => panic!("unexpected init_at_size error: {e:?}"),
+                    };
                     journal_size = journal.size().await;
                     oldest_retained_pos = journal.reader().await.bounds().start;
                 }

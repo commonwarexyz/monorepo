@@ -356,13 +356,12 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.prune_guard(section)?;
 
         // Remove sections in descending order (newest first) to maintain a contiguous record
-        // if a crash occurs during rewind.
-        let sections_to_remove: Vec<u64> = self
-            .blobs
-            .range((section + 1)..)
-            .rev()
-            .map(|(&s, _)| s)
-            .collect();
+        // if a crash occurs during rewind. Section `u64::MAX` has no successor, so there are
+        // no sections above it to remove.
+        let sections_to_remove: Vec<u64> = match section.checked_add(1) {
+            Some(next) => self.blobs.range(next..).rev().map(|(&s, _)| s).collect(),
+            None => Vec::new(),
+        };
 
         for s in sections_to_remove {
             // Remove the underlying blob from storage
