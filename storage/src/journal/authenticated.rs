@@ -126,12 +126,18 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
             "leaf_digests_with expects no items added via add"
         );
 
+        let first = self.inner.leaves();
         let hasher = &self.hasher;
-        self.inner.leaf_digests(items, Vec::new, |buf, item, pos| {
-            buf.clear();
-            item.write(buf);
-            hasher.leaf_digest(pos, buf.as_slice())
-        })
+        self.inner.strategy().map_init_collect_vec(
+            items.iter().enumerate(),
+            Vec::new,
+            |buf, (i, item)| {
+                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
+                buf.clear();
+                item.write(buf);
+                hasher.leaf_digest(pos, buf.as_slice())
+            },
+        )
     }
 
     /// Like [`merkleize`](Self::merkleize), but uses pre-computed leaf digests for `items`.

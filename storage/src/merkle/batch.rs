@@ -225,11 +225,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self
     }
 
-    /// Add a run of pre-computed leaf digests, in order.
-    ///
-    /// Equivalent to calling [`Self::add_leaf_digest`] for each digest, but reserves capacity up
-    /// front to avoid repeated reallocation.
-    fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+    /// Append a run of pre-computed leaf digests and merkleize.
+    pub(crate) fn merkleize_leaf_digests(
+        mut self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        digests: impl IntoIterator<Item = D>,
+    ) -> Arc<MerkleizedBatch<F, D, S>> {
         let digests = digests.into_iter();
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let n = digests.size_hint().0 as u64;
@@ -239,39 +241,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         for digest in digests {
             self = self.add_leaf_digest(digest);
         }
-        self
-    }
-
-    /// Append a run of pre-computed leaf digests and merkleize.
-    pub(crate) fn merkleize_leaf_digests(
-        self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
-        digests: impl IntoIterator<Item = D>,
-    ) -> Arc<MerkleizedBatch<F, D, S>> {
-        self.add_leaf_digests(digests).merkleize(base, hasher)
-    }
-
-    /// Hash `leaves` in parallel.
-    pub(crate) fn leaf_digests<L, T>(
-        &self,
-        leaves: &[L],
-        init: impl Fn() -> T + Send + Sync,
-        leaf_digest: impl Fn(&mut T, &L, Position<F>) -> D + Send + Sync,
-    ) -> Vec<D>
-    where
-        L: Sync,
-        T: Send,
-    {
-        let first = self.leaves();
-        self.strategy().map_init_collect_vec(
-            leaves.iter().enumerate(),
-            init,
-            |state, (i, value)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                leaf_digest(state, value, pos)
-            },
-        )
+        self.merkleize(base, hasher)
     }
 
     /// Hash `element` and add it as a leaf.
@@ -700,7 +670,7 @@ mod tests {
         });
     }
 
-    fn add_leaf_digests_matches_individual<F: Family>() {
+    fn merkleize_leaf_digests_matches_individual<F: Family>() {
         let executor = deterministic::Runner::default();
         executor.start(|_| async move {
             let hasher: H = Standard::new(ForwardFold);
@@ -718,8 +688,7 @@ mod tests {
                 // Append the same leaves via the bulk helper.
                 let bulk = base
                     .new_batch()
-                    .add_leaf_digests(digests.iter().copied())
-                    .merkleize(&base, &hasher);
+                    .merkleize_leaf_digests(&base, &hasher, digests.iter().copied());
 
                 assert_eq!(
                     batch_root(&base, &individual, &hasher),
@@ -1177,8 +1146,8 @@ mod tests {
         consistency_with_reference::<crate::mmr::Family>();
     }
     #[test]
-    fn mmr_add_leaf_digests_matches_individual() {
-        add_leaf_digests_matches_individual::<crate::mmr::Family>();
+    fn mmr_merkleize_leaf_digests_matches_individual() {
+        merkleize_leaf_digests_matches_individual::<crate::mmr::Family>();
     }
     #[test]
     fn mmr_lifecycle() {
@@ -1256,8 +1225,8 @@ mod tests {
         consistency_with_reference::<crate::mmb::Family>();
     }
     #[test]
-    fn mmb_add_leaf_digests_matches_individual() {
-        add_leaf_digests_matches_individual::<crate::mmb::Family>();
+    fn mmb_merkleize_leaf_digests_matches_individual() {
+        merkleize_leaf_digests_matches_individual::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_lifecycle() {
