@@ -42,32 +42,31 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {
-    /// Prune databases and marshal every `maintenance_interval` finalized blocks.
-    pub maintenance_interval: NonZeroUsize,
-
-    /// Extra finalized blocks to retain in marshal beyond `max_pending_acks + 1`.
+    /// Finalized blocks to retain in marshal beyond `max_pending_acks + 1`.
     ///
     /// This should generally be set to a large enough number of blocks to facilitate downtime
     /// on a validator that has completed state sync. If the prune cadence on marshal is too
     /// aggressive, a rebooted node may fail to recover due to peers being unable to serve the
     /// blocks it needs to catch up.
-    pub additional_marshal_blocks: usize,
+    ///
+    /// This value is also used as the pruning cadence.
+    pub retained_marshal_blocks: NonZeroUsize,
 
-    /// Extra finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.
+    /// Finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.
     ///
     /// This value is generally safe to set to 0, as QMDB operations below the active range are only
     /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
     /// a non-zero value here to provide a larger buffer for serving state sync requests during periods
     /// of instability.
-    pub additional_qmdb_blocks: usize,
+    pub retained_qmdb_blocks: usize,
 }
 
 impl PruneConfig {
     /// Ensure marshal is never pruned more aggressively than QMDB.
     pub const fn assert_valid(self) {
         assert!(
-            self.additional_marshal_blocks >= self.additional_qmdb_blocks,
-            "marshal must retain at least as many additional blocks as QMDB",
+            self.retained_marshal_blocks.get() >= self.retained_qmdb_blocks,
+            "marshal must retain at least as many blocks as QMDB",
         );
     }
 }
@@ -114,7 +113,7 @@ where
     /// Periodic database and marshal pruning configuration.
     ///
     /// When enabled, glue retains `max_pending_acks + 1` finalized blocks plus
-    /// the configured extra block windows before pruning. Marshal must retain
+    /// the configured retained block windows before pruning. Marshal must retain
     /// at least as many blocks as QMDB.
     pub prune_config: Option<PruneConfig>,
 }

@@ -629,9 +629,8 @@ impl EngineDefinition for MultiDbEngine {
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
-                    maintenance_interval: NZUsize!(10),
-                    additional_marshal_blocks: 0,
-                    additional_qmdb_blocks: 0,
+                    retained_marshal_blocks: NZUsize!(10),
+                    retained_qmdb_blocks: 0,
                 }),
             },
         );
