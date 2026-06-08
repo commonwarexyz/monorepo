@@ -104,7 +104,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info_span, Instrument as _};
 
 /// An [`Application`] adapter that handles epoch transitions and validates block ancestry.
 ///
@@ -572,13 +572,20 @@ where
                 [parent],
                 ancestor_fetch_duration,
             );
-            let build_request = application.propose(
-                (
-                    runtime_context.child("app_propose"),
-                    consensus_context.clone(),
-                ),
-                ancestor_stream,
-            );
+            let build_request = application
+                .propose(
+                    (
+                        runtime_context.child("app_propose"),
+                        consensus_context.clone(),
+                    ),
+                    ancestor_stream,
+                )
+                .instrument(info_span!(
+                    "marshal.standard.deferred.application.propose",
+                    round = %consensus_context.round,
+                    parent_view = %parent_view,
+                    parent = %parent_commitment
+                ));
 
             let build_timer = build_duration.timer(&runtime_context);
             let built_block = select! {

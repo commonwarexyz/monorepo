@@ -24,7 +24,7 @@ use futures::{
 };
 use rand::Rng;
 use std::sync::mpsc::TryRecvError;
-use tracing::debug;
+use tracing::{debug, Instrument as _};
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
@@ -99,6 +99,7 @@ where
                 break;
             } => match step {
                 Step::Message(Message::Propose {
+                    span,
                     context,
                     ancestry,
                     response,
@@ -112,9 +113,11 @@ where
                             &mut self.input_provider,
                             response,
                         )
+                        .instrument(span)
                         .await;
                 }
                 Step::Message(Message::Verify {
+                    span,
                     context,
                     ancestry,
                     response,
@@ -127,27 +130,34 @@ where
                             ancestry,
                             response,
                         )
+                        .instrument(span)
                         .await;
                 }
                 Step::Message(Message::Finalized {
+                    span,
                     block,
                     acknowledgement,
                 }) => {
-                    if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
-                        self.processor
-                            .notify_finalized(self.context.as_present(), &block)
-                            .await;
+                    if let Some(prune) = async {
+                        if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                            self.processor
+                                .notify_finalized(self.context.as_present(), &block)
+                                .await;
+                            acknowledgement.acknowledge();
+                            return None;
+                        }
+                        let (status, prune) = self.processor.finalize(&self.context, block).await;
+                        if let FinalizeStatus::Persisted { height } = status {
+                            debug!(height = height.get(), "persisted finalized database batch");
+                        }
                         acknowledgement.acknowledge();
-                        continue;
+                        prune
                     }
-                    let (status, prune) = self.processor.finalize(&self.context, block).await;
-                    if let Some(prune) = prune {
+                    .instrument(span)
+                    .await
+                    {
                         pending_prune = Some(prune);
                     }
-                    if let FinalizeStatus::Persisted { height } = status {
-                        debug!(height = height.get(), "persisted finalized database batch");
-                    }
-                    acknowledgement.acknowledge();
                 }
                 Step::Message(Message::SubscribeDatabases { response }) => {
                     response.send_lossy(self.processor.databases().clone());

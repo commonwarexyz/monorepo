@@ -73,7 +73,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
-use tracing::debug;
+use tracing::{debug, info_span, Instrument as _};
 
 /// Tracks `(round, digest)` pairs for which `verify` has already fetched the
 /// block, so `certify` can return immediately without re-subscribing to marshal.
@@ -336,13 +336,20 @@ where
                 [parent],
                 ancestor_fetch_duration,
             );
-            let build_request = application.propose(
-                (
-                    runtime_context.child("app_propose"),
-                    consensus_context.clone(),
-                ),
-                ancestor_stream,
-            );
+            let build_request = application
+                .propose(
+                    (
+                        runtime_context.child("app_propose"),
+                        consensus_context.clone(),
+                    ),
+                    ancestor_stream,
+                )
+                .instrument(info_span!(
+                    "marshal.standard.inline.application.propose",
+                    round = %consensus_context.round,
+                    parent_view = %parent_view,
+                    parent = %parent_commitment
+                ));
 
             let build_timer = build_duration.timer(&runtime_context);
             let built_block = select! {

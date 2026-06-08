@@ -33,10 +33,11 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{num::NonZeroUsize, sync::Arc};
-use tracing::{debug, error};
+use tracing::{debug, error, Instrument as _, Span};
 
 /// Verify request buffered while state sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
+    span: Span,
     context: C,
     ancestry: ErasedAncestorStream<B>,
     response: oneshot::Sender<bool>,
@@ -139,14 +140,18 @@ where
                 break;
             } => match message {
                 Message::Propose {
+                    span,
                     context: (_, context),
                     response,
                     ..
                 } => {
-                    debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
-                    response.send_lossy(None);
+                    span.in_scope(|| {
+                        debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
+                        response.send_lossy(None);
+                    });
                 }
                 Message::Verify {
+                    span,
                     context,
                     ancestry,
                     response,
@@ -154,20 +159,28 @@ where
                     self.held_verify_requests
                         .retain(|request| !request.response.is_closed());
                     self.held_verify_requests.push(HeldVerify {
+                        span: span.clone(),
                         context,
                         ancestry,
                         response,
                     });
-                    debug!(
-                        held_verify_requests = self.held_verify_requests.len(),
-                        "verify held: state sync in progress"
-                    );
+                    span.in_scope(|| {
+                        debug!(
+                            held_verify_requests = self.held_verify_requests.len(),
+                            "verify held: state sync in progress"
+                        );
+                    });
                 }
                 Message::Finalized {
+                    span,
                     block,
                     acknowledgement,
                 } => {
-                    if let Some(handoff) = self.process_finalized(block, acknowledgement).await {
+                    let handoff = self
+                        .process_finalized(block, acknowledgement)
+                        .instrument(span)
+                        .await;
+                    if let Some(handoff) = handoff {
                         self.transition(Some(handoff)).await;
                         return;
                     }
@@ -295,6 +308,7 @@ where
                     request.ancestry,
                     request.response,
                 )
+                .instrument(request.span)
                 .await;
         }
 

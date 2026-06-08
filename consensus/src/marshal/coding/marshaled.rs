@@ -119,7 +119,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info_span, warn, Instrument as _};
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -415,13 +415,21 @@ where
                 [block.clone(), parent],
                 ancestor_fetch_duration,
             );
-            let validity_request = application.verify(
-                (
-                    runtime_context.child("app_verify"),
-                    consensus_context.clone(),
-                ),
-                ancestry_stream,
-            );
+            let validity_request = application
+                .verify(
+                    (
+                        runtime_context.child("app_verify"),
+                        consensus_context.clone(),
+                    ),
+                    ancestry_stream,
+                )
+                .instrument(info_span!(
+                    "marshal.coding.application.verify",
+                    round = %consensus_context.round,
+                    commitment = %commitment,
+                    parent_view = %parent_view,
+                    parent = %parent_commitment
+                ));
 
             // If consensus drops the receiver, we can stop work early.
             let timer = verify_duration.timer(&runtime_context);
@@ -790,13 +798,20 @@ where
                 [parent],
                 ancestor_fetch_duration,
             );
-            let build_request = application.propose(
-                (
-                    runtime_context.child("app_propose"),
-                    consensus_context.clone(),
-                ),
-                ancestor_stream,
-            );
+            let build_request = application
+                .propose(
+                    (
+                        runtime_context.child("app_propose"),
+                        consensus_context.clone(),
+                    ),
+                    ancestor_stream,
+                )
+                .instrument(info_span!(
+                    "marshal.coding.application.propose",
+                    round = %consensus_context.round,
+                    parent_view = %parent_view,
+                    parent = %parent_commitment
+                ));
 
             let build_timer = build_duration.timer(&runtime_context);
             let built_block = select! {
