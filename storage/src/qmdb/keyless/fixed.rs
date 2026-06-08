@@ -80,7 +80,10 @@ mod test {
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
-    use std::num::{NonZeroU16, NonZeroUsize};
+    use std::{
+        cell::Cell,
+        num::{NonZeroU16, NonZeroUsize},
+    };
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
@@ -111,6 +114,83 @@ mod test {
         Db<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Rayon>;
     type TestCompactDb<F> =
         CompactDb<F, deterministic::Context, commonware_utils::sequence::U64, Sha256, Sequential>;
+
+    thread_local! {
+        static STRATEGY_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct EncodingStrategy;
+
+    impl Strategy for EncodingStrategy {
+        fn fold_init<I, INIT, T, R, ID, F, RD>(
+            &self,
+            iter: I,
+            init: INIT,
+            identity: ID,
+            fold_op: F,
+            _reduce_op: RD,
+        ) -> R
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            R: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, &mut T, I::Item) -> R + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            let was_active = STRATEGY_ACTIVE.with(|active| active.replace(true));
+            let mut init_val = init();
+            let result = iter
+                .into_iter()
+                .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item));
+            STRATEGY_ACTIVE.with(|active| active.set(was_active));
+            result
+        }
+
+        fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
+        where
+            A: FnOnce() -> RA + Send,
+            B: FnOnce() -> RB + Send,
+            RA: Send,
+            RB: Send,
+        {
+            (a(), b())
+        }
+
+        fn parallelism_hint(&self) -> usize {
+            1
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct StrategyEncodedValue(u64);
+
+    impl commonware_codec::FixedSize for StrategyEncodedValue {
+        const SIZE: usize = <u64 as commonware_codec::FixedSize>::SIZE;
+    }
+
+    impl commonware_codec::Write for StrategyEncodedValue {
+        fn write(&self, buf: &mut impl bytes::BufMut) {
+            assert!(
+                STRATEGY_ACTIVE.with(Cell::get),
+                "operation encoded outside strategy"
+            );
+            <u64 as commonware_codec::Write>::write(&self.0, buf);
+        }
+    }
+
+    impl commonware_codec::Read for StrategyEncodedValue {
+        type Cfg = ();
+
+        fn read_cfg(
+            buf: &mut impl bytes::Buf,
+            cfg: &Self::Cfg,
+        ) -> Result<Self, commonware_codec::Error> {
+            <u64 as commonware_codec::Read>::read_cfg(buf, cfg).map(Self)
+        }
+    }
 
     async fn open_db<F: Family>(context: deterministic::Context) -> TestDb<F> {
         open_db_with_suffix("partition", context).await
@@ -300,6 +380,54 @@ mod test {
         deterministic::Runner::default().start(|ctx| async move {
             let db = open_rayon_db::<mmr::Family>(ctx.child("db").with_attribute("index", 1)).await;
             tests::test_keyless_db_metadata(db).await;
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_encodes_operations_with_strategy() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let cfg = db_config("strategy", &ctx, EncodingStrategy);
+            let db =
+                Db::<mmr::Family, _, StrategyEncodedValue, Sha256, EncodingStrategy>::init(
+                    ctx.child("db"),
+                    cfg,
+                )
+                .await
+                .unwrap();
+
+            let floor = db.inactivity_floor_loc();
+            db.new_batch()
+                .append(StrategyEncodedValue(7))
+                .merkleize(&db, None, floor);
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_keyless_fixed_compact_encodes_operations_with_strategy() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let page_cache = CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = CompactConfig {
+                merkle: crate::merkle::compact::Config {
+                    partition: "compact-keyless-fixed-strategy".into(),
+                    items_per_section: NZU64!(7),
+                    page_cache,
+                    write_buffer: NZUsize!(1024),
+                    strategy: EncodingStrategy,
+                },
+                commit_codec_config: (),
+            };
+            let db =
+                CompactDb::<mmr::Family, _, StrategyEncodedValue, Sha256, EncodingStrategy>::init(
+                    ctx.child("db"),
+                    cfg,
+                )
+                .await
+                .unwrap();
+
+            let floor = db.inactivity_floor_loc();
+            db.new_batch()
+                .append(StrategyEncodedValue(7))
+                .merkleize(&db, None, floor);
         });
     }
 

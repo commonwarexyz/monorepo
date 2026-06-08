@@ -270,15 +270,14 @@ where
         let total_size = base + ops.len() as u64;
 
         // Add operations to the journal batch and merkleize.
-        let mut journal_batch = self.journal_batch;
-        for op in &ops {
-            journal_batch = journal_batch.add(op.clone());
-        }
+        let ops = Arc::new(ops);
         let inactive_peaks = F::inactive_peaks(
             F::location_to_position(Location::new(total_size)),
             inactivity_floor,
         );
-        let journal = db.journal.with_mem(|mem| journal_batch.merkleize(mem));
+        let journal = db
+            .journal
+            .with_mem(|mem| self.journal_batch.merkleize_with(mem, ops));
         let root = db
             .journal
             .with_mem(|mem| journal.root(mem, &db.journal.hasher, inactive_peaks))
