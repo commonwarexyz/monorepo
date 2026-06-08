@@ -47,6 +47,11 @@ tracing-subscriber.workspace = true
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 gungraun = { workspace = true, features = ["client_requests"] }
 
+[package.metadata.cargo-udeps.ignore]
+# `gungraun` is exercised only by the feature-gated Linux benchmark target, so cargo-udeps
+# flags it falsely.
+development = ["gungraun"]
+
 [features]
 default = [ "std" ]
 std = [

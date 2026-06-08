@@ -5,8 +5,9 @@ The script has two modes:
 
 * ``generate`` runs the configured benchmarks and writes ``current.toml``. This
   is the baseline artifact uploaded from ``main``.
-* ``check`` runs the same benchmarks, compares them with a required baseline,
-  writes comparison artifacts, and renders ``comment.md`` for pull requests.
+* ``check`` runs the same benchmarks, compares them with a baseline when one is
+  available, writes comparison artifacts, and renders ``comment.md`` for pull
+  requests.
 """
 
 from __future__ import annotations
@@ -167,7 +168,7 @@ def parse_args() -> argparse.Namespace:
     subcommands = parser.add_subparsers(dest="mode", required=True)
 
     check = subcommands.add_parser("check", parents=[common])
-    check.add_argument("--baseline", required=True, type=Path)
+    check.add_argument("--baseline", type=Path)
 
     subcommands.add_parser("generate", parents=[common])
     return parser.parse_args()
@@ -488,9 +489,9 @@ def parse_metric_value(value: Any) -> int | None:
     return None
 
 
-def load_baseline(path: Path) -> dict[tuple[str, str], Result]:
-    if not path.exists():
-        raise ValueError(f"baseline `{path}` does not exist")
+def load_baseline(path: Path | None) -> dict[tuple[str, str], Result]:
+    if path is None or not path.exists():
+        return {}
     values = read_toml(path).get("benchmarks")
     if not isinstance(values, list):
         raise ValueError(f"baseline `{path}` must contain a `benchmarks` array")
@@ -591,7 +592,8 @@ def report_warnings(comparisons: list[Comparison]) -> list[str]:
 
 
 def render_warnings(lines: list[str], warnings: list[str]) -> None:
-    lines.append("> [!WARN]")
+    lines.append("> [!WARNING]")
+    lines.append(">")
     for warning in warnings:
         lines.append(f"> {warning}")
 
