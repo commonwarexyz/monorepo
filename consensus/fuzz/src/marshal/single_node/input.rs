@@ -66,6 +66,9 @@ pub enum MarshalEvent {
     /// Subscribe to a block by digest or commitment with a fetch fallback,
     /// exercising the missing-block subscription path.
     Subscribe { block_idx: u8, by_commitment: bool },
+    /// Submit a synchronous burst of mailbox traffic to exercise bounded
+    /// mailbox overflow, coalescing, pruning, and dropped subscribers.
+    MailboxBurst { block_idx: u8 },
     /// Set marshal's durable floor to the next processable finalized block.
     SetFloor { block_idx: u8 },
     /// Request pruning finalized archives below a height (only effective at
@@ -90,7 +93,7 @@ pub enum MarshalEvent {
 
 impl Arbitrary<'_> for MarshalEvent {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(match u.int_in_range(0..=119)? {
+        Ok(match u.int_in_range(0..=127)? {
             0..=11 => Self::Propose {
                 block_idx: block_idx(u)?,
             },
@@ -128,17 +131,20 @@ impl Arbitrary<'_> for MarshalEvent {
                 block_idx: block_idx(u)?,
                 by_commitment: u.arbitrary()?,
             },
-            88..=93 => Self::SetFloor {
+            88..=95 => Self::MailboxBurst {
                 block_idx: block_idx(u)?,
             },
-            94..=97 => Self::Prune {
+            96..=101 => Self::SetFloor {
                 block_idx: block_idx(u)?,
             },
-            98..=105 => Self::PublishViaVariant {
+            102..=105 => Self::Prune {
                 block_idx: block_idx(u)?,
             },
-            106..=113 => Self::AckNext,
-            114..=117 => Self::Restart,
+            106..=113 => Self::PublishViaVariant {
+                block_idx: block_idx(u)?,
+            },
+            114..=121 => Self::AckNext,
+            122..=125 => Self::Restart,
             _ => Self::Idle,
         })
     }
@@ -155,6 +161,7 @@ impl Arbitrary<'_> for MarshalFuzzInput {
         let event_count = u.int_in_range(MIN_EVENTS..=MAX_EVENTS)?;
         let mut events = Vec::with_capacity(event_count);
         events.extend([
+            MarshalEvent::MailboxBurst { block_idx: 0 },
             MarshalEvent::Subscribe {
                 block_idx: 0,
                 by_commitment: true,
