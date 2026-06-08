@@ -680,6 +680,13 @@ where
         };
 
         self.databases.finalize(batch).await;
+        self.app
+            .finalized(
+                (context.child("finalized"), block.context()),
+                &block,
+                &self.databases,
+            )
+            .await;
         let prune = self.pruning.observe_finalized(height, sync_targets);
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor {
@@ -1024,15 +1031,40 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct FinalizedObserver {
+        db_config: any::FixedConfig<TwoCap, Sequential>,
+        reopened_values: Arc<Mutex<Vec<u64>>>,
+    }
+
+    #[derive(Clone)]
     struct ExecutionApp {
         genesis: Block,
+        finalized_observer: Option<FinalizedObserver>,
     }
 
     impl ExecutionApp {
         fn new() -> Self {
             Self {
                 genesis: Block::genesis(),
+                finalized_observer: None,
             }
+        }
+
+        fn with_finalized_observer(
+            db_config: any::FixedConfig<TwoCap, Sequential>,
+        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
+            let reopened_values = Arc::new(Mutex::new(Vec::new()));
+            let observer = FinalizedObserver {
+                db_config,
+                reopened_values: reopened_values.clone(),
+            };
+            (
+                Self {
+                    genesis: Block::genesis(),
+                    finalized_observer: Some(observer),
+                },
+                reopened_values,
+            )
         }
 
         async fn execute(
@@ -1112,6 +1144,30 @@ mod tests {
             batches: <Self::Databases as DatabaseSet<deterministic::Context>>::Unmerkleized,
         ) -> <Self::Databases as DatabaseSet<deterministic::Context>>::Merkleized {
             Self::execute(block.height(), block.context.round.view(), batches).await
+        }
+
+        async fn finalized(
+            &mut self,
+            context: (deterministic::Context, Self::Context),
+            block: &Self::Block,
+            _databases: &Self::Databases,
+        ) {
+            let Some(observer) = self.finalized_observer.clone() else {
+                return;
+            };
+            let reopened: Qmdb<deterministic::Context> =
+                Qmdb::init(context.0.child("reopen_finalized"), observer.db_config)
+                    .await
+                    .expect("database reopen should succeed");
+            let value = reopened
+                .get(&height_key(block.height()))
+                .await
+                .expect("reopened db read should succeed")
+                .expect("finalized height should be durable");
+            observer
+                .reopened_values
+                .lock()
+                .push(digest_to_u64(&value));
         }
 
         fn sync_targets(
@@ -1206,6 +1262,18 @@ mod tests {
             let provider = MapProvider::default();
             let config = qmdb_config(&next_partition_prefix(), &context);
             Self::with_app(context, provider, config.clone(), ExecutionApp::new()).await
+        }
+
+        async fn new_with_finalized_observer(
+            context: deterministic::Context,
+        ) -> (Self, Arc<Mutex<Vec<u64>>>) {
+            let provider = MapProvider::default();
+            let config = qmdb_config(&next_partition_prefix(), &context);
+            let (app, reopened_values) = ExecutionApp::with_finalized_observer(config.clone());
+            (
+                Self::with_app(context, provider, config, app).await,
+                reopened_values,
+            )
         }
 
         async fn with_app(
@@ -1820,6 +1888,37 @@ mod tests {
                     .await,
                 Some(1),
                 "height state should survive reopen after finalization",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_finalized_hook_runs_for_each_durable_block() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut harness, finalized_values) =
+                Harness::new_with_finalized_observer(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+            let block2 = harness.stage_pending_child(&block1, View::new(2)).await;
+
+            let status = harness.finalize(block1).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+            let status = harness.finalize(block2).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(2)
+                }
+            );
+            assert_eq!(
+                finalized_values.lock().clone(),
+                vec![1, 2],
+                "finalized hook should observe every durably committed block",
             );
         });
     }

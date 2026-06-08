@@ -254,4 +254,24 @@ where
         block: &Self::Block,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
+
+    /// Observe a block after its database batches have been durably finalized.
+    ///
+    /// The wrapper calls this for every block it receives from marshal's
+    /// finalized block stream and applies to the database set. It is called
+    /// after [`DatabaseSet::finalize`] succeeds and before the marshal
+    /// acknowledgement is released, matching marshal's reporter delivery
+    /// contract.
+    ///
+    /// # Panics
+    ///
+    /// Implementations should panic if post-finalization maintenance fails.
+    fn finalized(
+        &mut self,
+        _context: (E, Self::Context),
+        _block: &Self::Block,
+        _databases: &Self::Databases,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
 }
