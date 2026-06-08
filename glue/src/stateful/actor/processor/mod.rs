@@ -680,13 +680,7 @@ where
         };
 
         self.databases.finalize(batch).await;
-        self.app
-            .finalized(
-                (context.child("finalized"), block.context()),
-                &block,
-                &self.databases,
-            )
-            .await;
+        self.notify_finalized(context, &block).await;
         let prune = self.pruning.observe_finalized(height, sync_targets);
         self.prune_pending_after_finalize(&digest, round);
         self.last_processed = Anchor {
@@ -697,6 +691,18 @@ where
         timer.observe(context);
 
         (FinalizeStatus::Persisted { height }, prune)
+    }
+
+    /// Notify the application that marshal delivered a finalized block already
+    /// reflected in the database set.
+    pub(super) async fn notify_finalized(&mut self, context: &E, block: &A::Block) {
+        self.app
+            .finalized(
+                (context.child("finalized"), block.context()),
+                block,
+                &self.databases,
+            )
+            .await;
     }
 
     /// Remove pending state that is not compatible with the finalized winner.
@@ -1164,10 +1170,7 @@ mod tests {
                 .await
                 .expect("reopened db read should succeed")
                 .expect("finalized height should be durable");
-            observer
-                .reopened_values
-                .lock()
-                .push(digest_to_u64(&value));
+            observer.reopened_values.lock().push(digest_to_u64(&value));
         }
 
         fn sync_targets(
@@ -1919,6 +1922,35 @@ mod tests {
                 finalized_values.lock().clone(),
                 vec![1, 2],
                 "finalized hook should observe every durably committed block",
+            );
+        });
+    }
+
+    #[test]
+    fn execution_finalized_hook_runs_for_already_reflected_block() {
+        deterministic::Runner::default().start(|context| async move {
+            let (mut harness, finalized_values) =
+                Harness::new_with_finalized_observer(context).await;
+            let genesis = Block::genesis();
+            let block1 = harness.stage_pending_child(&genesis, View::new(1)).await;
+
+            let status = harness.finalize(block1.clone()).await;
+            assert_eq!(
+                status,
+                FinalizeStatus::Persisted {
+                    height: Height::new(1)
+                }
+            );
+
+            finalized_values.lock().clear();
+            harness
+                .processor
+                .notify_finalized(harness.context_cell.as_present(), &block1)
+                .await;
+            assert_eq!(
+                finalized_values.lock().clone(),
+                vec![1],
+                "finalized hook should run for blocks already reflected in the database set",
             );
         });
     }

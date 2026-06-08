@@ -141,6 +141,7 @@ where
                     acknowledgement,
                 }) => {
                     if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
+                        self.processor.notify_finalized(self.context.as_present(), &block).await;
                         acknowledgement.acknowledge();
                         continue;
                     }

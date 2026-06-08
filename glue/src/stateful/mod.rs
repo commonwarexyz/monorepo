@@ -255,13 +255,21 @@ where
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> impl Future<Output = <Self::Databases as DatabaseSet<E>>::Merkleized> + Send;
 
-    /// Observe a block after its database batches have been durably finalized.
+    /// Observe a finalized block after it is reflected in durable state.
     ///
-    /// The wrapper calls this for every block it receives from marshal's
-    /// finalized block stream and applies to the database set. It is called
-    /// after [`DatabaseSet::finalize`] succeeds and before the marshal
-    /// acknowledgement is released, matching marshal's reporter delivery
-    /// contract.
+    /// Once the database set is ready, the wrapper calls this for every
+    /// finalized block it receives from marshal before releasing that block's
+    /// marshal acknowledgement. Blocks applied through normal processing are
+    /// reported after [`DatabaseSet::finalize`] succeeds. Blocks already
+    /// reflected by startup reconciliation or completed state sync are reported
+    /// without reapplying them.
+    ///
+    /// During peer state sync, finalized blocks observed before sync completes
+    /// are used to update the sync target and are not reported here.
+    ///
+    /// Inherited from marshal's reporter stream, this is an at-least-once notification:
+    /// a crash after this hook runs but before the marshal acknowledgement is
+    /// durable may cause the same block to be reported again after restart.
     ///
     /// # Panics
     ///
