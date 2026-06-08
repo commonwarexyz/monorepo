@@ -175,16 +175,25 @@ impl<T: Clone> Maintenance<T> {
     /// Observe a newly finalized block and decide whether maintenance should
     /// run for it.
     ///
-    /// When pruning is enabled, preflush maintenance targets the retained block
-    /// that will be pruned at the next pruning boundary. Prune maintenance first
-    /// retains `retention` finalized `(height, sync_targets)` pairs, including
-    /// the tip. It then prunes only when that full window is populated and the
-    /// current finalized height matches the configured cadence. The prune target
-    /// is the oldest retained finalized target and its corresponding finalized
-    /// block height.
+    /// Maintenance always preflushes on the configured cadence so databases can
+    /// move pending writes out of memory. When pruning is enabled, preflush
+    /// maintenance targets the retained block that will be pruned at the next
+    /// pruning boundary. Prune maintenance first retains `retention` finalized
+    /// `(height, sync_targets)` pairs, including the tip. It then prunes only
+    /// when that full window is populated and the current finalized height
+    /// matches the configured cadence. The prune target is the oldest retained
+    /// finalized target and its corresponding finalized block height.
     fn observe_finalized(&mut self, height: Height, targets: T) -> MaintenanceAction<T> {
+        let interval = u64::try_from(self.config.interval.get())
+            .expect("maintenance interval should fit in u64");
+        let at_maintenance_boundary = height.get().is_multiple_of(interval);
+
         let Some(retention_window) = self.prune_retention_window else {
-            return MaintenanceAction::None;
+            return if at_maintenance_boundary {
+                MaintenanceAction::Preflush { height, targets }
+            } else {
+                MaintenanceAction::None
+            };
         };
 
         self.retained_targets.push_back((height, targets));
@@ -192,11 +201,7 @@ impl<T: Clone> Maintenance<T> {
             self.retained_targets.pop_front();
         }
 
-        let interval = u64::try_from(self.config.interval.get())
-            .expect("maintenance interval should fit in u64");
-        let at_prune_boundary = height.get().is_multiple_of(interval);
-
-        if at_prune_boundary && self.retained_targets.len() >= retention_window {
+        if at_maintenance_boundary && self.retained_targets.len() >= retention_window {
             let (prune_height, targets) = self
                 .retained_targets
                 .front()
@@ -221,7 +226,7 @@ impl<T: Clone> Maintenance<T> {
             };
         }
 
-        let prune_height = if at_prune_boundary {
+        let prune_height = if at_maintenance_boundary {
             Self::next_prune_height_after(height, interval)
         } else {
             let current = height.get();
@@ -1790,7 +1795,7 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_does_not_persist_without_pruning() {
+    fn maintenance_preflushes_without_pruning() {
         let mut maintenance = Maintenance::new(
             MaintenanceConfig {
                 interval: NZUsize!(2),
@@ -1804,7 +1809,21 @@ mod tests {
         );
         assert_eq!(
             maintenance.observe_finalized(Height::new(2), 20_u64),
+            MaintenanceAction::Preflush {
+                height: Height::new(2),
+                targets: 20,
+            },
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(3), 30_u64),
             MaintenanceAction::None,
+        );
+        assert_eq!(
+            maintenance.observe_finalized(Height::new(4), 40_u64),
+            MaintenanceAction::Preflush {
+                height: Height::new(4),
+                targets: 40,
+            },
         );
     }
 

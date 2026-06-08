@@ -39,14 +39,14 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Periodic database maintenance performed after finalization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MaintenanceConfig {
-    /// Run prune maintenance every `interval` finalized blocks.
+    /// Run durable database maintenance every `interval` finalized blocks.
     pub interval: NonZeroUsize,
 
     /// Number of finalized target pairs to retain, including the tip.
     ///
     /// With pruning enabled, glue prunes to the oldest retained target. For example,
     /// `Some(1024)` keeps 1024 finalized targets and prunes to the oldest one.
-    /// When `None`, no periodic durable database maintenance is scheduled.
+    /// When `None`, glue still runs periodic preflush maintenance but does not prune.
     pub retention: Option<NonZeroUsize>,
 }
 
