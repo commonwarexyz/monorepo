@@ -702,6 +702,7 @@ where
         self,
         mut ops: Vec<Operation<F, U>>,
         mut diff: DiffVec<U::Key, F, U::Value>,
+        superseded_floor_locations: Vec<Location<F>>,
         active_keys_delta: isize,
         user_steps: u64,
         metadata: Option<U::Value>,
@@ -728,6 +729,11 @@ where
             let mut moved = 0u64;
             let mut scan_from = floor;
             let mut floor_diff = Vec::with_capacity(total_steps as usize);
+            let mut superseded = superseded_floor_locations;
+            superseded.extend(diff.iter().filter_map(|(_, entry)| entry.base_old_loc()));
+            superseded.sort();
+            superseded.dedup();
+            let mut superseded_idx = 0;
 
             while moved < total_steps {
                 // Collect candidates, capped by the number of active ops still needed.
@@ -739,8 +745,26 @@ where
                     let Some(candidate) = next_candidate(scan_from, fixed_tip) else {
                         break;
                     };
-                    candidates.push(candidate);
+
+                    while superseded
+                        .get(superseded_idx)
+                        .is_some_and(|loc| *loc < candidate)
+                    {
+                        superseded_idx += 1;
+                    }
+                    if superseded.get(superseded_idx) == Some(&candidate) {
+                        let mut next = Location::new(*candidate + 1);
+                        superseded_idx += 1;
+                        while superseded.get(superseded_idx) == Some(&next) {
+                            superseded_idx += 1;
+                            next = Location::new(*next + 1);
+                        }
+                        floor = next;
+                        scan_from = next;
+                        continue;
+                    }
                     scan_from = Location::new(*candidate + 1);
+                    candidates.push(candidate);
                 }
                 if candidates.is_empty() {
                     break;
@@ -1069,6 +1093,7 @@ where
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
             Vec::with_capacity(mutations.len() + 1);
         let mut diff: DiffVec<K, F, V::Value> = Vec::with_capacity(mutations.len());
+        let mut superseded_floor_locations = Vec::with_capacity(locations.len());
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
 
@@ -1097,6 +1122,7 @@ where
                 // any mutation key. The mutation will be handled as a create below.
                 continue;
             };
+            superseded_floor_locations.push(old_loc);
 
             // Write the user mutation at the next batch location while
             // preserving the committed-base provenance computed above.
@@ -1167,6 +1193,7 @@ where
         m.finish(
             ops,
             diff,
+            superseded_floor_locations,
             active_keys_delta,
             user_steps,
             metadata,
@@ -1243,6 +1270,7 @@ where
         let mut prev_candidates: PrevCandidates<K, F, V::Value> = Vec::new();
         let mut deleted: Vec<(K, Location<F>)> = Vec::new();
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
+        let mut superseded_floor_locations = Vec::with_capacity(locations.len());
 
         for (op, &old_loc) in m
             .read_ops(&locations, &[], &reader)
@@ -1275,6 +1303,7 @@ where
             } else {
                 deleted.push((key, old_loc));
             }
+            superseded_floor_locations.push(old_loc);
         }
 
         deleted.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1516,6 +1545,7 @@ where
                         base_old_loc: prev_base_old_loc,
                     },
                 ));
+                superseded_floor_locations.push(*prev_loc);
                 user_steps += 1;
             }
         }
@@ -1526,6 +1556,7 @@ where
         m.finish(
             ops,
             diff,
+            superseded_floor_locations,
             active_keys_delta,
             user_steps,
             metadata,
@@ -1755,11 +1786,16 @@ where
             .validate_apply_to(db_size, self.inactivity_floor_loc)?;
         let start_loc = Location::new(db_size);
 
-        // Apply journal (handles its own partial ancestor skipping).
-        self.log.apply_batch(&batch.journal_batch).await?;
+        let journal = async {
+            self.log
+                .apply_batch(&batch.journal_batch)
+                .await
+                .map_err(crate::qmdb::Error::from)
+        };
+        let state = async {
+            let previous_last_commit_loc = self.last_commit_loc;
 
-        // Scoped so the bitmap guard drops before later `.await`s (guard is `!Send`).
-        {
+            // Scoped so the bitmap guard drops before this future returns.
             let mut bitmap = self.bitmap.write();
             bitmap.extend_to(batch.bounds.total_size);
 
@@ -1799,15 +1835,16 @@ where
             // CommitFloor: bit = 1 only on the current last commit. Demote the previous and
             // set the new; earlier ancestor commits between them are already 0 from
             // `extend_to`.
-            bitmap.set_bit(*self.last_commit_loc, false);
+            bitmap.set_bit(*previous_last_commit_loc, false);
             bitmap.set_bit(batch.bounds.total_size - 1, true);
-        }
 
-        // Update DB metadata.
-        self.active_keys = batch.total_active_keys;
-        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
-        self.root = batch.root;
+            self.active_keys = batch.total_active_keys;
+            self.inactivity_floor_loc = batch.bounds.inactivity_floor;
+            self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
+            self.root = batch.root;
+            Ok::<(), crate::qmdb::Error<F>>(())
+        };
+        futures::try_join!(journal, state)?;
 
         // Return range of operations that were written to the log.
         let end_loc = Location::new(*self.last_commit_loc + 1);
@@ -1820,86 +1857,6 @@ where
         Ok(range)
     }
 
-    /// Apply a batch and buffer pending operation-log and Merkle data.
-    #[tracing::instrument(
-        name = "qmdb::any::Db::apply_batch_and_buffer_pending",
-        level = "info",
-        skip_all,
-        fields(
-            batch_total_size = batch.bounds.total_size,
-            batch_base_size = batch.bounds.base_size,
-            db_size = *self.last_commit_loc + 1,
-            ancestor_batches = batch.ancestor_diffs.len() as u64,
-        ),
-    )]
-    pub async fn apply_batch_and_buffer_pending(
-        &mut self,
-        batch: Arc<MerkleizedBatch<F, H::Digest, U, S>>,
-    ) -> Result<Range<Location<F>>, crate::qmdb::Error<F>> {
-        let _timer = self.metrics.operations.apply_batch_timer();
-        self.metrics.operations.apply_batch_calls.inc();
-        let db_size = *self.last_commit_loc + 1;
-        batch
-            .bounds
-            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
-        let start_loc = Location::new(db_size);
-
-        self.log
-            .apply_batch_and_buffer_pending(&batch.journal_batch)
-            .await?;
-
-        {
-            let mut bitmap = self.bitmap.write();
-            bitmap.extend_to(batch.bounds.total_size);
-
-            if batch.ancestor_diffs.is_empty() {
-                for (key, entry) in batch.diff.iter() {
-                    apply_diff(
-                        &mut self.snapshot,
-                        &mut bitmap,
-                        key,
-                        entry,
-                        entry.base_old_loc(),
-                    );
-                }
-            } else {
-                let mut applied = Vec::with_capacity(batch.ancestor_diffs.len());
-                let mut pending = Vec::with_capacity(batch.ancestor_diffs.len());
-                for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-                    if batch.bounds.ancestors[i].end <= db_size {
-                        applied.push(ancestor_diff.as_slice());
-                    } else {
-                        pending.push(ancestor_diff.as_slice());
-                    }
-                }
-                let mut resolver = AppliedAncestorResolver::new(applied);
-                let merge = DiffMerge::new(
-                    iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
-                );
-                for (key, entry) in merge {
-                    let old = resolver.lookup(key).unwrap_or_else(|| entry.base_old_loc());
-                    apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
-                }
-            }
-
-            bitmap.set_bit(*self.last_commit_loc, false);
-            bitmap.set_bit(batch.bounds.total_size - 1, true);
-        }
-
-        self.active_keys = batch.total_active_keys;
-        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
-        self.root = batch.root;
-
-        let end_loc = Location::new(*self.last_commit_loc + 1);
-        let range = start_loc..end_loc;
-        self.update_metrics().await;
-        self.metrics
-            .operations
-            .operations_applied
-            .inc_by(*range.end - *range.start);
-        Ok(range)
-    }
 }
 
 impl<F: Family, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>

@@ -15,7 +15,10 @@ use commonware_cryptography::{
 use commonware_runtime::{deterministic, Buf, BufMut};
 use commonware_utils::sync::AsyncRwLock;
 use futures::Stream;
-use std::{convert::Infallible, sync::Arc};
+use std::{
+    convert::Infallible,
+    sync::{Arc, Mutex},
+};
 
 pub(crate) type TestDatabases = Arc<AsyncRwLock<TestDb>>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
@@ -50,7 +53,9 @@ impl Merkleized for TestMerkleized {
 }
 
 #[derive(Default)]
-pub(crate) struct TestDb;
+pub(crate) struct TestDb {
+    pub(crate) events: Arc<Mutex<Vec<&'static str>>>,
+}
 
 impl<E: Send> ManagedDb<E> for TestDb {
     type Unmerkleized = TestUnmerkleized;
@@ -60,7 +65,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
     type SyncTarget = u64;
 
     async fn init(_context: E, _config: Self::Config) -> Result<Self, Self::Error> {
-        Ok(Self)
+        Ok(Self::default())
     }
 
     async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
@@ -72,10 +77,34 @@ impl<E: Send> ManagedDb<E> for TestDb {
     }
 
     async fn finalize(&mut self, _batch: Self::Merkleized) -> Result<(), Self::Error> {
+        self.events
+            .lock()
+            .expect("test db events mutex poisoned")
+            .push("finalize");
         Ok(())
     }
 
     async fn persist(&mut self) -> Result<(), Self::Error> {
+        self.events
+            .lock()
+            .expect("test db events mutex poisoned")
+            .push("persist");
+        Ok(())
+    }
+
+    async fn preflush_to(&self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+        self.events
+            .lock()
+            .expect("test db events mutex poisoned")
+            .push("preflush_to");
+        Ok(())
+    }
+
+    async fn prune(&mut self, _target: &Self::SyncTarget) -> Result<(), Self::Error> {
+        self.events
+            .lock()
+            .expect("test db events mutex poisoned")
+            .push("prune");
         Ok(())
     }
 
@@ -217,7 +246,7 @@ impl Application<deterministic::Context> for TestApp {
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Arc::new(AsyncRwLock::new(TestDb))
+    Arc::new(AsyncRwLock::new(TestDb::default()))
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

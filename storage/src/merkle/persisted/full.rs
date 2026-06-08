@@ -607,20 +607,59 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     fn snapshot_missing(&self, journal_size: Position<F>) -> Option<MissingSnapshot<F, D>> {
         let inner = self.inner.read();
         let size = inner.mem.size();
-        let sync_target_leaves = inner.mem.leaves();
+        self.snapshot_missing_to_inner(&inner, journal_size, size)
+    }
 
+    fn snapshot_missing_to(
+        &self,
+        journal_size: Position<F>,
+        target_size: Position<F>,
+    ) -> Option<MissingSnapshot<F, D>> {
+        let inner = self.inner.read();
+        let size = inner.mem.size();
+        let target_size = if target_size > size {
+            size
+        } else {
+            target_size
+        };
+
+        self.snapshot_missing_to_inner(&inner, journal_size, target_size)
+    }
+
+    fn snapshot_missing_to_inner(
+        &self,
+        inner: &Inner<F, D>,
+        journal_size: Position<F>,
+        target_size: Position<F>,
+    ) -> Option<MissingSnapshot<F, D>> {
+        let size = inner.mem.size();
         assert!(
             journal_size <= size,
             "journal size should never exceed in-memory structure size"
         );
-        if journal_size == size {
+        let mem_pruning_boundary =
+            Position::try_from(inner.mem.bounds().start).expect("valid mem pruning boundary");
+        if target_size <= mem_pruning_boundary {
             return None;
         }
 
-        let mut missing_nodes = Vec::with_capacity((*size - *journal_size) as usize);
-        for pos in *journal_size..*size {
-            let node = *inner.mem.get_node_unchecked(Position::new(pos));
-            missing_nodes.push(node);
+        let sync_target_leaves = Location::try_from(target_size).expect("valid merkle size");
+        let missing_end = target_size;
+        let missing_count = if journal_size < missing_end {
+            *missing_end - *journal_size
+        } else {
+            0
+        };
+        let mut missing_nodes = Vec::with_capacity(
+            missing_count
+                .try_into()
+                .expect("missing nodes count should fit in usize"),
+        );
+        if journal_size < missing_end {
+            for pos in *journal_size..*missing_end {
+                let node = *inner.mem.get_node_unchecked(Position::new(pos));
+                missing_nodes.push(node);
+            }
         }
 
         let prune_loc = Location::try_from(inner.pruned_to_pos).expect("valid pruned_to_pos");
@@ -656,23 +695,15 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             return Ok(());
         };
 
-        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
-        self.needs_sync.store(true, Ordering::Release);
+        if !missing_nodes.is_empty() {
+            self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+            self.needs_sync.store(true, Ordering::Release);
+        }
         self.prune_committed_mem(sync_target_leaves, pinned_nodes);
         Ok(())
     }
 
-    /// Buffer missing Merkle nodes to the backing journal without flushing.
-    ///
-    /// The buffered nodes remain queryable through this handle. A later sync-start, sync, or
-    /// buffer-pressure flush pushes them to storage.
-    pub async fn buffer_pending(&self) -> Result<(), Error<F>> {
-        self.write_pending_inner().await
-    }
-
     /// Buffer missing Merkle nodes to the backing journal.
-    ///
-    /// This is equivalent to [`Self::buffer_pending`].
     pub async fn write_pending(&self) -> Result<(), Error<F>> {
         self.write_pending_inner().await
     }
@@ -691,8 +722,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             return Ok(());
         };
 
-        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
-        self.needs_sync.store(true, Ordering::Release);
+        if !missing_nodes.is_empty() {
+            self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+            self.needs_sync.store(true, Ordering::Release);
+        }
         self.journal.sync_start().await?;
         self.prune_committed_mem(sync_target_leaves, pinned_nodes);
         Ok(())
@@ -705,7 +738,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
         let journal_size = Position::<F>::new(self.journal.size().await);
         let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
-            self.snapshot_missing(journal_size)
+            self.snapshot_missing_to(journal_size, target_size)
         else {
             if self.needs_sync.load(Ordering::Acquire) {
                 self.journal.sync_start_to(*target_size).await?;
@@ -713,8 +746,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             return Ok(());
         };
 
-        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
-        self.needs_sync.store(true, Ordering::Release);
+        if !missing_nodes.is_empty() {
+            self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+            self.needs_sync.store(true, Ordering::Release);
+        }
         self.journal.sync_start_to(*target_size).await?;
         self.prune_committed_mem(sync_target_leaves, pinned_nodes);
         Ok(())
@@ -735,8 +770,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             return Ok(());
         };
 
-        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
-        self.needs_sync.store(true, Ordering::Release);
+        if !missing_nodes.is_empty() {
+            self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+            self.needs_sync.store(true, Ordering::Release);
+        }
         self.journal.sync().await?;
         self.needs_sync.store(false, Ordering::Release);
         self.prune_committed_mem(sync_target_leaves, pinned_nodes);
@@ -750,7 +787,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
         let journal_size = Position::<F>::new(self.journal.size().await);
         let Some((sync_target_leaves, missing_nodes, pinned_nodes)) =
-            self.snapshot_missing(journal_size)
+            self.snapshot_missing_to(journal_size, target_size)
         else {
             if self.needs_sync.load(Ordering::Acquire) {
                 self.journal.wait_for_sync_to(*target_size).await?;
@@ -761,8 +798,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             return Ok(());
         };
 
-        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
-        self.needs_sync.store(true, Ordering::Release);
+        if !missing_nodes.is_empty() {
+            self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+            self.needs_sync.store(true, Ordering::Release);
+        }
         self.journal.wait_for_sync_to(*target_size).await?;
         if self.journal.size().await <= *target_size {
             self.needs_sync.store(false, Ordering::Release);
@@ -1591,6 +1630,80 @@ mod tests {
     fn test_full_write_pending_buffers_prune_boundary_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(full_write_pending_buffers_prune_boundary_inner::<mmb::Family>);
+    }
+
+    async fn full_sync_start_to_leaves_buffers_only_target_inner<F: Family>(
+        context: deterministic::Context,
+    ) {
+        let hasher: Standard<Sha256> = Standard::new(ForwardFold);
+        let cfg = test_config(&context);
+        let mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
+            .await
+            .unwrap();
+
+        let mut leaves = Vec::with_capacity(64);
+        let mut batch = mmr.new_batch();
+        for i in 0..64 {
+            let leaf = test_digest(i);
+            batch = batch.add(&hasher, &leaf);
+            leaves.push(leaf);
+        }
+        let batch = mmr.with_mem(|mem| batch.merkleize(mem, &hasher));
+        mmr.apply_batch(&batch).unwrap();
+
+        let full_size = mmr.size();
+        let target_leaves = Location::<F>::new(32);
+        let target_size = Position::<F>::try_from(target_leaves).unwrap();
+        assert!(target_size < full_size);
+
+        mmr.sync_start_to_leaves(target_leaves).await.unwrap();
+        assert_eq!(
+            Position::<F>::new(mmr.journal.size().await),
+            target_size,
+            "targeted sync-start should not append Merkle nodes beyond the requested leaves",
+        );
+
+        let later_loc = Location::<F>::new(48);
+        let root = mmr.root(&hasher, 0).unwrap();
+        let proof = mmr.proof(&hasher, later_loc, 0).await.unwrap();
+        assert!(proof.verify_element_inclusion(
+            &hasher,
+            &leaves[*later_loc as usize],
+            later_loc,
+            &root
+        ));
+
+        mmr.sync_to_leaves(target_leaves).await.unwrap();
+        assert_eq!(
+            Position::<F>::new(mmr.journal.size().await),
+            target_size,
+            "targeted sync should not append Merkle nodes beyond the requested leaves",
+        );
+
+        mmr.write_pending().await.unwrap();
+        assert_eq!(
+            Position::<F>::new(mmr.journal.size().await),
+            full_size,
+            "full pending write should still append the later Merkle nodes",
+        );
+
+        mmr.destroy().await.unwrap();
+    }
+
+    #[test_traced]
+    fn test_full_sync_start_to_leaves_buffers_only_target_mmr() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_sync_start_to_leaves_buffers_only_target_inner::<
+            mmr::Family,
+        >);
+    }
+
+    #[test_traced]
+    fn test_full_sync_start_to_leaves_buffers_only_target_mmb() {
+        let executor = deterministic::Runner::default();
+        executor.start(full_sync_start_to_leaves_buffers_only_target_inner::<
+            mmb::Family,
+        >);
     }
 
     /// Generates a stateful structure, simulates a crash that wrote a leaf but not its parent

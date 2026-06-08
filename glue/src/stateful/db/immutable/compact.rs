@@ -251,6 +251,8 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
+        // Compact variants have no replayable operation log, so capture the retained-base witness
+        // while the finalized tip is still available in memory.
         self.write_pending().await?;
         Ok(())
     }
@@ -328,6 +330,8 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner)?;
+        // Compact variants have no replayable operation log, so capture the retained-base witness
+        // while the finalized tip is still available in memory.
         self.write_pending().await?;
         Ok(())
     }

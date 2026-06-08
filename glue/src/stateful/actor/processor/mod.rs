@@ -95,13 +95,11 @@ pub(super) enum MaintenanceAction<T> {
     /// No maintenance should run for this finalized block.
     None,
 
-    /// Best-effort background write preflush.
+    /// Background write preflush.
     ///
     /// This is coalesced by the actor loop so a running maintenance task is
-    /// followed by the latest known target. Individual databases may still skip
-    /// the preflush when they are already busy; skipped prune boundaries are
-    /// retried until a background attempt actually starts. Prune remains the
-    /// authoritative durable boundary before marshal history is discarded.
+    /// followed by the latest known target. Prune remains the authoritative
+    /// durable boundary before marshal history is discarded.
     Preflush { height: Height, targets: T },
 
     /// Prune databases and marshal to the provided finalized boundary.
@@ -877,11 +875,10 @@ where
 /// Callers can then schedule this work separately so preflushes and pruning do
 /// not delay subsequent mailbox polling.
 ///
-/// Preflush maintenance is best effort and may be coalesced. Individual
-/// databases may skip preflush work when they are already busy; skipped prune
-/// boundaries are retried by later maintenance observations. Prune maintenance
-/// always runs database pruning before marshal pruning so the actor never drops
-/// marshal history ahead of the corresponding durable database boundary.
+/// Preflush maintenance may be coalesced. Once scheduled, it waits until it can
+/// start each database's background write/sync work. Prune maintenance always
+/// runs database pruning before marshal pruning so the actor never drops marshal
+/// history ahead of the corresponding durable database boundary.
 /// [`MaintenanceAction::None`] is a no-op.
 pub(super) async fn run_maintenance<E, DBs, S, V>(
     databases: DBs,
@@ -1066,7 +1063,7 @@ mod tests {
     }
 
     impl MaintenanceOrderDbSet {
-        fn skipping_preflush() -> Self {
+        fn not_starting_preflush() -> Self {
             Self {
                 events: Arc::new(Mutex::new(Vec::new())),
                 preflush_started: false,
@@ -2013,10 +2010,10 @@ mod tests {
     }
 
     #[test]
-    fn preflush_maintenance_reports_none_when_skipped() {
+    fn preflush_maintenance_reports_none_when_not_started() {
         deterministic::Runner::default().start(|context| async move {
             let marshal = init_marshal_mailbox(context.child("marshal")).await;
-            let databases = MaintenanceOrderDbSet::skipping_preflush();
+            let databases = MaintenanceOrderDbSet::not_starting_preflush();
             let result = run_maintenance::<deterministic::Context, _, _, _>(
                 databases.clone(),
                 marshal,

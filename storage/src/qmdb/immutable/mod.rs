@@ -793,53 +793,6 @@ where
         Ok(range)
     }
 
-    /// Apply a batch and buffer pending operation-log and Merkle data.
-    pub async fn apply_batch_and_buffer_pending(
-        &mut self,
-        batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V, S>>,
-    ) -> Result<Range<Location<F>>, Error<F>> {
-        let _timer = self.metrics.operations.apply_batch_timer();
-        self.metrics.operations.apply_batch_calls.inc();
-        let db_size = *self.last_commit_loc + 1;
-        batch
-            .bounds
-            .validate_apply_to(db_size, self.inactivity_floor_loc)?;
-        let start_loc = Location::new(db_size);
-
-        self.journal
-            .apply_batch_and_buffer_pending(&batch.journal_batch)
-            .await?;
-
-        let bounds = self.journal.reader().await.bounds();
-        let mut seen = HashSet::new();
-        for (key, entry) in batch.diff.iter() {
-            seen.insert(key.clone());
-            self.snapshot
-                .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
-        }
-        for (i, ancestor_diff) in batch.ancestor_diffs.iter().enumerate() {
-            if batch.bounds.ancestors[i].end <= db_size {
-                continue;
-            }
-            for (key, entry) in ancestor_diff.iter() {
-                if seen.insert(key.clone()) {
-                    self.snapshot
-                        .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
-                }
-            }
-        }
-
-        self.last_commit_loc = Location::new(batch.bounds.total_size - 1);
-        self.inactivity_floor_loc = batch.bounds.inactivity_floor;
-        self.root = batch.root;
-        let range = start_loc..Location::new(batch.bounds.total_size);
-        self.update_metrics().await;
-        self.metrics
-            .operations
-            .operations_applied
-            .inc_by(*range.end - *range.start);
-        Ok(range)
-    }
 }
 
 #[cfg(test)]

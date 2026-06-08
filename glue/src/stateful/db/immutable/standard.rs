@@ -9,14 +9,15 @@ use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
-use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
+use commonware_codec::{Codec, CodecFixedShared, CodecShared, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     journal::{
         contiguous::{
-            fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
+            fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
+            BoundarySyncable, Mutable,
         },
         Error as JournalError,
     },
@@ -31,8 +32,8 @@ use commonware_storage::{
         sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
     },
-    translator::Translator,
     Persistable,
+    translator::Translator,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
@@ -258,6 +259,11 @@ where
     H: Hasher + 'static,
     T: Translator,
     S: Strategy,
+    fixed::Operation<F, K, V>: CodecFixedShared,
+    FixedJournal<E, fixed::Operation<F, K, V>>:
+        BoundarySyncable<Item = fixed::Operation<F, K, V>>
+            + Mutable<Item = fixed::Operation<F, K, V>>
+            + Persistable<Error = commonware_storage::journal::Error>,
 {
     type Unmerkleized = ImmutableUnmerkleized<
         F,
@@ -304,7 +310,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch_and_buffer_pending(batch.inner).await?;
+        self.apply_batch(batch.inner).await?;
         Ok(())
     }
 
@@ -355,7 +361,11 @@ where
     H: Hasher + 'static,
     T: Translator,
     S: Strategy,
-    variable::Operation<F, K, V>: Codec,
+    variable::Operation<F, K, V>: CodecShared,
+    VariableJournal<E, variable::Operation<F, K, V>>:
+        BoundarySyncable<Item = variable::Operation<F, K, V>>
+            + Mutable<Item = variable::Operation<F, K, V>>
+            + Persistable<Error = commonware_storage::journal::Error>,
 {
     type Unmerkleized = ImmutableUnmerkleized<
         F,
@@ -402,7 +412,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch_and_buffer_pending(batch.inner).await?;
+        self.apply_batch(batch.inner).await?;
         Ok(())
     }
 

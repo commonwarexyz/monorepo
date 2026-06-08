@@ -10,14 +10,15 @@ use crate::stateful::db::{
     ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
-use commonware_codec::{EncodeShared, Read as CodecRead};
+use commonware_codec::{CodecFixedShared, CodecShared, EncodeShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
     journal::{
         contiguous::{
-            fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
+            fixed::Journal as FixedJournal, variable::Journal as VariableJournal,
+            BoundarySyncable, Mutable,
         },
         Error as JournalError,
     },
@@ -246,6 +247,11 @@ where
     V: FixedValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
+    fixed::Operation<F, V>: CodecFixedShared,
+    FixedJournal<E, fixed::Operation<F, V>>:
+        BoundarySyncable<Item = fixed::Operation<F, V>>
+            + Mutable<Item = fixed::Operation<F, V>>
+            + Persistable<Error = commonware_storage::journal::Error>,
 {
     type Unmerkleized =
         KeylessUnmerkleized<F, E, FixedEncoding<V>, FixedJournal<E, fixed::Operation<F, V>>, H, S>;
@@ -276,7 +282,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch_and_buffer_pending(batch.inner).await?;
+        self.apply_batch(batch.inner).await?;
         Ok(())
     }
 
@@ -325,6 +331,11 @@ where
     V: VariableValue + 'static,
     H: Hasher + 'static,
     S: Strategy,
+    variable::Operation<F, V>: CodecShared,
+    VariableJournal<E, variable::Operation<F, V>>:
+        BoundarySyncable<Item = variable::Operation<F, V>>
+            + Mutable<Item = variable::Operation<F, V>>
+            + Persistable<Error = commonware_storage::journal::Error>,
 {
     type Unmerkleized = KeylessUnmerkleized<
         F,
@@ -367,7 +378,7 @@ where
     }
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
-        self.apply_batch_and_buffer_pending(batch.inner).await?;
+        self.apply_batch(batch.inner).await?;
         Ok(())
     }
 

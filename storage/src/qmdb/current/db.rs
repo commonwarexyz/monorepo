@@ -885,22 +885,6 @@ where
         Ok(range)
     }
 
-    /// Apply a batch and buffer pending operation-log and Merkle data.
-    pub async fn apply_batch_and_buffer_pending(
-        &mut self,
-        batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,
-    ) -> Result<Range<Location<F>>, Error<F>> {
-        let _timer = self.metrics.apply_batch_timer();
-        self.metrics.apply_batch_calls.inc();
-        let range = self
-            .any
-            .apply_batch_and_buffer_pending(Arc::clone(&batch.inner))
-            .await?;
-        self.grafted_tree.apply_batch(&batch.grafted)?;
-        self.root = batch.canonical_root;
-        self.update_metrics();
-        Ok(range)
-    }
 }
 
 impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>

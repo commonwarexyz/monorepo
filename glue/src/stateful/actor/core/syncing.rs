@@ -6,7 +6,8 @@ use crate::stateful::{
             MaintenanceConfig,
         },
         processor::{
-            run_maintenance, FinalizeStatus, MaintenanceAction, Processor, ProcessorMetrics,
+            run_maintenance, FinalizeStatus, MaintenanceAction, MaintenanceResult, Processor,
+            ProcessorMetrics,
         },
         syncer::{self, StateSyncMetadata, SyncResult},
     },
@@ -248,13 +249,16 @@ where
             let (status, maintenance) = processor
                 .finalize(self.context.as_present(), handoff_finalized)
                 .await;
-            if let MaintenanceAction::Prune { .. } = maintenance {
-                run_maintenance::<E, _, _, _>(
+            if !matches!(maintenance, MaintenanceAction::None) {
+                let result = run_maintenance::<E, _, _, _>(
                     processor.databases().clone(),
                     self.marshal.clone(),
                     maintenance,
                 )
                 .await;
+                if let MaintenanceResult::PreflushStarted { height } = result {
+                    processor.mark_preflush_started(height);
+                }
             }
             if let FinalizeStatus::Applied { height } = status {
                 debug!(
@@ -541,6 +545,41 @@ mod tests {
             assert_eq!(
                 sync_metadata.lock().await.sync_height(),
                 Some(Height::new(7)),
+            );
+        });
+    }
+
+    #[test]
+    fn transition_runs_handoff_preflush_maintenance() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            harness.syncing.maintenance = MaintenanceConfig {
+                interval: NZUsize!(9),
+                prune: true,
+            };
+            let events = harness
+                .syncing
+                .artifact
+                .as_ref()
+                .expect("test harness has sync artifact")
+                .databases
+                .read()
+                .await
+                .events
+                .clone();
+            let (acknowledgement, waiter) = Exact::handle();
+
+            harness
+                .syncing
+                .transition(Some((TestBlock::new(8, 10), acknowledgement)))
+                .await;
+            waiter
+                .await
+                .expect("handoff acknowledgement should complete");
+
+            assert_eq!(
+                &*events.lock().expect("test db events mutex poisoned"),
+                &["finalize", "preflush_to"],
             );
         });
     }

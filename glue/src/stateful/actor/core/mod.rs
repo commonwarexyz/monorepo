@@ -311,7 +311,7 @@ mod tests {
             _reached_target: Option<mpsc::Sender<Self::SyncTarget>>,
             _sync_config: SyncEngineConfig,
         ) -> Result<Self, Self::SyncError> {
-            Ok(Self)
+            Ok(Self::default())
         }
     }
 

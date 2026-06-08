@@ -571,29 +571,6 @@ where
         Ok(())
     }
 
-    /// Apply a batch and buffer pending operation-log and Merkle data.
-    pub async fn apply_batch_and_buffer_pending(
-        &mut self,
-        batch: &MerkleizedBatch<F, H::Digest, C::Item, S>,
-    ) -> Result<(), Error<F>> {
-        let batches = self.append_batches(batch).await?;
-        self.merkle.apply_batch(&batch.inner)?;
-
-        let journal = async {
-            if !batches.is_empty() {
-                self.journal.append_many(Many::Nested(&batches)).await?;
-            }
-            Ok(())
-        };
-        try_join!(
-            journal.map_err(Error::Journal),
-            self.merkle.buffer_pending().map_err(Error::Merkle),
-        )?;
-
-        assert_eq!(*self.merkle.leaves(), self.journal.size().await);
-        Ok(())
-    }
-
     /// Rewind the journal and Merkle structure.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error<F>> {
         self.journal.rewind(size).await?;
