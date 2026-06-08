@@ -25,17 +25,16 @@ where
     // Compute the leaf digests in parallel.
     let hasher = qmdb::hasher::<H>();
     let first_leaf = batch.leaves();
-    let leaf_digests = merkle.strategy().map_init_collect_vec(
-        ops.iter().enumerate(),
-        Vec::new,
-        |buf, (i, op)| {
-            let offset = u64::try_from(i).expect("operation offset exceeds u64");
-            let pos = F::location_to_position(first_leaf + offset);
-            buf.clear();
-            op.write(buf);
-            hasher.leaf_digest(pos, buf.as_slice())
-        },
-    );
+    let leaf_digests =
+        merkle
+            .strategy()
+            .map_init_collect_vec(ops.iter().enumerate(), Vec::new, |buf, (i, op)| {
+                let offset = u64::try_from(i).expect("operation offset exceeds u64");
+                let pos = F::location_to_position(first_leaf + offset);
+                buf.clear();
+                op.write(buf);
+                hasher.leaf_digest(pos, buf.as_slice())
+            });
 
     // Add the leaf digests to the batch.
     batch = batch.add_leaf_digests(leaf_digests);
