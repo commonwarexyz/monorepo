@@ -1820,19 +1820,15 @@ where
         }
     }
 
-    /// Looks for a block in cache and finalized storage by inner digest, returning
-    /// only blocks that match `predicate`.
-    async fn find_block_in_storage_matching(
+    /// Looks for a block in cache and finalized storage by full consensus commitment.
+    async fn find_block_in_storage_by_commitment(
         &self,
-        digest: <V::Block as Digestible>::Digest,
-        mut predicate: impl FnMut(&V::Block) -> bool,
+        commitment: V::Commitment,
     ) -> Option<V::Block> {
+        let digest = V::commitment_to_inner(commitment);
         if let Some(block) = self
             .cache
-            .find_block_matching(digest, |stored| {
-                let block = stored.clone().into();
-                predicate(&block)
-            })
+            .find_block_matching(digest, |stored| V::stored_commitment(stored) == commitment)
             .await
         {
             return Some(block.into());
@@ -1840,8 +1836,7 @@ where
 
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
             Ok(Some(stored)) => {
-                let block = stored.into();
-                predicate(&block).then_some(block)
+                (V::stored_commitment(&stored) == commitment).then(|| stored.into())
             }
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
@@ -1875,10 +1870,7 @@ where
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
-        self.find_block_in_storage_matching(V::commitment_to_inner(commitment), |block| {
-            V::commitment(block) == commitment
-        })
-        .await
+        self.find_block_in_storage_by_commitment(commitment).await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total

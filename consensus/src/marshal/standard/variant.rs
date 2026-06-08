@@ -39,6 +39,10 @@ where
         block.digest()
     }
 
+    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment {
+        block.digest()
+    }
+
     fn commitment_to_inner(commitment: Self::Commitment) -> <Self::Block as Digestible>::Digest {
         // Trivial left-inverse: digest == commitment in this variant.
         commitment

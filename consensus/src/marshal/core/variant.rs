@@ -50,6 +50,14 @@ pub trait Variant: Clone + Send + Sync + 'static {
     /// `commitment_to_inner(commitment(block)) == block.digest()`.
     fn commitment(block: &Self::Block) -> Self::Commitment;
 
+    /// Computes the consensus commitment for a stored block.
+    ///
+    /// Variants with a stored representation that carries enough commitment
+    /// information should override this to avoid reconstructing a working block.
+    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment {
+        Self::commitment(&block.clone().into())
+    }
+
     /// Extracts the block digest from a consensus commitment.
     ///
     /// For blocks/certificates accepted by marshal in this variant instance, the digest
