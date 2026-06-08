@@ -242,6 +242,16 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self
     }
 
+    /// Append a run of pre-computed leaf digests and merkleize.
+    pub(crate) fn merkleize_leaf_digests(
+        self,
+        base: &Mem<F, D>,
+        hasher: &impl Hasher<F, Digest = D>,
+        digests: impl IntoIterator<Item = D>,
+    ) -> Arc<MerkleizedBatch<F, D, S>> {
+        self.add_leaf_digests(digests).merkleize(base, hasher)
+    }
+
     /// Hash `leaves` in parallel, append them, and merkleize.
     pub fn merkleize_leaves<L, T>(
         self,
@@ -249,7 +259,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         leaves: &[L],
         init: impl Fn() -> T + Send + Sync,
-        leaf: impl Fn(&mut T, &L, Position<F>) -> D + Send + Sync,
+        leaf_digest: impl Fn(&mut T, &L, Position<F>) -> D + Send + Sync,
     ) -> Arc<MerkleizedBatch<F, D, S>>
     where
         L: Sync,
@@ -261,10 +271,10 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             init,
             |state, (i, value)| {
                 let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                leaf(state, value, pos)
+                leaf_digest(state, value, pos)
             },
         );
-        self.add_leaf_digests(digests).merkleize(base, hasher)
+        self.merkleize_leaf_digests(base, hasher, digests)
     }
 
     /// Hash `element` and add it as a leaf.

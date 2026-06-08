@@ -1153,17 +1153,14 @@ pub(super) async fn build_grafted_tree<
         Mem::new()
     };
 
-    // Append the pre-computed grafted leaf digests and merkleize. The digests are already
-    // computed, so the per-leaf closure is an identity passthrough.
+    // Append the pre-computed grafted leaf digests and merkleize.
     if !leaves.is_empty() {
         let batch = {
             let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
-            batch.merkleize_leaves(
+            batch.merkleize_leaf_digests(
                 &grafted_tree,
                 &grafted_hasher,
-                &leaves,
-                || (),
-                |_, &(_, digest), _pos| digest,
+                leaves.iter().map(|&(_, digest)| digest),
             )
         };
         grafted_tree.apply_batch(&batch)?;
