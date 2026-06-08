@@ -430,6 +430,21 @@ stability_scope!(BETA {
             metric: M,
         ) -> telemetry::metrics::Registered<M>;
 
+        /// Register a metric that remains exposed until the runtime exits.
+        ///
+        /// Persistent metrics follow the same naming, attribute, and duplicate
+        /// registration rules as [`Metrics::register`]. Unlike
+        /// [`Metrics::register`], dropping the returned handle does not
+        /// unregister the metric.
+        ///
+        /// Names must start with `[a-zA-Z]` and contain only `[a-zA-Z0-9_]`.
+        fn register_persistent<N: Into<String>, H: Into<String>, M: telemetry::metrics::Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> telemetry::metrics::Registered<M>;
+
         /// Encode all metrics into a buffer.
         fn encode(&self) -> String;
     }
@@ -872,9 +887,9 @@ mod tests {
     use crate::telemetry::{
         metrics::{
             count_running_tasks,
-            raw::{Counter, Family},
+            raw::{Counter, Family, Gauge},
             EncodeLabelKey, EncodeLabelSetTrait as EncodeLabelSet,
-            EncodeLabelValueTrait as EncodeLabelValue, LabelSetEncoder,
+            EncodeLabelValueTrait as EncodeLabelValue, GaugeExt, LabelSetEncoder,
         },
         traces::collector::TraceStorage,
     };
@@ -2936,6 +2951,83 @@ mod tests {
     fn test_tokio_register_drop_removes_metrics() {
         let runner = tokio::Runner::default();
         test_register_drop_removes_metrics(runner);
+    }
+
+    fn test_register_persistent_survives_drop<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let gauge = context.child("engine").register_persistent(
+                "progress",
+                "sync progress",
+                Gauge::default(),
+            );
+            let _ = gauge.try_set(7);
+
+            let buffer = context.encode();
+            assert!(buffer.contains("engine_progress 7"));
+
+            drop(gauge);
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_progress 7"),
+                "persistent metric should survive handle drop: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_register_persistent_survives_drop() {
+        let executor = deterministic::Runner::default();
+        test_register_persistent_survives_drop(executor);
+    }
+
+    #[test]
+    fn test_tokio_register_persistent_survives_drop() {
+        let runner = tokio::Runner::default();
+        test_register_persistent_survives_drop(runner);
+    }
+
+    fn test_register_persistent_prevents_duplicate_unregister<R: Runner>(runner: R)
+    where
+        R::Context: Metrics,
+    {
+        runner.start(|context| async move {
+            let normal =
+                context
+                    .child("engine")
+                    .register("progress", "sync progress", Gauge::default());
+            let persistent = context.child("engine").register_persistent(
+                "progress",
+                "sync progress",
+                Gauge::default(),
+            );
+
+            assert!(std::ptr::eq(normal.metric(), persistent.metric()));
+            let _ = normal.try_set(7);
+            drop(persistent);
+            drop(normal);
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("engine_progress 7"),
+                "persistent duplicate should keep metric registered: {buffer}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_deterministic_register_persistent_prevents_duplicate_unregister() {
+        let executor = deterministic::Runner::default();
+        test_register_persistent_prevents_duplicate_unregister(executor);
+    }
+
+    #[test]
+    fn test_tokio_register_persistent_prevents_duplicate_unregister() {
+        let runner = tokio::Runner::default();
+        test_register_persistent_prevents_duplicate_unregister(runner);
     }
 
     fn test_register_with_attributes<R: Runner>(runner: R)

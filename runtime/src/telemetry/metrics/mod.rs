@@ -103,6 +103,11 @@ pub trait MetricsExt: crate::Metrics {
         self.register(name, help, raw::Gauge::default())
     }
 
+    /// Register a persistent gauge with the runtime.
+    fn persistent_gauge<N: Into<String>, H: Into<String>>(&self, name: N, help: H) -> Gauge {
+        self.register_persistent(name, help, raw::Gauge::default())
+    }
+
     /// Register a histogram with the runtime.
     fn histogram<N: Into<String>, H: Into<String>, I>(
         &self,
@@ -337,7 +342,7 @@ impl Drop for RegistryGuard {
 }
 
 /// A metric handle whose lifetime controls registry exposure and attached cleanup.
-#[must_use = "registered metrics are removed when the returned handle is dropped"]
+#[must_use = "registered metric handles should be retained or intentionally dropped"]
 pub struct Registered<M> {
     metric: Arc<M>,
     registration: Registration,
@@ -493,6 +498,7 @@ struct MetricEntry {
     attributes: MetricAttributes,
     encode_samples: Box<SampleEncoder>,
     metric_any: Arc<dyn Any + Send + Sync>,
+    persistent: bool,
     claims: usize,
     family_index: usize,
 }
@@ -551,6 +557,20 @@ impl Registry {
         inner.register(Arc::downgrade(&self.inner), name, help, attributes, metric)
     }
 
+    pub(crate) fn register_persistent<M>(
+        &self,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        metric: Arc<M>,
+    ) -> Registered<M>
+    where
+        M: Metric,
+    {
+        let mut inner = self.inner.lock();
+        inner.register_persistent(name, help, attributes, metric)
+    }
+
     pub fn encode(&self) -> String {
         self.inner.lock().encode()
     }
@@ -578,6 +598,34 @@ impl RegistryInner {
     where
         M: Metric,
     {
+        self.register_inner(Some(registry), name, help, attributes, metric, false)
+    }
+
+    fn register_persistent<M>(
+        &mut self,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        metric: Arc<M>,
+    ) -> Registered<M>
+    where
+        M: Metric,
+    {
+        self.register_inner(None, name, help, attributes, metric, true)
+    }
+
+    fn register_inner<M>(
+        &mut self,
+        registry: Option<Weak<Mutex<Self>>>,
+        name: String,
+        help: String,
+        attributes: Vec<(String, String)>,
+        metric: Arc<M>,
+        persistent: bool,
+    ) -> Registered<M>
+    where
+        M: Metric,
+    {
         let attributes = owned_attributes(attributes);
         let help = normalize_help(help);
         let metric_type = metric.metric_type();
@@ -601,19 +649,15 @@ impl RegistryInner {
                         key.0, key.1
                     )
                 });
-            self.claim_registration(existing_id);
+            self.claim_registration(existing_id, persistent);
             return Registered {
                 metric: existing_metric,
-                registration: Registration::from(RegistryGuard {
-                    id: existing_id,
-                    registry,
-                }),
+                registration: Self::registration(existing_id, registry),
             };
         }
         self.assert_family_matches(&name, &help, metric_type);
 
         let id = self.allocate_metric_id();
-        let registration = Registration::from(RegistryGuard { id, registry });
         let metric_any: Arc<dyn Any + Send + Sync> = metric.clone();
         self.insert_metric_entry(
             id,
@@ -625,11 +669,19 @@ impl RegistryInner {
                 encode_samples,
                 metric_any,
             },
+            persistent,
         );
         Registered {
             metric,
-            registration,
+            registration: Self::registration(id, registry),
         }
+    }
+
+    fn registration(id: usize, registry: Option<Weak<Mutex<Self>>>) -> Registration {
+        let Some(registry) = registry else {
+            return Registration::from(());
+        };
+        Registration::from(RegistryGuard { id, registry })
     }
 
     fn metric_slot_mut(&mut self, id: usize) -> &mut Option<MetricEntry> {
@@ -687,6 +739,7 @@ impl RegistryInner {
         help: String,
         metric_type: MetricType,
         entry: PendingMetricEntry,
+        persistent: bool,
     ) {
         let PendingMetricEntry {
             family_name,
@@ -717,13 +770,18 @@ impl RegistryInner {
             attributes,
             encode_samples,
             metric_any,
+            persistent,
             claims: 1,
             family_index,
         });
     }
 
-    fn claim_registration(&mut self, id: usize) {
+    fn claim_registration(&mut self, id: usize, persistent: bool) {
         let entry = self.metric_mut(id);
+        if persistent {
+            entry.persistent = true;
+            return;
+        }
         entry.claims = entry
             .claims
             .checked_add(1)
@@ -737,6 +795,9 @@ impl RegistryInner {
             .checked_sub(1)
             .expect("registration claim count underflow");
         if entry.claims > 0 {
+            return;
+        }
+        if entry.persistent {
             return;
         }
         self.drop_metric_entry(id);

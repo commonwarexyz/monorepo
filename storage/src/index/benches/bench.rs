@@ -42,6 +42,15 @@ impl Metrics for DummyMetrics {
         Registered::with_registration(metric, Registration::from(()))
     }
 
+    fn register_persistent<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        _: N,
+        _: H,
+        metric: M,
+    ) -> Registered<M> {
+        Registered::with_registration(metric, Registration::from(()))
+    }
+
     fn encode(&self) -> String {
         "".into()
     }

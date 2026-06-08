@@ -75,8 +75,8 @@ struct ProgressMetrics {
 impl ProgressMetrics {
     /// Register sync progress metrics on the provided context.
     fn new(context: &impl commonware_runtime::Metrics) -> Self {
-        let journal_size = context.gauge("journal_size", "Current sync journal size");
-        let target_end = context.gauge(
+        let journal_size = context.persistent_gauge("journal_size", "Current sync journal size");
+        let target_end = context.persistent_gauge(
             "target_end",
             "Exclusive target range end, equal to journal size when sync completes",
         );
@@ -91,11 +91,6 @@ impl ProgressMetrics {
     fn record(&self, journal_size: u64, target_end: u64) {
         let _ = self.journal_size.try_set(journal_size);
         let _ = self.target_end.try_set(target_end);
-    }
-
-    /// Keep the final progress gauges exposed after sync completion.
-    const fn leak(self) {
-        std::mem::forget(self);
     }
 }
 
@@ -828,7 +823,6 @@ where
                 }));
             }
 
-            self.progress_metrics.leak();
             return Ok(NextStep::Complete(database));
         }
 
