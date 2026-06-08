@@ -225,6 +225,20 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self
     }
 
+    /// Add a run of pre-computed leaf digests, in order.
+    ///
+    /// Equivalent to calling [`Self::add_leaf_digest`] for each digest, but reserves capacity for
+    /// the incoming leaves up front to avoid repeated reallocation. Pairs with computing the
+    /// digests in parallel (e.g. via [`commonware_parallel::Strategy::map_init_collect_vec`]).
+    pub fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+        let digests = digests.into_iter();
+        self.appended.reserve(digests.size_hint().0);
+        for digest in digests {
+            self = self.add_leaf_digest(digest);
+        }
+        self
+    }
+
     /// Hash `element` and add it as a leaf.
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
@@ -645,6 +659,36 @@ mod tests {
                 assert_eq!(
                     mem_root(&result, &hasher),
                     mem_root(&reference, &hasher),
+                    "root mismatch for n={n}"
+                );
+            }
+        });
+    }
+
+    fn add_leaf_digests_matches_individual<F: Family>() {
+        let executor = deterministic::Runner::default();
+        executor.start(|_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            for &n in &[0u64, 1, 2, 10, 199] {
+                let base = build_reference::<F>(&hasher, 7);
+                let digests: Vec<D> = (0..n).map(|i| hasher.digest(&i.to_be_bytes())).collect();
+
+                // Append the leaves one at a time.
+                let mut individual = base.new_batch();
+                for &digest in &digests {
+                    individual = individual.add_leaf_digest(digest);
+                }
+                let individual = individual.merkleize(&base, &hasher);
+
+                // Append the same leaves via the bulk helper.
+                let bulk = base
+                    .new_batch()
+                    .add_leaf_digests(digests.iter().copied())
+                    .merkleize(&base, &hasher);
+
+                assert_eq!(
+                    batch_root(&base, &individual, &hasher),
+                    batch_root(&base, &bulk, &hasher),
                     "root mismatch for n={n}"
                 );
             }
@@ -1098,6 +1142,10 @@ mod tests {
         consistency_with_reference::<crate::mmr::Family>();
     }
     #[test]
+    fn mmr_add_leaf_digests_matches_individual() {
+        add_leaf_digests_matches_individual::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_lifecycle() {
         lifecycle::<crate::mmr::Family>();
     }
@@ -1171,6 +1219,10 @@ mod tests {
     #[test]
     fn mmb_consistency() {
         consistency_with_reference::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_add_leaf_digests_matches_individual() {
+        add_leaf_digests_matches_individual::<crate::mmb::Family>();
     }
     #[test]
     fn mmb_lifecycle() {

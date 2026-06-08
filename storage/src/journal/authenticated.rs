@@ -145,9 +145,7 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
                 h.leaf_digest(pos, &item.encode())
             },
         );
-        for digest in digests {
-            self.inner = self.inner.add_leaf_digest(digest);
-        }
+        self.inner = self.inner.add_leaf_digests(digests);
 
         let merkle = self.inner.merkleize(base, &self.hasher);
         let ancestor_items = Self::collect_ancestor_items(&self.parent);

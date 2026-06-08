@@ -1,7 +1,7 @@
 //! Shared helpers for compact QMDB batches.
 
 use crate::{
-    merkle::{batch, compact, Family},
+    merkle::{batch, compact, hasher::Hasher as _, Family},
     qmdb, Context,
 };
 use commonware_codec::EncodeShared;
@@ -22,9 +22,21 @@ where
     S: Strategy,
     Op: EncodeShared,
 {
-    let hasher = qmdb::hasher::<H>();
-    for op in ops {
-        batch = batch.add(&hasher, &op.encode());
-    }
-    merkle.with_mem(|mem| batch.merkleize(mem, &hasher))
+    // Compute the leaf digests in parallel.
+    let first_leaf = batch.leaves();
+    let leaf_digests = merkle.strategy().map_init_collect_vec(
+        ops.iter().enumerate(),
+        qmdb::hasher::<H>,
+        |hasher, (i, op)| {
+            let offset = u64::try_from(i).expect("operation offset exceeds u64");
+            let pos = F::location_to_position(first_leaf + offset);
+            hasher.leaf_digest(pos, &op.encode())
+        },
+    );
+
+    // Add the leaf digests to the batch.
+    batch = batch.add_leaf_digests(leaf_digests);
+
+    // Merkleize the batch.
+    merkle.with_mem(|mem| batch.merkleize(mem, &qmdb::hasher::<H>()))
 }
