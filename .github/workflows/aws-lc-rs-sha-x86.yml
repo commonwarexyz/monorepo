@@ -2,6 +2,15 @@ name: AWS-LC SHA-256 X86
 
 on:
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/aws-lc-rs-sha-x86.yml"
+      - "cryptography/src/sha256/**"
+      - "cryptography/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 permissions:
   contents: read
