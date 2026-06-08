@@ -687,9 +687,11 @@ mod tests {
                 let individual = individual.merkleize(&base, &hasher);
 
                 // Append the same leaves via the bulk helper.
-                let bulk = base
-                    .new_batch()
-                    .merkleize_leaf_digests(&base, &hasher, digests.iter().copied());
+                let bulk = base.new_batch().merkleize_leaf_digests(
+                    &base,
+                    &hasher,
+                    digests.iter().copied(),
+                );
 
                 assert_eq!(
                     batch_root(&base, &individual, &hasher),
