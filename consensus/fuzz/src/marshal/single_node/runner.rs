@@ -18,7 +18,7 @@ use commonware_consensus::{
         mocks::{
             application::Application,
             harness::{
-                setup_network_with_participants, TestHarness, ValidatorHandle, D, NAMESPACE,
+                setup_network_with_participants, TestHarness, ValidatorHandle, D, K, NAMESPACE,
                 NUM_VALIDATORS, QUORUM, S,
             },
         },
@@ -37,6 +37,7 @@ use commonware_cryptography::{
     Digestible,
 };
 use commonware_macros::select;
+use commonware_p2p::Recipients;
 use commonware_runtime::{
     deterministic,
     telemetry::metrics::{
@@ -46,12 +47,15 @@ use commonware_runtime::{
     Clock, Runner, Supervisor as _,
 };
 use commonware_storage::archive;
-use commonware_utils::{FuzzRng, NZUsize};
-use futures::StreamExt;
+use commonware_utils::{vec::NonEmptyVec, FuzzRng, NZUsize};
+use futures::{future::BoxFuture, task::noop_waker_ref, FutureExt, StreamExt};
 use std::{
     collections::{HashSet, VecDeque},
+    future::Future,
+    hint::black_box,
     num::NonZeroUsize,
     sync::Arc,
+    task::{Context, Poll},
     time::Duration,
 };
 
@@ -68,6 +72,10 @@ const EVENT_SETTLE: Duration = Duration::from_millis(20);
 /// Final drain delay before the invariant check so any in-flight
 /// finalization deliveries reach the application.
 const FINAL_DRAIN: Duration = Duration::from_millis(200);
+
+/// Well above the harness mailbox capacity (`100`) so a single event reaches
+/// the overflow policy before yielding back to the deterministic scheduler.
+const MAILBOX_BURST_FILL: usize = 256;
 
 fn round_for_height(height: Height) -> Round {
     Round::new(Epoch::zero(), View::new(height.get()))
@@ -222,6 +230,40 @@ fn assert_stale_ack(expected: Height, observed: Height) {
     );
 }
 
+fn targets(participants: &[K], offset: usize) -> NonEmptyVec<K> {
+    let first = participants[offset % participants.len()].clone();
+    let second = participants[(offset + 1) % participants.len()].clone();
+    NonEmptyVec::from_unchecked(vec![first, second])
+}
+
+#[inline(never)]
+fn hint_finalized_via_mailbox<H: TestHarness>(
+    mailbox: &Mailbox<S, H::Variant>,
+    height: Height,
+    targets: NonEmptyVec<K>,
+) {
+    let hint: fn(&Mailbox<S, H::Variant>, Height, NonEmptyVec<K>) =
+        Mailbox::<S, H::Variant>::hint_finalized;
+    black_box(hint)(mailbox, height, targets);
+}
+
+fn park_mailbox_future<F, T>(parked: &mut Vec<BoxFuture<'static, ()>>, future: F)
+where
+    F: Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let mut future = async move {
+        let _ = future.await;
+    }
+    .boxed();
+    let waker = noop_waker_ref();
+    let mut cx = Context::from_waker(waker);
+    match future.as_mut().poll(&mut cx) {
+        Poll::Ready(()) | Poll::Pending => {}
+    }
+    parked.push(future);
+}
+
 /// Run the marshal fuzz driver against `H` (StandardHarness or CodingHarness).
 pub fn fuzz_marshal<H: TestHarness>(input: MarshalFuzzInput)
 where
@@ -332,6 +374,7 @@ where
         let mut restart_counter: usize = 0;
         let mut pending_floor: Option<u64> = None;
         let mut subscriptions = Vec::new();
+        let mut parked_queries: Vec<BoxFuture<'static, ()>> = Vec::new();
         let ancestry_fetch_duration = Timed::new(context.histogram(
             "marshal_fuzz_ancestor_fetch_duration",
             "Histogram of time taken to fetch a block via the marshal fuzz ancestry stream, in seconds",
@@ -629,6 +672,230 @@ where
                             H::digest(block),
                             DigestFallback::FetchByRound { round },
                         ));
+                    }
+                }
+                MarshalEvent::MailboxBurst { block_idx } => {
+                    let start = block_index(block_idx);
+                    let floor_block = &canonical[processed_height as usize % canonical.len()];
+                    let floor_height = H::height(floor_block);
+                    let floor_proposal = Proposal::new(
+                        round_for_height(floor_height),
+                        parent_view(floor_height),
+                        H::commitment(floor_block),
+                    );
+                    let floor_finalization =
+                        H::make_finalization(floor_proposal, &schemes, QUORUM);
+                    let stale = &canonical[0];
+                    let stale_height = H::height(stale);
+                    let stale_digest = H::digest(stale);
+                    let fresh = &canonical[8];
+                    let fresh_height = H::height(fresh);
+                    let fresh_round = round_for_height(fresh_height);
+                    let fresh_digest = H::digest(fresh);
+                    let fresh_commitment = H::commitment(fresh);
+
+                    for offset in 0..MAILBOX_BURST_FILL {
+                        let block = &canonical[(start + offset) % canonical.len()];
+                        handle.mailbox.forward(
+                            round_for_height(H::height(block)),
+                            H::commitment(block),
+                            Recipients::Some(Vec::new()),
+                        );
+                    }
+                    let pending_acks = application.pending_ack_heights();
+                    // Existing stale entries are orphaned by earlier restarts.
+                    // A live floor update only clears acks owned by the current actor.
+                    let stale_pending = stale_to_skip.len().min(pending_acks.len());
+                    let live_pending_acks = &pending_acks[stale_pending..];
+                    let only_genesis_pending = live_pending_acks.iter().all(|h| h.get() == 0);
+                    let current_segment_empty =
+                        delivery_log.len() == *segment_bounds.last().unwrap();
+                    let mut burst_floor = false;
+                    if pending_floor.is_none()
+                        && floor_height.get() == processed_height + 1
+                        && current_segment_empty
+                        && only_genesis_pending
+                    {
+                        handle.mailbox.set_floor(floor_finalization.clone());
+                        handle.mailbox.set_floor(floor_finalization);
+                        stale_to_skip.extend(live_pending_acks.iter().copied());
+                        pending_floor = Some(floor_height.get());
+                        burst_floor = true;
+                    }
+
+                    hint_finalized_via_mailbox::<H>(
+                        &handle.mailbox,
+                        Height::new(9),
+                        targets(&participants, 1),
+                    );
+                    handle.mailbox.prune(Height::new(2));
+                    handle.mailbox.prune(Height::new(8));
+                    handle.mailbox.prune(Height::new(4));
+                    hint_finalized_via_mailbox::<H>(
+                        &handle.mailbox,
+                        Height::new(1),
+                        targets(&participants, 0),
+                    );
+                    hint_finalized_via_mailbox::<H>(
+                        &handle.mailbox,
+                        Height::new(9),
+                        targets(&participants, 2),
+                    );
+                    hint_finalized_via_mailbox::<H>(
+                        &handle.mailbox,
+                        Height::new(9),
+                        targets(&participants, 1),
+                    );
+
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_info(stale_height).await
+                        });
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_block(stale_height).await
+                        });
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_finalization(stale_height).await
+                        });
+                    }
+
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_info(Identifier::Digest(fresh_digest)).await
+                        });
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_info(Identifier::Latest).await
+                        });
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_block(Identifier::Digest(fresh_digest)).await
+                        });
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_block(Identifier::Latest).await
+                        });
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_processed_height().await
+                        });
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        park_mailbox_future(&mut parked_queries, async move {
+                            mailbox.get_verified(fresh_round).await
+                        });
+                    }
+
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        let _ = async move {
+                            mailbox.get_block(Identifier::Digest(stale_digest)).await
+                        }
+                        .now_or_never();
+                    }
+                    {
+                        let mailbox = handle.mailbox.clone();
+                        let _ = async move {
+                            mailbox.get_info(Identifier::Latest).await
+                        }
+                        .now_or_never();
+                    }
+
+                    let mut closed_digest =
+                        handle
+                            .mailbox
+                            .subscribe_by_digest(fresh_digest, DigestFallback::Wait);
+                    closed_digest.close();
+                    drop(closed_digest);
+                    let mut closed_commitment = handle.mailbox.subscribe_by_commitment(
+                        fresh_commitment,
+                        CommitmentFallback::FetchByCommitment {
+                            height: fresh_height,
+                        },
+                    );
+                    closed_commitment.close();
+                    drop(closed_commitment);
+                    subscriptions.push(
+                        handle
+                            .mailbox
+                            .subscribe_by_digest(fresh_digest, DigestFallback::Wait),
+                    );
+                    subscriptions.push(handle.mailbox.subscribe_by_commitment(
+                        fresh_commitment,
+                        CommitmentFallback::FetchByCommitment {
+                            height: fresh_height,
+                        },
+                    ));
+                    handle.mailbox.hint_notarized(fresh_round, fresh_commitment);
+
+                    // Only report consensus certificates for a locally missing
+                    // block outside the pending floor transition. If marshal
+                    // already has the block, Finalization can store a trailing
+                    // finalized anchor and trigger repair, which must be modeled
+                    // by the dedicated ReportFinalization arm.
+                    if !block_available(
+                        &durable_available,
+                        &variant_available,
+                        fresh_height.get(),
+                    ) && pending_floor != Some(fresh_height.get())
+                    {
+                        let proposal =
+                            Proposal::new(fresh_round, parent_view(fresh_height), fresh_commitment);
+                        let notarization = H::make_notarization(proposal.clone(), &schemes, QUORUM);
+                        let finalization = H::make_finalization(proposal, &schemes, QUORUM);
+                        handle.mailbox.report(Activity::Notarization(notarization));
+                        handle.mailbox.report(Activity::Finalization(finalization));
+                    }
+
+                    if burst_floor {
+                        let round = round_for_height(floor_height);
+                        let proposed = floor_block.clone().into();
+                        let verified = floor_block.clone().into();
+                        let certified = floor_block.clone().into();
+                        {
+                            let mailbox = handle.mailbox.clone();
+                            park_mailbox_future(&mut parked_queries, async move {
+                                mailbox.proposed(round, proposed).await
+                            });
+                        }
+                        {
+                            let mailbox = handle.mailbox.clone();
+                            park_mailbox_future(&mut parked_queries, async move {
+                                mailbox.verified(round, verified).await
+                            });
+                        }
+                        {
+                            let mailbox = handle.mailbox.clone();
+                            park_mailbox_future(&mut parked_queries, async move {
+                                mailbox.certified(round, certified).await
+                            });
+                        }
+                        durable_available.insert(floor_height.get());
+                        repair_wake |= apply_pending_floor(
+                            &mut pending_floor,
+                            floor_height,
+                            &mut durable_available,
+                            &mut finalized_available,
+                            &mut processed_height,
+                            &mut segment_starts,
+                        );
                     }
                 }
                 MarshalEvent::SetFloor { block_idx } => {
