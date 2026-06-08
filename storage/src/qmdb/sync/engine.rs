@@ -92,6 +92,11 @@ impl ProgressMetrics {
         let _ = self.journal_size.try_set(journal_size);
         let _ = self.target_end.try_set(target_end);
     }
+
+    /// Keep the final progress gauges exposed after sync completion.
+    const fn leak(self) {
+        std::mem::forget(self);
+    }
 }
 
 /// Result from a fetch operation with its request ID and starting location.
@@ -823,6 +828,7 @@ where
                 }));
             }
 
+            self.progress_metrics.leak();
             return Ok(NextStep::Complete(database));
         }
 
