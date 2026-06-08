@@ -1135,28 +1135,63 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         if items.is_empty() {
             return Err(Error::EmptyAppend);
         }
+        let items_count = items.len();
+        let items_buf = Self::encode_items(items);
+        self.write_encoded(items_buf, items_count).await
+    }
 
-        // Encode all items into a single contiguous buffer before taking the write guard.
-        // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let items_count = match &items {
-            Many::Flat(items) => items.len(),
-            Many::Nested(nested_items) => nested_items.iter().map(|s| s.len()).sum(),
-        };
-        let mut items_buf = Vec::with_capacity(items_count * A::SIZE);
-        match &items {
+    /// Encode `items` into a single contiguous buffer using the fixed-width record layout, ready to
+    /// be appended via [`Self::append_encoded`]. This is synchronous and holds no locks, so a caller
+    /// can encode borrowed data (e.g. under a read lock) and release the borrow before the append.
+    ///
+    /// Uses `Write::write` directly to avoid the per-item allocations of `Encode::encode`.
+    pub(crate) fn encode_items(items: Many<'_, A>) -> Vec<u8> {
+        let mut items_buf = Vec::with_capacity(items.len() * A::SIZE);
+        match items {
             Many::Flat(items) => {
-                for item in *items {
+                for item in items {
                     item.write(&mut items_buf);
                 }
             }
             Many::Nested(nested_items) => {
-                for items in *nested_items {
+                for items in nested_items {
                     for item in *items {
                         item.write(&mut items_buf);
                     }
                 }
             }
         }
+        items_buf
+    }
+
+    /// Append `items_count` records pre-encoded by [`Self::encode_items`] into `items_buf`,
+    /// recording batch-append metrics (the counterpart to [`Self::append_many`] for callers that
+    /// encode separately).
+    ///
+    /// The only caller is the ALPHA-stability `merkle` module, which is excluded under the BETA
+    /// stability check (`commonware_stability_BETA`) while this BETA-stability journal remains;
+    /// allow dead code there so the annotation check does not flag this internal helper.
+    #[cfg_attr(commonware_stability_BETA, allow(dead_code))]
+    pub(crate) async fn append_encoded(
+        &self,
+        items_buf: Vec<u8>,
+        items_count: usize,
+    ) -> Result<u64, Error> {
+        let _timer = self.metrics.append_many_timer();
+        self.metrics.append_many_calls.inc();
+        self.write_encoded(items_buf, items_count).await
+    }
+
+    /// Append `items_count` pre-encoded records into `items_buf`, without recording metrics.
+    async fn write_encoded(&self, items_buf: Vec<u8>, items_count: usize) -> Result<u64, Error> {
+        if items_count == 0 {
+            return Err(Error::EmptyAppend);
+        }
+        assert_eq!(
+            items_buf.len(),
+            items_count * A::SIZE,
+            "encoded buffer length must match item count"
+        );
 
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;

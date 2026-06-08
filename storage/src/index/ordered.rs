@@ -267,7 +267,7 @@ impl<T: Translator, V: Send + Sync> Drop for Index<T, V> {
     /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
     /// lieu of Rust's default recursive drop).
     fn drop(&mut self) {
-        for (_, record) in self.map.iter_mut() {
+        for record in self.map.values_mut() {
             let mut next = record.next.take();
             while let Some(mut record) = next {
                 next = record.next.take();

@@ -624,9 +624,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     async fn flush_internal(&self, journal_dirty: &mut bool) -> Result<(), Error<F>> {
         let journal_size = Position::<F>::new(self.journal.size().await);
 
-        // Snapshot nodes in the mem that are missing from the journal, along with the pinned
+        // Encode the nodes missing from the journal directly to bytes and snapshot the pinned
         // node set for the current pruning boundary.
-        let (sync_target_leaves, missing_nodes, pinned_nodes) = {
+        let (sync_target_leaves, encoded, count, pinned_nodes) = {
             let inner = self.inner.read();
             let size = inner.mem.size();
             let sync_target_leaves = inner.mem.leaves();
@@ -639,11 +639,12 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 return Ok(());
             }
 
-            let mut missing_nodes = Vec::with_capacity((*size - *journal_size) as usize);
-            for pos in *journal_size..*size {
-                let node = *inner.mem.get_node_unchecked(Position::new(pos));
-                missing_nodes.push(node);
-            }
+            // Encode the un-journaled tail of the mem straight into a byte buffer, with no
+            // intermediate `Vec<D>` and no second serialization pass. The buffer is owned, so the
+            // read lock is released before the journal I/O below.
+            let (head, tail) = inner.mem.nodes_from(journal_size);
+            let count = head.len() + tail.len();
+            let encoded = Journal::<E, D>::encode_items(Many::Nested(&[head, tail]));
 
             // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
             // by pruning the mem.
@@ -654,11 +655,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 pinned_nodes.insert(pos, *digest);
             }
 
-            (sync_target_leaves, missing_nodes, pinned_nodes)
+            (sync_target_leaves, encoded, count, pinned_nodes)
         };
 
         // Append missing nodes to the journal without holding the mem read lock.
-        self.journal.append_many(Many::Flat(&missing_nodes)).await?;
+        self.journal.append_encoded(encoded, count).await?;
         *journal_dirty = true;
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
