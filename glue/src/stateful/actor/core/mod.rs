@@ -39,6 +39,42 @@ mod syncing;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
+/// Periodic pruning configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PruneConfig {
+    /// Prune databases and marshal every `maintenance_interval` finalized blocks.
+    ///
+    /// This controls only how often pruning runs, not how much history is retained. Each prune
+    /// always leaves at least the configured retention windows in place, so a small interval
+    /// prunes more frequently but never below those floors.
+    pub maintenance_interval: NonZeroUsize,
+
+    /// Finalized blocks to retain in marshal beyond `max_pending_acks + 1`.
+    ///
+    /// This should generally be set to a large enough number of blocks to facilitate downtime
+    /// on a validator that has completed state sync. If marshal retains too few blocks, a rebooted
+    /// node may fail to recover due to peers being unable to serve the blocks it needs to catch up.
+    pub retained_marshal_blocks: usize,
+
+    /// Finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.
+    ///
+    /// This value is generally safe to set to 0, as QMDB operations below the active range are only
+    /// needed to serve state sync requests for lagging peers. Some network topologies may benefit from
+    /// a non-zero value here to provide a larger buffer for serving state sync requests during periods
+    /// of instability.
+    pub retained_qmdb_blocks: usize,
+}
+
+impl PruneConfig {
+    /// Ensure marshal is never pruned more aggressively than QMDB.
+    pub const fn assert_valid(self) {
+        assert!(
+            self.retained_marshal_blocks >= self.retained_qmdb_blocks,
+            "marshal must retain at least as many blocks as QMDB",
+        );
+    }
+}
+
 /// Configuration for constructing a [`Stateful`] application.
 pub struct Config<E, A, S, V, R>
 where
@@ -77,6 +113,13 @@ where
 
     /// Sync engine tuning knobs.
     pub sync_config: SyncEngineConfig,
+
+    /// Periodic database and marshal pruning configuration.
+    ///
+    /// When enabled, glue retains `max_pending_acks + 1` finalized blocks plus
+    /// the configured retained block windows before pruning. Marshal must retain
+    /// at least as many blocks as QMDB.
+    pub prune_config: Option<PruneConfig>,
 }
 
 /// Stateful application that manages the pending-tip DAG of merkleized
@@ -115,6 +158,12 @@ where
 
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
+
+    /// Marshal ack window, used to derive automatic prune retention.
+    max_pending_acks: NonZeroUsize,
+
+    /// Periodic prune configuration.
+    prune_config: Option<PruneConfig>,
 }
 
 impl<E, A, S, V, R> Stateful<E, A, S, V, R>
@@ -133,6 +182,9 @@ where
     /// not process messages until [`Stateful::start`] is called.
     pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
         assert_rewind_window_safety::<E, A::Databases>(config.max_pending_acks);
+        if let Some(prune_config) = config.prune_config {
+            prune_config.assert_valid();
+        }
 
         let (sender, mailbox) = actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
         (
@@ -146,6 +198,8 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
+                max_pending_acks: config.max_pending_acks,
+                prune_config: config.prune_config,
             },
             Mailbox::new(sender),
         )
@@ -193,6 +247,8 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
+            max_pending_acks: self.max_pending_acks,
+            prune_config: self.prune_config,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -215,7 +271,14 @@ where
         self.resolvers.attach_databases(databases.clone()).await;
 
         let processor_metrics = ProcessorMetrics::new(self.context.child("processor"));
-        let processor = Processor::new(self.application, databases, anchor, processor_metrics);
+        let processor = Processor::new(
+            self.application,
+            databases,
+            anchor,
+            processor_metrics,
+            self.max_pending_acks,
+            self.prune_config,
+        );
         Processing {
             context: self.context,
             mailbox: self.mailbox,
@@ -391,6 +454,7 @@ mod tests {
                         update_channel_size: NZUsize!(1),
                         max_retained_roots: 1,
                     },
+                    prune_config: None,
                 },
             );
             let handle = stateful.start();

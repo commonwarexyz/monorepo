@@ -450,7 +450,7 @@ mod tests {
             db.inactivity_floor_loc(),
         ))
         .unwrap();
-        db.commit().await.unwrap();
+        db.sync().await.unwrap();
 
         let target = db.current_target();
         let fetch =

@@ -213,15 +213,48 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
-        let heights = F::parent_heights(self.leaves());
-        self.appended.push(digest);
+        self.append_leaf_digest(digest, self.leaves(), self.size());
+        self
+    }
 
-        for height in heights {
-            let pos = self.size();
+    /// Append a leaf digest and any parent placeholders.
+    ///
+    /// `leaves` is the leaf index this digest occupies and `size` is the starting node count.
+    /// Returns the new size.
+    fn append_leaf_digest(
+        &mut self,
+        digest: D,
+        leaves: Location<F>,
+        mut size: Position<F>,
+    ) -> Position<F> {
+        self.appended.push(digest);
+        size += 1;
+
+        for height in F::parent_heights(leaves) {
             self.appended.push(D::EMPTY);
-            push_dirty(&mut self.dirty_nodes, height, pos);
+            push_dirty(&mut self.dirty_nodes, height, size);
+            size += 1;
         }
 
+        size
+    }
+
+    /// Add a run of pre-computed leaf digests, in order.
+    #[cfg(feature = "std")]
+    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+        // Each leaf also appends its parent placeholders, so reserve for the full node count.
+        let digests = digests.into_iter();
+        let n = digests.size_hint().0 as u64;
+        let leaves = self.leaves();
+        let mut size = self.size();
+        let end = leaves.checked_add(n).expect("leaf count overflow");
+        let additional = (*Position::try_from(end).expect("size overflow") - *size) as usize;
+        self.appended.reserve(additional);
+
+        // Maintain leaf position and location incrementally to avoid recomputation on every iteration.
+        for (i, digest) in (0u64..).zip(digests) {
+            size = self.append_leaf_digest(digest, leaves + i, size);
+        }
         self
     }
 
