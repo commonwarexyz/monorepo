@@ -62,7 +62,7 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::fmt;
+    use core::{fmt, future::Future};
 
     cfg_if! {
         if #[cfg(feature = "std")] {
@@ -228,6 +228,24 @@ commonware_macros::stability_scope!(BETA {
                     a
                 },
             )
+        }
+
+        /// Runs `f` to completion and returns its result.
+        ///
+        /// When the strategy owns a thread pool, the returned future suspends the caller while
+        /// the work executes on the pool; otherwise the work runs inline when the future is
+        /// first polled. Use this to keep CPU-intensive work off async executor threads.
+        /// Strategy methods invoked within `f` execute with this strategy's parallelism.
+        ///
+        /// # Panics
+        ///
+        /// The returned future panics if `f` panics.
+        fn run_async<F, R>(&self, f: F) -> impl Future<Output = R> + Send
+        where
+            F: FnOnce() -> R + Send + 'static,
+            R: Send + 'static,
+        {
+            async move { f() }
         }
 
         /// Maps each element with per-partition state and collects results into a `Vec`.
@@ -558,6 +576,19 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             self.thread_pool.install(|| rayon::join(a, b))
         }
 
+        fn run_async<F, R>(&self, f: F) -> impl Future<Output = R> + Send
+        where
+            F: FnOnce() -> R + Send + 'static,
+            R: Send + 'static,
+        {
+            let (tx, rx) = futures::channel::oneshot::channel();
+            self.thread_pool.spawn(move || {
+                // The receiver may have been dropped; sending then fails harmlessly.
+                let _ = tx.send(f());
+            });
+            async move { rx.await.expect("work panicked on the strategy's thread pool") }
+        }
+
         fn parallelism_hint(&self) -> usize {
             self.thread_pool.current_num_threads()
         }
@@ -572,6 +603,25 @@ mod test {
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn run_async_returns_result() {
+        let sequential = Sequential;
+        assert_eq!(futures::executor::block_on(sequential.run_async(|| 7)), 7);
+
+        let parallel = parallel_strategy();
+        assert_eq!(futures::executor::block_on(parallel.run_async(|| 7)), 7);
+
+        // Nested strategy calls within the offloaded work execute correctly.
+        let parallel = parallel_strategy();
+        let result = futures::executor::block_on(parallel.clone().run_async(move || {
+            parallel
+                .map_collect_vec(0..100u64, |x| x * x)
+                .iter()
+                .sum::<u64>()
+        }));
+        assert_eq!(result, (0..100u64).map(|x| x * x).sum::<u64>());
     }
 
     proptest! {
