@@ -62,17 +62,14 @@
 //! ```
 //!
 //! ```ignore
-//! // Advanced mode: while the previous batch is being committed, build exactly
-//! // one child batch from the newly published state.
+//! // Apply a batch and commit it, then build a child batch from the newly published state
+//! // and apply it. `commit` takes `&mut self`, so committing and building share the same
+//! // exclusive borrow and run in sequence.
 //! db.apply_batch(db.new_batch().update(key_a, value_a).finalize(None)).await?;
+//! db.commit().await?;
 //!
-//! let (child_finalized, commit_result) = futures::join!(
-//!     async { db.new_batch().update(key_b, value_b).finalize(None) },
-//!     db.commit(),
-//! );
-//! commit_result?;
-//!
-//! db.apply_batch(child_finalized).await?;
+//! let child = db.new_batch().update(key_b, value_b).finalize(None);
+//! db.apply_batch(child).await?;
 //! db.commit().await?;
 //! ```
 

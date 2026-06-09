@@ -296,15 +296,24 @@ impl<E: Context> Blobs<E> {
         Ok(())
     }
 
-    /// Rewind the tail to `byte_offset`.
+    /// Rewind the tail to `byte_offset`, shrinking it in place.
     ///
     /// # Invariants
     ///
     /// - `byte_offset <= tail size`
+    ///
+    /// # Errors
+    /// Returns [Error::BlobInUse] if there are outstanding readers: the tail is shared mutable
+    /// state, so truncating it could tear a live snapshot's reads of bytes a later append reuses.
     pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
         let current_bytes = self.tail.size().await;
         debug_assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
+            // A new reader can't be created while we hold `&mut self`, so this only accounts for
+            // snapshots taken earlier; refuse the in-place truncation while any are live.
+            if self.readers.load(Ordering::Acquire) != 0 {
+                return Err(Error::BlobInUse(self.tail_blob_index()));
+            }
             self.tail
                 .resize(byte_offset)
                 .await
@@ -333,9 +342,9 @@ impl<E: Context> Blobs<E> {
             .filter(|&idx| idx < self.sealed.len())
             .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
 
-        // Refuse to truncate in place while any reader could be mid-read. Each live reader counts
-        // itself here; the Acquire load pairs with the Release drop, so a count of 0 guarantees
-        // every reader has finished and dropped before we start overwriting bytes.
+        // A new reader can't be created while we hold `&mut self`, so this only accounts for
+        // snapshots taken earlier; refuse the in-place truncation while any are live. The Acquire
+        // load pairs with the Release in `Snapshot::drop`, so a count of 0 means their reads are done.
         if self.readers.load(Ordering::Acquire) != 0 {
             return Err(Error::BlobInUse(blob));
         }
@@ -472,8 +481,9 @@ impl<B: Blob> Handle<'_, B> {
 
 /// An owned copy of the journal's blob handles and bounds, captured by [`Blobs::to_snapshot`].
 /// Later appends, seals, and prunes are invisible to it: it serves the positions in its frozen
-/// `bounds` from the handles retained at capture, so even pruned blobs stay readable. Counts
-/// itself in `readers` for its lifetime; the count gates in-place truncation during rewind.
+/// `bounds` from the handles retained at capture, so even pruned blobs stay readable. A rewind
+/// would mutate the tail (shared with the writer) or a sealed blob in place, so it counts itself
+/// in `readers` for its lifetime and rewind refuses ([Error::BlobInUse]) while the count is nonzero.
 pub(super) struct Snapshot<B: Blob> {
     /// Index of the first blob in [Self::sealed].
     pub(super) oldest_blob_index: u64,

@@ -1446,7 +1446,7 @@ mod tests {
             let res = journal.rewind(97).await;
             assert!(matches!(
                 res,
-                Err(Error::Journal(JournalError::InvalidRewind(97)))
+                Err(Error::Journal(JournalError::ItemPruned(97)))
             ));
             journal.rewind(98).await.unwrap();
             let bounds = journal.reader().await.bounds();

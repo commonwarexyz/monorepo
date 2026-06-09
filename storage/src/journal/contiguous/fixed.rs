@@ -35,8 +35,9 @@
 //!
 //! Operations that add or drop blobs never mutate the journal's sealed-blob slice; they replace it
 //! whole, so a reader's snapshot keeps valid handles. The journal and its readers share one piece
-//! of mutable state: a count of live readers, which rewind checks before truncating a sealed blob
-//! in place.
+//! of mutable state: a count of live readers. Rewind truncates a blob (sealed or tail) in place,
+//! which is the one operation that could change bytes under a live reader, so it checks that count
+//! and is refused with [Error::BlobInUse] while any reader is outstanding.
 //!
 //! # Open Blobs
 //!
@@ -808,12 +809,12 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         Ok(self.bounds.end - 1)
     }
 
-    /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if the rewind point
-    /// precedes the oldest retained element. The journal is not synced after rewinding.
+    /// Rewind the journal to the given `size`. Returns [Error::InvalidRewind] if `size` is beyond
+    /// the current size, or [Error::ItemPruned] if it precedes the pruning boundary. The journal
+    /// is not synced after rewinding.
     ///
-    /// Returns [Error::BlobInUse] if the rewind target is a sealed historical blob and any
-    /// [Reader] snapshot is outstanding: truncating in place could tear a reader's bytes. Retry
-    /// after readers are dropped.
+    /// Returns [Error::BlobInUse] if any [Reader] snapshot is outstanding: rewinding truncates a
+    /// blob in place, which could tear a live reader's bytes. Retry after readers are dropped.
     ///
     /// # Warnings
     ///
@@ -829,7 +830,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         }
 
         if size < self.bounds.start {
-            return Err(Error::InvalidRewind(size));
+            return Err(Error::ItemPruned(size));
         }
 
         let blob = size / self.items_per_blob.get();
@@ -932,6 +933,11 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// In the event of a crash during this call, upon restart recovery will ensure the journal is
     /// either still in its prior state, or has bounds `new_size..new_size`.
     pub(crate) async fn clear_to_size(&mut self, new_size: u64) -> Result<(), Error> {
+        // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
+        if new_size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
+
         // Durably record the intent first, so a crash mid-clear is finished on reopen.
         self.checkpoint.stage_clear(new_size).await?;
 
@@ -963,13 +969,17 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// idempotently.
     #[commonware_macros::stability(ALPHA)]
     pub(super) async fn stage_clear_intent(&mut self, new_size: u64) -> Result<(), Error> {
+        // A journal sized at `u64::MAX` can never accept an append, matching `init_at_size`.
+        if new_size == u64::MAX {
+            return Err(Error::SizeOverflow);
+        }
         self.checkpoint.stage_clear(new_size).await
     }
 }
 
 /// An owned snapshot of the journal. Bounds are frozen at creation and every position within
-/// `bounds()` remains readable, including across a concurrent prune. A concurrent rewind below
-/// the snapshot may surface as a read error, never as invalid data.
+/// `bounds()` remains readable, including across a concurrent prune. A rewind into the snapshot's
+/// range is refused ([Error::BlobInUse]) while it is alive, so its bytes never change underneath it.
 pub struct Reader<E: Context, A> {
     pub(super) snapshot: Snapshot<E::Blob>,
     pub(super) items_per_blob: NonZeroU64,
@@ -1066,7 +1076,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
         let chunk_size = A::SIZE;
 
         // Phase 1: drain page-cache hits synchronously; record the misses.
-        /// A cache miss: where the item goes (`result_index`) and where it lives (`position`).
+        // A cache miss: where the item goes (`result_index`) and where it lives (`position`).
         struct Miss {
             result_index: usize,
             position: u64,
@@ -2804,7 +2814,7 @@ mod tests {
             // Rewinding prior to our prune point should fail.
             assert!(matches!(
                 journal.rewind(299).await,
-                Err(Error::InvalidRewind(299))
+                Err(Error::ItemPruned(299))
             ));
             // Rewinding to the prune point should work.
             // always remain in the journal.
@@ -3828,6 +3838,28 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_fixed_journal_clear_to_size_rejects_max() {
+        // `clear_to_size` must reject `u64::MAX` like `init_at_size`: such a journal could never
+        // accept an append.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(10));
+            let mut journal = Journal::<_, Digest>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            assert!(matches!(
+                journal.clear_to_size(u64::MAX).await,
+                Err(Error::SizeOverflow)
+            ));
+            assert!(matches!(
+                journal.stage_clear_intent(u64::MAX).await,
+                Err(Error::SizeOverflow)
+            ));
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_fixed_journal_sync_crash_meta_none_boundary_aligned() {
         // Old meta = None (aligned), new boundary = aligned.
         let executor = deterministic::Runner::default();
@@ -4076,7 +4108,7 @@ mod tests {
 
             // Rewind to before pruning_boundary should fail
             let result = journal.rewind(9).await;
-            assert!(matches!(result, Err(Error::InvalidRewind(9))));
+            assert!(matches!(result, Err(Error::ItemPruned(9))));
 
             journal.destroy().await.unwrap();
         });
@@ -4667,9 +4699,11 @@ mod tests {
         });
     }
 
-    /// A stale snapshot reading past a tail rewind gets a clean error, never invalid data.
+    /// A tail rewind that would mutate bytes a live snapshot can still read is refused, so the
+    /// snapshot can never observe reappended data for an old position. Once readers drop, the
+    /// rewind proceeds and a fresh reader sees the new data.
     #[test_traced]
-    fn test_rewind_tail_stale_snapshot_errors_cleanly() {
+    fn test_rewind_tail_blocked_while_snapshot_live() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(10));
@@ -4681,15 +4715,26 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
+            // A live snapshot blocks the tail rewind (it would tear the snapshot's bytes once
+            // the rewound offsets are reappended).
             let snapshot = journal.reader();
-            journal.rewind(2).await.unwrap();
+            assert!(matches!(journal.rewind(2).await, Err(Error::BlobInUse(_))));
+            // The snapshot still reads its original, unchanged bytes.
+            assert_eq!(snapshot.read(6).await.unwrap(), test_digest(6));
 
-            // Within the rewound range the snapshot still reads its bytes.
-            assert_eq!(snapshot.read(1).await.unwrap(), test_digest(1));
-            // Past it, the read fails cleanly.
-            assert!(snapshot.read(6).await.is_err());
-
+            // After the snapshot drops, the rewind succeeds and reappends reuse the offsets.
             drop(snapshot);
+            journal.rewind(2).await.unwrap();
+            for i in 2..8u64 {
+                journal.append(&test_digest(i + 100)).await.unwrap();
+            }
+
+            // A fresh reader observes the new data; no stale reader is alive to see torn bytes.
+            let fresh = journal.reader();
+            assert_eq!(fresh.read(6).await.unwrap(), test_digest(106));
+            assert_eq!(fresh.read(1).await.unwrap(), test_digest(1));
+
+            drop(fresh);
             journal.destroy().await.unwrap();
         });
     }

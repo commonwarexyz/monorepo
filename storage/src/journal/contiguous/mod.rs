@@ -24,8 +24,9 @@ mod tests;
 /// readable through it, even if the journal prunes those items afterward. A reader never
 /// observes appends made after it was created.
 ///
-/// The sole exception is rewind: if the journal rewinds below `bounds().end` while the reader
-/// is alive, reads of the rewound positions may fail with an error but never return invalid data.
+/// A rewind below `bounds().end` would mutate bytes a reader can still see, so the journal
+/// refuses it while any reader is alive (the rewind returns an error); it never proceeds and
+/// leaves a reader observing changed data.
 pub trait Reader: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
@@ -217,8 +218,9 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [Error::InvalidRewind] if size is invalid (too large or points to pruned data).
-    /// Returns an error if the underlying storage operation fails.
+    /// Returns [Error::InvalidRewind] if `size` is beyond the current size, or [Error::ItemPruned]
+    /// if it precedes the pruning boundary. Returns an error if the underlying storage operation
+    /// fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
     /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
