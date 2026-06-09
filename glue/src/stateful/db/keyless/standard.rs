@@ -277,8 +277,11 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
-        Ok(())
+        self.sync().await
+    }
+
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -291,7 +294,7 @@ where
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
-        self.commit().await?;
+        self.sync().await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(
@@ -352,8 +355,11 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.commit().await?;
-        Ok(())
+        self.sync().await
+    }
+
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -366,7 +372,7 @@ where
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
         self.rewind(target.range.end()).await?;
-        self.commit().await?;
+        self.sync().await?;
 
         let rewound_target = self.sync_target().await;
         assert_eq!(
