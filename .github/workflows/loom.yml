@@ -43,8 +43,6 @@ jobs:
       uses: ./.github/actions/disk
     - name: Run setup
       uses: ./.github/actions/setup
-      with:
-        additional-cache-key: loom-${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:

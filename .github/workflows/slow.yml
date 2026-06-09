@@ -54,8 +54,6 @@ jobs:
       uses: ./.github/actions/disk
     - name: Run setup
       uses: ./.github/actions/setup
-      with:
-        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
     - name: Install just & nextest
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
@@ -230,7 +228,6 @@ jobs:
       with:
         toolchain: ${{ env.NIGHTLY_VERSION }}
         components: miri
-        additional-cache-key: part-${{ matrix.partition }}
     - name: Install miri
       run: cargo miri setup
     - name: Install just & nextest
@@ -284,8 +281,6 @@ jobs:
       uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
     - name: Run setup
       uses: ./.github/actions/setup
-      with:
-        additional-cache-key: ${{ matrix.name }}-part-${{ matrix.partition }}
     - name: Install just
       uses: taiki-e/install-action@0c5db7f7f897c03b771660e91d065338615679f4 # v2.60.0
       with:
