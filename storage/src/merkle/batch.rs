@@ -219,14 +219,14 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Append a leaf digest and any parent placeholders.
     ///
-    /// `leaves` and `size` are the starting leaf and node counts.
-    /// Returns the new leaf count and size.
+    /// `leaves` is the leaf index this digest occupies and `size` is the starting node count.
+    /// Returns the new size.
     fn append_leaf_digest(
         &mut self,
         digest: D,
         leaves: Location<F>,
         mut size: Position<F>,
-    ) -> (Location<F>, Position<F>) {
+    ) -> Position<F> {
         self.appended.push(digest);
         size += 1;
 
@@ -236,7 +236,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             size += 1;
         }
 
-        (leaves + 1, size)
+        size
     }
 
     /// Add a run of pre-computed leaf digests, in order.
@@ -245,14 +245,15 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
-        let mut leaves = self.leaves();
+        let leaves = self.leaves();
         let mut size = self.size();
-        let additional = Position::try_from(leaves + n).map_or(0, |end| (*end - *size) as usize);
+        let end = leaves.checked_add(n).expect("leaf count overflow");
+        let additional = (*Position::try_from(end).expect("size overflow") - *size) as usize;
         self.appended.reserve(additional);
 
         // Track positions locally so bulk appends do not recompute them from the growing batch.
-        for digest in digests {
-            (leaves, size) = self.append_leaf_digest(digest, leaves, size);
+        for (i, digest) in (0u64..).zip(digests) {
+            size = self.append_leaf_digest(digest, leaves + i, size);
         }
         self
     }
