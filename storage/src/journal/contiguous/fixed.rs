@@ -1135,9 +1135,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         if items.is_empty() {
             return Err(Error::EmptyAppend);
         }
-        let items_count = items.len();
         let items_buf = Self::encode_items(items);
-        self.write_encoded(items_buf, items_count).await
+        self.write_encoded(items_buf).await
     }
 
     /// Encode `items` into an owned fixed-width byte buffer.
@@ -1163,24 +1162,20 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         items_buf
     }
 
-    /// Append `items_count` records pre-encoded by [`Self::encode_items`] into `items_buf`.
+    /// Append records pre-encoded by [`Self::encode_items`] into `items_buf`.
     ///
     /// Records no metrics: the public [`append`](Self::append) / [`append_many`](Self::append_many)
     /// wrappers record their own, and callers that encode separately record whatever fits their
     /// operation.
-    pub(crate) async fn write_encoded(
-        &self,
-        items_buf: Vec<u8>,
-        items_count: usize,
-    ) -> Result<u64, Error> {
+    pub(crate) async fn write_encoded(&self, items_buf: Vec<u8>) -> Result<u64, Error> {
+        assert!(
+            items_buf.len().is_multiple_of(A::SIZE),
+            "encoded buffer length must be a multiple of the item size"
+        );
+        let items_count = items_buf.len() / A::SIZE;
         if items_count == 0 {
             return Err(Error::EmptyAppend);
         }
-        assert_eq!(
-            items_buf.len(),
-            items_count * A::SIZE,
-            "encoded buffer length must match item count"
-        );
 
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
