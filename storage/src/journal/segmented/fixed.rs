@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Metrics, Storage,
+    Blob, Buf, IoBuf, Metrics, Storage,
 };
 use futures::{
     stream::{self, Stream},
@@ -140,20 +140,19 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append pre-encoded bytes to the given section.
     ///
     /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
+    /// Buffers too large for the write buffer are written directly to the blob without an
+    /// intermediate copy.
     ///
     /// # Panics
     ///
     /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
-    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
+    pub(crate) async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<(), Error> {
         assert!(!buf.is_empty());
         assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
+        let count = buf.len() / Self::CHUNK_SIZE;
         let blob = self.manager.get_or_create(section).await?;
-        blob.append(buf).await?;
-        trace!(
-            section,
-            count = buf.len() / Self::CHUNK_SIZE,
-            "appended items"
-        );
+        blob.append_owned(buf).await?;
+        trace!(section, count, "appended items");
         Ok(())
     }
 
