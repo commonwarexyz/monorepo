@@ -385,8 +385,11 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
+    }
+
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
@@ -479,8 +482,11 @@ where
 
     async fn finalize(&mut self, batch: Self::Merkleized) -> Result<(), Error<F>> {
         self.apply_batch(batch.inner).await?;
-        self.sync().await?;
-        Ok(())
+        self.sync().await
+    }
+
+    async fn prune(&mut self, target: &Self::SyncTarget) -> Result<(), Error<F>> {
+        self.prune((*target.range.start()).into()).await
     }
 
     async fn sync_target(&self) -> Self::SyncTarget {
