@@ -53,6 +53,18 @@ runs:
         echo "CARGO_TARGET_DIR=/mnt/target" >> "$GITHUB_ENV"
         echo "CARGO_HOME=/mnt/.cargo" >> "$GITHUB_ENV"
         echo "/mnt/.cargo/bin" >> "$GITHUB_PATH"
+    - name: Remove preinstalled Rust toolchains
+      if: inputs.rust-cache-enabled == 'true'
+      shell: bash
+      run: |
+        # rust-cache hashes every rustup toolchain it can see. Hosted runners
+        # ship a rolling stable toolchain, so start from an empty toolchain set.
+        while IFS= read -r line; do
+          toolchain="${line%% *}"
+          if [ -n "$toolchain" ]; then
+            rustup toolchain uninstall "$toolchain"
+          fi
+        done < <(rustup toolchain list --quiet)
     - name: Install additional Rust toolchain
       if: inputs.additional-toolchain != ''
       uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561

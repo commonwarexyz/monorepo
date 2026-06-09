@@ -43,6 +43,7 @@ jobs:
     - name: Run setup
       uses: ./.github/actions/setup
       with:
+        components: clippy
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
         additional-components: ${{ matrix.os == 'ubuntu-latest' && matrix.flags == '' && 'rustfmt,rustc-dev,llvm-tools-preview' || 'rustfmt' }}
         additional-cache-key: ${{ matrix.flags || 'default' }}
