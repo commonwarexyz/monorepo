@@ -260,7 +260,9 @@ where
 
         // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
         let reader = self.log.reader().await;
-        let ops = reader.read_many(&positions).await?;
+        let ops = reader
+            .read_many_decoded(&positions, self.log.strategy())
+            .await?;
 
         // Phase 4: Match operations back to keys via binary search (no HashMap).
         for &(key_idx, pos) in &candidates {
@@ -325,7 +327,9 @@ where
         }
 
         let reader = self.log.reader().await;
-        let ops = reader.read_many(&positions).await?;
+        let ops = reader
+            .read_many_decoded(&positions, self.log.strategy())
+            .await?;
 
         for &(key_idx, pos) in &candidates {
             if results[key_idx].is_some() {

@@ -205,6 +205,34 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         if positions.is_empty() {
             return Ok((Vec::new(), 0));
         }
+
+        let hits = self.read_many_into(section, positions, buf).await?;
+
+        let mut items = Vec::with_capacity(positions.len());
+        for i in 0..positions.len() {
+            let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
+            items.push(A::decode(slice).map_err(Error::Codec)?);
+        }
+        Ok((items, hits))
+    }
+
+    /// Fill `buf` with the raw bytes of the items at `positions` in the given section without
+    /// decoding them.
+    ///
+    /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
+    /// strictly increasing and within the section's bounds. Item `i` occupies
+    /// `buf[i * CHUNK_SIZE..(i + 1) * CHUNK_SIZE]`.
+    ///
+    /// Returns the number served without a blob read (page cache or tip buffer hits).
+    pub async fn read_many_into(
+        &self,
+        section: u64,
+        positions: &[u64],
+        buf: &mut [u8],
+    ) -> Result<usize, Error> {
+        if positions.is_empty() {
+            return Ok(0);
+        }
         let blob = self
             .manager
             .get(section)?
@@ -219,13 +247,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             .collect::<Result<_, _>>()?;
 
         let hits = blob.read_many_into(buf, &offsets, Self::CHUNK_SIZE).await?;
-
-        let mut items = Vec::with_capacity(positions.len());
-        for i in 0..positions.len() {
-            let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
-            items.push(A::decode(slice).map_err(Error::Codec)?);
-        }
-        Ok((items, hits))
+        Ok(hits)
     }
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.

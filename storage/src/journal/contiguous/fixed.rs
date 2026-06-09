@@ -96,8 +96,9 @@ use crate::{
     metadata::{Config as MetadataConfig, Metadata},
     Context, Persistable,
 };
-use commonware_codec::CodecFixedShared;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_codec::{CodecFixedShared, DecodeExt as _};
+use commonware_parallel::Strategy;
+use commonware_runtime::{buffer::paged::CacheRef, IoBufMut};
 use commonware_utils::{
     sequence::VecU64,
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
@@ -325,79 +326,48 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         if positions.is_empty() {
             return Ok(Vec::new());
         }
-        let _timer = self.metrics.read_many_timer();
-        self.metrics.read_many_calls.inc();
-        assert!(
-            positions.windows(2).all(|w| w[0] < w[1]),
-            "positions must be strictly increasing"
-        );
-        // Validate all positions.
-        for &pos in positions {
-            if pos >= self.guard.size {
-                return Err(Error::ItemOutOfRange(pos));
-            }
-            if pos < self.guard.pruning_boundary {
-                return Err(Error::ItemPruned(pos));
-            }
-        }
-
-        let items_per_blob = self.items_per_blob;
-        let pruning_boundary = self.guard.pruning_boundary;
         let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
+        let buf = self.read_many_into_pooled(positions).await?;
 
-        // Read all positions grouped by section. Each group goes through the segmented journal's
-        // batched read, which serves page-cache and tip-buffer hits under a single lock acquisition
-        // and reads only true misses from the blob (concurrently). This avoids one lock acquisition
-        // per item that a per-item synchronous probe would incur for the warm steady state.
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        // Scratch decode buffer, allocated uninitialized from the page-cache pool to avoid the
-        // per-call zero-fill of `positions.len() * chunk_size` bytes.
-        let buf_len = positions.len() * chunk_size;
-        // SAFETY: each group slice handed to `get_many` is fully initialized by `read_many_into`
-        // before it is decoded on the `Ok` path; on `Err` the buffer is dropped unread.
-        let mut reusable_buf = unsafe { self.guard.journal.pool().alloc_len(buf_len) };
-        let mut hits = 0u64;
-
-        let mut group_start = 0;
-        while group_start < positions.len() {
-            let section = positions[group_start] / items_per_blob;
-
-            let mut group_end = group_start + 1;
-            while group_end < positions.len() && positions[group_end] / items_per_blob == section {
-                group_end += 1;
-            }
-
-            let group_len = group_end - group_start;
-            let first_position = first_in_section(pruning_boundary, section, items_per_blob)?;
-            let section_positions: Vec<u64> = positions[group_start..group_end]
-                .iter()
-                .map(|&pos| pos - first_position)
-                .collect();
-
-            let buf = &mut reusable_buf.as_mut()[..group_len * chunk_size];
-            let (items, group_hits) = self
-                .guard
-                .journal
-                .get_many(section, &section_positions, buf)
-                .await
-                .map_err(|e| match e {
-                    Error::SectionOutOfRange(e)
-                    | Error::AlreadyPrunedToSection(e)
-                    | Error::ItemOutOfRange(e) => {
-                        Error::Corruption(format!("section/item should be found, but got: {e}"))
-                    }
-                    other => other,
-                })?;
-
-            hits += group_hits as u64;
-            result.extend(items);
-            group_start = group_end;
+        for i in 0..positions.len() {
+            let slice = &buf.as_ref()[i * chunk_size..(i + 1) * chunk_size];
+            result.push(A::decode(slice).map_err(Error::Codec)?);
         }
+        Ok(result)
+    }
 
-        self.metrics.record_cache_hits(hits);
-        self.metrics
-            .record_cache_misses(positions.len() as u64 - hits);
-        self.metrics.items_read.inc_by(positions.len() as u64);
+    async fn read_many_decoded<S: Strategy>(
+        &self,
+        positions: &[u64],
+        strategy: &S,
+    ) -> Result<Vec<A>, Error> {
+        if positions.is_empty() {
+            return Ok(Vec::new());
+        }
+        let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
+        let buf = self.read_many_into_pooled(positions).await?;
+        let bytes = buf.as_ref();
+
+        let n = positions.len();
+        let workers = strategy.parallelism_hint().clamp(1, n);
+        let span = n.div_ceil(workers);
+
+        let chunks: Vec<Result<Vec<A>, Error>> =
+            strategy.map_collect_vec((0..n).step_by(span), |start| {
+                let end = (start + span).min(n);
+                let mut items = Vec::with_capacity(end - start);
+                for i in start..end {
+                    let slice = &bytes[i * chunk_size..(i + 1) * chunk_size];
+                    items.push(A::decode(slice).map_err(Error::Codec)?);
+                }
+                Ok(items)
+            });
+
+        let mut result = Vec::with_capacity(n);
+        for chunk in chunks {
+            result.extend(chunk?);
+        }
         Ok(result)
     }
 
@@ -488,6 +458,81 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         });
 
         Ok(stream)
+    }
+}
+
+impl<E: Context, A: CodecFixedShared> Reader<'_, E, A> {
+    /// Fill a pooled buffer with the raw bytes of the items at `positions` and return it.
+    ///
+    /// Item `i` occupies `buf[i * CHUNK_SIZE..(i + 1) * CHUNK_SIZE]`. Positions must be strictly
+    /// increasing and within bounds. Reads are grouped by section so each section is served by a
+    /// single batched read under one lock acquisition.
+    pub(crate) async fn read_many_into_pooled(&self, positions: &[u64]) -> Result<IoBufMut, Error> {
+        let _timer = self.metrics.read_many_timer();
+        self.metrics.read_many_calls.inc();
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be strictly increasing"
+        );
+        for &pos in positions {
+            if pos >= self.guard.size {
+                return Err(Error::ItemOutOfRange(pos));
+            }
+            if pos < self.guard.pruning_boundary {
+                return Err(Error::ItemPruned(pos));
+            }
+        }
+
+        let items_per_blob = self.items_per_blob;
+        let pruning_boundary = self.guard.pruning_boundary;
+        let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
+
+        let buf_len = positions.len() * chunk_size;
+        // SAFETY: every byte handed to a section group is fully initialized by `read_many_into`
+        // before the buffer is read by the caller; on `Err` the buffer is dropped unread.
+        let mut buf = unsafe { self.guard.journal.pool().alloc_len(buf_len) };
+        let mut hits = 0u64;
+
+        let mut group_start = 0;
+        while group_start < positions.len() {
+            let section = positions[group_start] / items_per_blob;
+
+            let mut group_end = group_start + 1;
+            while group_end < positions.len() && positions[group_end] / items_per_blob == section {
+                group_end += 1;
+            }
+
+            let first_position = first_in_section(pruning_boundary, section, items_per_blob)?;
+            let section_positions: Vec<u64> = positions[group_start..group_end]
+                .iter()
+                .map(|&pos| pos - first_position)
+                .collect();
+
+            let group_buf =
+                &mut buf.as_mut()[group_start * chunk_size..group_end * chunk_size];
+            let group_hits = self
+                .guard
+                .journal
+                .read_many_into(section, &section_positions, group_buf)
+                .await
+                .map_err(|e| match e {
+                    Error::SectionOutOfRange(e)
+                    | Error::AlreadyPrunedToSection(e)
+                    | Error::ItemOutOfRange(e) => {
+                        Error::Corruption(format!("section/item should be found, but got: {e}"))
+                    }
+                    other => other,
+                })?;
+
+            hits += group_hits as u64;
+            group_start = group_end;
+        }
+
+        self.metrics.record_cache_hits(hits);
+        self.metrics
+            .record_cache_misses(positions.len() as u64 - hits);
+        self.metrics.items_read.inc_by(positions.len() as u64);
+        Ok(buf)
     }
 }
 

@@ -127,19 +127,15 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         );
 
         let first = self.inner.leaves();
-        let hasher = &self.hasher;
-        let digests = self.inner.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
-        );
-
-        self.inner = self.inner.add_leaf_digests(digests);
+        let hasher = self.hasher.clone();
+        let items_ref = &items;
+        let n = items.len() as u64;
+        self.inner = self.inner.add_many_leaves(&hasher, n, |i, buf| {
+            let pos = Position::try_from(first + i).expect("valid leaf location");
+            buf.clear();
+            items_ref[i as usize].write(buf);
+            hasher.leaf_digest(pos, buf.as_slice())
+        });
         self.items = items;
         self
     }

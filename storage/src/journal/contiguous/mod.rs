@@ -5,6 +5,7 @@
 //! [variable]-size item journals are supported.
 
 use super::Error;
+use commonware_parallel::Strategy;
 use futures::Stream;
 use std::{future::Future, num::NonZeroUsize, ops::Range};
 use tracing::warn;
@@ -54,6 +55,23 @@ pub trait Reader: Send + Sync {
             }
             Ok(items)
         }
+    }
+
+    /// Read multiple items, decoding the raw payloads in parallel using `strategy`.
+    ///
+    /// The default implementation ignores `strategy` and delegates to
+    /// [`read_many`](Self::read_many). Implementations that copy the raw item bytes into a single
+    /// contiguous buffer override this to decode that buffer lock-free across the strategy's
+    /// parallelism.
+    fn read_many_decoded<S: Strategy>(
+        &self,
+        positions: &[u64],
+        _strategy: &S,
+    ) -> impl Future<Output = Result<Vec<Self::Item>, Error>> + Send
+    where
+        Self::Item: Send,
+    {
+        self.read_many(positions)
     }
 
     /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.

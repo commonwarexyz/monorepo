@@ -189,6 +189,105 @@ fn merkleize_appended_slice<F: Family, D: Digest, S: Strategy>(
     deferred
 }
 
+/// Fill leaf slots and hash interior nodes for the slice `appended[..]`, which maps to absolute
+/// appended indices `[base, end)`.
+///
+/// `leaves` lists `(slot_index, leaf_index)` pairs for the leaves in this slice, sorted by slot.
+/// `leaf_fn(leaf_index, scratch)` produces the leaf digest, reusing `scratch` for encoding.
+/// `interior` lists `(slot_index, height)` for the interior placeholders in this slice, sorted by
+/// slot. This fuses the leaf hashing pass into the interior pass: each task fills its leaf slots
+/// before computing its interior nodes, so every in-slice child (leaf or interior) is finalized
+/// before it is read.
+///
+/// See [`merkleize_appended_slice`] for the slice-boundary deferral contract; the returned
+/// `(position, height)` list is identical in meaning.
+#[cfg(feature = "std")]
+#[allow(clippy::too_many_arguments)]
+fn fused_appended_slice<F, D, S, L>(
+    strategy: &S,
+    hasher: &impl Hasher<F, Digest = D>,
+    leaf_fn: &L,
+    parent_size: u64,
+    base: u64,
+    end: u64,
+    appended: &mut [D],
+    leaves: &[(u64, u64)],
+    interior: &[(u64, u32)],
+) -> Vec<(Position<F>, u32)>
+where
+    F: Family,
+    D: Digest,
+    S: Strategy,
+    L: Fn(u64, &mut Vec<u8>) -> D + Send + Sync,
+{
+    if interior.len() > PARALLEL_SPLIT_THRESHOLD && end - base > 1 {
+        let mid = base + (end - base) / 2;
+        let leaf_split = leaves.partition_point(|&(slot, _)| slot < mid);
+        let int_split = interior.partition_point(|&(slot, _)| slot < mid);
+        let (left_slice, right_slice) = appended.split_at_mut((mid - base) as usize);
+        let (left_leaves, right_leaves) = leaves.split_at(leaf_split);
+        let (left_int, right_int) = interior.split_at(int_split);
+        let (mut left_deferred, right_deferred) = strategy.join(
+            || {
+                fused_appended_slice::<F, D, S, L>(
+                    strategy,
+                    hasher,
+                    leaf_fn,
+                    parent_size,
+                    base,
+                    mid,
+                    left_slice,
+                    left_leaves,
+                    left_int,
+                )
+            },
+            || {
+                fused_appended_slice::<F, D, S, L>(
+                    strategy,
+                    hasher,
+                    leaf_fn,
+                    parent_size,
+                    mid,
+                    end,
+                    right_slice,
+                    right_leaves,
+                    right_int,
+                )
+            },
+        );
+        left_deferred.extend(right_deferred);
+        return left_deferred;
+    }
+
+    let mut scratch = Vec::new();
+    for &(slot, leaf_index) in leaves {
+        let oi = (slot - base) as usize;
+        appended[oi] = leaf_fn(leaf_index, &mut scratch);
+    }
+
+    let mut deferred = Vec::new();
+    let mut deferred_idx: BTreeSet<u64> = BTreeSet::new();
+    for &(idx, height) in interior {
+        let pos = Position::<F>::new(parent_size + idx);
+        let (left, right) = F::children(pos, height);
+        let li = (*left).wrapping_sub(parent_size).wrapping_sub(base);
+        let ri = (*right).wrapping_sub(parent_size).wrapping_sub(base);
+        let in_slice = *left >= base + parent_size
+            && *right >= base + parent_size
+            && !deferred_idx.contains(&(base + li))
+            && !deferred_idx.contains(&(base + ri));
+        if in_slice {
+            let oi = (idx - base) as usize;
+            let digest = hasher.node_digest(pos, &appended[li as usize], &appended[ri as usize]);
+            appended[oi] = digest;
+        } else {
+            deferred.push((pos, height));
+            deferred_idx.insert(idx);
+        }
+    }
+    deferred
+}
+
 // ---------------------------------------------------------------------------
 // UnmerkleizedBatch
 // ---------------------------------------------------------------------------
@@ -349,6 +448,72 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         for (i, digest) in (0u64..).zip(digests) {
             size = self.append_leaf_digest(digest, leaves + i, size);
         }
+        self
+    }
+
+    /// Append `n` leaves, computing leaf and interior digests in a single fused parallel pass.
+    ///
+    /// `leaf_fn(leaf_index, scratch)` produces the digest for the leaf at the absolute leaf index
+    /// `leaf_index`, reusing `scratch` as a per-task encode buffer. The layout (which appended slots
+    /// hold leaves vs interior nodes) depends only on positions, so it is precomputed serially; the
+    /// fused pass then fills leaf slots and hashes interior nodes together, avoiding the separate
+    /// leaf-hashing pass plus its intermediate digest Vec.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any leaves were already appended to this batch.
+    #[cfg(feature = "std")]
+    pub(crate) fn add_many_leaves<L>(
+        mut self,
+        hasher: &impl Hasher<F, Digest = D>,
+        n: u64,
+        leaf_fn: L,
+    ) -> Self
+    where
+        L: Fn(u64, &mut Vec<u8>) -> D + Send + Sync,
+    {
+        assert!(
+            self.appended.is_empty(),
+            "add_many_leaves expects no prior appends"
+        );
+        if n == 0 {
+            return self;
+        }
+
+        // Precompute the appended-region layout. Each leaf occupies one slot followed by its parent
+        // placeholders; both lists are built in slot-ascending order.
+        let first_leaf = self.leaves();
+        let mut leaf_slots: Vec<(u64, u64)> = Vec::with_capacity(n as usize);
+        let mut interior: Vec<(u64, u32)> = Vec::new();
+        let mut slot = 0u64;
+        for i in 0..n {
+            leaf_slots.push((slot, i));
+            slot += 1;
+            for height in F::parent_heights(first_leaf + i) {
+                interior.push((slot, height));
+                slot += 1;
+            }
+        }
+        let total = slot;
+
+        self.appended.resize(total as usize, D::EMPTY);
+        let parent_size = *self.parent.size();
+        let strategy = self.parent.strategy.clone();
+        let deferred = fused_appended_slice::<F, D, S, L>(
+            &strategy,
+            hasher,
+            &leaf_fn,
+            parent_size,
+            0,
+            total,
+            &mut self.appended,
+            &leaf_slots,
+            &interior,
+        );
+        for (pos, height) in deferred {
+            push_dirty(&mut self.dirty_nodes, height, pos);
+        }
+
         self
     }
 
@@ -819,6 +984,35 @@ mod tests {
                     mem_root(&result, &hasher),
                     mem_root(&reference, &hasher),
                     "root mismatch for base_n={base_n} add_n={add_n}"
+                );
+            }
+        });
+    }
+
+    fn fused_appended_parity<F: Family, S: Strategy>(strategy: S) {
+        let executor = deterministic::Runner::default();
+        executor.start(move |_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            for &(base_n, add_n) in &[(0u64, 5000u64), (1000, 4000), (777, 6001), (3333, 3000)] {
+                let reference = build_reference::<F>(&hasher, base_n + add_n);
+                let base = build_reference::<F>(&hasher, base_n);
+                let batch = base.new_batch_with_strategy(strategy.clone());
+                let merkleized = batch
+                    .add_many_leaves(&hasher, add_n, |i, buf| {
+                        let pos =
+                            Position::<F>::try_from(Location::new(base_n + i)).expect("valid leaf");
+                        buf.clear();
+                        buf.extend_from_slice(&(base_n + i).to_be_bytes());
+                        let element = hasher.digest(buf.as_slice());
+                        hasher.leaf_digest(pos, element.as_ref())
+                    })
+                    .merkleize(&base, &hasher);
+                let mut result = base;
+                result.apply_batch(&merkleized).unwrap();
+                assert_eq!(
+                    mem_root(&result, &hasher),
+                    mem_root(&reference, &hasher),
+                    "fused root mismatch for base_n={base_n} add_n={add_n}"
                 );
             }
         });
@@ -1372,6 +1566,16 @@ mod tests {
             commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(4).unwrap()).unwrap();
         large_appended_parity::<crate::mmr::Family, _>(strategy);
     }
+    #[test]
+    fn mmr_fused_appended_parity_sequential() {
+        fused_appended_parity::<crate::mmr::Family, _>(commonware_parallel::Sequential);
+    }
+    #[test]
+    fn mmr_fused_appended_parity_rayon() {
+        let strategy =
+            commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(4).unwrap()).unwrap();
+        fused_appended_parity::<crate::mmr::Family, _>(strategy);
+    }
 
     // --- MMB tests ---
 
@@ -1456,5 +1660,15 @@ mod tests {
         let strategy =
             commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(4).unwrap()).unwrap();
         large_appended_parity::<crate::mmb::Family, _>(strategy);
+    }
+    #[test]
+    fn mmb_fused_appended_parity_sequential() {
+        fused_appended_parity::<crate::mmb::Family, _>(commonware_parallel::Sequential);
+    }
+    #[test]
+    fn mmb_fused_appended_parity_rayon() {
+        let strategy =
+            commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(4).unwrap()).unwrap();
+        fused_appended_parity::<crate::mmb::Family, _>(strategy);
     }
 }

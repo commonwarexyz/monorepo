@@ -29,7 +29,6 @@ use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::{cmp::Ordering, ops::Range};
 use std::{
-    collections::BTreeMap,
     iter,
     sync::{Arc, Weak},
 };
@@ -75,13 +74,13 @@ impl<K: Ord + Clone, V: Clone> Mutations<K, V> {
             .find_map(|(k, v)| (k == key).then_some(v))
     }
 
-    /// Resolve to a key-sorted, last-write-wins `BTreeMap`.
+    /// Resolve to a key-sorted, last-write-wins [`SortedMutations`].
     ///
     /// A stable sort followed by a reverse-keep dedup preserves last-write-wins: equal keys keep
     /// their insertion order after the stable sort, and keeping the last of each run keeps the most
-    /// recent write. The result matches the order and final value mapping that successive
+    /// recent write. The resulting key order and final value mapping match what successive
     /// `BTreeMap::insert` calls would produce.
-    fn into_sorted(self) -> BTreeMap<K, Option<V>> {
+    fn into_sorted(self) -> SortedMutations<K, V> {
         let mut pending = self.pending;
         pending.sort_by(|a, b| a.0.cmp(&b.0));
         // Keep the LAST write of each equal-key run. `dedup_by` retains the first of a run, so
@@ -94,7 +93,71 @@ impl<K: Ord + Clone, V: Clone> Mutations<K, V> {
                 false
             }
         });
-        BTreeMap::from_iter(pending)
+        SortedMutations {
+            entries: pending.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+        }
+    }
+}
+
+/// Key-sorted, last-write-wins mutations consumed by `merkleize`.
+///
+/// Backed by a sorted, deduplicated `Vec<(K, Option<Option<V>>)>`: the outer `Option` is a
+/// tombstone (`None` once the entry has been consumed via [`take`](Self::take) or
+/// [`retain_take`](Self::retain_take)), and the inner `Option<V>` is the mutation (`Some(value)`
+/// upsert, `None` delete). Replaces the prior `BTreeMap` rebuild: classification consumes entries
+/// in place by binary-searching the key, and the residual creates iterate in key order without a
+/// second container.
+struct SortedMutations<K, V> {
+    entries: Vec<(K, Option<Option<V>>)>,
+}
+
+impl<K: Ord, V> SortedMutations<K, V> {
+    const fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.iter().all(|(_, slot)| slot.is_none())
+    }
+
+    /// Keys of the live (not yet consumed) entries, in ascending order.
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.entries
+            .iter()
+            .filter_map(|(k, slot)| slot.as_ref().map(|_| k))
+    }
+
+    /// Consume and return the mutation for `key`, or `None` if absent or already consumed.
+    fn take(&mut self, key: &K) -> Option<Option<V>> {
+        let idx = self
+            .entries
+            .binary_search_by(|(k, _)| k.cmp(key))
+            .ok()?;
+        self.entries[idx].1.take()
+    }
+
+    /// Visit live entries in ascending key order. When `f` returns `Some`, the entry is consumed
+    /// and the value collected; otherwise it is left in place. `f` receives the mutation
+    /// (`Some(value)` upsert, `None` delete).
+    fn retain_take<T>(&mut self, mut f: impl FnMut(&K, &Option<V>) -> Option<T>) -> Vec<T> {
+        let mut taken = Vec::new();
+        for (key, slot) in self.entries.iter_mut() {
+            let Some(value) = slot.as_ref() else {
+                continue;
+            };
+            if let Some(t) = f(key, value) {
+                slot.take();
+                taken.push(t);
+            }
+        }
+        taken
+    }
+
+    /// Drain the remaining live entries in ascending key order.
+    fn into_creates(self) -> impl Iterator<Item = (K, Option<V>)> {
+        self.entries
+            .into_iter()
+            .filter_map(|(k, slot)| slot.map(|v| (k, v)))
     }
 }
 
@@ -733,7 +796,7 @@ where
     /// deleted; the unordered path can skip them.
     fn gather_existing_locations<E, C, I, const N: usize>(
         &self,
-        mutations: &BTreeMap<U::Key, Option<U::Value>>,
+        mutations: &SortedMutations<U::Key, U::Value>,
         db: &Db<F, E, C, I, H, U, N, S>,
         include_active_collision_siblings: bool,
     ) -> Vec<Location<F>>
@@ -750,8 +813,8 @@ where
                 locations.extend(db.snapshot.get(key).copied());
             }
         } else {
-            // `mutations` is a BTreeMap, so keys iterate in ascending order; a single forward
-            // cursor sweep over the ancestor diffs replaces a per-key binary search per ancestor.
+            // `mutations` keys iterate in ascending order; a single forward cursor sweep over the
+            // ancestor diffs replaces a per-key binary search per ancestor.
             let mut cursors =
                 AncestorCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
             for key in mutations.keys() {
@@ -789,25 +852,23 @@ where
     #[allow(clippy::type_complexity)]
     fn extract_parent_deleted_creates(
         &self,
-        mutations: &mut BTreeMap<U::Key, Option<U::Value>>,
+        mutations: &mut SortedMutations<U::Key, U::Value>,
     ) -> Vec<(U::Key, U::Value, Option<Location<F>>)> {
         if self.ancestors.is_empty() {
             return Vec::new();
         }
-        let mut creates = Vec::new();
-        // `retain` visits keys in ascending BTreeMap order, so a forward cursor sweep over the
+        // `retain_take` visits live keys in ascending order, so a forward cursor sweep over the
         // ancestor diffs replaces a per-key binary search per ancestor.
         let mut cursors = AncestorCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
-        mutations.retain(|key, value| {
-            if let Some(DiffEntry::Deleted { base_old_loc }) = cursors.resolve(key) {
-                if let Some(v) = value.take() {
-                    creates.push((key.clone(), v, *base_old_loc));
-                    return false;
-                }
+        mutations.retain_take(|key, value| {
+            if let (Some(v), Some(DiffEntry::Deleted { base_old_loc })) =
+                (value.as_ref(), cursors.resolve(key))
+            {
+                Some((key.clone(), v.clone(), *base_old_loc))
+            } else {
+                None
             }
-            true
-        });
-        creates
+        })
     }
 
     /// Shared final phases of merkleization: floor raise, CommitFloor, journal
@@ -1022,7 +1083,7 @@ where
     async fn finish_unordered<E, C, I, R, const N: usize>(
         self,
         existing: Vec<ExistingEntry<K, F, V::Value>>,
-        mut mutations: BTreeMap<K, Option<V::Value>>,
+        mut mutations: SortedMutations<K, V::Value>,
         metadata: Option<V::Value>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
         reader: R,
@@ -1083,7 +1144,7 @@ where
         // regardless of whether the parent is pending or committed.
         let mut creates: Vec<(K, V::Value, Option<Location<F>>)> =
             Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
-        for (key, value) in mutations {
+        for (key, value) in mutations.into_creates() {
             if let Some(value) = value {
                 creates.push((key, value, None));
             }
@@ -1142,7 +1203,7 @@ where
 
     /// Split into pending mutations and the merkleization machinery.
     #[allow(clippy::type_complexity)]
-    fn into_parts(self) -> (BTreeMap<U::Key, Option<U::Value>>, Merkleizer<F, H, U, S>) {
+    fn into_parts(self) -> (SortedMutations<U::Key, U::Value>, Merkleizer<F, H, U, S>) {
         let ancestors: Vec<_> = self.base.parent().map_or_else(Vec::new, |parent| {
             let mut v = vec![Arc::clone(parent)];
             v.extend(parent.ancestors());
@@ -1425,11 +1486,13 @@ where
         // map routes every key through the read path: the behavior when no pre-resolution is
         // supplied.
         let mut existing: Vec<ExistingEntry<K, F, V::Value>> = Vec::with_capacity(mutations.len());
-        let mut rest: BTreeMap<K, Option<V::Value>> = if resolved.is_empty() {
+        let mut rest: SortedMutations<K, V::Value> = if resolved.is_empty() {
             mutations
         } else {
-            let mut rest = BTreeMap::new();
-            for (key, value) in mutations {
+            // `into_creates` drains in ascending key order, so the residual entries stay sorted
+            // without a re-sort; resolved keys are pulled into `existing` instead.
+            let mut entries = Vec::with_capacity(mutations.len());
+            for (key, value) in mutations.into_creates() {
                 match resolved.get(&key).copied() {
                     Some(hint) => existing.push(ExistingEntry {
                         key,
@@ -1437,12 +1500,10 @@ where
                         base_old_loc: hint.base_old_loc,
                         value,
                     }),
-                    None => {
-                        rest.insert(key, value);
-                    }
+                    None => entries.push((key, Some(value))),
                 }
             }
-            rest
+            SortedMutations { entries }
         };
 
         // Resolve the rest from the journal: gather candidate locations, read the ops, and
@@ -1465,7 +1526,7 @@ where
                 } else {
                     Some(old_loc)
                 };
-                let Some(mutation) = rest.remove(key) else {
+                let Some(mutation) = rest.take(key) else {
                     continue;
                 };
                 existing.push(ExistingEntry {
@@ -1578,7 +1639,7 @@ where
             };
             next_candidates.push(next_key);
 
-            let mutation = mutations.remove(&key);
+            let mutation = mutations.take(&key);
             prev_candidates.push((key.clone(), (value, old_loc)));
 
             let Some(mutation) = mutation else {
@@ -1607,7 +1668,7 @@ where
         // regardless of whether the parent is pending or committed.
         let mut created: Vec<(K, V::Value, Option<Location<F>>)> =
             Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
-        for (key, value) in mutations {
+        for (key, value) in mutations.into_creates() {
             let Some(value) = value else {
                 continue; // delete of non-existent key
             };
@@ -2363,6 +2424,7 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _};
+    use std::collections::BTreeMap;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
 
