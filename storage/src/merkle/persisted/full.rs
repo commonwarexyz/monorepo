@@ -639,9 +639,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 return Ok(());
             }
 
-            // Encode the un-journaled tail of the mem straight into a byte buffer, with no
-            // intermediate `Vec<D>` and no second serialization pass. The buffer is owned, so the
-            // read lock is released before the journal I/O below.
+            // Encode the un-journaled tail to an owned buffer so the read lock is released before
+            // the journal I/O below.
             let (head, tail) = inner.mem.nodes_from(journal_size);
             let count = head.len() + tail.len();
             let encoded = Journal::<E, D>::encode_items(Many::Nested(&[head, tail]));
