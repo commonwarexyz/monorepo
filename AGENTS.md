@@ -876,7 +876,7 @@ fn foo() -> usize {
 
 ### Tracing Spans
 
-Spans represent discrete, time-limited units of work and are exported to OTLP (Tempo) in
+Spans represent discrete, time-limited units of work and are exported to OTLP in
 production. Follow these rules when adding instrumentation:
 
 #### Naming
