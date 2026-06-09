@@ -168,9 +168,9 @@ pub mod test {
         });
     }
 
-    /// The fused `get_many_with_locations -> with_resolved -> merkleize` path must produce a
-    /// byte-identical root to a plain `merkleize`, both rooted at the DB (D=0) and through one
-    /// pending ancestor (D=1).
+    /// Reads on a batch retain resolved locations that `merkleize` consumes to skip re-reading
+    /// those keys. The root must match a write-only batch's `merkleize`, both rooted at the DB
+    /// (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
     pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
         use commonware_cryptography::Hasher as _;
@@ -241,22 +241,14 @@ pub mod test {
                 let normal_root = nb.merkleize(&db, None).await.unwrap().root();
 
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
-                let (values, resolved) = new_batch()
-                    .get_many_with_locations(&keys, &db)
-                    .await
-                    .unwrap();
+                let mut fb = new_batch();
+                let values = fb.get_many(&keys, &db).await.unwrap();
                 let plain = new_batch().get_many(&keys, &db).await.unwrap();
                 assert_eq!(values, plain, "value mismatch at depth={depth}");
-                let mut fb = new_batch();
                 for (k, v) in &muts {
                     fb = fb.write(*k, *v);
                 }
-                let fused_root = fb
-                    .with_resolved(resolved)
-                    .merkleize(&db, None)
-                    .await
-                    .unwrap()
-                    .root();
+                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
             }
         });

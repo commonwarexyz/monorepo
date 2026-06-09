@@ -26,7 +26,7 @@ use ahash::{AHashMap, AHashSet};
 use commonware_codec::Codec;
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::bitmap;
+use commonware_utils::{bitmap, sync::Mutex};
 use core::{cmp::Ordering, ops::Range};
 use std::{
     iter,
@@ -260,29 +260,6 @@ pub(crate) struct ResolvedLocation<F: Family> {
     pub(crate) base_old_loc: Option<Location<F>>,
 }
 
-/// Existing-key locations resolved by
-/// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations), attached to a batch
-/// via [`with_resolved`](UnmerkleizedBatch::with_resolved) so `merkleize` can skip re-reading
-/// those keys.
-///
-/// Entries are keyed internally by the key they were resolved for and must be attached to the
-/// batch they were resolved on. Applying and committing the batch's ancestors between resolution
-/// and merkleization is fine (ancestor-resolved locations are immutable and committed-resolved
-/// keys are untouched by those applies); attaching a token to any other batch may corrupt the
-/// database.
-#[derive(Debug)]
-pub struct ResolvedLocations<K, F: Family> {
-    pub(crate) locations: AHashMap<K, ResolvedLocation<F>>,
-}
-
-impl<K: core::hash::Hash + Eq, F: Family> ResolvedLocations<K, F> {
-    /// Absorb `other`, which must have been resolved on the same batch as `self`. Re-resolving a
-    /// key on the same batch yields the same location, so overlapping entries are identical.
-    pub fn merge(&mut self, other: Self) {
-        self.locations.extend(other.locations);
-    }
-}
-
 /// Where this batch's inherited state comes from.
 enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
 where
@@ -366,11 +343,12 @@ where
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 
-    /// Caller-supplied resolution of existing keys' committed locations, populated from
-    /// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations) during state load.
-    /// When a mutation key is present here, `merkleize` reuses the location and skips the
-    /// redundant journal read. Empty for callers that did not pre-resolve.
-    resolved: AHashMap<U::Key, ResolvedLocation<F>>,
+    /// Committed-DB locations resolved by this batch's reads (`get`/`get_many`), consumed by
+    /// `merkleize`. When a mutation key is present here, `merkleize` reuses the location and
+    /// skips the redundant journal read. Only committed-snapshot resolutions are retained;
+    /// ancestor-diff resolutions could go stale if a committed ancestor is dropped before
+    /// merkleize. Interior-mutable because reads take `&self`; never held across an await.
+    resolved: Mutex<AHashMap<U::Key, ResolvedLocation<F>>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -1329,25 +1307,16 @@ where
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        if let Some(value) = self.mutations.get(key) {
-            return Ok(value.clone());
-        }
-        if let Some(parent) = self.base.parent() {
-            if let Some(entry) = lookup_sorted(parent.diff.as_slice(), key) {
-                return Ok(entry.value().cloned());
-            }
-            for batch in parent.ancestors() {
-                if let Some(entry) = lookup_sorted(batch.diff.as_slice(), key) {
-                    return Ok(entry.value().cloned());
-                }
-            }
-        }
-        db.get(key).await
+        let mut values = self.get_many(&[key], db).await?;
+        Ok(values.pop().expect("one result per key"))
     }
 
-    /// Batch read multiple keys.
+    /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys, with `None` for absent or deleted
+    /// keys. Committed-DB locations resolved by the read are retained on the batch and consumed
+    /// by `merkleize`, which skips re-reading those keys. Keys answered by pending mutations or
+    /// ancestor diffs retain nothing (merkleize re-resolves them in memory).
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -1361,75 +1330,6 @@ where
         if keys.is_empty() {
             return Ok(Vec::new());
         }
-
-        let mut results: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
-        let mut db_indices = Vec::new();
-        let mut db_keys = Vec::new();
-
-        for (i, key) in keys.iter().enumerate() {
-            // Check local mutations.
-            if let Some(value) = self.mutations.get(*key) {
-                results.push(value.clone());
-                continue;
-            }
-
-            // Check parent diff chain.
-            let mut found = false;
-            if let Some(parent) = self.base.parent() {
-                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
-                    results.push(entry.value().cloned());
-                    found = true;
-                }
-                if !found {
-                    for batch in parent.ancestors() {
-                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
-                            results.push(entry.value().cloned());
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if found {
-                continue;
-            }
-
-            // Need DB fallthrough.
-            db_indices.push(i);
-            db_keys.push(*key);
-            results.push(None);
-        }
-
-        if !db_keys.is_empty() {
-            let db_results = db.get_many(&db_keys).await?;
-            for (slot, value) in db_indices.into_iter().zip(db_results) {
-                results[slot] = value;
-            }
-        }
-
-        Ok(results)
-    }
-
-    /// Batch read multiple keys, returning the values plus a [`ResolvedLocations`] token to be
-    /// attached via [`with_resolved`](UnmerkleizedBatch::with_resolved) so the subsequent
-    /// [`merkleize`](UnmerkleizedBatch::merkleize) can skip re-reading these keys.
-    ///
-    /// Resolution matches [`Self::get_many`] (mutations -> ancestor diffs -> committed DB).
-    /// Values are returned in the same order as the input keys, with `None` for keys that are
-    /// absent (a create) or were deleted. Keys answered by this batch's pending mutations receive
-    /// no token entry (merkleize resolves written keys itself).
-    #[allow(clippy::type_complexity)]
-    pub async fn get_many_with_locations<E, C, I, const N: usize>(
-        &self,
-        keys: &[&U::Key],
-        db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<(Vec<Option<U::Value>>, ResolvedLocations<U::Key, F>), crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
         let mut values: Vec<Option<U::Value>> =
             iter::repeat_with(|| None).take(keys.len()).collect();
         let mut locations: AHashMap<U::Key, ResolvedLocation<F>> =
@@ -1455,7 +1355,14 @@ where
         // absent in the chain's view. Sweep ancestor diffs with forward cursors in ascending key
         // order (cursors require it), so the caller's slice is visited via a sorted index
         // permutation rather than a per-key binary search per ancestor.
-        let chain: Vec<Arc<MerkleizedBatch<F, H::Digest, U, S>>> =
+        //
+        // Ancestor-resolved keys retain NO location: an ancestor's `base_old_loc` goes stale if
+        // that ancestor is committed and dropped before this batch merkleizes (the merkleize-time
+        // ancestor walk truncates at dropped batches and re-resolves through the committed
+        // snapshot, and `apply_batch`'s applied-ancestor fix-up cannot see a dropped ancestor's
+        // diff). Re-resolving these keys at merkleize is in-memory work; no journal read is saved
+        // by retaining them.
+        let chain: Vec<_> =
             self.base.parent().map_or_else(Vec::new, |parent| {
                 let mut v = vec![Arc::clone(parent)];
                 v.extend(parent.ancestors());
@@ -1471,18 +1378,7 @@ where
             for i in order {
                 let key = keys[i];
                 match cursors.resolve(key) {
-                    Some(DiffEntry::Active {
-                        value,
-                        loc,
-                        base_old_loc,
-                    }) => {
-                        locations.insert(
-                            key.clone(),
-                            ResolvedLocation {
-                                iter_loc: *loc,
-                                base_old_loc: *base_old_loc,
-                            },
-                        );
+                    Some(DiffEntry::Active { value, .. }) => {
                         values[i] = Some(value.clone());
                     }
                     Some(DiffEntry::Deleted { .. }) => {}
@@ -1510,7 +1406,8 @@ where
             }
         }
 
-        Ok((values, ResolvedLocations { locations }))
+        self.resolved.lock().extend(locations);
+        Ok(values)
     }
 }
 
@@ -1556,7 +1453,7 @@ where
     /// committed state only -- uncommitted ancestor ops aren't tracked, and bits can be set for
     /// locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
-        mut self,
+        self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
@@ -1566,7 +1463,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let resolved = core::mem::take(&mut self.resolved);
+        let resolved = core::mem::take(&mut *self.resolved.lock());
         let (mutations, m) = self.into_parts();
 
         // Split mutations into existing keys the caller pre-resolved (location reused from its
@@ -1643,15 +1540,6 @@ where
         .await
     }
 
-    /// Attach existing-key locations the caller already resolved during state load (via
-    /// [`get_many_with_locations`](Self::get_many_with_locations)) so [`merkleize`](Self::merkleize)
-    /// reuses them instead of re-reading the journal for those keys. Keys without an entry are
-    /// resolved normally. The token must have been resolved on this batch (see
-    /// [`ResolvedLocations`]).
-    pub fn with_resolved(mut self, resolved: ResolvedLocations<K, F>) -> Self {
-        self.resolved = resolved.locations;
-        self
-    }
 }
 
 // Ordered-specific methods.
@@ -2064,7 +1952,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: Mutations::new(),
             base: Base::Child(Arc::clone(self)),
-            resolved: AHashMap::new(),
+            resolved: Mutex::new(AHashMap::new()),
         }
     }
 
@@ -2187,7 +2075,7 @@ where
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
             },
-            resolved: AHashMap::new(),
+            resolved: Mutex::new(AHashMap::new()),
         }
     }
 }

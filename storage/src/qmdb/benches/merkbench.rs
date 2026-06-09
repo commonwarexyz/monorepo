@@ -8,7 +8,8 @@
 //! Usage:
 //!   cargo bench -p commonware-storage --bench merkbench -- [mode] [depth] [iters] [keys] [updates]
 //!
-//! - mode: "plain" (get_many + merkleize) or "fused" (get_many_with_locations + with_resolved)
+//! - mode: "plain" or "fused" (identical since reads always retain resolved locations; both
+//!   accepted for output compatibility with older binaries)
 //! - depth: number of pending ancestor batches under the timed batch (0 or 1)
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
@@ -159,23 +160,15 @@ fn main() {
                 Some(p) => p.new_batch::<Sha256>(),
             };
 
-            // Timed: load all touched keys, write them, merkleize, read root.
+            // Timed: load all touched keys, write them, merkleize, read root. Reads retain
+            // resolved locations on the batch, so merkleize skips re-reading those keys. Load
+            // and writes must share one batch for that retention to apply.
             let start = Instant::now();
-            let (values, resolved) = if mode == "fused" {
-                let nb = new_batch();
-                let (values, resolved) = nb.get_many_with_locations(&keys, &db).await.unwrap();
-                (values, Some(resolved))
-            } else {
-                let nb = new_batch();
-                (nb.get_many(&keys, &db).await.unwrap(), None)
-            };
-            black_box(&values);
             let mut b = new_batch();
+            let values = b.get_many(&keys, &db).await.unwrap();
+            black_box(&values);
             for (k, v) in &muts {
                 b = b.write(*k, Some(*v));
-            }
-            if let Some(resolved) = resolved {
-                b = b.with_resolved(resolved);
             }
             let merkleized = b.merkleize(&db, None).await.unwrap();
             let root = merkleized.root();

@@ -400,39 +400,6 @@ where
         self.inner.get_many(keys, &db.any).await
     }
 
-    /// Batch read multiple keys, returning the values plus a
-    /// [`ResolvedLocations`](any::batch::ResolvedLocations) token to be attached via
-    /// [`with_resolved`](Self::with_resolved) so the subsequent [`merkleize`](Self::merkleize)
-    /// can skip re-reading these keys.
-    #[allow(clippy::type_complexity)]
-    pub async fn get_many_with_locations<E, C, I>(
-        &self,
-        keys: &[&K],
-        db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-    ) -> Result<
-        (
-            Vec<Option<V::Value>>,
-            any::batch::ResolvedLocations<K, F>,
-        ),
-        Error<F>,
-    >
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>> + 'static,
-    {
-        self.inner.get_many_with_locations(keys, &db.any).await
-    }
-
-    /// Attach existing-key locations the caller already resolved during state load (via
-    /// [`get_many_with_locations`](Self::get_many_with_locations)) so
-    /// [`merkleize`](Self::merkleize) reuses them instead of re-reading the journal for those
-    /// keys. The token must have been resolved on this batch.
-    pub fn with_resolved(mut self, resolved: any::batch::ResolvedLocations<K, F>) -> Self {
-        self.inner = self.inner.with_resolved(resolved);
-        self
-    }
-
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     pub async fn merkleize<E, C, I>(
         self,

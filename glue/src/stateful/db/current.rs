@@ -25,7 +25,6 @@ use commonware_storage::{
     merkle::{Graftable, Location},
     qmdb::{
         any::{
-            batch::ResolvedLocations,
             operation::{Operation, Update},
             ordered, unordered,
             value::{self, FixedEncoding, ValueEncoding, VariableEncoding},
@@ -42,12 +41,7 @@ use commonware_storage::{
     translator::Translator,
     Persistable,
 };
-use commonware_utils::{
-    channel::mpsc,
-    non_empty_range,
-    sync::{AsyncRwLock, Mutex},
-    Array,
-};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
@@ -69,9 +63,6 @@ where
     batch: UnmerkleizedBatch<F, H, U, N, S>,
     db: CurrentDbHandle<F, E, C, I, H, U, N, S>,
     metadata: Option<U::Value>,
-    /// Locations resolved by `get_many` reads, attached to the batch at `merkleize` so it skips
-    /// re-reading those keys. Interior-mutable because reads take `&self`.
-    resolved: Mutex<Option<ResolvedLocations<U::Key, F>>>,
 }
 
 /// Key-value operations for the `current` unordered update kind.
@@ -105,18 +96,9 @@ where
     /// Read multiple values by key, falling back to committed state.
     ///
     /// Returns results in the same order as the input keys.
-    ///
-    /// Locations resolved by the read are retained and attached to the batch when it is
-    /// merkleized, so `merkleize` skips re-reading those keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
-        let (values, resolved) = self.batch.get_many_with_locations(keys, &*db).await?;
-        let mut slot = self.resolved.lock();
-        match slot.as_mut() {
-            Some(existing) => existing.merge(resolved),
-            None => *slot = Some(resolved),
-        }
-        Ok(values)
+        self.batch.get_many(keys, &*db).await
     }
 
     /// Record a mutation. `Some(value)` for upsert, `None` for delete.
@@ -269,11 +251,7 @@ where
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
         let db = self.db.read().await;
-        let mut batch = self.batch;
-        if let Some(resolved) = self.resolved.lock().take() {
-            batch = batch.with_resolved(resolved);
-        }
-        let merkleized = batch.merkleize(&*db, self.metadata).await?;
+        let merkleized = self.batch.merkleize(&*db, self.metadata).await?;
         Ok(CurrentMerkleized {
             inner: merkleized,
             db: self.db.clone(),
@@ -335,7 +313,6 @@ where
             batch: self.inner.new_batch::<H>(),
             db: self.db.clone(),
             metadata: None,
-            resolved: Mutex::new(None),
         }
     }
 }
@@ -395,7 +372,6 @@ where
             batch: inner.new_batch(),
             db: db.clone(),
             metadata: None,
-            resolved: Mutex::new(None),
         }
     }
 
@@ -490,7 +466,6 @@ where
             batch: inner.new_batch(),
             db: db.clone(),
             metadata: None,
-            resolved: Mutex::new(None),
         }
     }
 
@@ -662,7 +637,6 @@ where
             batch: inner.new_batch(),
             db: db.clone(),
             metadata: None,
-            resolved: Mutex::new(None),
         }
     }
 
@@ -762,7 +736,6 @@ where
             batch: inner.new_batch(),
             db: db.clone(),
             metadata: None,
-            resolved: Mutex::new(None),
         }
     }
 

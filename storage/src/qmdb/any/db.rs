@@ -292,7 +292,7 @@ where
     ///
     /// Results are returned in the same order as the input keys.
     #[allow(clippy::type_complexity)]
-    pub async fn get_many_with_locations(
+    pub(crate) async fn get_many_with_locations(
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<(U::Value, Location<F>)>>, crate::qmdb::Error<F>> {
