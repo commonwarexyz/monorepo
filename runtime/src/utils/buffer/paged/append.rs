@@ -293,29 +293,37 @@ impl<B: Blob> Append<B> {
     }
 
     /// Append all bytes in `buf` to the tip of the blob.
+    ///
+    /// A `buf` too large to fit in the write buffer is copied once into an owned buffer and
+    /// written through [Self::append_owned]'s direct path, so the write buffer never grows
+    /// meaningfully beyond its capacity no matter how large the append.
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
+        let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buffer = self.buffer.write().await;
 
-        if !buffer.append(buf) {
+        // Take the buffered path unless `buf` would push the buffer over capacity and at least
+        // one full page could be written directly from it.
+        let fill = (logical_page_size - (buffer.len() % logical_page_size)) % logical_page_size;
+        if buffer.len() + buf.len() <= buffer.capacity || buf.len() < fill + logical_page_size {
+            if buffer.append(buf) {
+                self.flush_internal(buffer, false, false).await?;
+            }
             return Ok(());
         }
+        drop(buffer);
 
-        // Buffer is over capacity, so we need to write data to the blob.
-        self.flush_internal(buffer, false, false).await?;
-        Ok(())
+        self.append_owned(IoBuf::copy_from_slice(buf)).await
     }
 
     /// Append all bytes in `buf` to the tip of the blob, writing whole pages directly to the
     /// underlying blob instead of staging them in the write buffer when `buf` is large.
     ///
-    /// Behaves like [Self::append], but a `buf` too large to buffer avoids the copy into the
-    /// write buffer (and the over-capacity allocation that copy requires): bytes needed to
-    /// complete the current partial page are buffered and flushed through the regular path, the
-    /// whole pages that follow are written to the blob as zero-copy slices of `buf`, and any
-    /// remaining partial-page suffix seeds the write buffer without copying.
-    ///
-    /// Unlike a buffered flush, the directly written pages do not populate the page cache (a
-    /// large write would evict most of it); they are cached on demand when read.
+    /// Behaves like [Self::append], but an owned `buf` too large to buffer additionally avoids
+    /// the copy into the write buffer: bytes needed to complete the current partial page are
+    /// buffered and flushed through the regular path, the whole pages that follow are written to
+    /// the blob as zero-copy slices of `buf` (populating the page cache, exactly as a buffered
+    /// flush would), and any remaining partial-page suffix seeds the write buffer without
+    /// copying.
     ///
     /// Like [Self::append], the write is not durable until [Self::sync] is called.
     pub async fn append_owned(&self, buf: IoBuf) -> Result<(), Error> {
@@ -354,14 +362,15 @@ impl<B: Blob> Append<B> {
         }
 
         // Prepare physical pages for the whole pages remaining in `buf` without copying them.
-        // These pages are not inserted into the page cache: a write this large would evict most
-        // of the cache for data that may never be read, and any page of it that is read gets
-        // cached on demand by the page-fault path. Readers of this region are correct in the
-        // meantime because they block on the blob lock held below until the write completes.
         let bulk_len = (buf.len() - fill) / logical_page_size * logical_page_size;
         let bulk = buf.slice(fill..fill + bulk_len);
         let mut physical_pages = IoBufs::default();
         self.physical_full_pages(&bulk, None, &mut physical_pages);
+
+        // Cache the bulk pages before releasing the tip lock so reads don't observe stale
+        // persisted bytes during the handoff from tip to cache.
+        let remaining = self.cache_ref.cache(self.id, bulk.as_ref(), boundary);
+        assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
 
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob
         // while we're writing to it.
@@ -1206,7 +1215,7 @@ impl<B: Blob> Append<B> {
             let zeros_needed = (size - current_size) as usize;
             let mut zeros = self.cache_ref.pool().alloc(zeros_needed);
             zeros.put_bytes(0, zeros_needed);
-            self.append(zeros.as_ref()).await?;
+            self.append_owned(zeros.freeze()).await?;
             return Ok(());
         }
 
@@ -1881,19 +1890,18 @@ mod tests {
                 .unwrap();
             assert_eq!(append.size().await, 500);
 
-            // The directly written pages do not populate the page cache.
+            // The directly written pages populate the page cache, exactly as a buffered flush
+            // would.
             let mut probe = vec![0u8; PAGE_SIZE.get() as usize];
-            assert_eq!(append.cache_ref.read_cached(append.id, &mut probe, 0), 0);
-
-            // All bytes are readable before any sync (bulk from the blob, suffix from tip).
-            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
-            assert_eq!(read_buf, &data[..]);
-
-            // Pages of the bulk region are cached on demand by reads.
             assert_eq!(
                 append.cache_ref.read_cached(append.id, &mut probe, 0),
                 PAGE_SIZE.get() as usize
             );
+            assert_eq!(probe, &data[..PAGE_SIZE.get() as usize]);
+
+            // All bytes are readable before any sync (bulk from the cache, suffix from tip).
+            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
+            assert_eq!(read_buf, &data[..]);
 
             // Everything becomes durable with a single sync.
             append.sync().await.unwrap();
@@ -2065,6 +2073,51 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 422);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_append_borrowed_large_takes_direct_path() {
+        // A plain `append` larger than the write buffer is routed through the direct path, so the
+        // write buffer holds only the partial-page suffix afterwards instead of the whole input.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"borrowed_large")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Start misaligned with a small buffered prefix.
+            let all: Vec<u8> = (0..530).map(|i| (i % 241) as u8).collect();
+            append.append(&all[..30]).await.unwrap();
+
+            // 500 more bytes exceed the 206-byte write buffer and take the direct path.
+            append.append(&all[30..]).await.unwrap();
+            assert_eq!(append.size().await, 530);
+
+            // Only the partial-page suffix remains buffered (530 = 5 full pages + 15 bytes).
+            assert_eq!(append.buffer.read().await.len(), 15);
+
+            let read_buf = append.read_at(0, 530).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
+
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"borrowed_large")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 530);
+            let read_buf = append.read_at(0, 530).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
         });
     }
 
