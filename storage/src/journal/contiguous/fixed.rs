@@ -1140,11 +1140,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         self.write_encoded(items_buf, items_count).await
     }
 
-    /// Encode `items` into a single contiguous buffer using the fixed-width record layout, ready to
-    /// be appended via [`Self::write_encoded`]. This is synchronous and holds no locks, so a caller
-    /// can encode borrowed data (e.g. under a read lock) and release the borrow before the append.
+    /// Encode `items` into an owned fixed-width byte buffer.
     ///
-    /// Uses `Write::write` directly to avoid the per-item allocations of `Encode::encode`.
+    /// This lets callers serialize borrowed items synchronously, release those borrows, and append
+    /// the bytes later without holding unrelated locks across journal I/O.
     pub(crate) fn encode_items(items: Many<'_, A>) -> Vec<u8> {
         let mut items_buf = Vec::with_capacity(items.len() * A::SIZE);
         match items {
