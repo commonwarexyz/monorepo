@@ -119,3 +119,31 @@ runs:
         cache-workspace-crates: false
         workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
         cache-bin: true
+    - name: Setup sccache
+      if: inputs.rust-cache-enabled == 'true'
+      uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+      with:
+        version: v0.16.0
+    - name: Configure sccache
+      if: inputs.rust-cache-enabled == 'true'
+      shell: bash
+      run: |
+        if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+          sccache_rw_mode="READ_WRITE"
+        else
+          sccache_rw_mode="READ_ONLY"
+        fi
+
+        sccache_config="${RUNNER_TEMP}/sccache-config.toml"
+        cat > "$sccache_config" <<EOF
+        server_startup_timeout_ms = 60000
+
+        [cache.gha]
+        enabled = true
+        version = ""
+        rw_mode = "$sccache_rw_mode"
+        EOF
+
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CONF=$sccache_config" >> "$GITHUB_ENV"
