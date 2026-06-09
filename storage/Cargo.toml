@@ -44,6 +44,14 @@ rand.workspace = true
 rstest.workspace = true
 tracing-subscriber.workspace = true
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun = { workspace = true, features = ["client_requests"] }
+
+[package.metadata.cargo-udeps.ignore]
+# `gungraun` is exercised only by the feature-gated Linux benchmark target, so cargo-udeps
+# flags it falsely.
+development = ["gungraun"]
+
 [features]
 default = [ "std" ]
 std = [
@@ -74,6 +82,7 @@ arbitrary = [
 ]
 fuzzing = []
 test-traits = []
+gungraun-bench = []
 
 [lib]
 bench = false
@@ -83,6 +92,12 @@ name = "qmdb"
 harness = false
 path = "src/qmdb/benches/bench.rs"
 required-features = ["test-traits"]
+
+[[bench]]
+name = "qmdb_gungraun"
+harness = false
+path = "src/qmdb/benches/gungraun.rs"
+required-features = ["test-traits", "gungraun-bench"]
 
 [[bench]]
 name="archive"

@@ -7,6 +7,8 @@ mod chained_growth;
 mod common;
 mod generate;
 mod init;
+#[macro_use]
+mod merkleize_workload;
 mod merkleize;
 
 criterion_main!(

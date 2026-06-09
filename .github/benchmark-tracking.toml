@@ -1,56 +1,76 @@
 # Benchmark tracking configuration.
 #
-# Each variant is passed to Criterion with `--exact`, so names must match the full benchmark name
-# printed by `cargo bench -- --list` or `cargo bench -- --output-format bencher`.
+# Each variant is passed to Gungraun as a filter. The `name` is the stable artifact key and the
+# `filter` is the Gungraun module-path wildcard used for execution.
 #
 # Add one `[[packages]]` table per Cargo package/feature configuration. The same package may appear
 # multiple times with different `cargo_flags`, for example to run storage benchmarks with and
 # without io_uring. When doing this, set a distinct `baseline_suite` for each feature
 # configuration so results are matched against the correct main-branch baseline.
 #
-# Thresholds can be set globally with `default_threshold_percent`, per package, per benchmark, or
-# per variant table. More specific settings override less specific settings.
+# Gates can be set globally, per package, per benchmark, or per variant. More specific `gates`
+# replace inherited gates. If no gates are supplied, the default gate is:
 #
-# Variants may be specified as strings:
+#   metric = "EstimatedCycles"
+#   direction = "down"
+#   threshold_percent = 10.0
 #
-#   variants = ["crate::bench/key=value"]
+# `direction = "down"` means lower is better, so increases beyond `threshold_percent` fail.
+# `direction = "up"` means higher is better, so decreases beyond `threshold_percent` fail.
 #
-# or as tables when per-variant overrides are needed:
+# Variants must be specified as tables:
 #
 #   [[packages.benchmarks.variants]]
 #   name = "crate::bench/key=value"
-#   threshold_percent = 20.0
+#   filter = "*::bench_id"
+#
+#   [[packages.benchmarks.variants.gates]]
+#   metric = "EstimatedCycles"
+#   direction = "down"
+#   threshold_percent = 10.0
+#
+#   [[packages.benchmarks.variants.gates]]
+#   metric = "L1hits"
+#   direction = "up"
+#   threshold_percent = 5.0
 #
 # Example duplicate package configuration:
 #
 #   [[packages]]
 #   name = "commonware-storage"
 #   baseline_suite = "commonware-storage"
-#   cargo_flags = ["--features", "test-traits"]
+#   cargo_flags = ["--features", "test-traits,gungraun-bench"]
 #
 #   [[packages.benchmarks]]
-#   name = "qmdb"
-#   variants = ["qmdb::merkleize/variant=... keys=10000 ch=false sync=false"]
+#   name = "qmdb_gungraun"
+#
+#   [[packages.benchmarks.variants]]
+#   name = "qmdb::merkleize/variant=... keys=10000 ch=false sync=false"
+#   filter = "*::bench_id"
 #
 #   [[packages]]
 #   name = "commonware-storage"
 #   baseline_suite = "commonware-storage-iouring"
-#   cargo_flags = ["--features", "commonware-runtime/iouring-storage,test-traits"]
+#   cargo_flags = ["--features", "commonware-runtime/iouring-storage,test-traits,gungraun-bench"]
 #
 #   [[packages.benchmarks]]
-#   name = "qmdb"
-#   variants = ["qmdb::merkleize/variant=... keys=10000 ch=false sync=false"]
-
-default_threshold_percent = 10.0
+#   name = "qmdb_gungraun"
+#
+#   [[packages.benchmarks.variants]]
+#   name = "qmdb::merkleize/variant=... keys=10000 ch=false sync=false"
+#   filter = "*::bench_id"
 
 [[packages]]
 name = "commonware-storage"
-cargo_flags = ["--features", "test-traits"]
+cargo_flags = ["--features", "test-traits,gungraun-bench"]
 
 [[packages.benchmarks]]
-name = "qmdb"
-criterion_args = ["--sample-size", "500", "--significance-level", "0.01"]
-variants = [
-  "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false",
-  "qmdb::merkleize/variant=current::ordered::fixed::mmb chunk=256 keys=10000 ch=true sync=false",
-]
+name = "qmdb_gungraun"
+
+[[packages.benchmarks.variants]]
+name = "qmdb::merkleize/variant=any::unordered::fixed::mmr keys=10000 ch=false sync=false"
+filter = "*::bench_merkleize::any_unordered_fixed_mmr"
+
+[[packages.benchmarks.variants]]
+name = "qmdb::merkleize/variant=current::ordered::fixed::mmb chunk=256 keys=10000 ch=true sync=false"
+filter = "*::bench_merkleize::current_ordered_fixed_mmb_chunk_256"

@@ -29,6 +29,13 @@ target "riscv-unknown-elf-toolchain" {
   platforms = split(",", PLATFORMS)
 }
 
+target "gungraun" {
+  inherits = ["docker-metadata-action"]
+  context = "."
+  dockerfile = "docker/gungraun.dockerfile"
+  platforms = split(",", PLATFORMS)
+}
+
 target "rust-riscv32imac-cross" {
   inherits = ["docker-metadata-action"]
   context = "."

@@ -65,6 +65,55 @@ test-benches crate test_flags='' lint_flags='':
         cargo test --bench "$bench" -p {{ crate }} {{ test_flags }} -- --verbose
     done
 
+# Run the Gungraun benchmark tracking suite
+benchmark-tracking mode='generate' *args='':
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    run_tracking() {
+        python3 .github/scripts/benchmark-tracking.py \
+            {{ mode }} \
+            --config .github/benchmark-tracking.toml \
+            --output-dir benchmark-tracking-results {{ args }}
+    }
+
+    case "$(uname -s)" in
+        Linux)
+            run_tracking
+            ;;
+        Darwin)
+            image="commonware-gungraun:local"
+            arch="$(uname -m)"
+            if [ "$arch" = "arm64" ]; then
+                platform="linux/arm64"
+            else
+                platform="linux/amd64"
+            fi
+            DEFAULT_TAG="$image" PLATFORMS="$platform" docker buildx bake \
+                --load \
+                --progress plain \
+                -f docker/docker-bake.hcl \
+                gungraun
+            docker run --rm \
+                --platform "$platform" \
+                --security-opt seccomp=unconfined \
+                --user "$(id -u):$(id -g)" \
+                --volume "$PWD:/workspace" \
+                --workdir /workspace \
+                --env CARGO_HOME=/tmp/cargo \
+                --env CARGO_TARGET_DIR=/workspace/target/gungraun-docker \
+                "$image" \
+                python3 .github/scripts/benchmark-tracking.py \
+                    {{ mode }} \
+                    --config .github/benchmark-tracking.toml \
+                    --output-dir benchmark-tracking-results {{ args }}
+            ;;
+        *)
+            echo "unsupported platform: $(uname -s)" >&2
+            exit 1
+            ;;
+    esac
+
 # Run tests
 test *args='':
     cargo nextest run $@

@@ -37,7 +37,7 @@ jobs:
             const artifacts = await github.paginate(github.rest.actions.listArtifactsForRepo, {
               owner,
               repo,
-              name: 'benchmark-tracking-results',
+              name: 'gungraun-benchmark-tracking-results',
               per_page: 100,
             });
             artifacts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
@@ -48,7 +48,7 @@ jobs:
               core.setOutput('found', 'true');
               core.setOutput('run_id', String(artifact.workflow_run.id));
             } else {
-              core.warning('No benchmark-tracking artifact found for main');
+              core.warning('No Gungraun benchmark-tracking artifact found for main');
               core.setOutput('found', 'false');
             }
 
@@ -56,28 +56,43 @@ jobs:
         if: github.event_name == 'pull_request' && steps.baseline.outputs.found == 'true'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
-          name: benchmark-tracking-results
+          name: gungraun-benchmark-tracking-results
           path: benchmark-tracking-baseline
           run-id: ${{ steps.baseline.outputs.run_id }}
           github-token: ${{ github.token }}
+
+      - name: Install Gungraun dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --assume-yes --no-install-recommends \
+            clang \
+            libclang-dev \
+            valgrind
 
       - name: Run setup
         uses: ./.github/actions/setup
         with:
           toolchain: nightly
+          additional-cache-key: gungraun-v1
+
+      - name: Install Gungraun runner
+        uses: taiki-e/install-action@15413b256f995d819248ea62704771a959284285 # v2.79.13
+        with:
+          tool: gungraun-runner@0.19.1
+          fallback: none
 
       - name: Run benchmark tracking
         id: run
         run: |
-          args=()
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            if [ -f benchmark-tracking-baseline/current.toml ]; then
-              args=(--baseline benchmark-tracking-baseline/current.toml)
-            fi
+            mode=check
+            args=(--baseline benchmark-tracking-baseline/current.toml)
           else
-            args=(--no-compare)
+            mode=generate
+            args=()
           fi
           python3 .github/scripts/benchmark-tracking.py \
+            "$mode" \
             --config "$BENCHMARK_TRACKING_CONFIG" \
             --output-dir benchmark-tracking-results \
             "${args[@]}"
@@ -86,7 +101,7 @@ jobs:
         if: always() && github.ref == 'refs/heads/main' && steps.run.outcome == 'success'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: benchmark-tracking-results
+          name: gungraun-benchmark-tracking-results
           path: benchmark-tracking-results
           if-no-files-found: error
 
