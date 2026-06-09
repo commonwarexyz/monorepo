@@ -228,8 +228,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Add a run of pre-computed leaf digests, in order.
     #[cfg(feature = "std")]
     pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
-        let digests = digests.into_iter();
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
+        let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
         let additional =
             Position::try_from(self.leaves() + n).map_or(0, |end| (*end - *self.size()) as usize);
@@ -247,7 +247,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
                 push_dirty(&mut self.dirty_nodes, height, size);
                 size += 1;
             }
-
             leaves += 1;
         }
         self
