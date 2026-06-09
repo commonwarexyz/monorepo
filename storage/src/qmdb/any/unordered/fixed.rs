@@ -388,6 +388,56 @@ pub(crate) mod test {
                     .unwrap()
                     .root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+
+                // Fused path with reads after writes. Written keys are answered by the pending
+                // mutations and receive no token entry; the root must still match.
+                let half = muts.len() / 2;
+                let mut mb = new_batch();
+                for (k, v) in muts.iter().take(half) {
+                    mb = mb.write(*k, *v);
+                }
+                let (values, resolved) = mb.get_many_with_locations(&keys, &db).await.unwrap();
+                for (i, (_, v)) in muts.iter().enumerate().take(half) {
+                    assert_eq!(values[i], *v, "pending write not visible at depth={depth}");
+                }
+                assert_eq!(
+                    values[half..],
+                    plain[half..],
+                    "unwritten value mismatch at depth={depth}"
+                );
+                for (k, v) in muts.iter().skip(half) {
+                    mb = mb.write(*k, *v);
+                }
+                let mixed_root = mb
+                    .with_resolved(resolved)
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(normal_root, mixed_root, "mixed root mismatch at depth={depth}");
+
+                // Two disjoint reads on the same batch, tokens merged.
+                let gb = new_batch();
+                let (_, mut first) = gb
+                    .get_many_with_locations(&keys[..half], &db)
+                    .await
+                    .unwrap();
+                let (_, second) = gb
+                    .get_many_with_locations(&keys[half..], &db)
+                    .await
+                    .unwrap();
+                first.merge(second);
+                let mut gb = gb;
+                for (k, v) in &muts {
+                    gb = gb.write(*k, *v);
+                }
+                let merged_root = gb
+                    .with_resolved(first)
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(normal_root, merged_root, "merged root mismatch at depth={depth}");
             }
         });
     }

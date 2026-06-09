@@ -67,6 +67,10 @@ impl<K: Ord + Clone, V: Clone> Mutations<K, V> {
         self.pending.len()
     }
 
+    const fn is_empty(&self) -> bool {
+        self.pending.is_empty()
+    }
+
     /// Latest value written for `key`, or `None` if `key` was never written in this batch.
     fn get(&self, key: &K) -> Option<&Option<V>> {
         self.pending
@@ -269,6 +273,14 @@ pub(crate) struct ResolvedLocation<F: Family> {
 #[derive(Debug)]
 pub struct ResolvedLocations<K, F: Family> {
     pub(crate) locations: AHashMap<K, ResolvedLocation<F>>,
+}
+
+impl<K: core::hash::Hash + Eq, F: Family> ResolvedLocations<K, F> {
+    /// Absorb `other`, which must have been resolved on the same batch as `self`. Re-resolving a
+    /// key on the same batch yields the same location, so overlapping entries are identical.
+    pub fn merge(&mut self, other: Self) {
+        self.locations.extend(other.locations);
+    }
 }
 
 /// Where this batch's inherited state comes from.
@@ -1403,11 +1415,10 @@ where
     /// attached via [`with_resolved`](UnmerkleizedBatch::with_resolved) so the subsequent
     /// [`merkleize`](UnmerkleizedBatch::merkleize) can skip re-reading these keys.
     ///
-    /// Resolution matches [`Self::get_many`] (mutations -> ancestor diffs -> committed DB) but is
-    /// intended to be called on a fresh batch (before any mutations are written), so the mutation
-    /// layer is skipped. Values are returned in the same order as the input keys, with `None` for
-    /// keys that are absent (a create) or were deleted by an ancestor; only present keys receive
-    /// an entry in the token.
+    /// Resolution matches [`Self::get_many`] (mutations -> ancestor diffs -> committed DB).
+    /// Values are returned in the same order as the input keys, with `None` for keys that are
+    /// absent (a create) or were deleted. Keys answered by this batch's pending mutations receive
+    /// no token entry (merkleize resolves written keys itself).
     #[allow(clippy::type_complexity)]
     pub async fn get_many_with_locations<E, C, I, const N: usize>(
         &self,
@@ -1426,6 +1437,19 @@ where
         let mut db_indices = Vec::new();
         let mut db_keys = Vec::new();
 
+        // Check local mutations.
+        let mut unresolved: Vec<usize> = Vec::with_capacity(keys.len());
+        if self.mutations.is_empty() {
+            unresolved.extend(0..keys.len());
+        } else {
+            for (i, key) in keys.iter().enumerate() {
+                match self.mutations.get(*key) {
+                    Some(value) => values[i] = value.clone(),
+                    None => unresolved.push(i),
+                }
+            }
+        }
+
         // Resolve through the ancestor diff chain (parent first). An Active entry's `loc` is the
         // uncommitted ancestor location used for op-gen ordering; a Deleted entry means the key is
         // absent in the chain's view. Sweep ancestor diffs with forward cursors in ascending key
@@ -1438,10 +1462,10 @@ where
                 v
             });
         if chain.is_empty() {
-            db_indices.extend(0..keys.len());
-            db_keys.extend_from_slice(keys);
+            db_keys.extend(unresolved.iter().map(|&i| keys[i]));
+            db_indices = unresolved;
         } else {
-            let mut order: Vec<usize> = (0..keys.len()).collect();
+            let mut order = unresolved;
             order.sort_unstable_by(|&a, &b| keys[a].cmp(keys[b]));
             let mut cursors = AncestorCursors::new(chain.iter().map(|a| a.diff.as_slice()));
             for i in order {
@@ -1510,7 +1534,7 @@ where
         ),
     )]
     pub async fn merkleize<E, C, I, const N: usize>(
-        mut self,
+        self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1519,8 +1543,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let resolved = core::mem::take(&mut self.resolved);
-        self.merkleize_with_floor_scan(db, resolved, metadata, |floor, tip, limit, out| {
+        self.merkleize_with_floor_scan(db, metadata, |floor, tip, limit, out| {
             fill_candidates(&db.bitmap, floor, tip, limit, out)
         })
         .await
@@ -1533,9 +1556,8 @@ where
     /// committed state only -- uncommitted ancestor ops aren't tracked, and bits can be set for
     /// locations superseded by an overlay in this chain.
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
-        self,
+        mut self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        resolved: AHashMap<K, ResolvedLocation<F>>,
         metadata: Option<V::Value>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1544,6 +1566,7 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
+        let resolved = core::mem::take(&mut self.resolved);
         let (mutations, m) = self.into_parts();
 
         // Split mutations into existing keys the caller pre-resolved (location reused from its
