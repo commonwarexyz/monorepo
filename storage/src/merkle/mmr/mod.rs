@@ -126,19 +126,22 @@ impl merkle::Family for Family {
         // increasing (consecutive leaves differ by at least one node), so for a given `pos` there
         // is at most one `n`, and a position is a leaf iff that `n` exists.
         //
-        // We find `n` by a Newton-style estimate followed by a verified bracket walk:
+        // We find `n` by a Newton-style estimate followed by an exact check of the candidates:
         //
         //   1. Estimate. Treating `popcount` as locally constant, `f(n) = 2*n - c` inverts to
-        //      `n = (pos + c)/2`. Iterating `n <- (pos + popcount(n))/2` from `n = pos/2`
-        //      converges to within a small constant of the answer (the correction is always
-        //      `< 64`). Empirically, three steps always land within 1 of the true value, so the
-        //      bracket below runs at most one iteration. We have not proven 3 is the worst case,
-        //      only observed it across exhaustive and boundary-stress testing; correctness does
-        //      not rely on it (see step 2), it only governs how fast we get there.
-        //   2. Bracket. Walk `n` monotonically toward `pos` and verify exactly. Correctness does
-        //      not depend on the estimate's accuracy: because `f` is strictly increasing, the walk
-        //      stops at the unique crossing point, returning the leaf if `f(n) == pos` and `None`
-        //      otherwise. A worse estimate only means more steps, never a wrong answer.
+        //      `n = (pos + c)/2`. Iterating `n <- (pos + popcount(n))/2` from `n = pos/2` lands
+        //      within 1 of the answer after three steps for every valid leaf position: for a leaf
+        //      at location `n*`, `pos + popcount(n*) == 2*n*` exactly, so `n*` is a fixed point
+        //      and each step's error is half the popcount change caused by the previous error.
+        //      Popcount changes from offsets smaller than 64 depend only on the low 6 bits of
+        //      `n*` and the length of the run of identical bits just above them, which reduces
+        //      all 2^62 possible inputs to ~300k distinct behaviors; exhaustively checking them
+        //      (see `test_position_to_location_behavior_classes`) shows the error after three
+        //      steps always lies in [-1, 1].
+        //   2. Verify. Check `n` and its neighbors exactly. A location is returned only when
+        //      `f(n) == pos` holds identically, so a wrong answer is impossible; the bound above
+        //      guarantees the true leaf is always among the candidates. A non-leaf `pos` has no
+        //      `n` with `f(n) == pos` at all, so every candidate fails and we return `None`.
         //
         // `pos <= MAX_NODES = 2^63 - 1` (checked by the caller), so every `2*n` below stays within
         // `u64` and every `2*n - popcount(n)` is non-negative.
@@ -148,20 +151,16 @@ impl merkle::Family for Family {
         n = (pos + n.count_ones() as u64) >> 1;
 
         let f = |n: u64| 2 * n - n.count_ones() as u64;
-        let mut fn_ = f(n);
-        while fn_ < pos {
-            n += 1;
-            fn_ = f(n);
+        if f(n) == pos {
+            return Some(Location::new(n));
         }
-        while fn_ > pos {
-            n -= 1;
-            fn_ = f(n);
+        if n > 0 && f(n - 1) == pos {
+            return Some(Location::new(n - 1));
         }
-        if fn_ == pos {
-            Some(Location::new(n))
-        } else {
-            None
+        if f(n + 1) == pos {
+            return Some(Location::new(n + 1));
         }
+        None
     }
 
     fn to_nearest_size(size: Position) -> Position {
@@ -579,6 +578,50 @@ mod tests {
         for n in (*MAX_LEAVES - 64)..=*MAX_LEAVES {
             let pos = fwd(Location::new(n));
             assert_eq!(inv(pos), Some(Location::new(n)), "leaf n={n}");
+        }
+    }
+
+    /// Round-trip one witness leaf count per behavior class of the estimate's error dynamics,
+    /// covering every valid input.
+    ///
+    /// The three-step estimate's error trajectory depends only on the low 6 bits of the leaf
+    /// count, the length of the run of identical bits just above them (which bounds the single
+    /// carry or borrow an offset below 64 can ripple), and the total popcount (which sets the
+    /// starting error). Bits above the run are invisible to the dynamics, so one witness per
+    /// combination exercises the behavior of every leaf count sharing that structure.
+    #[test]
+    fn test_position_to_location_behavior_classes() {
+        let fwd = <Family as crate::merkle::Family>::location_to_position;
+        let inv = <Family as crate::merkle::Family>::position_to_location;
+        let check = |n: u64| {
+            let pos = fwd(Location::new(n));
+            assert_eq!(inv(pos), Some(Location::new(n)), "leaf n={n}");
+        };
+
+        // Leaf counts below 64 have no upper bits; check them directly.
+        for n in 0..64u64 {
+            check(n);
+        }
+
+        // Witnesses n = 64*h + low. For each trailing-run length, `extra` additional one bits
+        // above the run sweep the popcount; constructed in u128 to avoid shift overflow, with
+        // out-of-range counts (infeasible combinations) skipped.
+        for low in 0..64u64 {
+            for run in 1..=56u32 {
+                for extra in 0..56u32 {
+                    // h odd: `run` trailing ones, a zero, then `extra` ones.
+                    let h_odd = (((1u128 << extra) - 1) << (run + 1)) | ((1u128 << run) - 1);
+                    // h even: `run` trailing zeros, then `extra + 1` ones.
+                    let h_even = ((1u128 << (extra + 1)) - 1) << run;
+                    for h in [h_odd, h_even] {
+                        let n = 64 * h + low as u128;
+                        if n > 1u128 << 62 {
+                            continue;
+                        }
+                        check(n as u64);
+                    }
+                }
+            }
         }
     }
 
