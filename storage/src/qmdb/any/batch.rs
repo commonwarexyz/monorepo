@@ -345,9 +345,18 @@ where
 
     /// Committed-DB locations resolved by this batch's reads (`get`/`get_many`), consumed by
     /// `merkleize`. When a mutation key is present here, `merkleize` reuses the location and
-    /// skips the redundant journal read. Only committed-snapshot resolutions are retained;
-    /// ancestor-diff resolutions could go stale if a committed ancestor is dropped before
-    /// merkleize. Interior-mutable because reads take `&self`; never held across an await.
+    /// skips the redundant journal read.
+    ///
+    /// Only committed-snapshot resolutions are retained. A key resolved from the committed
+    /// snapshot was in no live ancestor diff, and a legal intervening commit (applying this
+    /// batch's own ancestors) can only relocate keys present in an ancestor diff, so retained
+    /// entries cannot go stale. Ancestor-diff resolutions are NOT retained: their `base_old_loc`
+    /// goes stale if that ancestor is committed and dropped before merkleize, which is covered by
+    /// neither recovery mechanism (merkleize re-resolves non-retained keys against the live
+    /// chain, and `apply_batch`'s applied-ancestor fixup only sees diffs captured at merkleize).
+    /// See `test_unordered_fixed_retention_survives_ancestor_commit`.
+    ///
+    /// Interior-mutable because reads take `&self`; never held across an await.
     resolved: Mutex<AHashMap<U::Key, ResolvedLocation<F>>>,
 }
 
@@ -1420,6 +1429,9 @@ where
     Operation<F, update::Unordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// Consumes the locations retained by this batch's reads: keys loaded via `get`/`get_many`
+    /// before being written skip the journal re-read their resolution would otherwise require.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb::any::batch::merkleize",
@@ -1466,10 +1478,9 @@ where
         let resolved = core::mem::take(&mut *self.resolved.lock());
         let (mutations, m) = self.into_parts();
 
-        // Split mutations into existing keys the caller pre-resolved (location reused from its
-        // state load, skipping the journal read) and the rest, resolved here. An empty `resolved`
-        // map routes every key through the read path: the behavior when no pre-resolution is
-        // supplied.
+        // Split mutations into existing keys this batch's reads already resolved (location
+        // reused, skipping the journal read) and the rest, resolved here. A batch that never
+        // read routes every key through the read path.
         let mut existing: Vec<ExistingEntry<K, F, V::Value>> = Vec::with_capacity(mutations.len());
         let mut rest: SortedMutations<K, V::Value> = if resolved.is_empty() {
             mutations
