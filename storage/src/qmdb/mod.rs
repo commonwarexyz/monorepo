@@ -31,8 +31,7 @@
 //!
 //! # Traits
 //!
-//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny` and
-//! persistence methods exposed by each database type.
+//! Keyed mutable variants ([any] and [current]) implement `any::traits::DbAny`.
 //!
 //! # Acknowledgments
 //!
