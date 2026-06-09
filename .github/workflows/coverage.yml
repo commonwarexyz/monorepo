@@ -37,7 +37,8 @@ jobs:
       uses: ./.github/actions/setup
       with:
         additional-toolchain: ${{ env.NIGHTLY_VERSION }}
-        additional-cache-key: ${{ matrix.flags || 'default' }}-part-${{ matrix.partition }}
+        additional-cache-key: ${{ matrix.flags || 'default' }}
+        rust-cache-save: ${{ matrix.partition == 1 }}
     - name: Remove fuzz
       run: |
         rm -rf broadcast/fuzz

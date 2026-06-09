@@ -28,6 +28,14 @@ inputs:
     description: "An additional cache key that is added alongside the automatic `job`-based cache key."
     required: false
     default: ""
+  rust-cache-enabled:
+    description: "Whether rust-cache should restore and save cache entries for this job."
+    required: false
+    default: "true"
+  rust-cache-save:
+    description: "Whether this job should save rust-cache entries when running on main."
+    required: false
+    default: "true"
 runs:
   using: composite
   steps:
@@ -61,17 +69,36 @@ runs:
     - name: Normalize cache key
       id: cache-key
       shell: bash
+      env:
+        WORKFLOW_NAME: ${{ github.workflow }}
+        ADDITIONAL_CACHE_KEY: ${{ inputs.additional-cache-key }}
       run: |
-        key="${{ inputs.additional-cache-key }}"
+        key="${WORKFLOW_NAME}"
+        if [ -n "$ADDITIONAL_CACHE_KEY" ]; then
+          key="${key}-${ADDITIONAL_CACHE_KEY}"
+        fi
         key="${key// /-}"
         key="${key//\//-}"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
+    - name: Configure rust cache workspace
+      id: rust-cache-workspace
+      shell: bash
+      run: |
+        target="${CARGO_TARGET_DIR:-target}"
+        # rust-cache's workspace mapping is written as `. -> target`. On linux,
+        # cargo uses /mnt/target for disk space, so convert it back to a path
+        # relative to GITHUB_WORKSPACE before passing it to rust-cache
+        if [ "${RUNNER_OS:-}" = "Linux" ] && [ "${target#/}" != "$target" ]; then
+          target="$(realpath --relative-to="$GITHUB_WORKSPACE" "$target")"
+        fi
+        echo "target=${target}" >> "$GITHUB_OUTPUT"
     - name: Setup rust cache
+      if: inputs.rust-cache-enabled == 'true'
       uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       with:
-        save-if: ${{ github.ref == 'refs/heads/main' }}
+        save-if: ${{ github.ref == 'refs/heads/main' && inputs.rust-cache-save == 'true' }}
         key: ${{ steps.cache-key.outputs.key }}
         cache-on-failure: false
-        cache-workspace-crates: true
-        cache-directories: ${{ env.CARGO_TARGET_DIR }}
+        cache-workspace-crates: false
+        workspaces: . -> ${{ steps.rust-cache-workspace.outputs.target }}
         cache-bin: true
