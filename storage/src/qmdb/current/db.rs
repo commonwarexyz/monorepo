@@ -1156,10 +1156,8 @@ pub(super) async fn build_grafted_tree<
     // Add each grafted leaf digest.
     if !leaves.is_empty() {
         let batch = {
-            let mut batch = grafted_tree.new_batch_with_strategy(strategy.clone());
-            for &(_ops_pos, digest) in &leaves {
-                batch = batch.add_leaf_digest(digest);
-            }
+            let batch = grafted_tree.new_batch_with_strategy(strategy.clone());
+            let batch = batch.add_leaf_digests(leaves.iter().map(|&(_, digest)| digest));
             batch.merkleize(&grafted_tree, &grafted_hasher)
         };
         grafted_tree.apply_batch(&batch)?;

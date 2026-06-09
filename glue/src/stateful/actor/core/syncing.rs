@@ -8,7 +8,7 @@ use crate::stateful::{
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
-    Application,
+    Application, PruneConfig,
 };
 use commonware_actor::mailbox as actor_mailbox;
 use commonware_consensus::{
@@ -28,7 +28,7 @@ use commonware_utils::{
     Acknowledgement,
 };
 use rand::Rng;
-use std::sync::Arc;
+use std::{num::NonZeroUsize, sync::Arc};
 use tracing::{debug, error};
 
 /// Verify request buffered while state sync is still in progress.
@@ -40,6 +40,11 @@ pub(super) struct HeldVerify<C, B> {
 
 type HeldVerifyRequest<E, A> =
     HeldVerify<(E, <A as Application<E>>::Context), <A as Application<E>>::Block>;
+
+enum FinalizedHandoff<B> {
+    Reflected(B, Exact),
+    Apply(B, Exact),
+}
 
 pub(super) struct Syncing<E, A, S, V, R>
 where
@@ -85,6 +90,12 @@ where
 
     /// Signals that the syncer has produced a usable artifact.
     pub(super) sync_completed: oneshot::Receiver<SyncResult<E, A>>,
+
+    /// Marshal ack window, used to derive automatic prune retention.
+    pub(super) max_pending_acks: NonZeroUsize,
+
+    /// Periodic prune configuration.
+    pub(super) prune_config: Option<PruneConfig>,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -150,7 +161,7 @@ where
                     acknowledgement,
                 } => {
                     if let Some(handoff) = self.process_finalized(block, acknowledgement).await {
-                        self.transition(handoff).await;
+                        self.transition(Some(handoff)).await;
                         return;
                     }
                 }
@@ -170,7 +181,7 @@ where
         &mut self,
         block: A::Block,
         acknowledgement: Exact,
-    ) -> Option<Option<(A::Block, Exact)>> {
+    ) -> Option<FinalizedHandoff<A::Block>> {
         if self.artifact.is_none() {
             let anchor = Anchor::from(&block);
             let targets = A::sync_targets(&block);
@@ -179,14 +190,11 @@ where
             // block's tip update. If we ack after merely enqueueing it, sync can still
             // complete on the previous anchor and handoff would observe marshal ahead of
             // `artifact.anchor.height.next()`.
-            match self.syncer.update_targets(anchor, targets).await {
-                Some(artifact) => {
-                    self.artifact = Some(artifact);
-                }
-                None => {
-                    acknowledgement.acknowledge();
-                    return None;
-                }
+            if let Some(artifact) = self.syncer.update_targets(anchor, targets).await {
+                self.artifact = Some(artifact);
+            } else {
+                acknowledgement.acknowledge();
+                return None;
             }
         }
 
@@ -201,8 +209,7 @@ where
                 artifact.anchor.digest,
                 "finalized block at sync anchor height must match sync anchor digest",
             );
-            acknowledgement.acknowledge();
-            return Some(None);
+            return Some(FinalizedHandoff::Reflected(block, acknowledgement));
         }
 
         assert_eq!(
@@ -210,12 +217,12 @@ where
             artifact.anchor.height.next(),
             "finalized block after sync anchor must be the next finalized block",
         );
-        Some(Some((block, acknowledgement)))
+        Some(FinalizedHandoff::Apply(block, acknowledgement))
     }
 
     /// Transitions to [`Processing`] state once the database set has converged
     /// on the state sync [`Anchor`].
-    async fn transition(mut self, handoff: Option<(A::Block, Exact)>) {
+    async fn transition(mut self, handoff: Option<FinalizedHandoff<A::Block>>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
 
@@ -225,6 +232,8 @@ where
             artifact.databases,
             artifact.anchor,
             metrics,
+            self.max_pending_acks,
+            self.prune_config,
         );
 
         self.sync_metadata
@@ -233,17 +242,29 @@ where
             .set_complete(synced_height)
             .await;
 
-        if let Some((handoff_finalized, acknowledgement)) = handoff {
-            if let FinalizeStatus::Persisted { height } = processor
-                .finalize(self.context.as_present(), handoff_finalized)
-                .await
-            {
-                debug!(
-                    height = height.get(),
-                    "persisted finalized database batch during sync handoff"
-                );
+        if let Some(handoff) = handoff {
+            match handoff {
+                FinalizedHandoff::Reflected(block, acknowledgement) => {
+                    processor
+                        .notify_finalized(self.context.as_present(), &block)
+                        .await;
+                    acknowledgement.acknowledge();
+                }
+                FinalizedHandoff::Apply(block, acknowledgement) => {
+                    let (status, prune) =
+                        processor.finalize(self.context.as_present(), block).await;
+                    if let Some(prune) = prune {
+                        prune.run(processor.databases_mut(), &self.marshal).await;
+                    }
+                    if let FinalizeStatus::Persisted { height } = status {
+                        debug!(
+                            height = height.get(),
+                            "persisted finalized database batch during sync handoff"
+                        );
+                    }
+                    acknowledgement.acknowledge();
+                }
             }
-            acknowledgement.acknowledge();
         }
 
         // Attach the resolvers to the initialized databases before starting the processor,
@@ -286,7 +307,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::Syncing;
+    use super::{FinalizedHandoff, Syncing};
     use crate::stateful::{
         actor::syncer::{self, StateSyncMetadata, SyncResult},
         db::{Anchor, AttachableResolver},
@@ -352,6 +373,8 @@ mod tests {
                     }),
                     resolvers: NoopResolver,
                     sync_completed,
+                    max_pending_acks: NZUsize!(1),
+                    prune_config: None,
                 },
             }
         }
@@ -427,16 +450,18 @@ mod tests {
     #[test]
     fn anchor_height_block_acknowledges_and_transitions_without_handoff() {
         deterministic::Runner::default().start(|context| async move {
-            let mut harness = TestHarness::new(context, anchor(7, 9)).await;
-            let (acknowledgement, waiter) = Exact::handle();
+            let mut harness = TestHarness::new(context.child("harness"), anchor(7, 9)).await;
+            let (acknowledgement, mut waiter) = Exact::handle();
 
             let action = harness
                 .syncing
                 .process_finalized(TestBlock::new(7, 9), acknowledgement)
                 .await;
 
+            assert!(poll!(&mut waiter).is_pending());
+            assert!(matches!(action, Some(FinalizedHandoff::Reflected(_, _))));
+            harness.syncing.transition(action).await;
             assert!(waiter.await.is_ok());
-            assert!(matches!(action, Some(None)));
         });
     }
 
@@ -453,7 +478,7 @@ mod tests {
 
             assert!(waiter.now_or_never().is_none());
 
-            let Some(Some((block, acknowledgement))) = action else {
+            let Some(FinalizedHandoff::Apply(block, acknowledgement)) = action else {
                 panic!("post-anchor block should be handed off to processor");
             };
             assert_eq!(block.height().get(), 8);
@@ -495,9 +520,10 @@ mod tests {
             let metadata_guard = sync_metadata.lock().await;
             let (acknowledgement, mut waiter) = Exact::handle();
 
-            let transition = harness
-                .syncing
-                .transition(Some((TestBlock::new(8, 10), acknowledgement)));
+            let transition = harness.syncing.transition(Some(FinalizedHandoff::Apply(
+                TestBlock::new(8, 10),
+                acknowledgement,
+            )));
             pin_mut!(transition);
             assert!(
                 poll!(&mut transition).is_pending(),
