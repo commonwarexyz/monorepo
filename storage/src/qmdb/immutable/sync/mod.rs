@@ -3,7 +3,6 @@ use crate::{
     journal::{
         authenticated,
         contiguous::{Mutable, Reader as _},
-        Error as JournalError,
     },
     merkle::{
         full::{self, Merkle},
@@ -19,7 +18,7 @@ use crate::{
         Error,
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Encode, EncodeShared, Read};
 use commonware_cryptography::Hasher;
@@ -32,9 +31,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>
-        + Persistable<Error = JournalError>
-        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
     C::Config: Clone + Send,
     H: Hasher,

@@ -14,11 +14,8 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    journal::{
-        contiguous::{
-            fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
-        },
-        Error as JournalError,
+    journal::contiguous::{
+        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
     },
     merkle::{Family, Location},
     qmdb::{
@@ -32,7 +29,6 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
-    Persistable,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
@@ -48,7 +44,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -66,7 +62,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -85,7 +81,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -135,7 +131,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -151,7 +147,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -170,7 +166,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -197,7 +193,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -226,7 +222,7 @@ where
     E: Storage + Clock + Metrics,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     H: Hasher,
     T: Translator,
     S: Strategy,

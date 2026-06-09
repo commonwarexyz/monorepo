@@ -94,7 +94,7 @@ use crate::{
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -1449,21 +1449,17 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         Self::rewind(self, size).await
     }
-}
-
-impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
-    type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
-        self.commit().await
+        Self::commit(self).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 

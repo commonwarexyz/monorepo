@@ -1,26 +1,13 @@
 //! Trait providing a unified test/benchmark interface across all Any database variants.
 
 use crate::{
-    journal::contiguous::Mutable,
     merkle::{Family, Location, Proof},
     qmdb::{operation::Key, Error},
-    Persistable,
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Digest;
 use core::num::NonZeroU64;
 use std::{future::Future, ops::Range};
-
-/// A mutable operation log that can be durably persisted.
-pub(crate) trait PersistableMutableLog<O>:
-    Mutable<Item = O> + Persistable<Error = crate::journal::Error>
-{
-}
-
-impl<T, O> PersistableMutableLog<O> for T where
-    T: Mutable<Item = O> + Persistable<Error = crate::journal::Error>
-{
-}
 
 /// Unmerkleized batch of operations.
 pub trait UnmerkleizedBatch<Db: ?Sized>: Sized {
@@ -79,10 +66,7 @@ pub trait BatchableDb {
 /// This trait provides access to authentication (root), pruning, persistence,
 /// reads, and batch mutations.
 pub trait DbAny<F: Family>:
-    BatchableDb<Family = F, K = <Self as DbAny<F>>::Key, V = <Self as DbAny<F>>::Value>
-    + Persistable<Error = Error<F>>
-    + Send
-    + Sync
+    BatchableDb<Family = F, K = <Self as DbAny<F>>::Key, V = <Self as DbAny<F>>::Value> + Send + Sync
 {
     /// The key type used to look up values.
     type Key: Key;
@@ -118,6 +102,22 @@ pub trait DbAny<F: Family>:
 
     /// Prune historical operations prior to `loc`.
     fn prune(&mut self, loc: Location<F>) -> impl Future<Output = Result<(), Error<F>>> + Send;
+
+    /// Durably persist the database, guaranteeing the current state will survive a crash.
+    ///
+    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
+    fn commit(&self) -> impl Future<Output = Result<(), Error<F>>> + Send;
+
+    /// Durably persist the database, guaranteeing the current state will survive a crash, and that
+    /// no recovery will be needed on startup.
+    ///
+    /// This provides a stronger guarantee than [Self::commit] but may be slower.
+    fn sync(&self) -> impl Future<Output = Result<(), Error<F>>> + Send;
+
+    /// Destroy the database, removing all data from disk.
+    fn destroy(self) -> impl Future<Output = Result<(), Error<F>>> + Send
+    where
+        Self: Sized;
 
     /// The location before which all operations can be pruned.
     fn inactivity_floor_loc(&self) -> impl Future<Output = Location<F>> + Send;
@@ -207,6 +207,18 @@ macro_rules! impl_db_any {
                 loc: $crate::merkle::Location<$fam>,
             ) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
                 <$ty>::prune(self, loc).await
+            }
+
+            async fn commit(&self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+                <$ty>::commit(self).await
+            }
+
+            async fn sync(&self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+                <$ty>::sync(self).await
+            }
+
+            async fn destroy(self) -> ::core::result::Result<(), $crate::qmdb::Error<$fam>> {
+                <$ty>::destroy(self).await
             }
 
             async fn inactivity_floor_loc(&self) -> $crate::merkle::Location<$fam> {

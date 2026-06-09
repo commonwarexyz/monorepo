@@ -931,7 +931,6 @@ mod trait_impls {
             BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
             UnmerkleizedBatch as UnmerkleizedBatchTrait,
         },
-        Persistable,
     };
     use std::future::Future;
 
@@ -947,8 +946,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
@@ -981,8 +979,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
@@ -1030,8 +1027,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -1063,8 +1059,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
