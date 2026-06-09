@@ -14,7 +14,7 @@ documentation = "https://docs.rs/commonware-storage"
 workspace = true
 
 [dependencies]
-ahash = { version = "0.8.12", default-features = false }
+ahash.workspace = true
 anyhow.workspace = true
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes = { workspace = true, default-features = false }

@@ -104,12 +104,17 @@ struct Cache {
     /// The page cache index, with a key composed of (blob id, page number), that maps each cached
     /// page to the index of its slot in `entries` and `slots`.
     ///
+    /// Keyed with [ahash::RandomState] (randomly seeded via runtime-rng) instead of std's default
+    /// SipHash: ahash remains DoS-resistant for adversarially influenced page numbers but is
+    /// several times faster on these fixed-width keys, which are hashed on every cached read and
+    /// insert.
+    ///
     /// # Invariants
     ///
     /// Each `index` entry maps to exactly one `entries` slot, and that entry always has a
     /// matching key. (The converse is not true: after [Self::invalidate_from] a slot may retain
     /// a stale key that is no longer present in `index`.)
-    index: HashMap<(u64, u64), usize>,
+    index: HashMap<(u64, u64), usize, ahash::RandomState>,
 
     /// Metadata for each cache slot.
     ///
@@ -134,7 +139,7 @@ struct Cache {
 
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
-    page_fetches: HashMap<(u64, u64), PageFetchEntry>,
+    page_fetches: HashMap<(u64, u64), PageFetchEntry, ahash::RandomState>,
 }
 
 /// Metadata for a single cache entry (page data stored in per-slot buffers).
@@ -455,13 +460,13 @@ impl Cache {
             slots.push(slot);
         }
         Self {
-            index: HashMap::new(),
+            index: HashMap::with_hasher(ahash::RandomState::new()),
             entries: Vec::with_capacity(capacity),
             slots,
             page_size,
             clock: 0,
             capacity,
-            page_fetches: HashMap::new(),
+            page_fetches: HashMap::with_hasher(ahash::RandomState::new()),
         }
     }
 
