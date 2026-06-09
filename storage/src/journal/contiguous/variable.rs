@@ -14,7 +14,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_macros::boxed;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::{buffer::paged::CacheRef, IoBuf};
 use commonware_utils::{
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
     NZUsize,
@@ -822,6 +822,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Err(Error::EmptyAppend);
         }
 
+        let encoded = IoBuf::from(encoded);
+
         let _op_guard = self.op_lock.lock().await;
 
         // Mutating operations are serialized by taking the write guard.
@@ -850,7 +852,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             // into absolute offsets.
             let base_offset = inner
                 .data
-                .append_raw(section, &encoded[batch_start..batch_end])
+                .append_raw(section, encoded.slice(batch_start..batch_end))
                 .await?;
 
             let absolute_offsets = item_starts[written..written + batch_count]

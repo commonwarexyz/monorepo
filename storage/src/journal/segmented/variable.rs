@@ -580,7 +580,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// from the raw encoded size if compression is enabled).
     pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
         let (buf, item_len) = Self::encode_item(self.compression, item)?;
-        self.append_raw(section, &buf)
+        self.append_raw(section, IoBuf::from(buf))
             .await
             .map(|offset| (offset, item_len))
     }
@@ -588,11 +588,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// Append pre-encoded bytes to the given section, returning the byte offset
     /// where the data was written.
     ///
-    /// The buffer must be in the on-disk format produced by [Self::encode_item].
-    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
+    /// The buffer must be in the on-disk format produced by [Self::encode_item]. Buffers too
+    /// large for the write buffer are written directly to the blob without an intermediate copy.
+    pub(crate) async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
         let offset = blob.size().await;
-        blob.append(buf).await?;
+        blob.append_owned(buf).await?;
         trace!(blob = section, offset, "appended item");
         Ok(offset)
     }
@@ -1393,7 +1394,7 @@ mod tests {
                 .await
                 .expect("Failed to append item");
             journal
-                .append_raw(section, &[0xFF, 0xFF])
+                .append_raw(section, IoBuf::copy_from_slice(&[0xFF, 0xFF]))
                 .await
                 .expect("Failed to append trailing bytes");
             journal.sync(section).await.expect("Failed to sync journal");
