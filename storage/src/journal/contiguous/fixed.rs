@@ -1141,7 +1141,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Encode `items` into a single contiguous buffer using the fixed-width record layout, ready to
-    /// be appended via [`Self::append_encoded`]. This is synchronous and holds no locks, so a caller
+    /// be appended via [`Self::write_encoded`]. This is synchronous and holds no locks, so a caller
     /// can encode borrowed data (e.g. under a read lock) and release the borrow before the append.
     ///
     /// Uses `Write::write` directly to avoid the per-item allocations of `Encode::encode`.
@@ -1164,26 +1164,16 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         items_buf
     }
 
-    /// Append `items_count` records pre-encoded by [`Self::encode_items`] into `items_buf`,
-    /// recording batch-append metrics (the counterpart to [`Self::append_many`] for callers that
-    /// encode separately).
+    /// Append `items_count` records pre-encoded by [`Self::encode_items`] into `items_buf`.
     ///
-    /// The only caller is the ALPHA-stability `merkle` module, which is excluded under the BETA
-    /// stability check (`commonware_stability_BETA`) while this BETA-stability journal remains;
-    /// allow dead code there so the annotation check does not flag this internal helper.
-    #[cfg_attr(commonware_stability_BETA, allow(dead_code))]
-    pub(crate) async fn append_encoded(
+    /// Records no metrics: the public [`append`](Self::append) / [`append_many`](Self::append_many)
+    /// wrappers record their own, and callers that encode separately record whatever fits their
+    /// operation.
+    pub(crate) async fn write_encoded(
         &self,
         items_buf: Vec<u8>,
         items_count: usize,
     ) -> Result<u64, Error> {
-        let _timer = self.metrics.append_many_timer();
-        self.metrics.append_many_calls.inc();
-        self.write_encoded(items_buf, items_count).await
-    }
-
-    /// Append `items_count` pre-encoded records into `items_buf`, without recording metrics.
-    async fn write_encoded(&self, items_buf: Vec<u8>, items_count: usize) -> Result<u64, Error> {
         if items_count == 0 {
             return Err(Error::EmptyAppend);
         }

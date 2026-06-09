@@ -659,7 +659,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         };
 
         // Append missing nodes to the journal without holding the mem read lock.
-        self.journal.append_encoded(encoded, count).await?;
+        self.journal.write_encoded(encoded, count).await?;
         *journal_dirty = true;
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
