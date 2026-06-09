@@ -219,8 +219,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Append a leaf digest and any parent placeholders.
     ///
-    /// `leaves` and `size` are the starting leaf and node counts, and the returned cursors point
-    /// just past the appended nodes.
+    /// `leaves` and `size` are the starting leaf and node counts.
+    /// Returns the new leaf count and size.
     fn append_leaf_digest(
         &mut self,
         digest: D,
