@@ -649,26 +649,6 @@ where
         locations
     }
 
-    /// Check if the operation at `loc` for `key` is still active.
-    fn is_active_at<E, C, I, const N: usize>(
-        &self,
-        key: &U::Key,
-        loc: Location<F>,
-        batch_diff: &DiffSlice<U::Key, F, U::Value>,
-        db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> bool
-    where
-        E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        let diff_entry = lookup_sorted(batch_diff, key);
-        if let Some(entry) = diff_entry.or_else(|| resolve_in_ancestors(&self.ancestors, key)) {
-            return entry.loc() == Some(loc);
-        }
-        db.snapshot.get(key).any(|&l| l == loc)
-    }
-
     /// Extract keys that were deleted by a parent batch but are being
     /// re-created by this child batch. Removes those keys from `mutations`
     /// and returns `(key, value, base_old_loc)` entries.
@@ -756,20 +736,31 @@ where
                     let Some(key) = op.key().cloned() else {
                         continue; // skip CommitFloor and other non-keyed ops
                     };
-                    // `is_active_at` is required even for set bits in the committed bitmap
-                    // range: this batch's own diff or an uncommitted ancestor diff may
-                    // supersede the committed location, and neither source is reflected in
-                    // the bitmap.
-                    if !self.is_active_at(&key, candidate, &diff, db) {
+                    // A single batch-diff lookup drives the activity check, the base
+                    // provenance, and the in-place diff update below. Revalidation is required
+                    // even for candidates whose committed bitmap bit is set: this batch's diff
+                    // or an uncommitted ancestor diff may supersede the committed location, and
+                    // neither source is reflected in the bitmap.
+                    let search = diff.binary_search_by(|(k, _)| k.cmp(&key));
+                    let (active, base_old_loc) = match search {
+                        Ok(idx) => {
+                            let entry = &diff[idx].1;
+                            (entry.loc() == Some(candidate), entry.base_old_loc())
+                        }
+                        Err(_) => resolve_in_ancestors(&self.ancestors, &key).map_or_else(
+                            || {
+                                (
+                                    db.snapshot.get(&key).any(|&l| l == candidate),
+                                    Some(candidate),
+                                )
+                            },
+                            |entry| (entry.loc() == Some(candidate), entry.base_old_loc()),
+                        ),
+                    };
+                    if !active {
                         continue;
                     }
                     let new_loc = Location::new(self.base_size + ops.len() as u64);
-                    let search = diff.binary_search_by(|(k, _)| k.cmp(&key));
-                    let base_old_loc = match &search {
-                        Ok(idx) => diff[*idx].1.base_old_loc(),
-                        Err(_) => resolve_in_ancestors(&self.ancestors, &key)
-                            .map_or(Some(candidate), DiffEntry::base_old_loc),
-                    };
                     let value = extract_update_value(&op);
                     ops.push(op);
 
