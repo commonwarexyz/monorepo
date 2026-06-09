@@ -12,9 +12,9 @@ const N_LEAVES: [u64; 3] = [1_000_000, 1_000_000_000_000, 1 << 62];
 /// bit patterns (the cost varies with the popcount structure near the target).
 const SAMPLES: usize = 4096;
 
-/// Generate `SAMPLES` valid leaf positions drawn from leaf counts in `[0, max_leaves)`. Callers of
-/// `position_to_location` (e.g. `leaves()`, `Location::try_from`) always pass leaf-aligned sizes,
-/// so the benchmark mirrors that and does not exercise the non-leaf (`None`) path.
+/// Generate `SAMPLES` valid leaf positions drawn from leaf counts in `[0, max_leaves)`. The
+/// benchmark focuses on the common leaf/size (`Some`) path exercised by callers like `leaves()` and
+/// `Location::try_from`; it does not measure the non-leaf (`None`) path used for leaf detection.
 fn sample_positions<F: Family>(max_leaves: u64) -> Vec<Position<F>> {
     let mut rng = StdRng::seed_from_u64(0);
     (0..SAMPLES)

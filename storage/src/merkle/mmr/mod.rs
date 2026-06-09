@@ -121,41 +121,47 @@ impl merkle::Family for Family {
 
     fn position_to_location(pos: Position) -> Option<Location> {
         let pos = *pos;
-        // Position 0 is always the first leaf at location 0.
-        if pos == 0 {
-            return Some(Location::new(0));
-        }
 
-        // Find the height of the perfect binary tree containing this position.
-        // Safe: pos + 1 cannot overflow since pos <= MAX_NODES (checked by caller).
-        let start = u64::MAX >> (pos + 1).leading_zeros();
-        let height = start.trailing_ones();
-        // Height 0 means this position is a peak (not a leaf in a tree).
-        if height == 0 {
-            return None;
-        }
-        let mut two_h = 1 << (height - 1);
-        let mut cur_node = start - 1;
-        let mut leaf_loc_floor = 0u64;
+        // Invert `pos = 2*n - popcount(n)` for the leaf count `n`. The forward map is strictly
+        // increasing (consecutive leaves differ by at least one node), so for a given `pos` there
+        // is at most one `n`, and a position is a leaf iff that `n` exists.
+        //
+        // We find `n` by a Newton-style estimate followed by a verified bracket walk:
+        //
+        //   1. Estimate. Treating `popcount` as locally constant, `f(n) = 2*n - c` inverts to
+        //      `n = (pos + c)/2`. Iterating `n <- (pos + popcount(n))/2` from `n = pos/2`
+        //      converges to within a small constant of the answer (the correction is always
+        //      `< 64`). Empirically, three steps always land within 1 of the true value, so the
+        //      bracket below runs at most one iteration. We have not proven 3 is the worst case,
+        //      only observed it across exhaustive and boundary-stress testing; correctness does
+        //      not rely on it (see step 2), it only governs how fast we get there.
+        //   2. Bracket. Walk `n` monotonically toward `pos` and verify exactly. Correctness does
+        //      not depend on the estimate's accuracy: because `f` is strictly increasing, the walk
+        //      stops at the unique crossing point, returning the leaf if `f(n) == pos` and `None`
+        //      otherwise. A worse estimate only means more steps, never a wrong answer.
+        //
+        // `pos <= MAX_NODES = 2^63 - 1` (checked by the caller), so every `2*n` below stays within
+        // `u64` and every `2*n - popcount(n)` is non-negative.
+        let mut n = pos >> 1;
+        n = (pos + n.count_ones() as u64) >> 1;
+        n = (pos + n.count_ones() as u64) >> 1;
+        n = (pos + n.count_ones() as u64) >> 1;
 
-        while two_h > 1 {
-            if cur_node == pos {
-                return None;
-            }
-            let left_pos = cur_node - two_h;
-            two_h >>= 1;
-            if pos > left_pos {
-                // The leaf is in the right subtree, so we must account for the leaves in the left
-                // subtree all of which precede it.
-                leaf_loc_floor += two_h;
-                cur_node -= 1; // move to the right child
-            } else {
-                // The node is in the left subtree
-                cur_node = left_pos;
-            }
+        let f = |n: u64| 2 * n - n.count_ones() as u64;
+        let mut fn_ = f(n);
+        while fn_ < pos {
+            n += 1;
+            fn_ = f(n);
         }
-
-        Some(Location::new(leaf_loc_floor))
+        while fn_ > pos {
+            n -= 1;
+            fn_ = f(n);
+        }
+        if fn_ == pos {
+            Some(Location::new(n))
+        } else {
+            None
+        }
     }
 
     fn to_nearest_size(size: Position) -> Position {
@@ -538,6 +544,42 @@ mod tests {
             Location::try_from(overflow_pos).unwrap_err(),
             merkle::Error::PositionOverflow(p) if p == overflow_pos
         ));
+    }
+
+    /// Power-of-two boundaries are the stress case for the popcount-based inversion: `2^m - 1` has
+    /// a full run of ones (popcount `m`) adjacent to `2^m` (popcount 1), so the Newton estimate's
+    /// transient error is largest here. Verify round-trips on every leaf count near each boundary.
+    #[test]
+    fn test_position_to_location_power_of_two_boundaries() {
+        let fwd = <Family as crate::merkle::Family>::location_to_position;
+        let inv = <Family as crate::merkle::Family>::position_to_location;
+        for m in 1..=62u64 {
+            let base = 1u64 << m;
+            for delta in -64i64..=64 {
+                let n = base as i64 + delta;
+                if n < 0 || (n as u64) > *MAX_LEAVES {
+                    continue;
+                }
+                let n = n as u64;
+                let pos = fwd(Location::new(n));
+                assert_eq!(
+                    inv(pos),
+                    Some(Location::new(n)),
+                    "leaf n={n} (2^{m}{delta:+})"
+                );
+            }
+        }
+    }
+
+    /// Round-trip the extreme leaf counts, including the inclusive `MAX_LEAVES` bound.
+    #[test]
+    fn test_position_to_location_max_boundary() {
+        let fwd = <Family as crate::merkle::Family>::location_to_position;
+        let inv = <Family as crate::merkle::Family>::position_to_location;
+        for n in (*MAX_LEAVES - 64)..=*MAX_LEAVES {
+            let pos = fwd(Location::new(n));
+            assert_eq!(inv(pos), Some(Location::new(n)), "leaf n={n}");
+        }
     }
 
     #[test]
