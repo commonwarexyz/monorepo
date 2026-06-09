@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
         deterministic, telemetry::metrics, Blob, Clock, Error, IoBufs, IoBufsMut, Metrics, Name,
-        Storage, Supervisor, Tracing,
+        Storage, Supervisor,
     };
     use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
     use std::{
@@ -60,13 +60,6 @@ pub(super) mod partition_sync_fault {
 
         fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
             self.inner = self.inner.with_attribute(key, value);
-            self
-        }
-    }
-
-    impl Tracing for Context {
-        fn with_span(mut self) -> Self {
-            self.inner = self.inner.with_span();
             self
         }
     }

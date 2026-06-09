@@ -3,6 +3,7 @@ use crate::stateful::{
         core::{
             keep_resolvers_alive,
             mailbox::{ErasedAncestorStream, Message},
+            process_span,
             processing::Processing,
         },
         metrics::Metrics as StatefulMetrics,
@@ -156,15 +157,16 @@ where
                     ancestry,
                     response,
                 } => {
+                    let process = process_span(&span);
                     self.held_verify_requests
                         .retain(|request| !request.response.is_closed());
                     self.held_verify_requests.push(HeldVerify {
-                        span: span.clone(),
+                        span,
                         context,
                         ancestry,
                         response,
                     });
-                    span.in_scope(|| {
+                    process.in_scope(|| {
                         debug!(
                             held_verify_requests = self.held_verify_requests.len(),
                             "verify held: state sync in progress"
@@ -176,9 +178,10 @@ where
                     block,
                     acknowledgement,
                 } => {
+                    let process = process_span(&span);
                     let handoff = self
                         .process_finalized(block, acknowledgement)
-                        .instrument(span)
+                        .instrument(process)
                         .await;
                     if let Some(handoff) = handoff {
                         self.transition(Some(handoff)).await;
@@ -300,6 +303,7 @@ where
         }
 
         for request in self.held_verify_requests.drain(..) {
+            let process = process_span(&request.span);
             processor
                 .verify(
                     self.context.as_present(),
@@ -308,7 +312,7 @@ where
                     request.ancestry,
                     request.response,
                 )
-                .instrument(request.span)
+                .instrument(process)
                 .await;
         }
 

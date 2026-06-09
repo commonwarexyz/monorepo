@@ -47,7 +47,7 @@ use std::{
     future::Future,
     num::NonZeroUsize,
 };
-use tracing::{debug, info_span, warn, Instrument as _};
+use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
@@ -255,10 +255,7 @@ where
         let timer = self.metrics.propose_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let parent = match next_or_cancel(&mut response, &mut ancestry)
-            .instrument(info_span!("stateful.processor.fetch_parent"))
-            .await
-        {
+        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 response.send_lossy(None);
@@ -349,10 +346,7 @@ where
         let timer = self.metrics.verify_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let block = match next_or_cancel(&mut response, &mut ancestry)
-            .instrument(info_span!("stateful.processor.fetch_block"))
-            .await
-        {
+        let block = match next_or_cancel(&mut response, &mut ancestry).await {
             Some(Some(block)) => block,
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
@@ -418,10 +412,7 @@ where
         }
 
         let round = consensus_context.round();
-        let parent = match next_or_cancel(&mut response, &mut ancestry)
-            .instrument(info_span!("stateful.processor.fetch_parent"))
-            .await
-        {
+        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 debug!(
@@ -877,6 +868,7 @@ where
 }
 
 /// Read the next ancestry item unless the response receiver is dropped.
+#[tracing::instrument(name = "stateful.processor.fetch_ancestor", level = "info", skip_all)]
 pub(super) async fn next_or_cancel<R, T, S>(
     response: &mut oneshot::Sender<R>,
     stream: &mut S,

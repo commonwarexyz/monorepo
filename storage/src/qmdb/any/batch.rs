@@ -1017,7 +1017,7 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
-        name = "qmdb::any::batch::merkleize",
+        name = "qmdb.any.batch.merkleize",
         level = "info",
         skip_all,
         fields(
@@ -1189,7 +1189,7 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
-        name = "qmdb::any::batch::merkleize",
+        name = "qmdb.any.batch.merkleize",
         level = "info",
         skip_all,
         fields(
@@ -1568,7 +1568,7 @@ where
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
     #[tracing::instrument(
-        name = "qmdb::any::batch::new",
+        name = "qmdb.any.batch.new",
         level = "debug",
         skip_all,
         fields(
@@ -1687,7 +1687,7 @@ where
 {
     /// Create a new speculative batch of operations with this database as its parent.
     #[tracing::instrument(
-        name = "qmdb::any::batch::new",
+        name = "qmdb.any.batch.new",
         level = "debug",
         skip_all,
         fields(
@@ -1733,7 +1733,7 @@ where
     /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
     /// guarantee durability.
     #[tracing::instrument(
-        name = "qmdb::any::Db::apply_batch",
+        name = "qmdb.any.db.apply_batch",
         level = "info",
         skip_all,
         fields(
@@ -1835,7 +1835,7 @@ where
     ///
     /// This is the starting point for building owned batch chains.
     #[tracing::instrument(
-        name = "qmdb::any::Db::to_batch",
+        name = "qmdb.any.db.to_batch",
         level = "info",
         skip_all,
         fields(

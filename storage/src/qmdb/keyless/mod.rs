@@ -378,7 +378,7 @@ where
     ///
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor declared by
     ///   the last committed batch.
-    #[tracing::instrument(name = "qmdb::keyless::Db::prune", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.prune_timer();
         self.metrics.operations.prune_calls.inc();
@@ -413,7 +413,7 @@ where
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
     /// [`Self::sync`].
-    #[tracing::instrument(name = "qmdb::keyless::Db::rewind", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.keyless.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
@@ -456,7 +456,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
-    #[tracing::instrument(name = "qmdb::keyless::Db::sync", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
     pub async fn sync(&self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.sync_timer();
         self.metrics.operations.sync_calls.inc();
@@ -465,7 +465,7 @@ where
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
-    #[tracing::instrument(name = "qmdb::keyless::Db::commit", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.keyless.db.commit", level = "info", skip_all)]
     pub async fn commit(&self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.commit_timer();
         self.metrics.operations.commit_calls.inc();
@@ -526,7 +526,7 @@ where
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably commit it. Call [`Keyless::commit`] or
     /// [`Keyless::sync`] to guarantee durability.
-    #[tracing::instrument(name = "qmdb::keyless::Db::apply_batch", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.keyless.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,

@@ -382,7 +382,7 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
-        name = "qmdb::current::batch::merkleize",
+        name = "qmdb.current.batch.merkleize",
         level = "info",
         skip_all,
         fields(variant = "unordered",)
@@ -454,7 +454,7 @@ where
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
-        name = "qmdb::current::batch::merkleize",
+        name = "qmdb.current.batch.merkleize",
         level = "info",
         skip_all,
         fields(variant = "ordered",)
