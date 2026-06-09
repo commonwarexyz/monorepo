@@ -2,8 +2,9 @@
 
 use crate::{Hasher, Key, Value};
 use commonware_parallel::Sequential;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Storage};
 use commonware_storage::{
+    journal::contiguous::variable,
     merkle::{
         compact::Config as MerkleConfig,
         mmr::{self},
@@ -14,6 +15,7 @@ use commonware_storage::{
         sync::compact,
     },
 };
+use commonware_utils::{NZUsize, NZU16, NZU64};
 use tracing::error;
 
 /// Database type alias.
@@ -23,11 +25,19 @@ pub type Database<E> = fixed::CompactDb<mmr::Family, E, Value, Hasher, Sequentia
 pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the compact keyless variant.
-pub fn create_config(_context: &impl BufferPooler) -> CompactConfig<Sequential> {
+pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
     CompactConfig {
         merkle: MerkleConfig {
             partition: "compact-keyless".into(),
             strategy: Sequential,
+        },
+        witness: variable::Config {
+            partition: "compact-keyless-witness".into(),
+            items_per_section: NZU64!(1024),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(64)),
+            write_buffer: NZUsize!(1024),
         },
         commit_codec_config: (),
     }

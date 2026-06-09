@@ -423,6 +423,18 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context) -> TestDb {
+        let witness = commonware_storage::journal::contiguous::variable::Config {
+            partition: "compact-p2p-test-witness".into(),
+            items_per_section: commonware_utils::NZU64!(64),
+            compression: None,
+            codec_config: (),
+            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+                &context,
+                commonware_utils::NZU16!(1024),
+                NZUsize!(64),
+            ),
+            write_buffer: NZUsize!(1024),
+        };
         TestDb::init(
             context,
             keyless_fixed::CompactConfig {
@@ -430,6 +442,7 @@ mod tests {
                     partition: "compact-p2p-test".into(),
                     strategy: Sequential,
                 },
+                witness,
                 commit_codec_config: (),
             },
         )

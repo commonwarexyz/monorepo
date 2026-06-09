@@ -1068,11 +1068,20 @@ mod compact_variable_mmr {
 
     fn client_config(
         suffix: &str,
+        pooler: &impl BufferPooler,
     ) -> variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
                 strategy: Sequential,
+            },
+            witness: crate::journal::contiguous::variable::Config {
+                partition: format!("compact-{suffix}-witness"),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000).into(), ()),
         }
@@ -1148,7 +1157,7 @@ mod compact_variable_mmr {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let client_cfg = client_config(&suffix);
+            let client_cfg = client_config(&suffix, &context);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: source.clone(),
@@ -1214,7 +1223,7 @@ mod compact_variable_mmr {
                     ]))),
                 },
                 target: target.clone(),
-                db_config: client_config(&suffix),
+                db_config: client_config(&suffix, &context),
             })
             .await
             .unwrap();
@@ -1275,7 +1284,7 @@ mod compact_variable_mmr {
                     ]))),
                 },
                 target: target.clone(),
-                db_config: client_config(&suffix),
+                db_config: client_config(&suffix, &context),
             })
             .await
             .unwrap();
@@ -1319,7 +1328,7 @@ mod compact_variable_mmr {
             let mut bad_state = good_state.clone();
             bad_state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
-            let client_cfg = client_config(&suffix);
+            let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
@@ -1386,7 +1395,7 @@ mod compact_variable_mmr {
                     ]))),
                 },
                 target: target.clone(),
-                db_config: client_config(&suffix),
+                db_config: client_config(&suffix, &context),
             })
             .await
             .unwrap();
@@ -1442,7 +1451,7 @@ mod compact_variable_mmr {
                 ]))),
             };
 
-            let client_cfg = client_config(&suffix);
+            let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver,
@@ -1520,7 +1529,7 @@ mod compact_variable_mmr {
     fn test_compact_source_reopen_rewind_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-unj-source-{}", context.next_u64());
-            let source_cfg = client_config(&format!("{suffix}-source"));
+            let source_cfg = client_config(&format!("{suffix}-source"), &context);
             let mut source = ClientDb::init(context.child("source_init"), source_cfg.clone())
                 .await
                 .unwrap();
@@ -1542,7 +1551,7 @@ mod compact_variable_mmr {
                 .unwrap();
             assert_eq!(source.current_target(), target1);
 
-            let serve1_cfg = client_config(&format!("{suffix}-serve1"));
+            let serve1_cfg = client_config(&format!("{suffix}-serve1"), &context);
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 1),
                 resolver: Arc::new(source),
@@ -1574,7 +1583,7 @@ mod compact_variable_mmr {
             source.rewind().await.unwrap();
             assert_eq!(source.current_target(), target1);
 
-            let serve2_cfg = client_config(&format!("{suffix}-serve2"));
+            let serve2_cfg = client_config(&format!("{suffix}-serve2"), &context);
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 2),
                 resolver: Arc::new(source),
@@ -1605,7 +1614,7 @@ mod compact_variable_mmr {
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
 
-            let serve3_cfg = client_config(&format!("{suffix}-serve3"));
+            let serve3_cfg = client_config(&format!("{suffix}-serve3"), &context);
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
@@ -1628,7 +1637,7 @@ mod compact_variable_mmr {
                 context: context.child("stale_client"),
                 resolver: source.clone(),
                 target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale")),
+                db_config: client_config(&format!("{suffix}-stale"), &context),
             })
             .await;
             assert!(matches!(
@@ -1688,11 +1697,20 @@ mod compact_variable_mmb {
 
     fn client_config(
         suffix: &str,
+        pooler: &impl BufferPooler,
     ) -> variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
         keyless::CompactConfig {
             merkle: crate::merkle::compact::Config {
                 partition: format!("compact-{suffix}"),
                 strategy: Sequential,
+            },
+            witness: crate::journal::contiguous::variable::Config {
+                partition: format!("compact-{suffix}-witness"),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000).into(), ()),
         }
@@ -1768,7 +1786,7 @@ mod compact_variable_mmb {
                 leaf_count: bounds.end,
             };
             let source = Arc::new(source);
-            let client_cfg = client_config(&suffix);
+            let client_cfg = client_config(&suffix, &context);
             let client: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: source.clone(),
@@ -1834,7 +1852,7 @@ mod compact_variable_mmb {
                     ]))),
                 },
                 target: target.clone(),
-                db_config: client_config(&suffix),
+                db_config: client_config(&suffix, &context),
             })
             .await
             .unwrap();
@@ -1895,7 +1913,7 @@ mod compact_variable_mmb {
                     ]))),
                 },
                 target: target.clone(),
-                db_config: client_config(&suffix),
+                db_config: client_config(&suffix, &context),
             })
             .await
             .unwrap();
@@ -1939,7 +1957,7 @@ mod compact_variable_mmb {
             let mut bad_state = good_state.clone();
             bad_state.pinned_nodes[0] = sha256::Digest::from([0xaa; 32]);
 
-            let client_cfg = client_config(&suffix);
+            let client_cfg = client_config(&suffix, &context);
             let synced: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("client"),
                 resolver: SequenceResolver {
@@ -2006,7 +2024,7 @@ mod compact_variable_mmb {
                     ]))),
                 },
                 target: target.clone(),
-                db_config: client_config(&suffix),
+                db_config: client_config(&suffix, &context),
             })
             .await
             .unwrap();
@@ -2069,7 +2087,7 @@ mod compact_variable_mmb {
     fn test_compact_source_reopen_rewind_regrow_and_stale_target() {
         deterministic::Runner::default().start(|mut context| async move {
             let suffix = format!("compact-keyless-mmb-unj-source-{}", context.next_u64());
-            let source_cfg = client_config(&format!("{suffix}-source"));
+            let source_cfg = client_config(&format!("{suffix}-source"), &context);
             let mut source = ClientDb::init(context.child("source_init"), source_cfg.clone())
                 .await
                 .unwrap();
@@ -2091,7 +2109,7 @@ mod compact_variable_mmb {
                 .unwrap();
             assert_eq!(source.current_target(), target1);
 
-            let serve1_cfg = client_config(&format!("{suffix}-serve1"));
+            let serve1_cfg = client_config(&format!("{suffix}-serve1"), &context);
             let served1: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 1),
                 resolver: Arc::new(source),
@@ -2123,7 +2141,7 @@ mod compact_variable_mmb {
             source.rewind().await.unwrap();
             assert_eq!(source.current_target(), target1);
 
-            let serve2_cfg = client_config(&format!("{suffix}-serve2"));
+            let serve2_cfg = client_config(&format!("{suffix}-serve2"), &context);
             let served2: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 2),
                 resolver: Arc::new(source),
@@ -2154,7 +2172,7 @@ mod compact_variable_mmb {
             assert_ne!(target3, target1);
             assert_ne!(target3, target2);
 
-            let serve3_cfg = client_config(&format!("{suffix}-serve3"));
+            let serve3_cfg = client_config(&format!("{suffix}-serve3"), &context);
             let served3: ClientDb = sync::compact::sync(sync::compact::Config {
                 context: context.child("serve").with_attribute("index", 3),
                 resolver: Arc::new(source),
@@ -2178,7 +2196,7 @@ mod compact_variable_mmb {
                 context: context.child("stale_client"),
                 resolver: source.clone(),
                 target: target2.clone(),
-                db_config: client_config(&format!("{suffix}-stale")),
+                db_config: client_config(&format!("{suffix}-stale"), &context),
             })
             .await;
             assert!(matches!(

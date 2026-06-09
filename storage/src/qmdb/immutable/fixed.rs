@@ -69,8 +69,9 @@ impl<F: Family, E: Storage + Clock + Metrics, K: Array, V: FixedValue, H: Hasher
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<S>) -> Result<Self, Error<F>> {
+        let witness_context = context.child("witness");
         let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, ()).await
+        Self::init_from_merkle(merkle, witness_context, cfg.witness, ()).await
     }
 }
 
@@ -130,6 +131,14 @@ mod tests {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-immutable-fixed".into(),
                 strategy: Sequential,
+            },
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-immutable-fixed-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
         };

@@ -73,8 +73,15 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
+        let witness_context = context.child("witness");
         let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, cfg.commit_codec_config).await
+        Self::init_from_merkle(
+            merkle,
+            witness_context,
+            cfg.witness,
+            cfg.commit_codec_config,
+        )
+        .await
     }
 }
 
@@ -153,6 +160,14 @@ mod test {
             merkle: crate::merkle::compact::Config {
                 partition: "compact-keyless-variable".into(),
                 strategy: Sequential,
+            },
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-keyless-variable-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000usize).into(), ()),
         };

@@ -202,8 +202,14 @@ where
             pinned_nodes.clone(),
         )
         .await?;
+        let journal = crate::qmdb::compact::witness::open_journal::<E, F, H::Digest>(
+            context.child("witness"),
+            config.witness,
+        )
+        .await?;
         Self::init_from_verified_state(
             merkle,
+            journal,
             commit_codec_config,
             last_commit_metadata,
             inactivity_floor_loc,
@@ -212,6 +218,7 @@ where
             last_commit_proof,
             pinned_nodes,
         )
+        .await
     }
 
     fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>> {

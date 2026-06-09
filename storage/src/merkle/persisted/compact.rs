@@ -1,23 +1,24 @@
-//! A compact Merkle structure.
+//! A compact Merkle structure: unlike [`crate::merkle::full`], it persists just enough to recover
+//! the current root and keep appending after a restart, never the history.
 //!
-//! Unlike [`crate::merkle::full`], this type persists only the minimum state required to
-//! recover the current root and continue appending after restart. Historical nodes are discarded
-//! on sync and are not readable after reopen.
+//! The whole on-disk state is a small *snapshot* -- `(leaf_count, peaks)`. That suffices because a
+//! root is a function of its peaks and appending a leaf only touches peaks, so rebuilding [`Mem`]
+//! from a snapshot reproduces an equivalent tree. History is dropped on every `sync` and cannot be
+//! read back.
 //!
-//! # Why peaks are enough
+//! # Crash-safe writes
 //!
-//! An MMR/MMB root is computed from the current peaks, and appending a new leaf only touches
-//! peaks. Persisting `(leaf_count, pinned_peaks)` and rebuilding [`Mem`] on reopen with no
-//! retained nodes and those peaks as pinned values reconstructs an equivalent tree: same root,
-//! same future append behavior.
+//! A snapshot is never overwritten in place. Disk holds two slots and a one-byte pointer naming the
+//! live one. Each `sync` writes the new snapshot into the *idle* slot, then flips the pointer to it
+//! in one atomic write. That flip is the commit point: a crash before it leaves the live slot
+//! intact (reopen recovers the last `sync`), a crash after it reveals the new snapshot, and a torn
+//! write only ever damages the idle slot.
 //!
-//! # One-step rewind
+//! # Rewind
 //!
-//! State is persisted into one of two slots on disk, with a generation pointer identifying the
-//! active slot. Each `sync` writes the new state to the *other* slot and flips the pointer
-//! atomically. The `rewind` entry point flips the pointer back and clears the now-stale slot,
-//! restoring the state as of the sync before the most recent one. Rewind is one-shot until the
-//! next `sync`.
+//! The previous snapshot still sits in the other slot, so `rewind` undoes the last `sync` by
+//! flipping the pointer back and clearing the slot it left. It is one-shot: clearing drops that
+//! snapshot, so a second rewind fails until the next `sync` refills the slot.
 
 use crate::{
     merkle::{
@@ -102,7 +103,7 @@ pub struct Merkle<F: Family, E: Context, D: Digest, S: Strategy> {
     sync_lock: AsyncMutex<()>,
     strategy: S,
     /// Active slot (0 or 1). Source of truth lives on disk under `GEN_PTR_PREFIX`; this is an
-    /// in-memory cache refreshed on every `sync_with` and `rewind`.
+    /// in-memory cache refreshed on every `sync` and `rewind`.
     active_slot: RwLock<u8>,
 }
 
@@ -234,14 +235,14 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Initialize from compact state without persisting it.
     ///
     /// Callers use this to reconstruct a compact tree in memory, verify that its root
-    /// matches an authenticated target, and only then persist it with [`Self::sync_with_witness`].
+    /// matches an authenticated target, and only then persist it with [`Self::sync`].
     /// Starting from a cleared metadata view means the first persistence populates exactly one
     /// slot, so `rewind` will return [`Error::RewindBeyondHistory`] until a later sync overwrites
     /// the alternate slot.
     ///
     /// This path is intended for a fresh or disposable compact partition. Existing metadata is
     /// cleared only in memory here; if verification fails before a later successful
-    /// [`Self::sync_with_witness`], the on-disk state remains untouched. Once persistence succeeds,
+    /// [`Self::sync`], the on-disk state remains untouched. Once persistence succeeds,
     /// the previous compact history in this partition is replaced by the newly initialized state.
     /// Root verification itself happens at the QMDB layer after reconstruction, because that layer
     /// owns the typed final commit operation needed to authenticate the caller's requested target.
@@ -311,6 +312,7 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Return the index of the slot currently holding the committed state.
+    #[cfg(test)]
     pub(crate) fn active_slot(&self) -> u8 {
         *self.active_slot.read()
     }
@@ -336,76 +338,6 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     /// Apply a merkleized batch to the in-memory structure.
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
         self.inner.get_mut().apply_batch(batch)
-    }
-
-    /// Read a metadata key from the Db's "extras" keyspace for the given slot. Used by the
-    /// qmdb `CompactDb` layer to read back its own per-slot state on reopen or rewind.
-    pub(crate) async fn read_metadata_key(&self, key: &U64) -> Option<Vec<u8>> {
-        let metadata = self.metadata.lock().await;
-        metadata.get(key).cloned()
-    }
-
-    /// Persist the tree state to the inactive slot together with a caller-provided witness.
-    ///
-    /// This is the only safe way to durably persist state from this Merkle. The `build_witness`
-    /// closure is the caller's one chance to capture anything that depends on the unpruned
-    /// [`Mem`]; after this method completes, the in-memory tree is pruned to peaks only and that
-    /// information is no longer recoverable locally.
-    ///
-    /// The `build_witness` closure runs against the unpruned [`Mem`] under `sync_lock`, making it
-    /// the only safe place to capture data that would be lost by peak-only pruning. The `update`
-    /// closure then receives both the mutable [`Metadata`] store and the built witness so caller
-    /// metadata and the witness are written in the same atomic transaction before the generation
-    /// pointer flips. `build_witness` must stay fully synchronous and non-blocking: it runs while a
-    /// read lock is held on the committed in-memory tree, so it must not `.await` or do
-    /// unexpectedly heavy work. In practice this closure is where callers capture a last-leaf
-    /// proof or other small authenticated snapshot that would be impossible to reconstruct once the
-    /// tree is pruned back to peaks.
-    pub(crate) async fn sync_with_witness<W, R>(
-        &self,
-        build_witness: impl FnOnce(&Mem<F, D>) -> Result<W, Error<F>>,
-        update: impl FnOnce(&mut Metadata<E, U64, Vec<u8>>, u8, W) -> Result<R, Error<F>>,
-    ) -> Result<R, Error<F>> {
-        let _sync_guard = self.sync_lock.lock().await;
-
-        let current_slot = *self.active_slot.read();
-        let target_slot = 1 - current_slot;
-
-        let (leaves, pinned_nodes, witness) = {
-            let inner = self.inner.read();
-            let leaves = inner.leaves();
-            let pinned_nodes = F::nodes_to_pin(leaves)
-                .map(|pos| *inner.get_node_unchecked(pos))
-                .collect::<Vec<_>>();
-            let witness = build_witness(&inner)?;
-            (leaves, pinned_nodes, witness)
-        };
-
-        let result = {
-            let mut metadata = self.metadata.lock().await;
-            let old_target_leaves =
-                Self::read_slot_size(&metadata, target_slot)?.unwrap_or(Location::new(0));
-            Self::clear_slot_pins(&mut metadata, target_slot, old_target_leaves);
-            metadata.put(
-                U64::new(size_prefix(target_slot), 0),
-                leaves.as_u64().to_be_bytes().to_vec(),
-            );
-            for (idx, digest) in pinned_nodes.iter().enumerate() {
-                metadata.put(
-                    U64::new(node_prefix(target_slot), idx as u64),
-                    digest.to_vec(),
-                );
-            }
-            let result = update(&mut metadata, target_slot, witness)?;
-            metadata
-                .put_sync(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot])
-                .await?;
-            result
-        };
-
-        *self.active_slot.write() = target_slot;
-        self.inner.write().prune_all();
-        Ok(result)
     }
 
     /// Restore the state as of the sync before the most recent one.
@@ -448,12 +380,9 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
             })?
         };
 
-        // Atomically clear this layer's state in the pre-rewind slot (size + pins) and flip the
-        // generation pointer. Removing the size key is what makes the slot "no longer a valid
-        // rewind target": subsequent rewinds read `None` for its size and fail with
-        // `RewindBeyondHistory`. Any caller-specific extras written alongside under separate
-        // prefixes remain on disk but are harmless, since the next `sync_with` into this slot
-        // overwrites them before they can be read.
+        // Atomically clear this slot's state (size + pins) and flip the generation pointer.
+        // Removing the size key is what makes the slot "no longer a valid rewind target":
+        // subsequent rewinds read `None` for its size and fail with `RewindBeyondHistory`.
         {
             let mut metadata = self.metadata.lock().await;
             let old_current_leaves =
@@ -470,10 +399,46 @@ impl<F: Family, E: Context, D: Digest, S: Strategy> Merkle<F, E, D, S> {
     }
 
     /// Durably persist the current tree state to disk.
+    ///
+    /// Writes the frontier (size + pinned peaks) into the inactive slot, then flips the generation
+    /// pointer in a single atomic metadata transaction; that flip is the commit point. Afterwards
+    /// the in-memory tree is pruned to peaks only.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        self.sync_with_witness(|_| Ok(()), |_, _, ()| Ok(()))
-            .await
-            .map(|_| ())
+        let _sync_guard = self.sync_lock.lock().await;
+
+        let current_slot = *self.active_slot.read();
+        let target_slot = 1 - current_slot;
+
+        let (leaves, pinned_nodes) = {
+            let inner = self.inner.read();
+            let leaves = inner.leaves();
+            let pinned_nodes = F::nodes_to_pin(leaves)
+                .map(|pos| *inner.get_node_unchecked(pos))
+                .collect::<Vec<_>>();
+            (leaves, pinned_nodes)
+        };
+
+        let mut metadata = self.metadata.lock().await;
+        let old_target_leaves =
+            Self::read_slot_size(&metadata, target_slot)?.unwrap_or(Location::new(0));
+        Self::clear_slot_pins(&mut metadata, target_slot, old_target_leaves);
+        metadata.put(
+            U64::new(size_prefix(target_slot), 0),
+            leaves.as_u64().to_be_bytes().to_vec(),
+        );
+        for (idx, digest) in pinned_nodes.iter().enumerate() {
+            metadata.put(
+                U64::new(node_prefix(target_slot), idx as u64),
+                digest.to_vec(),
+            );
+        }
+        metadata
+            .put_sync(U64::new(GEN_PTR_PREFIX, 0), vec![target_slot])
+            .await?;
+
+        *self.active_slot.write() = target_slot;
+        self.inner.write().prune_all();
+        Ok(())
     }
 
     /// Durably persist the current tree state to disk (alias for [`Self::sync`]).
