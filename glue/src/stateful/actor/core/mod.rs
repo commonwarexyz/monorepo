@@ -42,15 +42,19 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {
+    /// Prune databases and marshal every `maintenance_interval` finalized blocks.
+    ///
+    /// This controls only how often pruning runs, not how much history is retained. Each prune
+    /// always leaves at least the configured retention windows in place, so a small interval
+    /// prunes more frequently but never below those floors.
+    pub maintenance_interval: NonZeroUsize,
+
     /// Finalized blocks to retain in marshal beyond `max_pending_acks + 1`.
     ///
     /// This should generally be set to a large enough number of blocks to facilitate downtime
-    /// on a validator that has completed state sync. If the prune cadence on marshal is too
-    /// aggressive, a rebooted node may fail to recover due to peers being unable to serve the
-    /// blocks it needs to catch up.
-    ///
-    /// This value is also used as the pruning cadence.
-    pub retained_marshal_blocks: NonZeroUsize,
+    /// on a validator that has completed state sync. If marshal retains too few blocks, a rebooted
+    /// node may fail to recover due to peers being unable to serve the blocks it needs to catch up.
+    pub retained_marshal_blocks: usize,
 
     /// Finalized blocks' worth of operations to retain in QMDB beyond `max_pending_acks + 1`.
     ///
@@ -65,7 +69,7 @@ impl PruneConfig {
     /// Ensure marshal is never pruned more aggressively than QMDB.
     pub const fn assert_valid(self) {
         assert!(
-            self.retained_marshal_blocks.get() >= self.retained_qmdb_blocks,
+            self.retained_marshal_blocks >= self.retained_qmdb_blocks,
             "marshal must retain at least as many blocks as QMDB",
         );
     }

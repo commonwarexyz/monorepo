@@ -15,6 +15,7 @@ use commonware_runtime::deterministic;
 use multi_db_app::MultiDbEngine;
 use properties::{
     BlockAgreementAtHeight, CrashDuringStateSyncRecovery, LateJoinerStateSyncHandoff,
+    MarshalPrunedBelow, QmdbPruned,
 };
 use single_db_app::SingleDbEngine;
 use std::time::Duration;
@@ -53,6 +54,13 @@ fn deterministic_across_seeds() {
 fn crash_and_restart_one_validator() {
     run_crash_restart(SingleDbEngine::new(NUM_VALIDATORS));
     run_crash_restart(MultiDbEngine::new(NUM_VALIDATORS));
+}
+
+#[test_group("slow")]
+#[test_traced("DEBUG")]
+fn pruning_bounds_finalized_history() {
+    run_pruning(SingleDbEngine::new(NUM_VALIDATORS));
+    run_pruning(MultiDbEngine::new(NUM_VALIDATORS));
 }
 
 #[test_group("slow")]
@@ -319,6 +327,36 @@ where
         ))
         .exit_condition(ProcessedHeightAtLeast::new(50))
         .property(BlockAgreementAtHeight::new(50))
+        .run()
+        .unwrap();
+}
+
+/// Run long enough to cross the prune maintenance interval many times and
+/// assert pruning actually discarded durable history through the live actor.
+///
+/// The engines enable pruning with `max_pending_acks = 1`,
+/// `retained_marshal_blocks = 10`, and `retained_qmdb_blocks = 0`, so marshal
+/// retains a 12 block window. Running to height 100:
+/// - marshal must prune the block at height 1 while still serving height 95, and
+/// - each QMDB must advance its oldest retained operation past location 0.
+///
+/// A QMDB log only ever starts at location 0, so a non-zero oldest retained
+/// location can only be produced by the deferred `Step::Prune` path running.
+fn run_pruning<D>(engine: D)
+where
+    D: EngineDefinition<PublicKey = ed25519::PublicKey>,
+    D::State: ProcessedHeight,
+    BlockAgreementAtHeight: Property<ed25519::PublicKey, D::State>,
+    MarshalPrunedBelow: Property<ed25519::PublicKey, D::State>,
+    QmdbPruned: Property<ed25519::PublicKey, D::State>,
+    ProcessedHeightAtLeast: ExitCondition<ed25519::PublicKey, D::State>,
+{
+    PlanBuilder::new(engine)
+        .seeds(0..5)
+        .exit_condition(ProcessedHeightAtLeast::new(100))
+        .property(BlockAgreementAtHeight::new(100))
+        .property(MarshalPrunedBelow::new(1, 95))
+        .property(QmdbPruned::new(1))
         .run()
         .unwrap();
 }
