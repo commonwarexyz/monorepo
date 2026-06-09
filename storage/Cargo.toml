@@ -79,6 +79,11 @@ test-traits = []
 bench = false
 
 [[bench]]
+name = "merkbench"
+harness = false
+path = "src/qmdb/benches/merkbench.rs"
+
+[[bench]]
 name = "qmdb"
 harness = false
 path = "src/qmdb/benches/bench.rs"
