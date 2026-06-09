@@ -177,10 +177,6 @@ pub(super) mod partition_sync_fault {
     }
 }
 
-pub(super) trait MutableContiguous: Mutable<Item = u64> {}
-
-impl<T> MutableContiguous for T where T: Mutable<Item = u64> {}
-
 async fn get_bounds<J: Contiguous>(journal: &J) -> std::ops::Range<u64> {
     let reader = journal.reader().await;
     reader.bounds()
@@ -205,7 +201,7 @@ async fn read_item<J: Contiguous>(journal: &J, position: u64) -> Result<J::Item,
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String, usize) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let counter = AtomicUsize::new(0);
     let indexed_factory = |name: String| {
@@ -257,7 +253,7 @@ where
 async fn test_empty_journal_bounds<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let journal = factory("empty".into()).await.unwrap();
     let bounds = get_bounds(&journal).await;
@@ -271,7 +267,7 @@ where
 async fn test_bounds_with_items<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("bounds-with-items".into()).await.unwrap();
 
@@ -293,7 +289,7 @@ where
 async fn test_bounds_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("bounds-after-prune".into()).await.unwrap();
 
@@ -343,7 +339,7 @@ where
 async fn test_append_and_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("append-and-size".into()).await.unwrap();
 
@@ -368,7 +364,7 @@ where
 async fn test_sequential_appends<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("sequential-appends".into()).await.unwrap();
 
@@ -390,7 +386,7 @@ where
 async fn test_replay_from_start<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("replay-from-start".into()).await.unwrap();
 
@@ -422,7 +418,7 @@ where
 async fn test_replay_from_middle<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("replay-from-middle".into()).await.unwrap();
 
@@ -454,7 +450,7 @@ where
 async fn test_prune_retains_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("prune-retains-size".into()).await.unwrap();
 
@@ -487,7 +483,7 @@ where
 async fn test_through_trait<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("through-trait".into()).await.unwrap();
 
@@ -507,7 +503,7 @@ where
 async fn test_replay_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("replay-after-prune".into()).await.unwrap();
 
@@ -546,7 +542,7 @@ where
 async fn test_prune_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("prune-then-append".into()).await.unwrap();
 
@@ -572,7 +568,7 @@ where
 async fn test_position_stability<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("position-stability".into()).await.unwrap();
 
@@ -622,7 +618,7 @@ where
 async fn test_sync_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("sync-behavior".into()).await.unwrap();
 
@@ -647,7 +643,7 @@ where
 async fn test_replay_on_empty<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let journal = factory("replay-on-empty".into()).await.unwrap();
 
@@ -671,7 +667,7 @@ where
 async fn test_replay_at_exact_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("replay-at-exact-size".into()).await.unwrap();
 
@@ -701,7 +697,7 @@ where
 async fn test_multiple_prunes<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("multiple-prunes".into()).await.unwrap();
 
@@ -726,7 +722,7 @@ where
 async fn test_prune_beyond_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("prune-beyond-size".into()).await.unwrap();
 
@@ -751,7 +747,7 @@ where
 async fn test_persistence_basic<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let test_name = "persistence-basic".to_string();
 
@@ -806,7 +802,7 @@ where
 async fn test_persistence_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let test_name = "persistence-after-prune".to_string();
 
@@ -881,7 +877,7 @@ where
 pub(super) async fn test_read_by_position<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("read-by-position".into()).await.unwrap();
 
@@ -902,7 +898,7 @@ where
 pub(super) async fn test_read_many<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("read-many".into()).await.unwrap();
 
@@ -922,7 +918,7 @@ where
 pub(super) async fn test_read_out_of_range<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("read-out-of-range".into()).await.unwrap();
 
@@ -939,7 +935,7 @@ where
 pub(super) async fn test_read_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("read-after-prune".into()).await.unwrap();
 
@@ -960,7 +956,7 @@ where
 async fn test_rewind_to_middle<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-to-middle".into()).await.unwrap();
 
@@ -999,7 +995,7 @@ where
 async fn test_rewind_to_zero<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-to-zero".into()).await.unwrap();
 
@@ -1024,7 +1020,7 @@ where
 async fn test_rewind_current_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-current-size".into()).await.unwrap();
 
@@ -1043,7 +1039,7 @@ where
 async fn test_rewind_invalid_forward<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-invalid-forward".into()).await.unwrap();
 
@@ -1062,7 +1058,7 @@ where
 async fn test_rewind_invalid_pruned<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-invalid-pruned".into()).await.unwrap();
 
@@ -1085,7 +1081,7 @@ where
 async fn test_rewind_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-then-append".into()).await.unwrap();
 
@@ -1113,7 +1109,7 @@ where
 async fn test_rewind_zero_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-zero-then-append".into()).await.unwrap();
 
@@ -1144,7 +1140,7 @@ where
 async fn test_rewind_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("rewind-after-prune".into()).await.unwrap();
 
@@ -1192,7 +1188,7 @@ where
 async fn test_section_boundary_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("section-boundary".into()).await.unwrap();
 
@@ -1250,7 +1246,7 @@ where
 async fn test_destroy_and_reinit<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let test_name = "destroy-and-reinit".to_string();
 
@@ -1300,7 +1296,7 @@ where
 async fn test_append_many_empty<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("append-many-empty".into()).await.unwrap();
 
@@ -1322,7 +1318,7 @@ where
 async fn test_append_many_basic<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("append-many-basic".into()).await.unwrap();
 
@@ -1344,7 +1340,7 @@ where
 async fn test_append_many_across_sections<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("append-many-sections".into()).await.unwrap();
 
@@ -1365,7 +1361,7 @@ where
 async fn test_append_many_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("append-many-then-single".into()).await.unwrap();
 
@@ -1388,7 +1384,7 @@ where
 async fn test_append_many_single_item<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: MutableContiguous,
+    J: Mutable<Item = u64>,
 {
     let mut journal = factory("append-many-single".into()).await.unwrap();
 

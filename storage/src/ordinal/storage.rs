@@ -417,13 +417,6 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         Ok(())
     }
 
-    /// Durably persist the ordinal, guaranteeing the current state will survive a crash.
-    ///
-    /// This is an alias for [Self::sync].
-    pub async fn commit(&self) -> Result<(), Error> {
-        self.sync().await
-    }
-
     /// Destroy [Ordinal] and remove all data.
     pub async fn destroy(self) -> Result<(), Error> {
         for (i, blob) in self.blobs.into_iter() {
