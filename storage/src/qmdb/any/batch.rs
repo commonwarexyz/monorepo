@@ -206,6 +206,12 @@ where
 
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
+
+    /// Caller-supplied resolution of existing keys' committed locations, populated from
+    /// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations) during state load.
+    /// When a mutation key is present here, `merkleize` reuses the location and skips the
+    /// redundant journal read. Empty for callers that did not pre-resolve.
+    resolved: BTreeMap<U::Key, Option<ResolvedLocation<F>>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -1139,7 +1145,8 @@ where
     }
 
     /// Batch read multiple keys, returning per key both the value and the resolved location to be
-    /// fed into [`merkleize_resolved`](UnmerkleizedBatch::merkleize_resolved).
+    /// attached via [`with_resolved`](UnmerkleizedBatch::with_resolved) so the subsequent
+    /// [`merkleize`](UnmerkleizedBatch::merkleize) can skip re-reading these keys.
     ///
     /// Resolution matches [`Self::get_many`] (mutations -> ancestor diffs -> committed DB) but is
     /// intended to be called on a fresh batch (before any mutations are written), so the mutation
@@ -1252,7 +1259,7 @@ where
         ),
     )]
     pub async fn merkleize<E, C, I, const N: usize>(
-        self,
+        mut self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1261,7 +1268,8 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(db, metadata, |floor, tip| {
+        let resolved = core::mem::take(&mut self.resolved);
+        self.merkleize_with_floor_scan(db, resolved, metadata, |floor, tip| {
             next_candidate(&db.bitmap, floor, tip)
         })
         .await
@@ -1276,6 +1284,7 @@ where
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        resolved: BTreeMap<K, Option<ResolvedLocation<F>>>,
         metadata: Option<V::Value>,
         next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1284,106 +1293,42 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let (mut mutations, m) = self.into_parts();
+        let (mutations, m) = self.into_parts();
 
-        // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, false);
-        let reader = db.log.reader().await;
-        let results = m.read_ops(&locations, &[], &reader).await?;
-
-        // Classify existing-key mutations in location order. Collision/ancestor-mismatch slots
-        // are skipped; their mutation (if any) is handled as a create below.
-        let mut existing: Vec<ExistingEntry<K, F, V::Value>> = Vec::with_capacity(locations.len());
-        for (op, &old_loc) in results.iter().zip(&locations) {
-            let key = op.key().expect("updates should have a key");
-
-            // A key resolved via the ancestor diff must only match at its ancestor-diff
-            // location. Without this guard, a stale snapshot collision (the pre-parent DB
-            // snapshot still containing the key's old location) can consume the mutation at the
-            // wrong sort position, changing the operation order relative to the committed-state
-            // path. When the ancestor diff entry does match, use it to trace `base_old_loc`
-            // back to the key's location in the committed DB snapshot.
-            let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
-                if entry.loc() != Some(old_loc) {
-                    continue;
-                }
-                entry.base_old_loc()
-            } else {
-                Some(old_loc)
-            };
-
-            let Some(mutation) = mutations.remove(key) else {
-                // Snapshot index collision: this operation's key does not match
-                // any mutation key. The mutation will be handled as a create below.
-                continue;
-            };
-
-            existing.push(ExistingEntry {
-                key: key.clone(),
-                iter_loc: old_loc,
-                base_old_loc,
-                value: mutation,
-            });
-        }
-
-        m.finish_unordered(existing, mutations, metadata, next_candidate, reader, db)
-            .await
-    }
-
-    /// Resolve, merkleize, and return an `Arc<MerkleizedBatch>`, reusing locations the caller
-    /// already resolved during state load via
-    /// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations).
-    ///
-    /// For each mutation key present (and `Some`) in `resolved`, the committed location and
-    /// provenance are taken from the map, skipping `gather_existing_locations` + `read_ops` for
-    /// that key. Keys absent from `resolved` (creates, or keys the caller chose not to pre-resolve)
-    /// fall back to the normal read-based resolution. A `resolved` entry of `None` indicates the
-    /// caller observed the key as absent; such keys are treated as creates/deletes-of-absent
-    /// without consulting the map.
-    ///
-    /// Produces a byte-identical root to [`merkleize`](Self::merkleize) for the same mutations.
-    #[allow(clippy::type_complexity)]
-    pub async fn merkleize_resolved<E, C, I, const N: usize>(
-        self,
-        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        resolved: &std::collections::HashMap<K, Option<ResolvedLocation<F>>>,
-        metadata: Option<V::Value>,
-    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
-    where
-        E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
-        I: UnorderedIndex<Value = Location<F>>,
-    {
-        let next_candidate = |floor, tip| next_candidate(&db.bitmap, floor, tip);
-        let (mut mutations, m) = self.into_parts();
-
-        // Partition mutations: pre-resolved existing keys vs. the rest (creates and any keys not
-        // covered by the map). `resolved` entries that are `None` are treated as creates: the key
-        // was observed absent during load, so it carries no committed location.
+        // Split mutations into existing keys the caller pre-resolved (location reused from its
+        // state load, skipping the journal read) and the rest, resolved here. An empty `resolved`
+        // map routes every key through the read path: the behavior when no pre-resolution is
+        // supplied.
         let mut existing: Vec<ExistingEntry<K, F, V::Value>> = Vec::with_capacity(mutations.len());
-        let mut rest: BTreeMap<K, Option<V::Value>> = BTreeMap::new();
-        let keys: Vec<K> = mutations.keys().cloned().collect();
-        for key in keys {
-            let value = mutations.remove(&key).expect("key from mutations");
-            match resolved.get(&key) {
-                Some(Some(loc)) => existing.push(ExistingEntry {
-                    key,
-                    iter_loc: loc.iter_loc,
-                    base_old_loc: loc.base_old_loc,
-                    value,
-                }),
-                _ => {
-                    rest.insert(key, value);
+        let mut rest: BTreeMap<K, Option<V::Value>> = if resolved.is_empty() {
+            mutations
+        } else {
+            let mut rest = BTreeMap::new();
+            for (key, value) in mutations {
+                match resolved.get(&key) {
+                    Some(Some(loc)) => existing.push(ExistingEntry {
+                        key,
+                        iter_loc: loc.iter_loc,
+                        base_old_loc: loc.base_old_loc,
+                        value,
+                    }),
+                    _ => {
+                        rest.insert(key, value);
+                    }
                 }
             }
-        }
+            rest
+        };
 
-        // Resolve the rest the normal way. This covers creates and any not-pre-resolved keys,
-        // and preserves the collision/ancestor-mismatch handling for them.
+        // Resolve the rest from the journal: gather candidate locations, read the ops, and
+        // classify in location order. A key resolved via an ancestor diff must only match at its
+        // ancestor-diff location; otherwise a stale snapshot collision (the pre-parent DB snapshot
+        // still holding the key's old location) could consume the mutation at the wrong sort
+        // position and reorder operations. Collision/ancestor-mismatch slots are skipped and their
+        // mutation (if any) is handled as a create by `finish_unordered`.
         let reader = db.log.reader().await;
-        let mut rest_creates = rest;
-        if !rest_creates.is_empty() {
-            let locations = m.gather_existing_locations(&rest_creates, db, false);
+        if !rest.is_empty() {
+            let locations = m.gather_existing_locations(&rest, db, false);
             let results = m.read_ops(&locations, &[], &reader).await?;
             for (op, &old_loc) in results.iter().zip(&locations) {
                 let key = op.key().expect("updates should have a key");
@@ -1395,7 +1340,7 @@ where
                 } else {
                     Some(old_loc)
                 };
-                let Some(mutation) = rest_creates.remove(key) else {
+                let Some(mutation) = rest.remove(key) else {
                     continue;
                 };
                 existing.push(ExistingEntry {
@@ -1407,11 +1352,21 @@ where
             }
         }
 
-        // Existing-key ops are generated in iter-location order (matching the normal path).
+        // Existing-key ops are generated in iter-location order; the read path already yields
+        // that order, and pre-resolved entries are merged into it here.
         existing.sort_by(|a, b| a.iter_loc.cmp(&b.iter_loc));
 
-        m.finish_unordered(existing, rest_creates, metadata, next_candidate, reader, db)
+        m.finish_unordered(existing, rest, metadata, next_candidate, reader, db)
             .await
+    }
+
+    /// Attach existing-key locations the caller already resolved during state load (via
+    /// [`get_many_with_locations`](Self::get_many_with_locations)) so [`merkleize`](Self::merkleize)
+    /// reuses them instead of re-reading the journal for those keys. Keys absent from `resolved`
+    /// are resolved normally; a `None` entry marks a key observed as absent (handled as a create).
+    pub fn with_resolved(mut self, resolved: BTreeMap<K, Option<ResolvedLocation<F>>>) -> Self {
+        self.resolved = resolved;
+        self
     }
 }
 
@@ -1823,6 +1778,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base: Base::Child(Arc::clone(self)),
+            resolved: BTreeMap::new(),
         }
     }
 
@@ -1945,6 +1901,7 @@ where
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
             },
+            resolved: BTreeMap::new(),
         }
     }
 }

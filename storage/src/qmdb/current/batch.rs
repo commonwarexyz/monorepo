@@ -397,9 +397,12 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip| {
-                next_candidate(&bitmap_parent, floor, tip)
-            })
+            .merkleize_with_floor_scan(
+                &db.any,
+                std::collections::BTreeMap::new(),
+                metadata,
+                |floor, tip| next_candidate(&bitmap_parent, floor, tip),
+            )
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
     }

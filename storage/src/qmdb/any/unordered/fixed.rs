@@ -305,7 +305,7 @@ pub(crate) mod test {
     #[test_traced("WARN")]
     fn test_unordered_fixed_merkleize_resolved_parity() {
         use crate::qmdb::any::batch::ResolvedLocation;
-        use std::collections::HashMap;
+        use std::collections::{BTreeMap, HashMap};
 
         deterministic::Runner::default().start(|ctx| async move {
             let mut db = create_test_db(ctx.child("db")).await;
@@ -375,8 +375,8 @@ pub(crate) mod test {
                     .get_many_with_locations(&keys, &db)
                     .await
                     .unwrap();
-                let mut resolved: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
-                    HashMap::new();
+                let mut resolved: BTreeMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
+                    BTreeMap::new();
                 for ((k, _), r) in muts.iter().zip(resolved_vec) {
                     resolved.insert(*k, r.map(|(_, loc)| loc));
                 }
@@ -385,7 +385,8 @@ pub(crate) mod test {
                     fb = fb.write(*k, *v);
                 }
                 let fused_root = fb
-                    .merkleize_resolved(&db, &resolved, None)
+                    .with_resolved(resolved)
+                    .merkleize(&db, None)
                     .await
                     .unwrap()
                     .root();
@@ -394,13 +395,15 @@ pub(crate) mod test {
 
                 // Guard: an EMPTY resolved map forces every key through the read-based fallback
                 // and must still match (proves the fallback path is sound).
-                let empty: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> = HashMap::new();
+                let empty: BTreeMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
+                    BTreeMap::new();
                 let mut eb = new_batch();
                 for (k, v) in &muts {
                     eb = eb.write(*k, *v);
                 }
                 let empty_root = eb
-                    .merkleize_resolved(&db, &empty, None)
+                    .with_resolved(empty)
+                    .merkleize(&db, None)
                     .await
                     .unwrap()
                     .root();
@@ -412,8 +415,8 @@ pub(crate) mod test {
                 // Guard: marking existing keys as absent (`None`) must NOT corrupt the root; such
                 // keys fall back to the live snapshot resolution rather than being treated as
                 // creates off a stale hint.
-                let mut none_map: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
-                    HashMap::new();
+                let mut none_map: BTreeMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
+                    BTreeMap::new();
                 for (k, _) in &muts {
                     none_map.insert(*k, None);
                 }
@@ -422,7 +425,8 @@ pub(crate) mod test {
                     gb = gb.write(*k, *v);
                 }
                 let none_root = gb
-                    .merkleize_resolved(&db, &none_map, None)
+                    .with_resolved(none_map)
+                    .merkleize(&db, None)
                     .await
                     .unwrap()
                     .root();
