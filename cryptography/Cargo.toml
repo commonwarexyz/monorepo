@@ -51,6 +51,10 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 # aws-lc-rs provides optimized P-256 verification and handshake cipher on x86_64 and aarch64.
 aws-lc-rs.workspace = true
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# sriracha-mayo builds MAYO-C with a C toolchain, which is unavailable on wasm32.
+sriracha-mayo.workspace = true
+
 [target.'cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies.chacha20poly1305]
 workspace = true
 default-features = false
@@ -120,6 +124,7 @@ std = [
 	"rand_chacha/std",
 	"rand_core/std",
 	"sha2/std",
+	"sriracha-mayo/std",
 	"thiserror/std",
 	"zeroize/std",
 ]
@@ -133,6 +138,11 @@ path = "src/bls12381/benches/bench.rs"
 name = "ed25519"
 harness = false
 path = "src/ed25519/benches/bench.rs"
+
+[[bench]]
+name = "mayo"
+harness = false
+path = "src/mayo/benches/bench.rs"
 
 [[bench]]
 name = "secp256r1"

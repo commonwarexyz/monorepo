@@ -158,6 +158,54 @@ hash = "b98d0717af705e8b60af88a8337154eaced6659c3cc9f604aa4f55585a28b77f"
 n_cases = 65536
 hash = "47ab8f97f2b9ff2b56e952c4e219c8c95832cf3a58d5b682cdc769c2ecb79daf"
 
+["commonware_cryptography::mayo::scheme::mayo1::tests::conformance::CodecConformance<PrivateKey>"]
+n_cases = 256
+hash = "622ee5dbb2ff7e2c77196be298d33253d970724e55c04bd7cc31503c9fab863e"
+
+["commonware_cryptography::mayo::scheme::mayo1::tests::conformance::CodecConformance<PublicKey>"]
+n_cases = 256
+hash = "069497d7fadaae1af1d74fd2afa0546214e33a81a19b1fd6cd0a4bd6df192028"
+
+["commonware_cryptography::mayo::scheme::mayo1::tests::conformance::CodecConformance<Signature>"]
+n_cases = 1024
+hash = "c2a61e825702d83285f3054be988beaa0311b193049da4d354043c49ebfe2980"
+
+["commonware_cryptography::mayo::scheme::mayo2::tests::conformance::CodecConformance<PrivateKey>"]
+n_cases = 256
+hash = "622ee5dbb2ff7e2c77196be298d33253d970724e55c04bd7cc31503c9fab863e"
+
+["commonware_cryptography::mayo::scheme::mayo2::tests::conformance::CodecConformance<PublicKey>"]
+n_cases = 256
+hash = "36dc72fe7fc5fbeb65b26cd207e3f085bc5dd331b8df84aa4b9aaff21efb4486"
+
+["commonware_cryptography::mayo::scheme::mayo2::tests::conformance::CodecConformance<Signature>"]
+n_cases = 1024
+hash = "a16b2078208a775b645523a924984d8623721a1e3061a2d08d7f11c999f2757c"
+
+["commonware_cryptography::mayo::scheme::mayo3::tests::conformance::CodecConformance<PrivateKey>"]
+n_cases = 256
+hash = "64ac026e5f2d5290343e4620e5b7c9577f34393c882ee4b1794e3f94a39c4bd2"
+
+["commonware_cryptography::mayo::scheme::mayo3::tests::conformance::CodecConformance<PublicKey>"]
+n_cases = 256
+hash = "587e85b5bf7b53cfef3f575c4f7e14a2c60bfd614372541150e64b4d526c3ab9"
+
+["commonware_cryptography::mayo::scheme::mayo3::tests::conformance::CodecConformance<Signature>"]
+n_cases = 1024
+hash = "ed605a7fb31175d584dcb65ce48cc9e7c5e11ff9ecbad25fc98ffe13061d42ec"
+
+["commonware_cryptography::mayo::scheme::mayo5::tests::conformance::CodecConformance<PrivateKey>"]
+n_cases = 256
+hash = "323f187342d633f85924c3d84659219ac431b5cb83923a59bc1e23693412d5f9"
+
+["commonware_cryptography::mayo::scheme::mayo5::tests::conformance::CodecConformance<PublicKey>"]
+n_cases = 256
+hash = "04e7c490db2dac7f6b55c2ca976b983c96bde18fa08f0b49661066b74662652e"
+
+["commonware_cryptography::mayo::scheme::mayo5::tests::conformance::CodecConformance<Signature>"]
+n_cases = 1024
+hash = "f869247b3f9add675d79e847c568fd13dc096bc4dcbffe9254392d57b86e490e"
+
 ["commonware_cryptography::secp256r1::certificate::tests::conformance::CodecConformance<Certificate>"]
 n_cases = 1024
 hash = "c708aa3df9cc2918aaf2d8db673c96729a2d2fd41b470ac5f6843489fc380951"
