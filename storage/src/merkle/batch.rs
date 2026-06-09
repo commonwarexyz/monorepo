@@ -213,16 +213,30 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
-        let heights = F::parent_heights(self.leaves());
-        self.appended.push(digest);
+        self.append_leaf_digest(digest, self.leaves(), self.size());
+        self
+    }
 
-        for height in heights {
-            let pos = self.size();
+    /// Append a leaf digest and any parent placeholders.
+    ///
+    /// `leaves` and `size` are the starting leaf and node counts, and the returned cursors point
+    /// just past the appended nodes.
+    fn append_leaf_digest(
+        &mut self,
+        digest: D,
+        leaves: Location<F>,
+        mut size: Position<F>,
+    ) -> (Location<F>, Position<F>) {
+        self.appended.push(digest);
+        size += 1;
+
+        for height in F::parent_heights(leaves) {
             self.appended.push(D::EMPTY);
-            push_dirty(&mut self.dirty_nodes, height, pos);
+            push_dirty(&mut self.dirty_nodes, height, size);
+            size += 1;
         }
 
-        self
+        (leaves + 1, size)
     }
 
     /// Add a run of pre-computed leaf digests, in order.
@@ -239,15 +253,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let mut leaves = self.leaves();
         let mut size = self.size();
         for digest in digests {
-            self.appended.push(digest);
-            size += 1;
-
-            for height in F::parent_heights(leaves) {
-                self.appended.push(D::EMPTY);
-                push_dirty(&mut self.dirty_nodes, height, size);
-                size += 1;
-            }
-            leaves += 1;
+            (leaves, size) = self.append_leaf_digest(digest, leaves, size);
         }
         self
     }
