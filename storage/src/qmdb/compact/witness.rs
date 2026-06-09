@@ -15,14 +15,12 @@
 //!
 //! # Journal layout and crash consistency
 //!
-//! Entries are strictly increasing in committed leaf count (`proof.leaves`); every append path
-//! upholds this invariant. Since journal positions are also stable across pruning, rewind and
-//! prune targets are located by binary search on leaf count.
+//! Entries are strictly increasing in committed leaf count (`proof.leaves`), and journal
+//! positions are stable across pruning, so rewind and prune targets are located by binary
+//! search on leaf count.
 //!
 //! The journal `sync` after an append is the commit point: a crash before it drops the unsynced
-//! tail on reopen, recovering the previous commit. The Merkle persists nothing, so there is
-//! nothing else to reconcile. Rewind truncates the journal to the target entry and syncs. Only
-//! the tip entry is ever verified: on reopen, or when a rewind makes an older entry the tip.
+//! tail on reopen, recovering the previous commit.
 //!
 //! [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip entry is never
 //! pruned.
@@ -41,9 +39,8 @@ use commonware_parallel::Strategy;
 use commonware_utils::sync::{AsyncMutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Upper bound on the encoded last-commit operation, enforced at commit time and as a decode
-/// guard against corrupted length prefixes. Commit operations are small; this bound is
-/// intentionally generous because the commit carries optional caller metadata.
+/// Upper bound on the encoded last-commit operation, enforced before any witness is built and
+/// as a decode guard against corrupted length prefixes.
 pub(crate) const MAX_OP_BYTES: usize = 1 << 24;
 
 /// Codec configuration for decoding a [`WitnessEntry`] read back from the journal.
@@ -64,16 +61,19 @@ impl Default for WitnessEntryCfg {
     }
 }
 
-/// A single durably persisted witness: the encoded last-commit operation, its inclusion proof,
-/// and the pinned frontier nodes of the committed Merkle.
+/// A single durably persisted witness: a complete snapshot of one synced commit.
 ///
-/// The proof's `leaves` field identifies the committed leaf count; together with `pinned_nodes`
-/// it is everything required to rebuild the in-memory Merkle for this commit. The root is not
-/// stored: it is recomputed from the rebuilt frontier and authenticated against the proof.
+/// The root is not stored: it is recomputed from the rebuilt frontier and authenticated against
+/// `proof`.
 #[derive(Clone)]
 pub(crate) struct WitnessEntry<F: Family, D: Digest> {
+    /// The encoded last-commit operation.
     op_bytes: Vec<u8>,
+    /// Inclusion proof for the last-commit leaf; its `leaves` field identifies the committed
+    /// leaf count.
     proof: Proof<F, D>,
+    /// Pinned frontier nodes of the committed Merkle; with `proof.leaves`, everything needed
+    /// to rebuild the in-memory Merkle for this commit.
     pinned_nodes: Vec<D>,
 }
 
@@ -129,7 +129,7 @@ pub(crate) struct Witness<F: Family, D: Digest> {
     pub(crate) root: D,
     /// Total leaves in the committed Merkle, which also identifies the tip commit location.
     pub(crate) leaf_count: Location<F>,
-    /// Frontier nodes pinned by compact sync; these are the persisted peaks, not the proof path.
+    /// Pinned frontier nodes of the committed Merkle; not the proof path.
     pub(crate) pinned_nodes: Vec<D>,
     /// Encoded last-commit operation bytes used for root verification and serving.
     pub(crate) last_commit_op_bytes: Vec<u8>,
@@ -161,7 +161,8 @@ where
         partition: cfg.partition,
         items_per_section: cfg.items_per_section,
         compression: cfg.compression,
-        // Callers pass `()` because [`WitnessEntryCfg`] is internal to this module.
+        // The caller's config carries `()` as a placeholder codec config; the real entry codec
+        // config is private to this module and substituted here.
         codec_config: WitnessEntryCfg::default(),
         page_cache: cfg.page_cache,
         write_buffer: cfg.write_buffer,
@@ -193,7 +194,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         }
     }
 
-    /// Wrap a journal and a verified compact-sync import that has not been persisted yet; the
+    /// Create a store from a verified compact-sync import that has not been persisted yet. The
     /// journal is untouched until the first persist replaces its contents with `witness`.
     pub(crate) fn from_import(journal: Journal<E, F, D>, witness: Witness<F, D>) -> Self {
         Self {
@@ -383,8 +384,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
 /// Build a witness for the last commit from the current unpruned Merkle state.
 ///
-/// This must run before the Merkle is pruned to its frontier, because the single-leaf inclusion proof is
-/// only computable while the proof path is still retained.
+/// This must run before the Merkle is pruned to its frontier, because the single-leaf inclusion
+/// proof is only computable while the proof path is still retained.
 fn build_witness<F, H, S>(
     merkle: &compact::Merkle<F, H::Digest, S>,
     inactivity_floor_loc: Location<F>,
@@ -469,9 +470,9 @@ where
 
 /// Load the tip witness from the journal and rebuild the Merkle from it.
 ///
-/// The tip entry is a complete snapshot: the Merkle is reset to its `(leaf_count, pinned_nodes)`,
-/// the root is recomputed from the rebuilt frontier, and the persisted proof is verified against
-/// that root before anything is served.
+/// The Merkle is reset to the entry's `(leaf_count, pinned_nodes)`, the root is recomputed from
+/// the rebuilt frontier, and the persisted proof is verified against that root before anything
+/// is served.
 async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
     merkle: &compact::Merkle<F, H::Digest, S>,
@@ -540,14 +541,12 @@ where
     Ok((witness, last_commit_op))
 }
 
-/// Open the witness store for an existing or new compact db.
+/// Open the witness store for an existing or new compact db, returning it with the decoded
+/// last-commit operation.
 ///
-/// Fresh compact databases begin with exactly one committed operation: the initial commit. This
-/// inserts that commit into the compact Merkle, builds its one-leaf proof, and persists the
-/// resulting witness so later reopen and rewind paths use the same recovery logic as every
-/// subsequent commit. An existing db instead reloads and re-verifies its tip witness.
-///
-/// Returns the store together with the decoded last-commit operation.
+/// A new db starts with one committed operation, the initial commit: it is inserted into the
+/// compact Merkle and persisted as the first witness entry, so reopen and rewind never see an
+/// empty journal. An existing db reloads and re-verifies its tip witness.
 pub(crate) async fn init<E, F, H, S, Op>(
     journal: Journal<E, F, H::Digest>,
     merkle: &mut compact::Merkle<F, H::Digest, S>,
@@ -608,13 +607,13 @@ pub(crate) mod tests {
     use super::*;
 
     impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
-        /// Mutate the cache in tests that intentionally corrupt witness state.
+        /// Mutate the cached witness.
         pub(crate) fn mutate(&self, f: impl FnOnce(&mut Witness<F, D>)) {
             f(&mut self.cache.write());
         }
     }
 
-    /// Read the tip witness entry's components. Used by db tests that tamper with persisted state.
+    /// Read the tip witness entry's components.
     pub(crate) async fn tip<E, F, D>(journal: &Journal<E, F, D>) -> (Vec<u8>, Proof<F, D>, Vec<D>)
     where
         E: Context,
@@ -629,8 +628,7 @@ pub(crate) mod tests {
         (entry.op_bytes, entry.proof, entry.pinned_nodes)
     }
 
-    /// Append a witness entry without syncing it. Used by db tests that simulate a commit
-    /// interrupted before its journal sync.
+    /// Append a witness entry without syncing it.
     pub(crate) async fn append_unsynced<E, F, D>(
         journal: &Journal<E, F, D>,
         op_bytes: Vec<u8>,
@@ -651,7 +649,7 @@ pub(crate) mod tests {
             .unwrap();
     }
 
-    /// Replace the tip witness entry. Used by db tests that tamper with persisted state.
+    /// Replace the tip witness entry.
     pub(crate) async fn overwrite_tip<E, F, D>(
         journal: &Journal<E, F, D>,
         op_bytes: Vec<u8>,

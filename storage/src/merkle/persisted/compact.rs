@@ -14,7 +14,7 @@
 //! # Durability
 //!
 //! This structure persists nothing. The owning database journals a snapshot of
-//! `(leaf_count, pinned_nodes)` with every commit and rebuilds the tree on open and rewind via
+//! `(leaf_count, pinned_nodes)` with every sync and rebuilds the tree on open and rewind via
 //! `Merkle::reset_to`.
 
 use crate::merkle::{

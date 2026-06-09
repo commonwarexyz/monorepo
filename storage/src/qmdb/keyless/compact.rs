@@ -57,9 +57,6 @@ pub struct Config<C, S: Strategy> {
     pub witness: JournalConfig<()>,
 
     /// Codec config used to decode the persisted last commit operation on reopen.
-    ///
-    /// Committed metadata must round-trip under this config: a commit whose encoded operation
-    /// does not decode under it fails on the next reopen.
     pub commit_codec_config: C,
 }
 
@@ -80,9 +77,6 @@ where
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
     commit_codec_config: C,
-    /// Durable witness history: a journal with one entry per sync, plus a cache of the tip
-    /// witness used to serve compact sync. The cache tracks the durable tip, not unsynced
-    /// in-memory mutations.
     witness: witness::Store<E, F, H::Digest>,
 }
 
@@ -265,11 +259,9 @@ where
     /// Build a compact db handle from already-verified compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and already authenticated the
-    /// supplied witness/root pair. Nothing is written to disk until the first [`Self::sync`],
-    /// which replaces the journal's previous contents with the imported witness; abandoning the
-    /// handle before then leaves the prior state intact, and rewind/prune are rejected until it
-    /// runs. A crash during that first sync can leave the journal empty, in which case
-    /// reopening yields a fresh db and the caller must re-sync.
+    /// supplied witness/root pair. The import lives only in memory until the first
+    /// [`Self::sync`], which replaces the journal's contents with it. Until then, dropping the
+    /// handle leaves the previous on-disk state untouched, and rewind/prune are rejected.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn init_from_verified_state(
         merkle: compact_merkle::Merkle<F, H::Digest, S>,
@@ -753,11 +745,36 @@ mod tests {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_compact_floor_regressed() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "keyless-floor-regressed").await;
+
+            let advance_floor = db.new_batch().append(U64::new(1));
+            let advance_floor = advance_floor.merkleize(&db, None, Location::new(1));
+            db.apply_batch(advance_floor).unwrap();
+
+            let regressed =
+                db.new_batch()
+                    .append(U64::new(2))
+                    .merkleize(&db, None, Location::new(0));
+
+            assert!(matches!(
+                db.apply_batch(regressed),
+                Err(Error::FloorRegressed(new, current))
+                    if new == Location::new(0) && current == Location::new(1)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // A chained batch whose tip floor is below its parent's floor must be rejected:
     // the parent's Commit participates in the per-commit monotonicity invariant even
     // before it is applied.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_regression_rejected() {
+    fn test_compact_ancestor_floor_regressed() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-regressed")
@@ -1361,10 +1378,27 @@ mod tests {
         });
     }
 
+    #[test_traced("INFO")]
+    fn test_compact_floor_beyond_size() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db::<mmr::Family>(context.child("db"), "keyless-floor-beyond").await;
+
+            let batch = db.new_batch().merkleize(&db, None, Location::new(2));
+
+            assert!(matches!(
+                db.apply_batch(batch),
+                Err(Error::FloorBeyondSize(floor, tip))
+                    if floor == Location::new(2) && tip == Location::new(1)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
     // A chained batch whose ancestor's floor exceeds that ancestor's own commit location
     // must be rejected, identifying the ancestor's bound rather than the tip's.
     #[test_traced("INFO")]
-    fn test_compact_ancestor_floor_beyond_commit_loc_rejected() {
+    fn test_compact_ancestor_floor_beyond_size() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
                 open_db::<mmr::Family>(context.child("db"), "keyless-ancestor-floor-beyond").await;
