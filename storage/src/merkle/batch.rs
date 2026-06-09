@@ -251,7 +251,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let additional = (*Position::try_from(end).expect("size overflow") - *size) as usize;
         self.appended.reserve(additional);
 
-        // Track positions locally so bulk appends do not recompute them from the growing batch.
+        // Maintain leaf position and location incrementally to avoid recomputation on every iteration.
         for (i, digest) in (0u64..).zip(digests) {
             size = self.append_leaf_digest(digest, leaves + i, size);
         }
