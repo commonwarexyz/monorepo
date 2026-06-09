@@ -37,8 +37,52 @@ impl<const N: usize> Shared<N> {
     }
 
     /// Single-lock alternative to `bitmap::Readable::ones_iter_from(from).next()`.
+    #[cfg(test)]
     pub(crate) fn next_one_from(&self, from: u64) -> Option<u64> {
         self.read().ones_iter_from(from).next()
+    }
+
+    /// Fill `out` with up to `limit` floor-raise candidates in `[scan_from, tip)`, holding a single
+    /// read guard for the whole batch. Returns the next `scan_from`.
+    ///
+    /// The candidate sequence is identical to repeatedly calling
+    /// [`next_candidate`](super::any::batch::next_candidate): set bits in the committed prefix are
+    /// returned in order via one `ones_iter_from`, then locations at or beyond the committed
+    /// boundary are returned sequentially.
+    pub(crate) fn fill_candidates(
+        &self,
+        scan_from: u64,
+        tip: u64,
+        limit: usize,
+        out: &mut Vec<u64>,
+    ) -> u64 {
+        let guard = self.read();
+        let bitmap_len = bitmap::Readable::<N>::len(&*guard);
+        let committed_end = bitmap_len.min(tip);
+
+        let mut scan = scan_from;
+        if scan < committed_end {
+            let mut ones = guard.ones_iter_from(scan);
+            while out.len() < limit {
+                match ones.next() {
+                    Some(idx) if idx < committed_end => {
+                        out.push(idx);
+                        scan = idx + 1;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        while out.len() < limit {
+            let candidate = scan.max(bitmap_len);
+            if candidate >= tip {
+                scan = candidate;
+                break;
+            }
+            out.push(candidate);
+            scan = candidate + 1;
+        }
+        scan
     }
 
     /// Return the number of pruned bits. Acquires the read lock briefly.

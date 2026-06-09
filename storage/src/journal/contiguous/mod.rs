@@ -63,6 +63,15 @@ pub trait Reader: Send + Sync {
         None
     }
 
+    /// Like [`try_read_sync`](Self::try_read_sync) but decodes into a caller-provided scratch
+    /// buffer to avoid a per-call allocation. `scratch` must be at least one item wide; the
+    /// implementation may grow it.
+    ///
+    /// Default implementation ignores `scratch` and delegates to [`try_read_sync`](Self::try_read_sync).
+    fn try_read_sync_into(&self, position: u64, _scratch: &mut Vec<u8>) -> Option<Self::Item> {
+        self.try_read_sync(position)
+    }
+
     /// Return a stream of all items starting from `start_pos`.
     ///
     /// Because the reader holds the lock, validation and stream setup happen

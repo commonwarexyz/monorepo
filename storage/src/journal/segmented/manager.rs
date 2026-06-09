@@ -143,6 +143,11 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
 }
 
 impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
+    /// Returns the buffer factory.
+    pub(crate) const fn factory(&self) -> &F {
+        &self.factory
+    }
+
     /// Initialize a new `Manager`.
     ///
     /// Scans the partition for existing blobs and opens them.

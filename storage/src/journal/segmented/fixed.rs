@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Metrics, Storage,
+    Blob, Buf, BufferPool, Metrics, Storage,
 };
 use futures::{
     stream::{self, Stream},
@@ -77,6 +77,11 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
+
+    /// Returns the buffer pool backing the page cache.
+    pub(crate) const fn pool(&self) -> &BufferPool {
+        self.manager.factory().page_cache_ref.pool()
+    }
 
     /// Initialize a new `Journal` instance.
     ///

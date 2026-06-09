@@ -350,7 +350,12 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         // and reads only true misses from the blob (concurrently). This avoids one lock acquisition
         // per item that a per-item synchronous probe would incur for the warm steady state.
         let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
+        // Scratch decode buffer, allocated uninitialized from the page-cache pool to avoid the
+        // per-call zero-fill of `positions.len() * chunk_size` bytes.
+        let buf_len = positions.len() * chunk_size;
+        // SAFETY: each group slice handed to `get_many` is fully initialized by `read_many_into`
+        // before it is decoded on the `Ok` path; on `Err` the buffer is dropped unread.
+        let mut reusable_buf = unsafe { self.guard.journal.pool().alloc_len(buf_len) };
         let mut hits = 0u64;
 
         let mut group_start = 0;
@@ -369,7 +374,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                 .map(|&pos| pos - first_position)
                 .collect();
 
-            let buf = &mut reusable_buf[..group_len * chunk_size];
+            let buf = &mut reusable_buf.as_mut()[..group_len * chunk_size];
             let (items, group_hits) = self
                 .guard
                 .journal
@@ -399,6 +404,27 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
     fn try_read_sync(&self, pos: u64) -> Option<A> {
         self.guard
             .try_read_sync(pos, self.items_per_blob)
+            .map_or_else(
+                || {
+                    self.metrics.record_cache_misses(1);
+                    None
+                },
+                |item| {
+                    self.metrics.record_cache_hits(1);
+                    self.metrics.try_read_sync_hits.inc();
+                    self.metrics.items_read.inc();
+                    Some(item)
+                },
+            )
+    }
+
+    fn try_read_sync_into(&self, pos: u64, scratch: &mut Vec<u8>) -> Option<A> {
+        let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
+        if scratch.len() < chunk_size {
+            scratch.resize(chunk_size, 0);
+        }
+        self.guard
+            .try_read_sync_into(pos, self.items_per_blob, scratch)
             .map_or_else(
                 || {
                     self.metrics.record_cache_misses(1);

@@ -84,7 +84,7 @@ use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
 use alloc::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Weak},
     vec::Vec,
 };
@@ -99,6 +99,94 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
         buckets.resize_with(h + 1, Vec::new);
     }
     buckets[h].push(pos);
+}
+
+/// Minimum number of dirty nodes a slice must hold before it is split for parallel hashing. Below
+/// this, the dispatch + slice-boundary deferral overhead dominates the hashing work.
+const PARALLEL_SPLIT_THRESHOLD: usize = 2048;
+
+/// Hash the appended-region dirty interior nodes covering the slice `appended[..]`, which maps to
+/// absolute appended indices `[base, end)`.
+///
+/// `nodes` lists `(absolute_index, height)` pairs sorted by index, restricted to indices in
+/// `[base, end)`. Returns the `(position, height)` of nodes whose left or right child falls before
+/// `base` (the merge path into pre-existing peaks at the top level, plus slice-boundary spans at
+/// deeper levels); the caller computes those against finalized children.
+///
+/// The slice is split at the midpoint index, recursing in parallel via [`Strategy::join`]. Each
+/// child slice owns a disjoint contiguous range, so the two halves never alias. Within a slice,
+/// nodes are processed in index order, and a node's children always precede it, so every in-slice
+/// dependency is finalized before it is read.
+fn merkleize_appended_slice<F: Family, D: Digest, S: Strategy>(
+    strategy: &S,
+    hasher: &impl Hasher<F, Digest = D>,
+    parent_size: u64,
+    base: u64,
+    end: u64,
+    appended: &mut [D],
+    nodes: &[(u64, u32)],
+) -> Vec<(Position<F>, u32)> {
+    if nodes.len() > PARALLEL_SPLIT_THRESHOLD && end - base > 1 {
+        let mid = base + (end - base) / 2;
+        let split = nodes.partition_point(|&(idx, _)| idx < mid);
+        let (left_slice, right_slice) = appended.split_at_mut((mid - base) as usize);
+        let (left_nodes, right_nodes) = nodes.split_at(split);
+        let (mut left_deferred, right_deferred) = strategy.join(
+            || {
+                merkleize_appended_slice::<F, D, S>(
+                    strategy,
+                    hasher,
+                    parent_size,
+                    base,
+                    mid,
+                    left_slice,
+                    left_nodes,
+                )
+            },
+            || {
+                merkleize_appended_slice::<F, D, S>(
+                    strategy,
+                    hasher,
+                    parent_size,
+                    mid,
+                    end,
+                    right_slice,
+                    right_nodes,
+                )
+            },
+        );
+        left_deferred.extend(right_deferred);
+        return left_deferred;
+    }
+
+    let mut deferred = Vec::new();
+    // Track deferred indices within this slice. A node whose child was deferred (e.g. a spine node
+    // merging a committed peak) must also be deferred, since the fast path leaves that child's slot
+    // unwritten. Children always precede their parent in index order, so this set is complete by the
+    // time a parent is visited.
+    let mut deferred_idx: BTreeSet<u64> = BTreeSet::new();
+    for &(idx, height) in nodes {
+        let pos = Position::<F>::new(parent_size + idx);
+        let (left, right) = F::children(pos, height);
+        // Children below `parent_size` are committed; below `base` they live in another slice. In
+        // both cases the fast path cannot read them, so defer. Also defer if a child was itself
+        // deferred within this slice.
+        let li = (*left).wrapping_sub(parent_size).wrapping_sub(base);
+        let ri = (*right).wrapping_sub(parent_size).wrapping_sub(base);
+        let in_slice = *left >= base + parent_size
+            && *right >= base + parent_size
+            && !deferred_idx.contains(&(base + li))
+            && !deferred_idx.contains(&(base + ri));
+        if in_slice {
+            let oi = (idx - base) as usize;
+            let digest = hasher.node_digest(pos, &appended[li as usize], &appended[ri as usize]);
+            appended[oi] = digest;
+        } else {
+            deferred.push((pos, height));
+            deferred_idx.insert(idx);
+        }
+    }
+    deferred
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +204,10 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
     /// in `merkleize`). Avoids the BTreeSet insert cost and a final global sort.
     dirty_nodes: Vec<Vec<Position<F>>>,
+    /// Interior placeholders appended by `append_leaf_digest`, as `(index_into_appended, height)`
+    /// in append order, which is strictly index-ascending. Feeds the parallel appended-region
+    /// hashing pass directly, avoiding a global sort of the dirty-node buckets.
+    appended_interior: Vec<(u64, u32)>,
 }
 
 impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
@@ -126,6 +218,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             appended: Vec::new(),
             overwrites: BTreeMap::new(),
             dirty_nodes: Vec::new(),
+            appended_interior: Vec::new(),
         }
     }
 
@@ -231,8 +324,9 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         size += 1;
 
         for height in F::parent_heights(leaves) {
+            let idx = self.appended.len() as u64;
             self.appended.push(D::EMPTY);
-            push_dirty(&mut self.dirty_nodes, height, size);
+            self.appended_interior.push((idx, height));
             size += 1;
         }
 
@@ -330,10 +424,25 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
-        // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
-        // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
-        // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
         let mut buckets = core::mem::take(&mut self.dirty_nodes);
+        let parent_size = self.parent.size();
+
+        // Interior nodes created by appends are already recorded in index-ascending order. Hash
+        // them in a single parallel divide-and-conquer pass over the appended Vec. Nodes the pass
+        // cannot resolve (the merge path into pre-existing peaks and slice-boundary spans) are
+        // returned and folded into the serial bucket path.
+        let appended_interior = core::mem::take(&mut self.appended_interior);
+        let deferred = self.merkleize_appended(hasher, parent_size, &appended_interior);
+        for (pos, height) in deferred {
+            push_dirty(&mut buckets, height, pos);
+        }
+
+        // Remaining dirty nodes come from overwrites (`mark_dirty`) plus the deferred spans. They
+        // are computed via the serial bucket path against finalized children. Each bucket
+        // accumulates positions in near-ascending push order; the stable sort is cheap and the
+        // dedup collapses duplicates from interleaved `mark_dirty` walks. Overwrites of
+        // just-appended leaves can re-dirty appended-region nodes already hashed above; recomputing
+        // them here reads the same finalized children and yields identical digests.
         for bucket in &mut buckets {
             bucket.sort();
             bucket.dedup();
@@ -348,7 +457,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
         let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
 
-        let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
             parent: Some(Arc::downgrade(&self.parent)),
             appended: Arc::new(self.appended),
@@ -360,6 +468,35 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             ancestor_overwrites,
             strategy: self.parent.strategy.clone(),
         })
+    }
+
+    /// Hash dirty interior nodes that live entirely in the appended region.
+    ///
+    /// `nodes` are `(index_into_appended, height)` pairs sorted by index. Each node is hashed from
+    /// its two children, which always precede it in the appended Vec. The Vec is split into disjoint
+    /// contiguous slices that are hashed in parallel; nodes whose left or right child falls before
+    /// the owning slice (the merge path into pre-existing peaks, and slice-boundary spans) are
+    /// returned for the caller to compute against finalized children.
+    fn merkleize_appended(
+        &mut self,
+        hasher: &impl Hasher<F, Digest = D>,
+        parent_size: Position<F>,
+        nodes: &[(u64, u32)],
+    ) -> Vec<(Position<F>, u32)> {
+        if nodes.is_empty() {
+            return Vec::new();
+        }
+        let strategy = self.parent.strategy.clone();
+        let len = self.appended.len() as u64;
+        merkleize_appended_slice::<F, D, S>(
+            &strategy,
+            hasher,
+            *parent_size,
+            0,
+            len,
+            &mut self.appended,
+            nodes,
+        )
     }
 
     /// Compute digests for one height's dirty nodes via the configured strategy.
@@ -658,6 +795,33 @@ mod tests {
         };
         mem.apply_batch(&batch).unwrap();
         mem
+    }
+
+    fn large_appended_parity<F: Family, S: Strategy>(strategy: S) {
+        let executor = deterministic::Runner::default();
+        executor.start(move |_| async move {
+            let hasher: H = Standard::new(ForwardFold);
+            // base+append totals exceed PARALLEL_SPLIT_THRESHOLD so the divide-and-conquer split
+            // (and its slice-boundary deferral) is exercised. A few base/append shapes hit different
+            // peak counts and merge-path depths.
+            for &(base_n, add_n) in &[(0u64, 5000u64), (1000, 4000), (777, 6001), (3333, 3000)] {
+                let reference = build_reference::<F>(&hasher, base_n + add_n);
+                let base = build_reference::<F>(&hasher, base_n);
+                let mut batch = base.new_batch_with_strategy(strategy.clone());
+                for i in base_n..(base_n + add_n) {
+                    let element = hasher.digest(&i.to_be_bytes());
+                    batch = batch.add(&hasher, &element);
+                }
+                let merkleized = batch.merkleize(&base, &hasher);
+                let mut result = base;
+                result.apply_batch(&merkleized).unwrap();
+                assert_eq!(
+                    mem_root(&result, &hasher),
+                    mem_root(&reference, &hasher),
+                    "root mismatch for base_n={base_n} add_n={add_n}"
+                );
+            }
+        });
     }
 
     fn consistency_with_reference<F: Family>() {
@@ -1198,6 +1362,16 @@ mod tests {
     fn mmr_update_out_of_bounds() {
         update_out_of_bounds::<crate::mmr::Family>();
     }
+    #[test]
+    fn mmr_large_appended_parity_sequential() {
+        large_appended_parity::<crate::mmr::Family, _>(commonware_parallel::Sequential);
+    }
+    #[test]
+    fn mmr_large_appended_parity_rayon() {
+        let strategy =
+            commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(4).unwrap()).unwrap();
+        large_appended_parity::<crate::mmr::Family, _>(strategy);
+    }
 
     // --- MMB tests ---
 
@@ -1272,5 +1446,15 @@ mod tests {
     #[test]
     fn mmb_update_out_of_bounds() {
         update_out_of_bounds::<crate::mmb::Family>();
+    }
+    #[test]
+    fn mmb_large_appended_parity_sequential() {
+        large_appended_parity::<crate::mmb::Family, _>(commonware_parallel::Sequential);
+    }
+    #[test]
+    fn mmb_large_appended_parity_rayon() {
+        let strategy =
+            commonware_parallel::Rayon::new(core::num::NonZeroUsize::new(4).unwrap()).unwrap();
+        large_appended_parity::<crate::mmb::Family, _>(strategy);
     }
 }
