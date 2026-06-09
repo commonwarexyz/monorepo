@@ -642,7 +642,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             // Encode the un-journaled tail to an owned buffer so the read lock is released before
             // the journal I/O below.
             let (head, tail) = inner.mem.nodes_from(journal_size);
-            let encoded = Journal::<E, D>::encode_items(Many::Nested(&[head, tail]));
+            let encoded = self.journal.prepare_append(Many::Nested(&[head, tail]));
 
             // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
             // by pruning the mem.
@@ -657,7 +657,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         };
 
         // Append missing nodes to the journal without holding the mem read lock.
-        self.journal.write_encoded(encoded).await?;
+        self.journal.append_prepared(encoded).await?;
         *journal_dirty = true;
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from

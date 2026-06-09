@@ -105,9 +105,17 @@ use commonware_utils::{
 use futures::{future::try_join_all, stream::Stream, StreamExt};
 use std::{
     future::Future,
+    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::warn;
+
+/// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
+/// [`Journal::append_prepared`].
+pub struct PreparedAppend<A> {
+    buf: Vec<u8>,
+    _marker: PhantomData<A>,
+}
 
 /// Metadata key for a mid-section pruning boundary.
 ///
@@ -1132,46 +1140,48 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     // Shared implementation for `append` and `append_many`; public wrappers record metrics.
     async fn append_many_inner<'a>(&'a self, items: Many<'a, A>) -> Result<u64, Error> {
-        if items.is_empty() {
-            return Err(Error::EmptyAppend);
-        }
-        let items_buf = Self::encode_items(items);
-        self.write_encoded(items_buf).await
+        self.write_encoded(self.prepare_append(items)).await
     }
 
-    /// Encode `items` into an owned fixed-width byte buffer.
+    /// Encode `items` into a buffer that can be appended later with [`Self::append_prepared`].
     ///
-    /// This lets callers serialize borrowed items synchronously, release those borrows, and append
-    /// the bytes later without holding unrelated locks across journal I/O.
-    pub(crate) fn encode_items(items: Many<'_, A>) -> Vec<u8> {
-        let mut items_buf = Vec::with_capacity(items.len() * A::SIZE);
+    /// This lets callers serialize borrowed items synchronously, release those borrows, and
+    /// perform the append without holding unrelated locks across journal I/O.
+    pub fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
+        let mut buf = Vec::with_capacity(items.len() * A::SIZE);
         match items {
             Many::Flat(items) => {
                 for item in items {
-                    item.write(&mut items_buf);
+                    item.write(&mut buf);
                 }
             }
             Many::Nested(nested_items) => {
                 for items in nested_items {
                     for item in *items {
-                        item.write(&mut items_buf);
+                        item.write(&mut buf);
                     }
                 }
             }
         }
-        items_buf
+        PreparedAppend {
+            buf,
+            _marker: PhantomData,
+        }
     }
 
-    /// Append records pre-encoded by [`Self::encode_items`] into `items_buf`.
+    /// Append items encoded by [`Self::prepare_append`], returning the position of the last item
+    /// appended.
     ///
-    /// Records no metrics: the public [`append`](Self::append) / [`append_many`](Self::append_many)
-    /// wrappers record their own, and callers that encode separately record whatever fits their
-    /// operation.
-    pub(crate) async fn write_encoded(&self, items_buf: Vec<u8>) -> Result<u64, Error> {
-        assert!(
-            items_buf.len().is_multiple_of(A::SIZE),
-            "encoded buffer length must be a multiple of the item size"
-        );
+    /// Returns [Error::EmptyAppend] if `prepared` contains no items.
+    pub async fn append_prepared(&self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        let _timer = self.metrics.append_prepared_timer();
+        self.metrics.append_prepared_calls.inc();
+        self.write_encoded(prepared).await
+    }
+
+    // Write pre-encoded items; shared by all append paths. Records no call metrics.
+    async fn write_encoded(&self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        let items_buf = prepared.buf;
         let items_count = items_buf.len() / A::SIZE;
         if items_count == 0 {
             return Err(Error::EmptyAppend);
