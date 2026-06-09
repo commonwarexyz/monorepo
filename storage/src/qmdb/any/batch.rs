@@ -110,9 +110,9 @@ struct ExistingEntry<K, F: Family, V> {
     value: Option<V>,
 }
 
-/// A key's resolved location, as produced by `get_many_with_locations` and consumed by
-/// `merkleize_resolved`. Carries enough provenance to reproduce the op-gen ordering and
-/// `base_old_loc` without re-reading the operation.
+/// A key's resolved location, as produced by `get_many_with_locations` and attached via
+/// `with_resolved`. Carries enough provenance to reproduce the op-gen ordering and `base_old_loc`
+/// without re-reading the operation during `merkleize`.
 #[derive(Clone, Copy, Debug)]
 pub struct ResolvedLocation<F: Family> {
     /// The location used for op-gen ordering. For a key resolved through an ancestor diff this is
@@ -879,7 +879,8 @@ where
     }
 }
 
-// Unordered op-generation tail shared by `merkleize_with_floor_scan` and `merkleize_resolved`.
+// Shared unordered op-generation tail: turns classified existing entries plus remaining
+// create mutations into operations, then runs the floor-raise and journal merkleize.
 impl<F: Family, K, V, H, S: Strategy> Merkleizer<F, H, update::Unordered<K, V>, S>
 where
     K: Key,

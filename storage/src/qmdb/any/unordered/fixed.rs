@@ -299,11 +299,11 @@ pub(crate) mod test {
         });
     }
 
-    /// The fused `get_many_with_locations -> merkleize_resolved` path must produce a byte-identical
-    /// root to the normal `merkleize`, across updates/deletes/creates, both with the batch rooted
-    /// directly at the DB (D=0) and through one pending ancestor (D=1).
+    /// The fused `get_many_with_locations -> with_resolved -> merkleize` path must produce a
+    /// byte-identical root to a plain `merkleize` (no hints), across updates/deletes/creates, both
+    /// with the batch rooted directly at the DB (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
-    fn test_unordered_fixed_merkleize_resolved_parity() {
+    fn test_unordered_fixed_resolved_merkleize_parity() {
         use crate::qmdb::any::batch::ResolvedLocation;
         use std::collections::{BTreeMap, HashMap};
 
