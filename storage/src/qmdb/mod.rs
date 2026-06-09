@@ -177,6 +177,9 @@ pub enum Error<F: Family> {
     #[error("location out of bounds: {0} >= {1}")]
     LocationOutOfBounds(Location<F>, Location<F>),
 
+    #[error("commit operation too large: {0} bytes > {1}")]
+    CommitTooLarge(usize, usize),
+
     #[error("prune location {0} beyond minimum required location {1}")]
     PruneBeyondMinRequired(Location<F>, Location<F>),
 

@@ -186,21 +186,27 @@ where
         let Operation::Commit(last_commit_metadata, op_floor) = last_commit_op else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
-        assert_eq!(op_floor, inactivity_floor_loc, "inactivity floor mismatch");
+        if op_floor != inactivity_floor_loc {
+            return Err(Error::DataCorrupted("inactivity floor mismatch"));
+        }
         let commit_codec_config = config.commit_codec_config.clone();
         let last_commit_op_bytes =
             Operation::<F, K, V>::Commit(last_commit_metadata.clone(), inactivity_floor_loc)
                 .encode()
                 .to_vec();
-        let merkle = crate::merkle::compact::Merkle::init_from_compact_state(
-            context.child("merkle"),
-            config.merkle,
+        let merkle = crate::merkle::compact::Merkle::from_compact_state(
+            config.strategy,
             leaf_count,
             pinned_nodes.clone(),
+        )?;
+        let journal = crate::qmdb::compact::witness::open_journal::<E, F, H::Digest>(
+            context.child("witness"),
+            config.witness,
         )
         .await?;
         Self::init_from_verified_state(
             merkle,
+            journal,
             commit_codec_config,
             last_commit_metadata,
             inactivity_floor_loc,
@@ -220,7 +226,7 @@ where
     }
 
     async fn persist_compact_state(&self) -> Result<(), Error<F>> {
-        self.persist_cached_witness().await
+        self.sync().await
     }
 }
 

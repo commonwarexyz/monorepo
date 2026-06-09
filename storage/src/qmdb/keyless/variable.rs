@@ -73,8 +73,14 @@ where
 {
     /// Returns a [CompactDb] initialized from `cfg`.
     pub async fn init(context: E, cfg: CompactConfig<C, S>) -> Result<Self, Error<F>> {
-        let merkle = crate::merkle::compact::Merkle::init(context, cfg.merkle).await?;
-        Self::init_from_merkle(merkle, cfg.commit_codec_config).await
+        let merkle = crate::merkle::compact::Merkle::new(cfg.strategy);
+        Self::init_from_merkle(
+            merkle,
+            context.child("witness"),
+            cfg.witness,
+            cfg.commit_codec_config,
+        )
+        .await
     }
 }
 
@@ -150,9 +156,14 @@ mod test {
         context: deterministic::Context,
     ) -> TestCompactDb<F> {
         let cfg = CompactConfig {
-            merkle: crate::merkle::compact::Config {
-                partition: "compact-keyless-variable".into(),
-                strategy: Sequential,
+            strategy: Sequential,
+            witness: crate::journal::contiguous::variable::Config {
+                partition: "compact-keyless-variable-witness".into(),
+                items_per_section: NZU64!(64),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000usize).into(), ()),
         };
@@ -351,7 +362,7 @@ mod test {
         db.apply_batch(retained).await.unwrap();
         compact.apply_batch(compact_batch).unwrap();
         db.commit().await.unwrap();
-        compact.commit().await.unwrap();
+        compact.sync().await.unwrap();
 
         assert_eq!(db.root(), compact.root());
         assert_eq!(compact.get_metadata(), Some(metadata.clone()));
@@ -376,6 +387,25 @@ mod test {
     fn test_keyless_variable_compact_root_compatibility_mmb() {
         deterministic::Runner::default().start(|ctx| async move {
             assert_compact_root_compatibility::<mmb::Family>(ctx).await;
+        });
+    }
+
+    /// A commit whose encoded operation exceeds the witness entry decode bound must be rejected
+    /// at commit time, not discovered as corruption on the next reopen.
+    #[test_traced("INFO")]
+    fn test_keyless_variable_compact_rejects_oversized_commit() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut compact = open_compact::<mmr::Family>(ctx.child("compact")).await;
+            let floor = compact.inactivity_floor_loc();
+            let metadata = vec![0u8; crate::qmdb::compact::witness::MAX_OP_BYTES + 1];
+            let batch = compact
+                .new_batch()
+                .merkleize(&compact, Some(metadata), floor);
+            compact.apply_batch(batch).unwrap();
+            assert!(matches!(
+                compact.sync().await,
+                Err(crate::qmdb::Error::CommitTooLarge(_, _))
+            ));
         });
     }
 

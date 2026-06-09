@@ -11,25 +11,23 @@
 //!
 //! # What compact dbs store
 //!
-//! A compact db persists two pieces of state that must always describe the same committed tip:
-//!
-//! 1. the compact Merkle frontier (persisted by [`crate::merkle::compact`]), and
-//! 2. a db-level witness for the last commit (persisted by `qmdb::compact::witness`).
-//!
-//! The witness exists because only the db layer knows how to encode and decode the typed commit
-//! operation. Without it, a compact db could recover its root and continue appending, but it could
-//! not serve compact sync to another node.
+//! A compact db persists one piece of state: a db-level witness journal (`qmdb::compact::witness`)
+//! whose entries each snapshot one committed state (commit operation, proof, and frontier pins).
+//! The in-memory compact Merkle ([`crate::merkle::compact`]) is rebuilt from the journal tip on
+//! reopen. Without the witness, a compact db could recover its root and continue appending, but
+//! it could not serve compact sync to another node.
 //!
 //! # When compact state changes
 //!
 //! The servable compact state advances only on durable persistence:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
-//! - [`Database::from_validated_state`] reconstructs the already-validated state in memory only.
-//! - Compact db-local commits persist the frontier and witness together during `sync`/`commit`.
-//! - `rewind` restores both the frontier and the witness from the previous slot together.
+//! - [`Database::from_validated_state`] reconstructs the already-validated state without
+//!   persisting it.
+//! - Compact db-local commits append one witness entry during `sync`.
+//! - `rewind` restores the frontier and the witness from the target journal entry.
 //!
-//! Unsynced in-memory mutations are therefore intentionally not servable: `current_target()` and
+//! Unsynced in-memory mutations are therefore intentionally not servable: `target()` and
 //! compact-state responses lag behind `apply_batch()` until the next durable sync.
 //!
 //! # Safety and invariants
@@ -37,9 +35,8 @@
 //! The compact path relies on these invariants:
 //!
 //! - the served commit proof must authenticate the final commit at `leaf_count - 1`,
-//! - the frontier pins and witness must move together in the same ping-pong slot,
-//! - reopen and rewind must re-verify the persisted witness against the root restored from that
-//!   slot, and
+//! - reopen and rewind must re-verify the persisted witness against the root recomputed from the
+//!   frontier rebuilt from the same journal entry, and
 //! - reconstructed state must not be persisted until the db recomputes the requested root locally.
 //!
 //! If those invariants are violated by missing or corrupted persisted data, compact db reopen fails
@@ -389,7 +386,9 @@ where
 /// 4. Build the compact db from that already-validated state.
 /// 5. Assert the db root still matches and persist the state.
 ///
-/// Any failure leaves the local compact db unopened or unchanged on disk.
+/// A failure (or abandoned sync) before the final persist leaves the local compact db unopened or
+/// unchanged on disk. A failure during the final persist may leave the target partition cleared,
+/// requiring a re-sync; it never leaves a verifiable but wrong state.
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>

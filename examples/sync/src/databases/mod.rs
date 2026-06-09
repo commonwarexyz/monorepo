@@ -274,7 +274,7 @@ mod tests {
 
                 assert_eq!(full.root(), compact.root());
                 assert_eq!(full.current_floor(), compact.current_floor());
-                assert_eq!(compact.current_target().root, full.root());
+                assert_eq!(compact.target().root, full.root());
             }
 
             full.destroy().await.unwrap();
@@ -308,7 +308,7 @@ mod tests {
 
                 assert_eq!(full.root(), compact.root());
                 assert_eq!(full.current_floor(), compact.current_floor());
-                assert_eq!(compact.current_target().root, full.root());
+                assert_eq!(compact.target().root, full.root());
             }
 
             full.destroy().await.unwrap();

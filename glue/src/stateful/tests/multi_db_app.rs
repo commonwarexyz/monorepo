@@ -623,12 +623,12 @@ impl EngineDefinition for MultiDbEngine {
                 db_config,
                 input_provider: (),
                 marshal: marshal_mailbox.clone(),
-                max_pending_acks,
                 mailbox_size: NZUsize!(100),
                 plan,
                 resolvers: (qmdb_sync_resolver_a, qmdb_sync_resolver_b),
                 sync_config: self.sync_config,
                 prune_config: Some(PruneConfig {
+                    max_pending_acks,
                     maintenance_interval: NZUsize!(5),
                     retained_marshal_blocks: 10,
                     retained_qmdb_blocks: 0,
