@@ -225,6 +225,21 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         self
     }
 
+    /// Add a run of pre-computed leaf digests, in order.
+    #[cfg(feature = "std")]
+    pub(crate) fn add_leaf_digests(mut self, digests: impl IntoIterator<Item = D>) -> Self {
+        let digests = digests.into_iter();
+        // Each leaf also appends its parent placeholders, so reserve for the full node count.
+        let n = digests.size_hint().0 as u64;
+        let additional =
+            Position::try_from(self.leaves() + n).map_or(0, |end| (*end - *self.size()) as usize);
+        self.appended.reserve(additional);
+        for digest in digests {
+            self = self.add_leaf_digest(digest);
+        }
+        self
+    }
+
     /// Hash `element` and add it as a leaf.
     pub fn add(self, hasher: &impl Hasher<F, Digest = D>, element: &[u8]) -> Self {
         let digest = hasher.leaf_digest(self.size(), element);
