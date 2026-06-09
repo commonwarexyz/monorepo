@@ -245,13 +245,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         // Each leaf also appends its parent placeholders, so reserve for the full node count.
         let digests = digests.into_iter();
         let n = digests.size_hint().0 as u64;
+        let mut leaves = self.leaves();
+        let mut size = self.size();
         let additional =
-            Position::try_from(self.leaves() + n).map_or(0, |end| (*end - *self.size()) as usize);
+            Position::try_from(leaves + n).map_or(0, |end| (*end - *size) as usize);
         self.appended.reserve(additional);
 
         // Track positions locally so bulk appends do not recompute them from the growing batch.
-        let mut leaves = self.leaves();
-        let mut size = self.size();
         for digest in digests {
             (leaves, size) = self.append_leaf_digest(digest, leaves, size);
         }
