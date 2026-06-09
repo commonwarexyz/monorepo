@@ -495,6 +495,7 @@ where
     ///
     /// - Returns [Error::PruneBeyondMinRequired] if `prune_loc` > inactivity floor.
     /// - Returns [crate::merkle::Error::LocationOverflow] if `prune_loc` > [crate::merkle::Family::MAX_LEAVES].
+    #[tracing::instrument(name = "qmdb::immutable::Db::prune", level = "info", skip_all)]
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.prune_timer();
         self.metrics.operations.prune_calls.inc();
@@ -528,6 +529,7 @@ where
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Immutable::commit`] or
     /// [`Immutable::sync`].
+    #[tracing::instrument(name = "qmdb::immutable::Db::rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
@@ -630,6 +632,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
+    #[tracing::instrument(name = "qmdb::immutable::Db::sync", level = "info", skip_all)]
     pub async fn sync(&self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.sync_timer();
         self.metrics.operations.sync_calls.inc();
@@ -638,6 +641,7 @@ where
     }
 
     /// Durably commit the journal state published by prior [`Immutable::apply_batch`] calls.
+    #[tracing::instrument(name = "qmdb::immutable::Db::commit", level = "info", skip_all)]
     pub async fn commit(&self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.commit_timer();
         self.metrics.operations.commit_calls.inc();
@@ -683,6 +687,7 @@ where
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably commit it. Call [`Immutable::commit`] or
     /// [`Immutable::sync`] to guarantee durability.
+    #[tracing::instrument(name = "qmdb::immutable::Db::apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, K, V, S>>,

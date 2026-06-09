@@ -6,7 +6,7 @@
 //! so the batch API can read through to committed state.
 
 use crate::stateful::db::{
-    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    read_lock, ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -108,7 +108,7 @@ where
 
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
+        let db = read_lock(&self.db).await;
         self.batch.get(key, &*db).await
     }
 
@@ -116,7 +116,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
+        let db = read_lock(&self.db).await;
         self.batch.get_many(keys, &*db).await
     }
 
@@ -178,7 +178,7 @@ where
 {
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = self.db.read().await;
+        let db = read_lock(&self.db).await;
         self.inner.get(key, &*db).await
     }
 
@@ -186,7 +186,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = self.db.read().await;
+        let db = read_lock(&self.db).await;
         self.inner.get_many(keys, &*db).await
     }
 }
@@ -207,7 +207,7 @@ where
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = self.db.read().await;
+        let db = read_lock(&self.db).await;
         let merkleized = self.batch.merkleize(
             &*db,
             self.metadata,
@@ -288,7 +288,7 @@ where
     }
 
     async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+        let inner = read_lock(db).await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
@@ -373,7 +373,7 @@ where
     }
 
     async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = db.read().await;
+        let inner = read_lock(db).await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),

@@ -230,6 +230,7 @@ where
     ///
     /// `inactivity_floor` declares that all operations before this location are inactive.
     /// It must be >= the database's current inactivity floor (monotonically non-decreasing).
+    #[tracing::instrument(name = "qmdb::immutable::batch::merkleize", level = "info", skip_all)]
     pub fn merkleize<E, C, T>(
         self,
         db: &Immutable<F, E, K, V, C, H, T, S>,

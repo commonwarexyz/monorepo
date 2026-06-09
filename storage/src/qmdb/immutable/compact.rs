@@ -185,6 +185,7 @@ where
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
+    #[tracing::instrument(name = "qmdb::immutable::compact::merkleize", level = "info", skip_all)]
     pub fn merkleize<E, C>(
         self,
         db: &Db<F, E, K, V, H, C, S>,
@@ -490,6 +491,11 @@ where
     ///   (walking ancestors oldest-first, then the tip).
     /// - [`Error::FloorBeyondSize`] if any unapplied commit's floor exceeds its own commit
     ///   location.
+    #[tracing::instrument(
+        name = "qmdb::immutable::compact::apply_batch",
+        level = "info",
+        skip_all
+    )]
     pub fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
@@ -512,6 +518,7 @@ where
     /// This is the point at which in-memory mutations become servable via compact sync. The compact
     /// Merkle frontier and last-commit witness are written into the same slot, reusing the cached
     /// witness when the current state has already been persisted.
+    #[tracing::instrument(name = "qmdb::immutable::compact::sync", level = "info", skip_all)]
     pub async fn sync(&self) -> Result<(), Error<F>> {
         witness::persist_witness::<F, E, H, S>(
             &self.merkle,
@@ -524,6 +531,7 @@ where
     }
 
     /// Durably persist the current db state to disk (alias for [`Self::sync`]).
+    #[tracing::instrument(name = "qmdb::immutable::compact::commit", level = "info", skip_all)]
     pub async fn commit(&self) -> Result<(), Error<F>>
     where
         F: Family,
@@ -555,6 +563,7 @@ where
     /// reloading the cached commit metadata or inactivity floor) fails, leaving this `Db`'s
     /// in-memory fields out of sync with the persisted slot. Callers must drop this handle
     /// after any `Err` from `rewind` and reopen from storage.
+    #[tracing::instrument(name = "qmdb::immutable::compact::rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self) -> Result<(), Error<F>>
     where
         F: Family,

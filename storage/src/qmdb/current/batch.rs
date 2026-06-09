@@ -380,6 +380,13 @@ where
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb::current::batch::merkleize",
+        level = "info",
+        skip_all,
+        fields(variant = "unordered",)
+    )]
     pub async fn merkleize<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
@@ -445,6 +452,13 @@ where
     }
 
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb::current::batch::merkleize",
+        level = "info",
+        skip_all,
+        fields(variant = "ordered",)
+    )]
     pub async fn merkleize<E, C, I>(
         self,
         db: &super::db::Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,

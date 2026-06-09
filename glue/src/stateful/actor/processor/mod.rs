@@ -47,7 +47,7 @@ use std::{
     future::Future,
     num::NonZeroUsize,
 };
-use tracing::{debug, warn};
+use tracing::{debug, info_span, warn, Instrument as _};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
@@ -255,7 +255,10 @@ where
         let timer = self.metrics.propose_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+        let parent = match next_or_cancel(&mut response, &mut ancestry)
+            .instrument(info_span!("stateful.processor.fetch_parent"))
+            .await
+        {
             Some(Some(parent)) => parent,
             Some(None) => {
                 response.send_lossy(None);
@@ -346,7 +349,10 @@ where
         let timer = self.metrics.verify_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let block = match next_or_cancel(&mut response, &mut ancestry).await {
+        let block = match next_or_cancel(&mut response, &mut ancestry)
+            .instrument(info_span!("stateful.processor.fetch_block"))
+            .await
+        {
             Some(Some(block)) => block,
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
@@ -412,7 +418,10 @@ where
         }
 
         let round = consensus_context.round();
-        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+        let parent = match next_or_cancel(&mut response, &mut ancestry)
+            .instrument(info_span!("stateful.processor.fetch_parent"))
+            .await
+        {
             Some(Some(parent)) => parent,
             Some(None) => {
                 debug!(
@@ -492,6 +501,7 @@ where
             response.send_lossy(false);
             return;
         };
+        let tail = info_span!("stateful.processor.verify_tail").entered();
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
             warn!(
                 ?parent_digest,
@@ -503,11 +513,14 @@ where
         }
         self.cache_pending(block_digest, parent_digest, round, merkleized);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
+        drop(block);
+        drop(tail);
         timer.observe(context);
         response.send_lossy(true);
     }
 
     /// Ensure parent state exists, then prepare unmerkleized batches for execution.
+    #[tracing::instrument(name = "stateful.processor.prepare_batches", level = "info", skip_all)]
     pub(super) async fn prepare_batches<S, V, Response>(
         &mut self,
         context: &E,
@@ -823,6 +836,7 @@ where
 }
 
 /// Returns true when `block` is already covered by committed state.
+#[tracing::instrument(name = "stateful.processor.processed_check", level = "info", skip_all)]
 async fn is_already_processed<S, V, Response>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
     marshal: MarshalMailbox<S, V>,

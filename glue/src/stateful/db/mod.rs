@@ -82,7 +82,7 @@ use commonware_macros::select;
 use commonware_runtime::{reschedule, Metrics, Spawner};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
-    sync::AsyncRwLock,
+    sync::{AsyncRwLock, AsyncRwLockReadGuard, AsyncRwLockWriteGuard},
 };
 use futures::{
     future::{pending, Either},
@@ -97,6 +97,18 @@ use std::{
 };
 
 const MAX_CHANNEL_DRAIN_PER_TICK: usize = 32;
+
+/// Acquire a read lock on a managed database, recording lock-wait time.
+#[tracing::instrument(name = "stateful.db.read_lock", level = "info", skip_all)]
+pub(crate) async fn read_lock<T>(db: &AsyncRwLock<T>) -> AsyncRwLockReadGuard<'_, T> {
+    db.read().await
+}
+
+/// Acquire a write lock on a managed database, recording lock-wait time.
+#[tracing::instrument(name = "stateful.db.write_lock", level = "info", skip_all)]
+pub(crate) async fn write_lock<T>(db: &AsyncRwLock<T>) -> AsyncRwLockWriteGuard<'_, T> {
+    db.write().await
+}
 
 pub mod any;
 pub mod current;
@@ -478,12 +490,12 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
     }
 
     async fn finalize(&self, batches: Self::Merkleized) {
-        let mut database = self.write().await;
+        let mut database = write_lock(self).await;
         finalize_or_panic(&mut *database, batches, None).await;
     }
 
     async fn prune(&self, target: &Self::SyncTargets) {
-        let mut database = self.write().await;
+        let mut database = write_lock(self).await;
         prune_or_panic(&mut *database, target, None).await;
     }
 
@@ -493,7 +505,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
     }
 
     async fn rewind_to_targets(&self, target: Self::SyncTargets) {
-        let mut database = self.write().await;
+        let mut database = write_lock(self).await;
         if T::sync_target(&*database).await == target {
             return;
         }
@@ -710,7 +722,7 @@ macro_rules! impl_database_set {
             async fn finalize(&self, batches: Self::Merkleized) {
                 join!($(
                     async {
-                        let mut database = self.$idx.write().await;
+                        let mut database = write_lock(&self.$idx).await;
                         finalize_or_panic(&mut *database, batches.$idx, Some($idx)).await;
                     },
                 )+);
@@ -719,7 +731,7 @@ macro_rules! impl_database_set {
             async fn prune(&self, targets: &Self::SyncTargets) {
                 join!($(
                     async {
-                        let mut database = self.$idx.write().await;
+                        let mut database = write_lock(&self.$idx).await;
                         prune_or_panic(&mut *database, &targets.$idx, Some($idx)).await;
                     },
                 )+);
@@ -737,7 +749,7 @@ macro_rules! impl_database_set {
             async fn rewind_to_targets(&self, targets: Self::SyncTargets) {
                 join!($(
                     async {
-                        let mut database = self.$idx.write().await;
+                        let mut database = write_lock(&self.$idx).await;
                         if $T::sync_target(&*database).await == targets.$idx {
                             return;
                         }
@@ -1368,6 +1380,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
+#[tracing::instrument(name = "stateful.db.finalize", level = "info", skip_all, fields(index))]
 async fn finalize_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     batch: T::Merkleized,
@@ -1389,6 +1402,7 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
+#[tracing::instrument(name = "stateful.db.rewind", level = "info", skip_all, fields(index))]
 async fn rewind_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: T::SyncTarget,
@@ -1410,6 +1424,7 @@ async fn rewind_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
+#[tracing::instrument(name = "stateful.db.prune", level = "info", skip_all, fields(index))]
 async fn prune_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: &T::SyncTarget,

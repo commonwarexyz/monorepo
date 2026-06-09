@@ -248,6 +248,7 @@ where
     /// be monotonically non-decreasing across the chain (enforced on `apply_batch`) and must
     /// be at most this batch's own commit location (`total_size - 1`). A floor past the commit
     /// would let a later `prune(floor)` remove the last readable commit.
+    #[tracing::instrument(name = "qmdb::keyless::batch::merkleize", level = "info", skip_all)]
     pub fn merkleize<E, C>(
         self,
         db: &Keyless<F, E, V, C, H, S>,

@@ -24,7 +24,7 @@ use futures::{
 };
 use rand::Rng;
 use std::sync::mpsc::TryRecvError;
-use tracing::{debug, Instrument as _};
+use tracing::{debug, info_span, Instrument as _};
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
@@ -104,6 +104,7 @@ where
                     ancestry,
                     response,
                 }) => {
+                    let process = info_span!(parent: &span, "stateful.actor.process");
                     self.processor
                         .propose(
                             self.context.as_present(),
@@ -113,7 +114,7 @@ where
                             &mut self.input_provider,
                             response,
                         )
-                        .instrument(span)
+                        .instrument(process)
                         .await;
                 }
                 Step::Message(Message::Verify {
@@ -122,6 +123,7 @@ where
                     ancestry,
                     response,
                 }) => {
+                    let process = info_span!(parent: &span, "stateful.actor.process");
                     self.processor
                         .verify(
                             self.context.as_present(),
@@ -130,7 +132,7 @@ where
                             ancestry,
                             response,
                         )
-                        .instrument(span)
+                        .instrument(process)
                         .await;
                 }
                 Step::Message(Message::Finalized {
@@ -138,6 +140,7 @@ where
                     block,
                     acknowledgement,
                 }) => {
+                    let process = info_span!(parent: &span, "stateful.actor.process");
                     if let Some(prune) = async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                             self.processor
@@ -153,7 +156,7 @@ where
                         acknowledgement.acknowledge();
                         prune
                     }
-                    .instrument(span)
+                    .instrument(process)
                     .await
                     {
                         pending_prune = Some(prune);
