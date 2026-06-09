@@ -234,8 +234,21 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let additional =
             Position::try_from(self.leaves() + n).map_or(0, |end| (*end - *self.size()) as usize);
         self.appended.reserve(additional);
+
+        // Track positions locally so bulk appends do not recompute them from the growing batch.
+        let mut leaves = self.leaves();
+        let mut size = self.size();
         for digest in digests {
-            self = self.add_leaf_digest(digest);
+            self.appended.push(digest);
+            size += 1;
+
+            for height in F::parent_heights(leaves) {
+                self.appended.push(D::EMPTY);
+                push_dirty(&mut self.dirty_nodes, height, size);
+                size += 1;
+            }
+
+            leaves += 1;
         }
         self
     }
