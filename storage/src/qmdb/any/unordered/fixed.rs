@@ -304,7 +304,6 @@ pub(crate) mod test {
     /// with the batch rooted directly at the DB (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
     fn test_unordered_fixed_resolved_merkleize_parity() {
-        use crate::qmdb::any::batch::ResolvedLocation;
         use std::collections::HashMap;
 
         deterministic::Runner::default().start(|ctx| async move {
@@ -369,17 +368,15 @@ pub(crate) mod test {
                 }
                 let normal_root = nb.merkleize(&db, None).await.unwrap().root();
 
-                // Fused path.
+                // Fused path. Values must match a plain `get_many` and the root must match the
+                // normal path.
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
-                let resolved_vec = new_batch()
+                let (values, resolved) = new_batch()
                     .get_many_with_locations(&keys, &db)
                     .await
                     .unwrap();
-                let mut resolved: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
-                    HashMap::new();
-                for ((k, _), r) in muts.iter().zip(resolved_vec) {
-                    resolved.insert(*k, r.map(|(_, loc)| loc));
-                }
+                let plain = new_batch().get_many(&keys, &db).await.unwrap();
+                assert_eq!(values, plain, "value mismatch at depth={depth}");
                 let mut fb = new_batch();
                 for (k, v) in &muts {
                     fb = fb.write(*k, *v);
@@ -390,49 +387,7 @@ pub(crate) mod test {
                     .await
                     .unwrap()
                     .root();
-
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
-
-                // Guard: an EMPTY resolved map forces every key through the read-based fallback
-                // and must still match (proves the fallback path is sound).
-                let empty: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> = HashMap::new();
-                let mut eb = new_batch();
-                for (k, v) in &muts {
-                    eb = eb.write(*k, *v);
-                }
-                let empty_root = eb
-                    .with_resolved(empty)
-                    .merkleize(&db, None)
-                    .await
-                    .unwrap()
-                    .root();
-                assert_eq!(
-                    normal_root, empty_root,
-                    "empty-map fallback mismatch depth={depth}"
-                );
-
-                // Guard: marking existing keys as absent (`None`) must NOT corrupt the root; such
-                // keys fall back to the live snapshot resolution rather than being treated as
-                // creates off a stale hint.
-                let mut none_map: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
-                    HashMap::new();
-                for (k, _) in &muts {
-                    none_map.insert(*k, None);
-                }
-                let mut gb = new_batch();
-                for (k, v) in &muts {
-                    gb = gb.write(*k, *v);
-                }
-                let none_root = gb
-                    .with_resolved(none_map)
-                    .merkleize(&db, None)
-                    .await
-                    .unwrap()
-                    .root();
-                assert_eq!(
-                    normal_root, none_root,
-                    "none-hint fallback mismatch depth={depth}"
-                );
             }
         });
     }

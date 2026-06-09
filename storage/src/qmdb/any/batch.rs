@@ -110,18 +110,32 @@ struct ExistingEntry<K, F: Family, V> {
     value: Option<V>,
 }
 
-/// A key's resolved location, as produced by `get_many_with_locations` and attached via
-/// `with_resolved`. Carries enough provenance to reproduce the op-gen ordering and `base_old_loc`
-/// without re-reading the operation during `merkleize`.
+/// A key's resolved location. Carries enough provenance to reproduce the op-gen ordering and
+/// `base_old_loc` without re-reading the operation during `merkleize`.
 #[derive(Clone, Copy, Debug)]
-pub struct ResolvedLocation<F: Family> {
+pub(crate) struct ResolvedLocation<F: Family> {
     /// The location used for op-gen ordering. For a key resolved through an ancestor diff this is
     /// the uncommitted ancestor location; for a committed-DB key it is the matched committed
     /// location.
-    pub iter_loc: Location<F>,
+    pub(crate) iter_loc: Location<F>,
     /// The key's committed-DB location (committed provenance), or `None` if the key was created by
     /// an ancestor and never existed in the committed DB.
-    pub base_old_loc: Option<Location<F>>,
+    pub(crate) base_old_loc: Option<Location<F>>,
+}
+
+/// Existing-key locations resolved by
+/// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations), attached to a batch
+/// via [`with_resolved`](UnmerkleizedBatch::with_resolved) so `merkleize` can skip re-reading
+/// those keys.
+///
+/// Entries are keyed internally by the key they were resolved for and must be attached to the
+/// batch they were resolved on. Applying and committing the batch's ancestors between resolution
+/// and merkleization is fine (ancestor-resolved locations are immutable and committed-resolved
+/// keys are untouched by those applies); attaching a token to any other batch may corrupt the
+/// database.
+#[derive(Debug)]
+pub struct ResolvedLocations<K, F: Family> {
+    pub(crate) locations: HashMap<K, ResolvedLocation<F>>,
 }
 
 /// Where this batch's inherited state comes from.
@@ -211,7 +225,7 @@ where
     /// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations) during state load.
     /// When a mutation key is present here, `merkleize` reuses the location and skips the
     /// redundant journal read. Empty for callers that did not pre-resolve.
-    resolved: HashMap<U::Key, Option<ResolvedLocation<F>>>,
+    resolved: HashMap<U::Key, ResolvedLocation<F>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -1145,36 +1159,29 @@ where
         Ok(results)
     }
 
-    /// Batch read multiple keys, returning per key both the value and the resolved location to be
+    /// Batch read multiple keys, returning the values plus a [`ResolvedLocations`] token to be
     /// attached via [`with_resolved`](UnmerkleizedBatch::with_resolved) so the subsequent
     /// [`merkleize`](UnmerkleizedBatch::merkleize) can skip re-reading these keys.
     ///
     /// Resolution matches [`Self::get_many`] (mutations -> ancestor diffs -> committed DB) but is
     /// intended to be called on a fresh batch (before any mutations are written), so the mutation
-    /// layer is skipped. For each key it returns:
-    /// - `None` if the key is absent (a create) or was deleted by an ancestor.
-    /// - `Some((value, resolved))` otherwise, where `resolved.iter_loc` is the location the
-    ///   merkleize op-gen loop would match the key at and `resolved.base_old_loc` is its committed
-    ///   provenance.
-    ///
-    /// Returns results in the same order as the input keys.
+    /// layer is skipped. Values are returned in the same order as the input keys, with `None` for
+    /// keys that are absent (a create) or were deleted by an ancestor; only present keys receive
+    /// an entry in the token.
     #[allow(clippy::type_complexity)]
     pub async fn get_many_with_locations<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
         db: &Db<F, E, C, I, H, U, N, S>,
-    ) -> Result<Vec<Option<(U::Value, ResolvedLocation<F>)>>, crate::qmdb::Error<F>>
+    ) -> Result<(Vec<Option<U::Value>>, ResolvedLocations<U::Key, F>), crate::qmdb::Error<F>>
     where
         E: Context,
         C: Contiguous<Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
-        if keys.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut results: Vec<Option<(U::Value, ResolvedLocation<F>)>> =
-            Vec::with_capacity(keys.len());
+        let mut values: Vec<Option<U::Value>> = Vec::with_capacity(keys.len());
+        let mut locations: HashMap<U::Key, ResolvedLocation<F>> =
+            HashMap::with_capacity(keys.len());
         let mut db_indices = Vec::new();
         let mut db_keys = Vec::new();
 
@@ -1184,27 +1191,30 @@ where
             // the key is absent in the chain's view.
             let mut found = false;
             if let Some(parent) = self.base.parent() {
-                let resolve = |entry: &DiffEntry<F, U::Value>| match entry {
+                let mut resolve = |entry: &DiffEntry<F, U::Value>| match entry {
                     DiffEntry::Active {
                         value,
                         loc,
                         base_old_loc,
-                    } => Some((
-                        value.clone(),
-                        ResolvedLocation {
-                            iter_loc: *loc,
-                            base_old_loc: *base_old_loc,
-                        },
-                    )),
+                    } => {
+                        locations.insert(
+                            (**key).clone(),
+                            ResolvedLocation {
+                                iter_loc: *loc,
+                                base_old_loc: *base_old_loc,
+                            },
+                        );
+                        Some(value.clone())
+                    }
                     DiffEntry::Deleted { .. } => None,
                 };
                 if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
-                    results.push(resolve(entry));
+                    values.push(resolve(entry));
                     found = true;
                 } else {
                     for batch in parent.ancestors() {
                         if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
-                            results.push(resolve(entry));
+                            values.push(resolve(entry));
                             found = true;
                             break;
                         }
@@ -1218,25 +1228,26 @@ where
 
             db_indices.push(i);
             db_keys.push(*key);
-            results.push(None);
+            values.push(None);
         }
 
         if !db_keys.is_empty() {
             let db_results = db.get_many_with_locations(&db_keys).await?;
             for (slot, value) in db_indices.into_iter().zip(db_results) {
-                results[slot] = value.map(|(v, loc)| {
-                    (
-                        v,
+                values[slot] = value.map(|(v, loc)| {
+                    locations.insert(
+                        (*keys[slot]).clone(),
                         ResolvedLocation {
                             iter_loc: loc,
                             base_old_loc: Some(loc),
                         },
-                    )
+                    );
+                    v
                 });
             }
         }
 
-        Ok(results)
+        Ok((values, ResolvedLocations { locations }))
     }
 }
 
@@ -1285,7 +1296,7 @@ where
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        resolved: HashMap<K, Option<ResolvedLocation<F>>>,
+        resolved: HashMap<K, ResolvedLocation<F>>,
         metadata: Option<V::Value>,
         next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1306,14 +1317,14 @@ where
         } else {
             let mut rest = BTreeMap::new();
             for (key, value) in mutations {
-                match resolved.get(&key) {
-                    Some(Some(loc)) => existing.push(ExistingEntry {
+                match resolved.get(&key).copied() {
+                    Some(hint) => existing.push(ExistingEntry {
                         key,
-                        iter_loc: loc.iter_loc,
-                        base_old_loc: loc.base_old_loc,
+                        iter_loc: hint.iter_loc,
+                        base_old_loc: hint.base_old_loc,
                         value,
                     }),
-                    _ => {
+                    None => {
                         rest.insert(key, value);
                     }
                 }
@@ -1363,10 +1374,11 @@ where
 
     /// Attach existing-key locations the caller already resolved during state load (via
     /// [`get_many_with_locations`](Self::get_many_with_locations)) so [`merkleize`](Self::merkleize)
-    /// reuses them instead of re-reading the journal for those keys. Keys absent from `resolved`
-    /// are resolved normally; a `None` entry marks a key observed as absent (handled as a create).
-    pub fn with_resolved(mut self, resolved: HashMap<K, Option<ResolvedLocation<F>>>) -> Self {
-        self.resolved = resolved;
+    /// reuses them instead of re-reading the journal for those keys. Keys without an entry are
+    /// resolved normally. The token must have been resolved on this batch (see
+    /// [`ResolvedLocations`]).
+    pub fn with_resolved(mut self, resolved: ResolvedLocations<K, F>) -> Self {
+        self.resolved = resolved.locations;
         self
     }
 }
