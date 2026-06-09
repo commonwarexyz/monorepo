@@ -303,7 +303,7 @@ where
         )?;
 
         let last_commit_loc = Location::new(*merkle.leaves() - 1);
-        let witness = witness::Store::new_import(journal, imported);
+        let witness = witness::Store::from_import(journal, imported);
         Ok(Self {
             merkle,
             last_commit_loc,

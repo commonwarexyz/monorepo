@@ -2,7 +2,8 @@
 //!
 //! Unlike [`crate::merkle::full`], this type retains only the minimum state required to compute
 //! the current root and continue appending: the leaf count plus the pinned frontier nodes.
-//! Historical nodes are discarded by `Merkle::prune_to_peaks` and are not readable afterward.
+//! Historical nodes accumulate only while mutations are non-durable; once the owning database
+//! persists them, the nodes are discarded and are no longer readable.
 //!
 //! # Why peaks are enough
 //!
@@ -69,7 +70,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 
 /// A Merkle structure that retains only the state required to continue appending.
 pub struct Merkle<F: Family, D: Digest, S: Strategy> {
-    mem: RwLock<Mem<F, D>>,
+    inner: RwLock<Mem<F, D>>,
     strategy: S,
 }
 
@@ -77,7 +78,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// Create an empty `Merkle`.
     pub const fn new(strategy: S) -> Self {
         Self {
-            mem: RwLock::new(Mem::new()),
+            inner: RwLock::new(Mem::new()),
             strategy,
         }
     }
@@ -90,7 +91,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     ) -> Result<Self, Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
         Ok(Self {
-            mem: RwLock::new(mem),
+            inner: RwLock::new(mem),
             strategy,
         })
     }
@@ -126,13 +127,13 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         pinned_nodes: Vec<D>,
     ) -> Result<(), Error<F>> {
         let mem = Self::mem_from_compact_state(leaves, pinned_nodes)?;
-        *self.mem.write() = mem;
+        *self.inner.write() = mem;
         Ok(())
     }
 
     /// Discard all retained nodes except the pinned frontier.
-    pub(crate) fn prune_to_peaks(&self) {
-        self.mem.write().prune_all();
+    pub(crate) fn prune_to_frontier(&self) {
+        self.inner.write().prune_all();
     }
 
     /// Return the root digest of the current state.
@@ -141,12 +142,12 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         hasher: &impl Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
-        self.mem.read().root(hasher, inactive_peaks)
+        self.inner.read().root(hasher, inactive_peaks)
     }
 
     /// Return the number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
-        self.mem.read().leaves()
+        self.inner.read().leaves()
     }
 
     /// Return a reference to the merkleization strategy.
@@ -159,25 +160,25 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
     /// The closure runs under the tree's read lock, which is not re-entrant: do not call other
     /// methods of this [`Merkle`] from within it.
     pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
-        let mem = self.mem.read();
-        f(&mem)
+        let inner = self.inner.read();
+        f(&inner)
     }
 
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
-        let mem = self.mem.read();
-        UnmerkleizedBatch::wrap(mem.new_batch_with_strategy(self.strategy.clone()))
+        let inner = self.inner.read();
+        UnmerkleizedBatch::wrap(inner.new_batch_with_strategy(self.strategy.clone()))
     }
 
     /// Create an owned merkleized batch representing the current state.
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        let mem = self.mem.read();
-        batch::MerkleizedBatch::from_mem_with_strategy(&mem, self.strategy.clone())
+        let inner = self.inner.read();
+        batch::MerkleizedBatch::from_mem_with_strategy(&inner, self.strategy.clone())
     }
 
     /// Apply a merkleized batch to the in-memory structure.
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
-        self.mem.get_mut().apply_batch(batch)
+        self.inner.get_mut().apply_batch(batch)
     }
 }
 
@@ -220,8 +221,8 @@ mod tests {
         let leaves = merkle.leaves();
         let pins = pinned_nodes(&merkle);
 
-        // Pruning to peaks does not change the root.
-        merkle.prune_to_peaks();
+        // Pruning to the frontier does not change the root.
+        merkle.prune_to_frontier();
         assert_eq!(merkle.root(&hasher, 0).unwrap(), root);
 
         // A fresh tree reset to the snapshot reproduces the same state.

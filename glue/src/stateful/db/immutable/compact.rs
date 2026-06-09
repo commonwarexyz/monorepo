@@ -263,7 +263,6 @@ where
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        // `rewind` makes the rewind durable, so no follow-up sync is needed.
         self.rewind(target.leaf_count).await?;
 
         let rewound_target = self.sync_target().await;
@@ -324,7 +323,6 @@ where
     }
 
     async fn rewind_to_target(&mut self, target: Self::SyncTarget) -> Result<(), Error<F>> {
-        // `rewind` makes the rewind durable, so no follow-up sync is needed.
         self.rewind(target.leaf_count).await?;
 
         let rewound_target = self.sync_target().await;

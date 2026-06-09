@@ -11,8 +11,8 @@
 //!
 //! # What compact dbs store
 //!
-//! A compact db persists one piece of state: a db-level witness journal (`qmdb::compact::witness`)
-//! whose entries each snapshot one committed state (commit operation, proof, and frontier pins).
+//! A compact db's only persistent state is its witness journal (`qmdb::compact::witness`), whose
+//! entries each snapshot one committed state (commit operation, proof, and frontier pins).
 //! The in-memory compact Merkle ([`crate::merkle::compact`]) is rebuilt from the journal tip on
 //! reopen. Without the witness, a compact db could recover its root and continue appending, but
 //! it could not serve compact sync to another node.
@@ -387,8 +387,7 @@ where
 /// 5. Assert the db root still matches and persist the state.
 ///
 /// A failure (or abandoned sync) before the final persist leaves the local compact db unopened or
-/// unchanged on disk. A failure during the final persist may leave the target partition cleared,
-/// requiring a re-sync; it never leaves a verifiable but wrong state.
+/// unchanged on disk.
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>

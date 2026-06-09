@@ -19,14 +19,13 @@
 //! upholds this invariant. Since journal positions are also stable across pruning, rewind and
 //! prune targets are located by binary search on leaf count.
 //!
-//! The journal `sync` after an append is the commit point. A crash before it drops the unsynced
-//! tail on reopen, recovering the previous commit; nothing else needs reconciliation because the
-//! Merkle has no persistence of its own. Rewind truncates the journal to the target entry and
-//! syncs before returning. Only the tip entry is verified on reopen; an older entry is verified
-//! when a rewind makes it the tip.
+//! The journal `sync` after an append is the commit point: a crash before it drops the unsynced
+//! tail on reopen, recovering the previous commit. The Merkle persists nothing, so there is
+//! nothing else to reconcile. Rewind truncates the journal to the target entry and syncs. Only
+//! the tip entry is ever verified: on reopen, or when a rewind makes an older entry the tip.
 //!
-//! History is retained until [`Store::prune`], which bounds how far back [`Store::rewind`]
-//! can reach. The tip entry is never pruned.
+//! [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip entry is never
+//! pruned.
 
 use crate::{
     journal::contiguous::{variable, Reader as _},
@@ -148,19 +147,6 @@ impl<F: Family, D: Digest> Witness<F, D> {
     }
 }
 
-/// Db-owned persistent store for the compact witness: a contiguous journal plus an in-memory
-/// cache of the tip witness.
-pub(crate) struct Store<E: Context, F: Family, D: Digest> {
-    journal: Journal<E, F, D>,
-    cache: RwLock<Witness<F, D>>,
-    /// Whether the cached witness came from compact sync and has not been written to the
-    /// journal yet. While set, the journal still holds the partition's previous contents; the
-    /// first persist replaces them with the cached witness and clears this flag.
-    import_pending: AtomicBool,
-    /// Serializes persist/rewind/prune so concurrent calls on a shared handle do not interleave.
-    sync_lock: AsyncMutex<()>,
-}
-
 /// Open the witness journal for a compact db.
 pub(crate) async fn open_journal<E, F, D>(
     context: E,
@@ -183,6 +169,19 @@ where
     Ok(variable::Journal::init(context, cfg).await?)
 }
 
+/// A contiguous journal plus an in-memory cache of the tip witness.
+pub(crate) struct Store<E: Context, F: Family, D: Digest> {
+    journal: Journal<E, F, D>,
+    cache: RwLock<Witness<F, D>>,
+    /// Whether the cached witness came from compact sync and has not been written to the
+    /// journal yet. While set, the journal still holds the partition's previous contents; the
+    /// first persist replaces them with the cached witness and clears this flag. Accessed only
+    /// under `sync_lock`, so loads and stores are `Relaxed`.
+    import_pending: AtomicBool,
+    /// Serializes persist/rewind/prune so concurrent calls on a shared handle do not interleave.
+    sync_lock: AsyncMutex<()>,
+}
+
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Wrap an opened journal and a verified witness into a store.
     pub(crate) fn new(journal: Journal<E, F, D>, witness: Witness<F, D>) -> Self {
@@ -196,7 +195,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
     /// Wrap a journal and a verified compact-sync import that has not been persisted yet; the
     /// journal is untouched until the first persist replaces its contents with `witness`.
-    pub(crate) fn new_import(journal: Journal<E, F, D>, witness: Witness<F, D>) -> Self {
+    pub(crate) fn from_import(journal: Journal<E, F, D>, witness: Witness<F, D>) -> Self {
         Self {
             journal,
             cache: RwLock::new(witness),
@@ -218,8 +217,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Persist the current compact state as a new witness journal entry.
     ///
     /// No-op if the cached witness already matches the Merkle (the witness is already durable).
-    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to peaks,
-    /// and refreshes the cache.
+    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
+    /// frontier, and refreshes the cache.
     pub(crate) async fn persist<H, S>(
         &self,
         merkle: &compact::Merkle<F, D, S>,
@@ -232,10 +231,10 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     {
         let _guard = self.sync_lock.lock().await;
 
-        // Outside a pending import, the cache always matches the journal tip, so an equal leaf
-        // count means the current state is already durable. During an import it instead means
-        // the cached witness must replace the journal's old contents. `sync_lock` orders the
-        // flag accesses.
+        // An equal leaf count means no commit has been applied since the cache was set.
+        // Normally the cache mirrors the journal tip, so the state is already durable and there
+        // is nothing to do. During a pending import the cached witness is not in the journal
+        // yet, so it is exactly what must be persisted: replace the journal's contents with it.
         let cached_leaves = self.with(|w| w.leaf_count);
         if cached_leaves == merkle.leaves() {
             if self.import_pending.load(Ordering::Relaxed) {
@@ -264,7 +263,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         }
         self.append_and_sync(&WitnessEntry::from(&witness)).await?;
         self.import_pending.store(false, Ordering::Relaxed);
-        merkle.prune_to_peaks();
+        merkle.prune_to_frontier();
         self.replace(witness);
         Ok(())
     }
@@ -274,7 +273,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// of the restored tip.
     ///
     /// Rewinding to a pruned leaf count, or one no entry commits, returns
-    /// [`merkle::Error::RewindBeyondHistory`]. The truncation is synced before returning.
+    /// [`merkle::Error::RewindBeyondHistory`]. The rewind is synced before returning.
     pub(crate) async fn rewind<H, S, Op>(
         &self,
         merkle: &compact::Merkle<F, D, S>,
@@ -384,7 +383,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
 /// Build a witness for the last commit from the current unpruned Merkle state.
 ///
-/// This must run before the Merkle is pruned to peaks, because the single-leaf inclusion proof is
+/// This must run before the Merkle is pruned to its frontier, because the single-leaf inclusion proof is
 /// only computable while the proof path is still retained.
 fn build_witness<F, H, S>(
     merkle: &compact::Merkle<F, H::Digest, S>,
