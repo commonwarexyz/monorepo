@@ -399,7 +399,7 @@ where
         let inner = inner
             .merkleize_with_floor_scan(
                 &db.any,
-                std::collections::BTreeMap::new(),
+                std::collections::HashMap::new(),
                 metadata,
                 |floor, tip| next_candidate(&bitmap_parent, floor, tip),
             )

@@ -29,7 +29,7 @@ use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::{cmp::Ordering, ops::Range};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     iter,
     sync::{Arc, Weak},
 };
@@ -211,7 +211,7 @@ where
     /// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations) during state load.
     /// When a mutation key is present here, `merkleize` reuses the location and skips the
     /// redundant journal read. Empty for callers that did not pre-resolve.
-    resolved: BTreeMap<U::Key, Option<ResolvedLocation<F>>>,
+    resolved: HashMap<U::Key, Option<ResolvedLocation<F>>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -1285,7 +1285,7 @@ where
     pub(crate) async fn merkleize_with_floor_scan<E, C, I, const N: usize>(
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
-        resolved: BTreeMap<K, Option<ResolvedLocation<F>>>,
+        resolved: HashMap<K, Option<ResolvedLocation<F>>>,
         metadata: Option<V::Value>,
         next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
@@ -1365,7 +1365,7 @@ where
     /// [`get_many_with_locations`](Self::get_many_with_locations)) so [`merkleize`](Self::merkleize)
     /// reuses them instead of re-reading the journal for those keys. Keys absent from `resolved`
     /// are resolved normally; a `None` entry marks a key observed as absent (handled as a create).
-    pub fn with_resolved(mut self, resolved: BTreeMap<K, Option<ResolvedLocation<F>>>) -> Self {
+    pub fn with_resolved(mut self, resolved: HashMap<K, Option<ResolvedLocation<F>>>) -> Self {
         self.resolved = resolved;
         self
     }
@@ -1779,7 +1779,7 @@ where
             journal_batch: self.journal_batch.new_batch::<H>(),
             mutations: BTreeMap::new(),
             base: Base::Child(Arc::clone(self)),
-            resolved: BTreeMap::new(),
+            resolved: HashMap::new(),
         }
     }
 
@@ -1902,7 +1902,7 @@ where
                 inactivity_floor_loc: self.inactivity_floor_loc,
                 active_keys: self.active_keys,
             },
-            resolved: BTreeMap::new(),
+            resolved: HashMap::new(),
         }
     }
 }
