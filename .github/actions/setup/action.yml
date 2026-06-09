@@ -128,11 +128,15 @@ runs:
       if: inputs.rust-cache-enabled == 'true'
       shell: bash
       run: |
-        if [ "$GITHUB_REF" = "refs/heads/main" ]; then
-          sccache_rw_mode="READ_WRITE"
-        else
-          sccache_rw_mode="READ_ONLY"
-        fi
+        # Temporarily allow PR cache writes while validating the sccache fork.
+        # Restore this after the experiment so only main writes native sccache objects:
+        #
+        # if [ "$GITHUB_REF" = "refs/heads/main" ]; then
+        #   sccache_rw_mode="READ_WRITE"
+        # else
+        #   sccache_rw_mode="READ_ONLY"
+        # fi
+        sccache_rw_mode="READ_WRITE"
 
         sccache_config="${RUNNER_TEMP}/sccache-config.toml"
         cat > "$sccache_config" <<EOF
