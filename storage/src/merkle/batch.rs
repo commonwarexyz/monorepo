@@ -247,8 +247,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let n = digests.size_hint().0 as u64;
         let mut leaves = self.leaves();
         let mut size = self.size();
-        let additional =
-            Position::try_from(leaves + n).map_or(0, |end| (*end - *size) as usize);
+        let additional = Position::try_from(leaves + n).map_or(0, |end| (*end - *size) as usize);
         self.appended.reserve(additional);
 
         // Track positions locally so bulk appends do not recompute them from the growing batch.
