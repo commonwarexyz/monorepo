@@ -299,6 +299,141 @@ pub(crate) mod test {
         });
     }
 
+    /// The fused `get_many_with_locations -> merkleize_resolved` path must produce a byte-identical
+    /// root to the normal `merkleize`, across updates/deletes/creates, both with the batch rooted
+    /// directly at the DB (D=0) and through one pending ancestor (D=1).
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_merkleize_resolved_parity() {
+        use crate::qmdb::any::batch::ResolvedLocation;
+        use std::collections::HashMap;
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = create_test_db(ctx.child("db")).await;
+
+            // Seed 2000 keys and commit so they live in the committed snapshot.
+            let mut seed = db.new_batch();
+            for i in 0..2000u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
+            // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
+            // both depths see identical mutations.
+            let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
+                let mut rng = test_rng_seeded(salt);
+                let mut out = Vec::new();
+                for _ in 0..600 {
+                    let r = rng.next_u32() % 100;
+                    if r < 60 {
+                        out.push((key(rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    } else if r < 80 {
+                        out.push((key(rng.next_u64() % 2000), None));
+                    } else {
+                        out.push((key(2000 + rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    }
+                }
+                // Dedup last-write-wins.
+                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                for (k, v) in out {
+                    m.insert(k, v);
+                }
+                m.into_iter().collect()
+            };
+
+            // D=0: batch rooted directly at the DB. D=1: through one pending ancestor.
+            for depth in [0u8, 1u8] {
+                let parent = if depth == 1 {
+                    let mut p = db.new_batch();
+                    for (k, v) in make(900) {
+                        p = p.write(k, v);
+                    }
+                    Some(p.merkleize(&db, None).await.unwrap())
+                } else {
+                    None
+                };
+
+                let muts = make(depth as u64 + 1);
+                let new_batch = || {
+                    parent
+                        .as_ref()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                // Normal path.
+                let mut nb = new_batch();
+                for (k, v) in &muts {
+                    nb = nb.write(*k, *v);
+                }
+                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+
+                // Fused path.
+                let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+                let resolved_vec = new_batch()
+                    .get_many_with_locations(&keys, &db)
+                    .await
+                    .unwrap();
+                let mut resolved: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
+                    HashMap::new();
+                for ((k, _), r) in muts.iter().zip(resolved_vec) {
+                    resolved.insert(*k, r.map(|(_, loc)| loc));
+                }
+                let mut fb = new_batch();
+                for (k, v) in &muts {
+                    fb = fb.write(*k, *v);
+                }
+                let fused_root = fb
+                    .merkleize_resolved(&db, &resolved, None)
+                    .await
+                    .unwrap()
+                    .root();
+
+                assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+
+                // Guard: an EMPTY resolved map forces every key through the read-based fallback
+                // and must still match (proves the fallback path is sound).
+                let empty: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> = HashMap::new();
+                let mut eb = new_batch();
+                for (k, v) in &muts {
+                    eb = eb.write(*k, *v);
+                }
+                let empty_root = eb
+                    .merkleize_resolved(&db, &empty, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(
+                    normal_root, empty_root,
+                    "empty-map fallback mismatch depth={depth}"
+                );
+
+                // Guard: marking existing keys as absent (`None`) must NOT corrupt the root; such
+                // keys fall back to the live snapshot resolution rather than being treated as
+                // creates off a stale hint.
+                let mut none_map: HashMap<Digest, Option<ResolvedLocation<mmr::Family>>> =
+                    HashMap::new();
+                for (k, _) in &muts {
+                    none_map.insert(*k, None);
+                }
+                let mut gb = new_batch();
+                for (k, v) in &muts {
+                    gb = gb.write(*k, *v);
+                }
+                let none_root = gb
+                    .merkleize_resolved(&db, &none_map, None)
+                    .await
+                    .unwrap()
+                    .root();
+                assert_eq!(
+                    normal_root, none_root,
+                    "none-hint fallback mismatch depth={depth}"
+                );
+            }
+        });
+    }
+
     // -- Generic inner functions for parameterized batch tests --
 
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {

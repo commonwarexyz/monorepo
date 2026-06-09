@@ -281,6 +281,70 @@ where
         Ok(results)
     }
 
+    /// Batch read multiple keys, returning per key both the value and the committed location it
+    /// key-matched (or `None` for absent keys).
+    ///
+    /// Identical resolution to [`Self::get_many`] but additionally returns the snapshot location
+    /// that produced each value. Used by the fused merkleize path to skip re-resolving keys that
+    /// were already located during state load.
+    ///
+    /// Results are returned in the same order as the input keys.
+    #[allow(clippy::type_complexity)]
+    pub async fn get_many_with_locations(
+        &self,
+        keys: &[&U::Key],
+    ) -> Result<Vec<Option<(U::Value, Location<F>)>>, crate::qmdb::Error<F>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let _timer = self.metrics.reads.get_many_timer();
+        self.metrics.reads.get_many_calls.inc();
+        self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
+
+        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        let mut results: Vec<Option<(U::Value, Location<F>)>> = vec![None; keys.len()];
+
+        for (key_idx, key) in keys.iter().enumerate() {
+            for &loc in self.snapshot.get(key) {
+                candidates.push((key_idx, *loc));
+            }
+        }
+
+        if candidates.is_empty() {
+            return Ok(results);
+        }
+
+        candidates.sort_unstable_by_key(|&(_, pos)| pos);
+
+        let mut positions: Vec<u64> = Vec::with_capacity(candidates.len());
+        for &(_, pos) in &candidates {
+            if positions.last() != Some(&pos) {
+                positions.push(pos);
+            }
+        }
+
+        let reader = self.log.reader().await;
+        let ops = reader.read_many(&positions).await?;
+
+        for &(key_idx, pos) in &candidates {
+            if results[key_idx].is_some() {
+                continue;
+            }
+            let op_idx = positions
+                .binary_search(&pos)
+                .expect("position was deduped from candidates");
+            let Operation::Update(data) = &ops[op_idx] else {
+                panic!("location does not reference update operation. loc={pos}");
+            };
+            if data.key() == keys[key_idx] {
+                results[key_idx] = Some((data.value().clone(), Location::new(pos)));
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
     pub async fn bounds(&self) -> std::ops::Range<Location<F>> {

@@ -99,6 +99,31 @@ pub(crate) fn lookup_sorted<'a, K: Ord, V>(entries: &'a [(K, V)], key: &K) -> Op
         .map(|idx| &entries[idx].1)
 }
 
+/// A classified existing-key mutation, in op-gen (iter-location) order.
+struct ExistingEntry<K, F: Family, V> {
+    key: K,
+    /// Location used for op-gen ordering.
+    iter_loc: Location<F>,
+    /// Committed-DB provenance.
+    base_old_loc: Option<Location<F>>,
+    /// `Some` for update, `None` for delete.
+    value: Option<V>,
+}
+
+/// A key's resolved location, as produced by `get_many_with_locations` and consumed by
+/// `merkleize_resolved`. Carries enough provenance to reproduce the op-gen ordering and
+/// `base_old_loc` without re-reading the operation.
+#[derive(Clone, Copy, Debug)]
+pub struct ResolvedLocation<F: Family> {
+    /// The location used for op-gen ordering. For a key resolved through an ancestor diff this is
+    /// the uncommitted ancestor location; for a committed-DB key it is the matched committed
+    /// location.
+    pub iter_loc: Location<F>,
+    /// The key's committed-DB location (committed provenance), or `None` if the key was created by
+    /// an ancestor and never existed in the committed DB.
+    pub base_old_loc: Option<Location<F>>,
+}
+
 /// Where this batch's inherited state comes from.
 enum Base<F: Family, D: Digest, U: update::Update + Send + Sync, S: Strategy>
 where
@@ -848,6 +873,123 @@ where
     }
 }
 
+// Unordered op-generation tail shared by `merkleize_with_floor_scan` and `merkleize_resolved`.
+impl<F: Family, K, V, H, S: Strategy> Merkleizer<F, H, update::Unordered<K, V>, S>
+where
+    K: Key,
+    V: ValueEncoding,
+    H: Hasher,
+    Operation<F, update::Unordered<K, V>>: Codec,
+{
+    /// Generate operations for the (location-sorted) existing entries followed by the creates,
+    /// then run the shared `finish` tail. `existing` must already be in iter-location order.
+    #[allow(clippy::type_complexity)]
+    async fn finish_unordered<E, C, I, R, const N: usize>(
+        self,
+        existing: Vec<ExistingEntry<K, F, V::Value>>,
+        mut mutations: BTreeMap<K, Option<V::Value>>,
+        metadata: Option<V::Value>,
+        next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
+        reader: R,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+        R: Reader<Item = Operation<F, update::Unordered<K, V>>>,
+    {
+        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
+            Vec::with_capacity(existing.len() + mutations.len() + 1);
+        let mut diff: DiffVec<K, F, V::Value> =
+            Vec::with_capacity(existing.len() + mutations.len());
+        let mut active_keys_delta: isize = 0;
+        let mut user_steps: u64 = 0;
+
+        // Process updates/deletes of existing keys in iter-location order.
+        for ExistingEntry {
+            key,
+            base_old_loc,
+            value,
+            ..
+        } in existing
+        {
+            let new_loc = Location::new(self.base_size + ops.len() as u64);
+            match value {
+                Some(value) => {
+                    ops.push(Operation::Update(update::Unordered(
+                        key.clone(),
+                        value.clone(),
+                    )));
+                    diff.push((
+                        key,
+                        DiffEntry::Active {
+                            value,
+                            loc: new_loc,
+                            base_old_loc,
+                        },
+                    ));
+                    user_steps += 1;
+                }
+                None => {
+                    ops.push(Operation::Delete(key.clone()));
+                    diff.push((key, DiffEntry::Deleted { base_old_loc }));
+                    active_keys_delta -= 1;
+                    user_steps += 1;
+                }
+            }
+        }
+
+        // Handle parent-deleted keys that the child wants to re-create.
+        let parent_deleted_creates = self.extract_parent_deleted_creates(&mut mutations);
+
+        // Process creates: remaining mutations (fresh keys) plus parent-deleted keys being
+        // re-created. Merge into a single key-sorted Vec so iteration order is deterministic
+        // regardless of whether the parent is pending or committed.
+        let mut creates: Vec<(K, V::Value, Option<Location<F>>)> =
+            Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
+        for (key, value) in mutations {
+            if let Some(value) = value {
+                creates.push((key, value, None));
+            }
+        }
+        for (key, value, base_old_loc) in parent_deleted_creates {
+            creates.push((key, value, base_old_loc));
+        }
+        creates.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        for (key, value, base_old_loc) in creates {
+            let new_loc = Location::new(self.base_size + ops.len() as u64);
+            ops.push(Operation::Update(update::Unordered(
+                key.clone(),
+                value.clone(),
+            )));
+            diff.push((
+                key,
+                DiffEntry::Active {
+                    value,
+                    loc: new_loc,
+                    base_old_loc,
+                },
+            ));
+            active_keys_delta += 1;
+        }
+
+        diff.sort_by(|a, b| a.0.cmp(&b.0));
+
+        self.finish(
+            ops,
+            diff,
+            active_keys_delta,
+            user_steps,
+            metadata,
+            next_candidate,
+            reader,
+            db,
+        )
+        .await
+    }
+}
+
 impl<F: Family, H, U, S: Strategy> UnmerkleizedBatch<F, H, U, S>
 where
     U: update::Update + Send + Sync,
@@ -995,6 +1137,99 @@ where
 
         Ok(results)
     }
+
+    /// Batch read multiple keys, returning per key both the value and the resolved location to be
+    /// fed into [`merkleize_resolved`](UnmerkleizedBatch::merkleize_resolved).
+    ///
+    /// Resolution matches [`Self::get_many`] (mutations -> ancestor diffs -> committed DB) but is
+    /// intended to be called on a fresh batch (before any mutations are written), so the mutation
+    /// layer is skipped. For each key it returns:
+    /// - `None` if the key is absent (a create) or was deleted by an ancestor.
+    /// - `Some((value, resolved))` otherwise, where `resolved.iter_loc` is the location the
+    ///   merkleize op-gen loop would match the key at and `resolved.base_old_loc` is its committed
+    ///   provenance.
+    ///
+    /// Returns results in the same order as the input keys.
+    #[allow(clippy::type_complexity)]
+    pub async fn get_many_with_locations<E, C, I, const N: usize>(
+        &self,
+        keys: &[&U::Key],
+        db: &Db<F, E, C, I, H, U, N, S>,
+    ) -> Result<Vec<Option<(U::Value, ResolvedLocation<F>)>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Contiguous<Item = Operation<F, U>>,
+        I: UnorderedIndex<Value = Location<F>> + 'static,
+    {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut results: Vec<Option<(U::Value, ResolvedLocation<F>)>> =
+            Vec::with_capacity(keys.len());
+        let mut db_indices = Vec::new();
+        let mut db_keys = Vec::new();
+
+        for (i, key) in keys.iter().enumerate() {
+            // Resolve through the ancestor diff chain (parent first). An Active entry's `loc` is
+            // the uncommitted ancestor location used for op-gen ordering; a Deleted entry means
+            // the key is absent in the chain's view.
+            let mut found = false;
+            if let Some(parent) = self.base.parent() {
+                let resolve = |entry: &DiffEntry<F, U::Value>| match entry {
+                    DiffEntry::Active {
+                        value,
+                        loc,
+                        base_old_loc,
+                    } => Some((
+                        value.clone(),
+                        ResolvedLocation {
+                            iter_loc: *loc,
+                            base_old_loc: *base_old_loc,
+                        },
+                    )),
+                    DiffEntry::Deleted { .. } => None,
+                };
+                if let Some(entry) = lookup_sorted(parent.diff.as_slice(), *key) {
+                    results.push(resolve(entry));
+                    found = true;
+                } else {
+                    for batch in parent.ancestors() {
+                        if let Some(entry) = lookup_sorted(batch.diff.as_slice(), *key) {
+                            results.push(resolve(entry));
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if found {
+                continue;
+            }
+
+            db_indices.push(i);
+            db_keys.push(*key);
+            results.push(None);
+        }
+
+        if !db_keys.is_empty() {
+            let db_results = db.get_many_with_locations(&db_keys).await?;
+            for (slot, value) in db_indices.into_iter().zip(db_results) {
+                results[slot] = value.map(|(v, loc)| {
+                    (
+                        v,
+                        ResolvedLocation {
+                            iter_loc: loc,
+                            base_old_loc: Some(loc),
+                        },
+                    )
+                });
+            }
+        }
+
+        Ok(results)
+    }
 }
 
 // Unordered-specific methods.
@@ -1056,15 +1291,9 @@ where
         let reader = db.log.reader().await;
         let results = m.read_ops(&locations, &[], &reader).await?;
 
-        // Generate user mutation operations.
-        let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
-            Vec::with_capacity(mutations.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> = Vec::with_capacity(mutations.len());
-        let mut active_keys_delta: isize = 0;
-        let mut user_steps: u64 = 0;
-
-        // Process updates/deletes of existing keys in location order.
-        // This includes keys from both the committed snapshot and ancestor diffs.
+        // Classify existing-key mutations in location order. Collision/ancestor-mismatch slots
+        // are skipped; their mutation (if any) is handled as a create below.
+        let mut existing: Vec<ExistingEntry<K, F, V::Value>> = Vec::with_capacity(locations.len());
         for (op, &old_loc) in results.iter().zip(&locations) {
             let key = op.key().expect("updates should have a key");
 
@@ -1089,83 +1318,100 @@ where
                 continue;
             };
 
-            // Write the user mutation at the next batch location while
-            // preserving the committed-base provenance computed above.
-            let new_loc = Location::new(m.base_size + ops.len() as u64);
-            match mutation {
-                Some(value) => {
-                    ops.push(Operation::Update(update::Unordered(
-                        key.clone(),
-                        value.clone(),
-                    )));
-                    diff.push((
-                        key.clone(),
-                        DiffEntry::Active {
-                            value,
-                            loc: new_loc,
-                            base_old_loc,
-                        },
-                    ));
-                    user_steps += 1;
-                }
-                None => {
-                    ops.push(Operation::Delete(key.clone()));
-                    diff.push((key.clone(), DiffEntry::Deleted { base_old_loc }));
-                    active_keys_delta -= 1;
-                    user_steps += 1;
-                }
-            }
+            existing.push(ExistingEntry {
+                key: key.clone(),
+                iter_loc: old_loc,
+                base_old_loc,
+                value: mutation,
+            });
         }
 
-        // Handle parent-deleted keys that the child wants to re-create.
-        let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
+        m.finish_unordered(existing, mutations, metadata, next_candidate, reader, db)
+            .await
+    }
 
-        // Process creates: remaining mutations (fresh keys) plus parent-deleted
-        // keys being re-created. Both get an Update op and active_keys_delta += 1.
-        // Merge into a single sorted Vec so iteration order is deterministic
-        // regardless of whether the parent is pending or committed.
-        let mut creates: Vec<(K, V::Value, Option<Location<F>>)> =
-            Vec::with_capacity(mutations.len() + parent_deleted_creates.len());
-        for (key, value) in mutations {
-            if let Some(value) = value {
-                creates.push((key, value, None));
-            }
-        }
-        for (key, value, base_old_loc) in parent_deleted_creates {
-            creates.push((key, value, base_old_loc));
-        }
-        creates.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
-        for (key, value, base_old_loc) in creates {
-            let new_loc = Location::new(m.base_size + ops.len() as u64);
-            ops.push(Operation::Update(update::Unordered(
-                key.clone(),
-                value.clone(),
-            )));
-            diff.push((
-                key,
-                DiffEntry::Active {
+    /// Resolve, merkleize, and return an `Arc<MerkleizedBatch>`, reusing locations the caller
+    /// already resolved during state load via
+    /// [`get_many_with_locations`](UnmerkleizedBatch::get_many_with_locations).
+    ///
+    /// For each mutation key present (and `Some`) in `resolved`, the committed location and
+    /// provenance are taken from the map, skipping `gather_existing_locations` + `read_ops` for
+    /// that key. Keys absent from `resolved` (creates, or keys the caller chose not to pre-resolve)
+    /// fall back to the normal read-based resolution. A `resolved` entry of `None` indicates the
+    /// caller observed the key as absent; such keys are treated as creates/deletes-of-absent
+    /// without consulting the map.
+    ///
+    /// Produces a byte-identical root to [`merkleize`](Self::merkleize) for the same mutations.
+    #[allow(clippy::type_complexity)]
+    pub async fn merkleize_resolved<E, C, I, const N: usize>(
+        self,
+        db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
+        resolved: &std::collections::HashMap<K, Option<ResolvedLocation<F>>>,
+        metadata: Option<V::Value>,
+    ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
+    where
+        E: Context,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        I: UnorderedIndex<Value = Location<F>>,
+    {
+        let next_candidate = |floor, tip| next_candidate(&db.bitmap, floor, tip);
+        let (mut mutations, m) = self.into_parts();
+
+        // Partition mutations: pre-resolved existing keys vs. the rest (creates and any keys not
+        // covered by the map). `resolved` entries that are `None` are treated as creates: the key
+        // was observed absent during load, so it carries no committed location.
+        let mut existing: Vec<ExistingEntry<K, F, V::Value>> = Vec::with_capacity(mutations.len());
+        let mut rest: BTreeMap<K, Option<V::Value>> = BTreeMap::new();
+        let keys: Vec<K> = mutations.keys().cloned().collect();
+        for key in keys {
+            let value = mutations.remove(&key).expect("key from mutations");
+            match resolved.get(&key) {
+                Some(Some(loc)) => existing.push(ExistingEntry {
+                    key,
+                    iter_loc: loc.iter_loc,
+                    base_old_loc: loc.base_old_loc,
                     value,
-                    loc: new_loc,
-                    base_old_loc,
-                },
-            ));
-            active_keys_delta += 1;
+                }),
+                _ => {
+                    rest.insert(key, value);
+                }
+            }
         }
 
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        // Resolve the rest the normal way. This covers creates and any not-pre-resolved keys,
+        // and preserves the collision/ancestor-mismatch handling for them.
+        let reader = db.log.reader().await;
+        let mut rest_creates = rest;
+        if !rest_creates.is_empty() {
+            let locations = m.gather_existing_locations(&rest_creates, db, false);
+            let results = m.read_ops(&locations, &[], &reader).await?;
+            for (op, &old_loc) in results.iter().zip(&locations) {
+                let key = op.key().expect("updates should have a key");
+                let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
+                    if entry.loc() != Some(old_loc) {
+                        continue;
+                    }
+                    entry.base_old_loc()
+                } else {
+                    Some(old_loc)
+                };
+                let Some(mutation) = rest_creates.remove(key) else {
+                    continue;
+                };
+                existing.push(ExistingEntry {
+                    key: key.clone(),
+                    iter_loc: old_loc,
+                    base_old_loc,
+                    value: mutation,
+                });
+            }
+        }
 
-        // Remaining phases: floor raise, CommitFloor, journal, diff merge.
-        m.finish(
-            ops,
-            diff,
-            active_keys_delta,
-            user_steps,
-            metadata,
-            next_candidate,
-            reader,
-            db,
-        )
-        .await
+        // Existing-key ops are generated in iter-location order (matching the normal path).
+        existing.sort_by(|a, b| a.iter_loc.cmp(&b.iter_loc));
+
+        m.finish_unordered(existing, rest_creates, metadata, next_candidate, reader, db)
+            .await
     }
 }
 
