@@ -253,24 +253,7 @@ impl CacheRef {
     /// in `ranges` correspond to cache misses that the caller must read from the underlying
     /// blob.
     pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
-        let page_cache = self.cache.read();
-        ranges.retain_mut(|(buf, logical_offset)| {
-            let mut remaining = buf.len();
-            let mut offset = *logical_offset;
-            let mut dst = 0;
-            while remaining > 0 {
-                let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
-                if count == 0 {
-                    break;
-                }
-                offset += count as u64;
-                dst += count;
-                remaining -= count;
-            }
-
-            // Keep cache misses in `ranges`; drop fully-cached entries.
-            remaining > 0
-        });
+        self.cache.read().read_cached_many_inner(blob_id, ranges);
     }
 
     /// Read the specified bytes, preferentially from the page cache. Bytes not found in the cache
@@ -506,6 +489,57 @@ impl Cache {
         );
 
         bytes_to_copy
+    }
+
+    /// Copy as many sorted disjoint ranges as are cached, dropping fully-cached entries and
+    /// retaining misses. Exploits sorted offsets to resolve consecutive items in the same page with
+    /// a single index lookup, and copies page-contained items in one memcpy.
+    fn read_cached_many_inner(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
+        let page_size = self.page_size;
+        let mut cached_page = u64::MAX;
+        let mut cached_slot: Option<usize> = None;
+        ranges.retain_mut(|(buf, logical_offset)| {
+            let len = buf.len();
+            let offset = *logical_offset;
+            let page_num = offset / page_size as u64;
+            let offset_in_page = (offset % page_size as u64) as usize;
+
+            // Reuse the resolved slot for consecutive items in the same page (offsets are sorted).
+            if page_num != cached_page {
+                cached_page = page_num;
+                cached_slot = self.index.get(&(blob_id, page_num)).copied();
+                if let Some(slot) = cached_slot {
+                    self.entries[slot].referenced.store(true, Ordering::Relaxed);
+                }
+            }
+
+            // Common case: the item lives entirely within the resolved page.
+            if let Some(slot) = cached_slot {
+                if offset_in_page + len <= page_size {
+                    buf.copy_from_slice(
+                        &self.slots[slot].as_ref()[offset_in_page..offset_in_page + len],
+                    );
+                    return false;
+                }
+            }
+
+            // The item straddles a page boundary or its first page missed. Fall back to the
+            // page-at-a-time loop, which also handles the multi-page tail.
+            let mut remaining = len;
+            let mut off = offset;
+            let mut dst = 0;
+            while remaining > 0 {
+                let count = self.read_at(blob_id, &mut buf[dst..], off);
+                if count == 0 {
+                    break;
+                }
+                off += count as u64;
+                dst += count;
+                remaining -= count;
+            }
+            cached_page = u64::MAX;
+            remaining > 0
+        });
     }
 
     /// Put the given `page` into the page cache.
@@ -1338,5 +1372,106 @@ mod tests {
         assert!(buf2 == page2);
         // Missed page's buffer should be untouched (still zeroed).
         assert!(buf1.iter().all(|b| *b == 0));
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_multiple_items_same_page() {
+        // Multiple sorted sub-page items resolve from a single page lookup.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+
+        let mut page0 = vec![0u8; page_size];
+        for (i, b) in page0.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &page0, 0);
+        }
+
+        let item = 7usize;
+        let offs = [0u64, 7, 50, (page_size - item) as u64];
+        let mut bufs: Vec<Vec<u8>> = offs.iter().map(|_| vec![0u8; item]).collect();
+        let mut ranges: Vec<(&mut [u8], u64)> = bufs
+            .iter_mut()
+            .zip(offs.iter())
+            .map(|(b, &o)| (b.as_mut_slice(), o))
+            .collect();
+
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert!(ranges.is_empty());
+        drop(ranges);
+
+        for (i, &o) in offs.iter().enumerate() {
+            assert_eq!(bufs[i].as_slice(), &page0[o as usize..o as usize + item]);
+        }
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_straddle_boundary() {
+        // An item that spans pages 0 and 1, mixed with a same-page sibling. Both cached.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+
+        let page0 = vec![0xAB; page_size];
+        let page1 = vec![0xCD; page_size];
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &page0, 0);
+            cache.cache(blob_id, &page1, 1);
+        }
+
+        let item = 8usize;
+        let straddle_off = (page_size - 3) as u64;
+        let mut sib = vec![0u8; item];
+        let mut straddle = vec![0u8; item];
+        let mut ranges: Vec<(&mut [u8], u64)> =
+            vec![(&mut sib, 0), (&mut straddle, straddle_off)];
+
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+        assert!(ranges.is_empty());
+        drop(ranges);
+
+        assert_eq!(sib.as_slice(), &page0[0..item]);
+        let mut expected = vec![0u8; item];
+        expected[..3].copy_from_slice(&page0[page_size - 3..]);
+        expected[3..].copy_from_slice(&page1[..item - 3]);
+        assert_eq!(straddle, expected);
+    }
+
+    #[test_traced]
+    fn test_read_cached_many_straddle_second_page_missing() {
+        // An item straddles into an uncached page. The whole item is a miss and stays in `ranges`,
+        // even though a same-page item before it was served from cache.
+        let pool = test_pool();
+        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        let page_size = PAGE_SIZE.get() as usize;
+
+        let page0 = vec![0xAB; page_size];
+        {
+            let mut cache = cache_ref.cache.write();
+            cache.cache(blob_id, &page0, 0);
+            // page 1 deliberately not cached
+        }
+
+        let item = 8usize;
+        let straddle_off = (page_size - 3) as u64;
+        let mut sib = vec![0u8; item];
+        let mut straddle = vec![0u8; item];
+        let mut ranges: Vec<(&mut [u8], u64)> =
+            vec![(&mut sib, 0), (&mut straddle, straddle_off)];
+
+        cache_ref.read_cached_many(blob_id, &mut ranges);
+
+        // The straddling item is a miss; the sibling was served.
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].1, straddle_off);
+        drop(ranges);
+        assert_eq!(sib.as_slice(), &page0[0..item]);
     }
 }

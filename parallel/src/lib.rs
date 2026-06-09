@@ -68,6 +68,7 @@ commonware_macros::stability_scope!(BETA {
         if #[cfg(feature = "std")] {
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
+                slice::ParallelSliceMut,
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
             use std::{num::NonZeroUsize, sync::Arc};
@@ -378,6 +379,18 @@ commonware_macros::stability_scope!(BETA {
             RA: Send,
             RB: Send;
 
+        /// Sort `slice` in place using `compare`, potentially in parallel.
+        ///
+        /// The sort is unstable: equal elements may be reordered. Callers that rely on a total
+        /// order must make `compare` total.
+        fn par_sort_unstable_by<T, F>(&self, slice: &mut [T], compare: F)
+        where
+            T: Send,
+            F: Fn(&T, &T) -> core::cmp::Ordering + Send + Sync,
+        {
+            slice.sort_unstable_by(compare);
+        }
+
         /// Return the number of threads that are available, as a hint to chunking.
         fn parallelism_hint(&self) -> usize;
     }
@@ -558,6 +571,15 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             self.thread_pool.install(|| rayon::join(a, b))
         }
 
+        fn par_sort_unstable_by<T, F>(&self, slice: &mut [T], compare: F)
+        where
+            T: Send,
+            F: Fn(&T, &T) -> core::cmp::Ordering + Send + Sync,
+        {
+            self.thread_pool
+                .install(|| slice.par_sort_unstable_by(compare));
+        }
+
         fn parallelism_hint(&self) -> usize {
             self.thread_pool.current_num_threads()
         }
@@ -597,6 +619,16 @@ mod test {
             );
 
             prop_assert_eq!(seq_result, par_result);
+        }
+
+        #[test]
+        fn par_sort_unstable_by_matches_std(data in prop::collection::vec(any::<i64>(), 0..1000)) {
+            let parallel = parallel_strategy();
+            let mut expected = data.clone();
+            expected.sort_unstable();
+            let mut actual = data;
+            parallel.par_sort_unstable_by(&mut actual, |a, b| a.cmp(b));
+            prop_assert_eq!(expected, actual);
         }
 
         #[test]

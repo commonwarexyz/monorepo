@@ -139,6 +139,11 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
         self.items = items;
         self
     }
+
+    /// Return a reference to the merkleization strategy.
+    pub(crate) fn strategy(&self) -> &S {
+        self.inner.strategy()
+    }
 }
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].

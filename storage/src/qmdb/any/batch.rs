@@ -34,8 +34,9 @@ use std::{
 };
 use tracing::debug;
 
-/// Maximum number of journal reads to issue concurrently during floor raising.
-const MAX_CONCURRENT_READS: u64 = 64;
+/// Maximum number of floor-raise candidates resolved per bulk read. Each batch fills candidates
+/// under one bitmap guard, then bulk-reads and decodes the journal misses in parallel.
+const FLOOR_READ_BATCH: u64 = 4096;
 
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
@@ -76,15 +77,27 @@ impl<K: Ord + Clone, V: Clone> Mutations<K, V> {
 
     /// Resolve to a key-sorted, last-write-wins [`SortedMutations`].
     ///
-    /// A stable sort followed by a reverse-keep dedup preserves last-write-wins: equal keys keep
-    /// their insertion order after the stable sort, and keeping the last of each run keeps the most
+    /// Pairs each write with its insertion index, then sorts by `(key, index)`. The index makes
+    /// the order total so an unstable (and parallelizable) sort still preserves insertion order
+    /// within an equal-key run. Keeping the last of each run keeps the highest index, i.e. the most
     /// recent write. The resulting key order and final value mapping match what successive
     /// `BTreeMap::insert` calls would produce.
-    fn into_sorted(self) -> SortedMutations<K, V> {
-        let mut pending = self.pending;
-        pending.sort_by(|a, b| a.0.cmp(&b.0));
+    fn into_sorted<S: Strategy>(self, strategy: &S) -> SortedMutations<K, V>
+    where
+        K: Send,
+        V: Send,
+    {
+        let mut pending: Vec<(K, Option<V>, u32)> = self
+            .pending
+            .into_iter()
+            .enumerate()
+            .map(|(i, (k, v))| (k, v, i as u32))
+            .collect();
+        strategy.par_sort_unstable_by(&mut pending, |a, b| {
+            a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2))
+        });
         // Keep the LAST write of each equal-key run. `dedup_by` retains the first of a run, so
-        // swap so the retained slot holds the later (insertion-order-preserved) write.
+        // swap so the retained slot holds the later (highest-index) write.
         pending.dedup_by(|a, b| {
             if a.0 == b.0 {
                 core::mem::swap(a, b);
@@ -94,7 +107,7 @@ impl<K: Ord + Clone, V: Clone> Mutations<K, V> {
             }
         });
         SortedMutations {
-            entries: pending.into_iter().map(|(k, v)| (k, Some(v))).collect(),
+            entries: pending.into_iter().map(|(k, v, _)| (k, Some(v))).collect(),
         }
     }
 }
@@ -738,17 +751,23 @@ where
     }
 
     /// Read multiple operations by location.
+    ///
+    /// `locations` must be strictly increasing (the floor-raise candidate sequence is). Disk misses
+    /// are bulk-read and decoded in parallel via `strategy`.
     async fn read_ops<R: Reader<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],
         batch_ops: &[Operation<F, U>],
         reader: &R,
+        strategy: &S,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
-        // First pass: resolve synchronously into an output Vec, recording the positions and output
-        // slots of disk misses. A single scratch buffer is reused across all sync probes. On the
-        // all-hits path (the warm steady state) nothing is reallocated and no second collect runs.
+        // First pass: resolve synchronously into an output Vec, recording the output slots and
+        // positions of disk misses. A single scratch buffer is reused across all sync probes. On
+        // the all-hits path (the warm steady state) nothing is reallocated and no second collect
+        // runs.
         let mut out: Vec<Operation<F, U>> = Vec::with_capacity(locations.len());
-        let mut misses: Vec<(usize, u64)> = Vec::new();
+        let mut miss_slots: Vec<usize> = Vec::new();
+        let mut miss_positions: Vec<u64> = Vec::new();
         let mut scratch: Vec<u8> = Vec::new();
         for (idx, loc) in locations.iter().enumerate() {
             match self.try_read_op_sync_into(*loc, batch_ops, reader, &mut scratch) {
@@ -756,30 +775,22 @@ where
                 None => {
                     // Reserve the slot; filled in after the batched disk read below.
                     out.push(Operation::CommitFloor(None, Location::new(0)));
-                    misses.push((idx, **loc));
+                    miss_slots.push(idx);
+                    miss_positions.push(**loc);
                 }
             }
         }
-        if misses.is_empty() {
+        if miss_positions.is_empty() {
             return Ok(out);
         }
 
-        // Batch-read disk misses. Reader::read_many requires sorted, unique positions, while this
-        // helper preserves the caller's order and permits duplicates.
-        let mut miss_positions: Vec<u64> = misses.iter().map(|(_, loc)| *loc).collect();
-        miss_positions.sort_unstable();
-        miss_positions.dedup();
-
-        let disk_results = reader.read_many(&miss_positions).await?;
-
-        // Merge disk results back into their reserved slots.
-        for (idx, loc) in misses {
-            // `miss_positions` is sorted and deduped, and `loc` came from it before deduping, so
-            // binary search must find the matching read_many result.
-            let result_idx = miss_positions
-                .binary_search(&loc)
-                .expect("disk result missing for requested location");
-            out[idx] = disk_results[result_idx].clone();
+        // `locations` is strictly increasing, so misses are a strictly increasing subsequence:
+        // already the sorted, unique positions read_many_decoded requires, with output slots in
+        // one-to-one order.
+        debug_assert!(miss_positions.windows(2).all(|w| w[0] < w[1]));
+        let disk_results = reader.read_many_decoded(&miss_positions, strategy).await?;
+        for (slot, op) in miss_slots.into_iter().zip(disk_results) {
+            out[slot] = op;
         }
         Ok(out)
     }
@@ -915,13 +926,13 @@ where
             let mut moved = 0u64;
             let mut scan_from = floor;
             let mut floor_diff = Vec::with_capacity(total_steps as usize);
-            let mut candidates: Vec<Location<F>> = Vec::with_capacity(MAX_CONCURRENT_READS as usize);
+            let mut candidates: Vec<Location<F>> = Vec::with_capacity(FLOOR_READ_BATCH as usize);
 
             while moved < total_steps {
                 // Collect candidates, capped by the number of active ops still needed.
                 // `scan_from` tracks prefetch progress separately from `floor`, so
                 // early exit cannot leave `floor` past unprocessed candidates.
-                let limit = ((total_steps - moved) as usize).min(MAX_CONCURRENT_READS as usize);
+                let limit = ((total_steps - moved) as usize).min(FLOOR_READ_BATCH as usize);
                 candidates.clear();
                 scan_from = fill_candidates(scan_from, fixed_tip, limit, &mut candidates);
                 if candidates.is_empty() {
@@ -929,8 +940,10 @@ where
                 }
 
                 // Batch-read candidates: cache hits resolve synchronously, disk misses
-                // are fetched concurrently.
-                let resolved = self.read_ops(&candidates, &ops, &reader).await?;
+                // are fetched concurrently and decoded in parallel.
+                let resolved = self
+                    .read_ops(&candidates, &ops, &reader, db.strategy())
+                    .await?;
 
                 // Process results in order, moving active ops to the tip.
                 for (candidate, op) in candidates.iter().copied().zip(resolved) {
@@ -1077,12 +1090,20 @@ where
     H: Hasher,
     Operation<F, update::Unordered<K, V>>: Codec,
 {
-    /// Generate operations for the (location-sorted) existing entries followed by the creates,
-    /// then run the shared `finish` tail. `existing` must already be in iter-location order.
-    #[allow(clippy::type_complexity)]
+    /// Generate operations for the existing entries (location order) followed by the creates
+    /// (key order), then run the shared `finish` tail.
+    ///
+    /// `existing` need not be location-sorted: a cheap `(location, index)` index sort drives op
+    /// emission, so the expensive sort of the wide `ExistingEntry` structs is avoided.
+    /// `existing_key_sorted` asserts `existing` is already in ascending key order (true when the
+    /// resolved-split produced every entry and the journal read path was skipped). When set, the
+    /// key-sorted diff is produced by a two-cursor merge of the existing and create runs instead
+    /// of a full re-sort.
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     async fn finish_unordered<E, C, I, R, const N: usize>(
         self,
         existing: Vec<ExistingEntry<K, F, V::Value>>,
+        existing_key_sorted: bool,
         mut mutations: SortedMutations<K, V::Value>,
         metadata: Option<V::Value>,
         fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
@@ -1097,43 +1118,55 @@ where
     {
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
             Vec::with_capacity(existing.len() + mutations.len() + 1);
-        let mut diff: DiffVec<K, F, V::Value> =
-            Vec::with_capacity(existing.len() + mutations.len());
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
 
-        // Process updates/deletes of existing keys in iter-location order.
-        for ExistingEntry {
-            key,
-            base_old_loc,
-            value,
-            ..
-        } in existing
-        {
-            let new_loc = Location::new(self.base_size + ops.len() as u64);
-            match value {
-                Some(value) => {
-                    ops.push(Operation::Update(update::Unordered(
-                        key.clone(),
-                        value.clone(),
-                    )));
-                    diff.push((
-                        key,
-                        DiffEntry::Active {
-                            value,
-                            loc: new_loc,
-                            base_old_loc,
-                        },
-                    ));
-                    user_steps += 1;
-                }
-                None => {
-                    ops.push(Operation::Delete(key.clone()));
-                    diff.push((key, DiffEntry::Deleted { base_old_loc }));
-                    active_keys_delta -= 1;
-                    user_steps += 1;
-                }
+        // Order existing entries by location for op emission. Sorting compact `(location, index)`
+        // pairs (16 bytes, contiguous) is far cheaper than sorting the wide `ExistingEntry` structs
+        // in place, and locations are unique so the order is total.
+        let mut order: Vec<(u64, u32)> = existing
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (*e.iter_loc, i as u32))
+            .collect();
+        order.sort_unstable();
+
+        // Emit existing-key ops in location order, recording each entry's new (uncommitted)
+        // location so the diff can be produced separately in key order.
+        let mut new_loc: Vec<Location<F>> = vec![Location::new(0); existing.len()];
+        for &(_, idx) in &order {
+            let entry = &existing[idx as usize];
+            let loc = Location::new(self.base_size + ops.len() as u64);
+            new_loc[idx as usize] = loc;
+            match &entry.value {
+                Some(value) => ops.push(Operation::Update(update::Unordered(
+                    entry.key.clone(),
+                    value.clone(),
+                ))),
+                None => ops.push(Operation::Delete(entry.key.clone())),
             }
+        }
+
+        // Existing-key diff entries in `existing`'s native order (key order when
+        // `existing_key_sorted`). Consumes `existing` so keys/values move rather than clone.
+        let mut existing_diff: DiffVec<K, F, V::Value> = Vec::with_capacity(existing.len());
+        for (i, entry) in existing.into_iter().enumerate() {
+            let loc = new_loc[i];
+            user_steps += 1;
+            let diff_entry = match entry.value {
+                Some(value) => DiffEntry::Active {
+                    value,
+                    loc,
+                    base_old_loc: entry.base_old_loc,
+                },
+                None => {
+                    active_keys_delta -= 1;
+                    DiffEntry::Deleted {
+                        base_old_loc: entry.base_old_loc,
+                    }
+                }
+            };
+            existing_diff.push((entry.key, diff_entry));
         }
 
         // Handle parent-deleted keys that the child wants to re-create.
@@ -1153,24 +1186,55 @@ where
             creates.push((key, value, base_old_loc));
         }
         creates.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+
+        // Create-key ops append after the existing ops in key order. Their diff entries are
+        // collected separately so the final diff can be assembled key-sorted.
+        let mut create_diff: DiffVec<K, F, V::Value> = Vec::with_capacity(creates.len());
         for (key, value, base_old_loc) in creates {
-            let new_loc = Location::new(self.base_size + ops.len() as u64);
+            let loc = Location::new(self.base_size + ops.len() as u64);
             ops.push(Operation::Update(update::Unordered(
                 key.clone(),
                 value.clone(),
             )));
-            diff.push((
+            create_diff.push((
                 key,
                 DiffEntry::Active {
                     value,
-                    loc: new_loc,
+                    loc,
                     base_old_loc,
                 },
             ));
             active_keys_delta += 1;
         }
 
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        // Assemble the key-sorted diff. `create_diff` is always key-sorted (creates were sorted by
+        // key). When `existing_key_sorted`, `existing_diff` is also key-sorted and the two runs are
+        // disjoint (a key is either existing or a create), so a two-cursor merge reproduces the full
+        // sort. Otherwise the read path interleaved `existing_diff` out of key order, so concatenate
+        // and sort.
+        let diff: DiffVec<K, F, V::Value> = if existing_key_sorted {
+            let mut merged = Vec::with_capacity(existing_diff.len() + create_diff.len());
+            let mut ei = existing_diff.into_iter().peekable();
+            let mut ci = create_diff.into_iter().peekable();
+            loop {
+                let take_create = match (ei.peek(), ci.peek()) {
+                    (Some(e), Some(c)) => c.0 < e.0,
+                    (None, Some(_)) => true,
+                    (Some(_), None) => false,
+                    (None, None) => break,
+                };
+                if take_create {
+                    merged.push(ci.next().unwrap());
+                } else {
+                    merged.push(ei.next().unwrap());
+                }
+            }
+            merged
+        } else {
+            existing_diff.extend(create_diff);
+            existing_diff.sort_by(|a, b| a.0.cmp(&b.0));
+            existing_diff
+        };
 
         self.finish(
             ops,
@@ -1220,8 +1284,9 @@ where
                 oldest.journal_batch.size() - oldest.journal_batch.items().len() as u64;
             db_size.max(oldest_base)
         });
+        let sorted = self.mutations.into_sorted(self.journal_batch.strategy());
         (
-            self.mutations.into_sorted(),
+            sorted,
             Merkleizer {
                 journal_batch: self.journal_batch,
                 ancestors,
@@ -1506,6 +1571,11 @@ where
             SortedMutations { entries }
         };
 
+        // `existing` is built in ascending key order by the resolved-split above (it drains
+        // `into_creates` in key order). The read path below appends in location order, breaking
+        // key order, so the fast key-sorted diff merge applies only when nothing is read.
+        let existing_key_sorted = rest.is_empty();
+
         // Resolve the rest from the journal: gather candidate locations, read the ops, and
         // classify in location order. A key resolved via an ancestor diff must only match at its
         // ancestor-diff location; otherwise a stale snapshot collision (the pre-parent DB snapshot
@@ -1515,7 +1585,7 @@ where
         let reader = db.log.reader().await;
         if !rest.is_empty() {
             let locations = m.gather_existing_locations(&rest, db, false);
-            let results = m.read_ops(&locations, &[], &reader).await?;
+            let results = m.read_ops(&locations, &[], &reader, db.strategy()).await?;
             for (op, &old_loc) in results.iter().zip(&locations) {
                 let key = op.key().expect("updates should have a key");
                 let base_old_loc = if let Some(entry) = resolve_in_ancestors(&m.ancestors, key) {
@@ -1538,12 +1608,16 @@ where
             }
         }
 
-        // Existing-key ops are generated in iter-location order; the read path already yields
-        // that order, and pre-resolved entries are merged into it here.
-        existing.sort_by(|a, b| a.iter_loc.cmp(&b.iter_loc));
-
-        m.finish_unordered(existing, rest, metadata, fill_candidates, reader, db)
-            .await
+        m.finish_unordered(
+            existing,
+            existing_key_sorted,
+            rest,
+            metadata,
+            fill_candidates,
+            reader,
+            db,
+        )
+        .await
     }
 
     /// Attach existing-key locations the caller already resolved during state load (via
@@ -1624,7 +1698,7 @@ where
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
         for (op, &old_loc) in m
-            .read_ops(&locations, &[], &reader)
+            .read_ops(&locations, &[], &reader, db.strategy())
             .await?
             .into_iter()
             .zip(&locations)
@@ -1696,7 +1770,9 @@ where
         prev_locations.sort();
         prev_locations.dedup();
 
-        let prev_results = m.read_ops(&prev_locations, &[], &reader).await?;
+        let prev_results = m
+            .read_ops(&prev_locations, &[], &reader, db.strategy())
+            .await?;
 
         for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
@@ -2865,14 +2941,16 @@ mod tests {
                 value_current,
             ))];
 
-            // read_ops should resolve all three sources correctly while preserving order and
-            // duplicates across the disk-backed subset.
+            // read_ops should resolve all three sources correctly. Locations are strictly
+            // increasing: committed (disk) < parent (ancestor) < current (this batch).
+            assert!(committed_loc < parent_loc && parent_loc < current_loc);
             let reader = db.log.reader().await;
             let ops = merkleizer
                 .read_ops(
-                    &[current_loc, committed_loc, parent_loc, committed_loc],
+                    &[committed_loc, parent_loc, current_loc],
                     &batch_ops,
                     &reader,
+                    db.strategy(),
                 )
                 .await
                 .unwrap();
@@ -2881,10 +2959,9 @@ mod tests {
             assert_eq!(
                 ops,
                 vec![
-                    Operation::Update(update::Unordered(key_current, value_current)),
                     Operation::Update(update::Unordered(key_db, value_db)),
                     Operation::Update(update::Unordered(key_parent, value_parent)),
-                    Operation::Update(update::Unordered(key_db, value_db)),
+                    Operation::Update(update::Unordered(key_current, value_current)),
                 ]
             );
 

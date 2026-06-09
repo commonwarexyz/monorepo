@@ -74,6 +74,7 @@ arbitrary = [
 ]
 fuzzing = []
 test-traits = []
+sha2-asm = [ "commonware-cryptography/sha2-asm" ]
 
 [lib]
 bench = false
