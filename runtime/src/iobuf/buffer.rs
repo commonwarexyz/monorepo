@@ -897,7 +897,10 @@ fn heap_layout(capacity: usize, alignment: usize) -> (Layout, usize) {
 /// `ptr` must be the base of an allocation created with `layout`, and `layout`
 /// must be a full pooled layout (see [`pooled_layout`]).
 #[inline(always)]
-const unsafe fn pooled_header_for_layout(ptr: NonNull<u8>, layout: Layout) -> NonNull<PooledHeader> {
+const unsafe fn pooled_header_for_layout(
+    ptr: NonNull<u8>,
+    layout: Layout,
+) -> NonNull<PooledHeader> {
     let header_offset = layout
         .size()
         .checked_sub(size_of::<PooledHeader>())
@@ -1107,12 +1110,17 @@ mod tests {
         assert!(!owner.is_pooled());
         assert!(!owner.is_empty());
 
-        let expected_header =
-            round_down(base_addr + cap - size_of::<HeapHeader>(), align_of::<HeapHeader>());
+        let expected_header = round_down(
+            base_addr + cap - size_of::<HeapHeader>(),
+            align_of::<HeapHeader>(),
+        );
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }.as_ptr() as usize, base_addr);
         // SAFETY: owner is unique and live.
-        assert_eq!(unsafe { owner.usable_capacity() }, expected_header - base_addr);
+        assert_eq!(
+            unsafe { owner.usable_capacity() },
+            expected_header - base_addr
+        );
         // SAFETY: the adopted region below the header is writable; verify the
         // payload survived adoption.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };
