@@ -737,8 +737,12 @@ mod zkc {
                     }
                 }
             }
-            // Add extra assertions for each committed index.
-            for (i, &c_pos) in self.committed_indices.iter().enumerate() {
+            // Add extra assertions for each committed index, linearizing so
+            // that committed values not referenced by any assertion still
+            // resolve to a location.
+            let committed: Vec<_> = self.committed_indices.iter().copied().collect();
+            for (i, c_pos) in committed.into_iter().enumerate() {
+                self.linearize(zkc, c_pos);
                 self.extra_assertions.push((c_pos, Location::Committed(i)));
             }
         }
@@ -2014,7 +2018,8 @@ pub mod fuzz {
         Circuit::new(2, weights).expect("quadratic circuit layout should be valid")
     }
 
-    struct Case {
+    /// A quadratic circuit paired with a witness that may or may not satisfy it.
+    pub struct Case {
         circuit: Circuit<F>,
         witness: Witness<F>,
     }
@@ -2080,15 +2085,18 @@ pub mod fuzz {
         }
     }
 
-    pub struct Plan {
-        case: Case,
+    pub enum Plan {
+        ProveAndVerify(Case),
+        ZkcConversion(crate::zk::circuit::fuzz::Plan),
     }
 
     impl<'a> Arbitrary<'a> for Plan {
         fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
-            Ok(Self {
-                case: Case::arbitrary(u)?,
-            })
+            match u.int_in_range(0..=1)? {
+                0 => Ok(Self::ProveAndVerify(Case::arbitrary(u)?)),
+                1 => Ok(Self::ZkcConversion(u.arbitrary()?)),
+                _ => unreachable!("plan variant out of range"),
+            }
         }
     }
 
@@ -2117,9 +2125,38 @@ pub mod fuzz {
         assert_eq!(verified, case.is_satisfied());
     }
 
+    /// Check that converting a ZK circuit to a bulletproofs circuit and
+    /// witness preserves satisfaction, committing a random subset of the
+    /// witnesses.
+    pub(super) fn assert_zkc_conversion_preserves_satisfaction(
+        plan: &crate::zk::circuit::fuzz::Plan,
+        u: &mut Unstructured<'_>,
+    ) -> arbitrary::Result<()> {
+        let valued = plan.build();
+        let mut committed = Vec::new();
+        for i in 0..valued.circuit.witnesses {
+            if u.arbitrary()? {
+                committed.push(crate::zk::circuit::CircuitIdx::Witness(i));
+            }
+        }
+        let (circuit, witness) =
+            zkc_to_circuit_and_witness(Some(&mut test_rng()), valued, &committed);
+        assert_eq!(
+            witness.is_satisfied(&circuit),
+            plan.satisfied(),
+            "plan: {plan:?}"
+        );
+        Ok(())
+    }
+
     impl Plan {
-        pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-            assert_verify_matches_satisfaction(&self.case);
+        pub fn run(self, u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            match self {
+                Self::ProveAndVerify(case) => assert_verify_matches_satisfaction(&case),
+                Self::ZkcConversion(plan) => {
+                    assert_zkc_conversion_preserves_satisfaction(&plan, u)?
+                }
+            }
             Ok(())
         }
     }
@@ -2130,7 +2167,7 @@ mod test {
     use super::{
         fuzz, prove, r1cs_to_circuit, verify, Circuit, R1cs, Setup, SparseMatrix, Witness,
     };
-    use crate::transcript::Transcript;
+    use crate::{transcript::Transcript, zk::circuit as zk};
     use commonware_codec::{Decode, Encode};
     use commonware_invariants::minifuzz;
     use commonware_math::{
@@ -2139,6 +2176,14 @@ mod test {
     };
     use commonware_parallel::Sequential;
     use commonware_utils::test_rng;
+
+    #[test]
+    fn test_zkc_conversion_preserves_satisfaction_minifuzz() {
+        minifuzz::test(|u| {
+            let plan = u.arbitrary::<zk::fuzz::Plan>()?;
+            fuzz::assert_zkc_conversion_preserves_satisfaction(&plan, u)
+        });
+    }
 
     #[test]
     fn test_random_r1cs_minifuzz() {

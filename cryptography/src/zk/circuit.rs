@@ -82,6 +82,17 @@ impl<F> Index<CircuitIdx> for ValuedCircuit<F> {
     }
 }
 
+impl<F: PartialEq> ValuedCircuit<F> {
+    /// Checks whether the values assigned to this circuit satisfy its assertions.
+    #[must_use]
+    pub fn is_satisfied(&self) -> bool {
+        self.circuit
+            .assertions
+            .iter()
+            .all(|&(a, b)| self[a] == self[b])
+    }
+}
+
 struct ValuesBuilder<F> {
     witnesses: Vec<F>,
     nodes: Vec<F>,
@@ -474,5 +485,166 @@ pub fn build_with_values<F: Ring + PartialEq>(
         circuit,
         witnesses: values.witnesses,
         nodes: values.nodes,
+    }
+}
+
+#[commonware_macros::stability(ALPHA)]
+#[cfg(any(test, feature = "fuzz"))]
+pub mod fuzz {
+    use super::*;
+    use arbitrary::{Arbitrary, Unstructured};
+    use commonware_math::test::F;
+
+    #[derive(Debug)]
+    enum Op {
+        Witness(F),
+        Constant(F),
+        Zero,
+        One,
+        Add(usize, usize),
+        Sub(usize, usize),
+        Mul(usize, usize),
+        Neg(usize),
+        Inv(usize),
+        AssertEq(usize, usize),
+    }
+
+    /// A random sequence of circuit operations, together with whether the
+    /// circuit they build should be satisfied.
+    ///
+    /// Values are drawn from a small range so that assertions have a decent
+    /// chance of holding, exercising both outcomes.
+    #[derive(Debug)]
+    pub struct Plan {
+        ops: Vec<Op>,
+        satisfied: bool,
+    }
+
+    impl Arbitrary<'_> for Plan {
+        fn arbitrary(u: &mut Unstructured<'_>) -> arbitrary::Result<Self> {
+            let mut ops = Vec::new();
+            let mut values: Vec<F> = Vec::new();
+            let mut is_native: Vec<bool> = Vec::new();
+            let mut satisfied = true;
+            for _ in 0..u.int_in_range(1..=32)? {
+                let kind = if values.is_empty() {
+                    u.int_in_range(0..=3)?
+                } else {
+                    u.int_in_range(0..=9)?
+                };
+                if kind <= 3 {
+                    let v = F::from(u.int_in_range::<u8>(0..=4)?);
+                    let (op, value, native) = match kind {
+                        0 => (Op::Witness(v), v, false),
+                        1 => (Op::Constant(v), v, false),
+                        2 => (Op::Zero, F::zero(), true),
+                        _ => (Op::One, F::one(), true),
+                    };
+                    ops.push(op);
+                    values.push(value);
+                    is_native.push(native);
+                    continue;
+                }
+                let a = u.int_in_range(0..=values.len() - 1)?;
+                let b = u.int_in_range(0..=values.len() - 1)?;
+                let merged = is_native[a] && is_native[b];
+                let (op, value, native) = match kind {
+                    4 => (Op::Add(a, b), values[a] + &values[b], merged),
+                    5 => (Op::Sub(a, b), values[a] - &values[b], merged),
+                    6 => (Op::Mul(a, b), values[a] * &values[b], merged),
+                    7 => (Op::Neg(a), -values[a], is_native[a]),
+                    8 => {
+                        // Inverting a circuit-backed zero constrains z * 0 = 1,
+                        // which is unsatisfiable. Native vars add no constraint.
+                        if !is_native[a] && values[a] == F::zero() {
+                            satisfied = false;
+                        }
+                        (Op::Inv(a), values[a].inv(), is_native[a])
+                    }
+                    _ => {
+                        // Asserting equality between two unequal native vars is
+                        // a panic by design, so the plan must avoid it.
+                        if merged && values[a] != values[b] {
+                            continue;
+                        }
+                        ops.push(Op::AssertEq(a, b));
+                        satisfied = satisfied && values[a] == values[b];
+                        continue;
+                    }
+                };
+                ops.push(op);
+                values.push(value);
+                is_native.push(native);
+            }
+            Ok(Self { ops, satisfied })
+        }
+    }
+
+    impl Plan {
+        /// Check that satisfaction matches the natively computed expectation.
+        pub fn run(self, _u: &mut Unstructured<'_>) -> arbitrary::Result<()> {
+            assert_eq!(
+                self.build().is_satisfied(),
+                self.satisfied(),
+                "plan: {self:?}"
+            );
+            Ok(())
+        }
+
+        /// Whether the circuit built by [`Self::build`] should be satisfied.
+        pub const fn satisfied(&self) -> bool {
+            self.satisfied
+        }
+
+        /// Build the circuit, along with its prover assignment.
+        pub fn build(&self) -> ValuedCircuit<F> {
+            build_with_values(|ctx| {
+                let mut vars: Vec<Var<'_, F>> = Vec::new();
+                for op in &self.ops {
+                    let var = match *op {
+                        Op::Witness(v) => Var::witness(ctx, move |_| v),
+                        Op::Constant(v) => Var::constant(ctx, v),
+                        Op::Zero => Var::zero(),
+                        Op::One => Var::one(),
+                        Op::Add(a, b) => vars[a].clone() + &vars[b],
+                        Op::Sub(a, b) => vars[a].clone() - &vars[b],
+                        Op::Mul(a, b) => vars[a].clone() * &vars[b],
+                        Op::Neg(a) => -vars[a].clone(),
+                        Op::Inv(a) => vars[a].inv(),
+                        Op::AssertEq(a, b) => {
+                            vars[a].assert_eq(&vars[b]);
+                            continue;
+                        }
+                    };
+                    vars.push(var);
+                }
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use commonware_invariants::minifuzz;
+    use commonware_math::test::F;
+
+    #[test]
+    fn test_is_satisfied_matches_native_evaluation_minifuzz() {
+        minifuzz::test(|u| u.arbitrary::<fuzz::Plan>()?.run(u));
+    }
+
+    #[test]
+    fn test_is_satisfied_cubic() {
+        // Constrain a witness `x` to satisfy `x^3 + x + 5 = 35`.
+        let cubic = |x_value: u64| {
+            build_with_values(move |ctx| {
+                let x = Var::witness(ctx, move |_| F::from(x_value));
+                let out = x.clone() * &x * &x + &x + &Var::constant(ctx, F::from(5u64));
+                out.assert_eq(&Var::constant(ctx, F::from(35u64)));
+            })
+        };
+        assert!(cubic(3).is_satisfied());
+        assert!(!cubic(4).is_satisfied());
     }
 }
