@@ -570,13 +570,14 @@ where
                 buffer.send(round, block, recipients);
             }
             Message::Proposed { round, block, ack } => {
+                self.ingest(&block, buffer, application, resolver)
+                    .await;
+
                 // If the round has already been pruned by tip advancement,
                 // `cache_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
                 self.cache_verified(round, block.digest(), block.clone())
-                    .await;
-                self.ingest(&block, buffer, application, resolver)
                     .await;
 
                 // Retain the block in memory so the subsequent `Forward` can
@@ -587,24 +588,25 @@ where
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Verified { round, block, ack } => {
+                self.ingest(&block, buffer, application, resolver)
+                    .await;
+
                 // If the round has already been pruned by tip advancement,
                 // `cache_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_verified(round, block.digest(), block.clone())
-                    .await;
-                self.ingest(&block, buffer, application, resolver)
-                    .await;
+                self.cache_verified(round, block.digest(), block).await;
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Certified { round, block, ack } => {
+                self.ingest(&block, buffer, application, resolver)
+                    .await;
+
                 // If the round has already been pruned by tip advancement,
                 // `cache_block` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_block(round, block.digest(), block.clone()).await;
-                self.ingest(&block, buffer, application, resolver)
-                    .await;
+                self.cache_block(round, block.digest(), block).await;
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Notarization { notarization } => {
@@ -621,9 +623,9 @@ where
                 // data. If the block is not locally available, remember the
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-                    self.cache_block(round, digest, block.clone()).await;
                     self.ingest(&block, buffer, application, resolver)
                         .await;
+                    self.cache_block(round, digest, block).await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
@@ -1071,13 +1073,12 @@ where
         if !self.floor.matches_pending_anchor(commitment) {
             return false;
         }
-        let block = (*block).clone();
 
         // Floor anchors can bypass the local proposal-verification path. Check
         // the parent relationship before using a non-genesis anchor for walkback.
         let height = block.height();
         if height > Height::zero() {
-            let parent_commitment = V::parent_commitment(&block);
+            let parent_commitment = V::parent_commitment(block);
             assert!(
                 block.parent() == V::commitment_to_inner(parent_commitment),
                 "floor block parent commitment mismatch"
@@ -1115,7 +1116,7 @@ where
         try_join!(
             async {
                 self.finalized_blocks
-                    .put(block.clone().into())
+                    .put((*block).clone().into())
                     .await
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
@@ -1240,7 +1241,7 @@ where
                     {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
-                                .put_certified(bounds.epoch(), height, digest, block.clone().into())
+                                .put_certified(bounds.epoch(), height, digest, block.into())
                                 .await;
                         }
                     }
@@ -1501,7 +1502,7 @@ where
                             .store_finalization(
                                 height,
                                 digest,
-                                block.clone(),
+                                block,
                                 Some(finalization),
                                 application,
                             )
