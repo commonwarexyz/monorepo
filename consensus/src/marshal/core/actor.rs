@@ -570,8 +570,7 @@ where
                 buffer.send(round, block, recipients);
             }
             Message::Proposed { round, block, ack } => {
-                self.ingest(&block, buffer, application, resolver)
-                    .await;
+                self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
                 // `cache_verified` is a no-op because the round is below
@@ -588,8 +587,7 @@ where
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Verified { round, block, ack } => {
-                self.ingest(&block, buffer, application, resolver)
-                    .await;
+                self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
                 // `cache_verified` is a no-op because the round is below
@@ -599,8 +597,7 @@ where
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Certified { round, block, ack } => {
-                self.ingest(&block, buffer, application, resolver)
-                    .await;
+                self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
                 // `cache_block` is a no-op because the round is below
@@ -623,8 +620,7 @@ where
                 // data. If the block is not locally available, remember the
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-                    self.ingest(&block, buffer, application, resolver)
-                        .await;
+                    self.ingest(&block, buffer, application, resolver).await;
                     self.cache_block(round, digest, block).await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
@@ -644,10 +640,7 @@ where
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // The anchor path stores the floor block and finalization,
                     // advances floors, prunes below them, and resumes dispatch.
-                    if self
-                        .ingest(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         return;
                     }
 
@@ -1035,10 +1028,7 @@ where
 
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor.await_anchor(finalization);
-            assert!(
-                self.ingest(&block, buffer, application, resolver)
-                    .await
-            );
+            assert!(self.ingest(&block, buffer, application, resolver).await);
             return;
         }
 
@@ -1203,10 +1193,7 @@ where
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
-                if self
-                    .ingest(&block, buffer, application, resolver)
-                    .await
-                {
+                if self.ingest(&block, buffer, application, resolver).await {
                     response.send_lossy(true);
                     return false;
                 }
@@ -1446,10 +1433,7 @@ where
 
                     // The floor-anchor path fully handles this finalization
                     // and moves the lower bound past it.
-                    if self
-                        .ingest(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         continue;
                     }
 
@@ -1481,10 +1465,7 @@ where
 
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.
-                    if self
-                        .ingest(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         continue;
                     }
 
