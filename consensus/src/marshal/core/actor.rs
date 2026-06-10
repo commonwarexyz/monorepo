@@ -1054,6 +1054,14 @@ where
     /// Notifies subscribers of a validated block and applies it to any
     /// pending floor transition.
     ///
+    /// Subscribers are notified before the block is persisted. This is not
+    /// observable while running because mailbox requests are only served
+    /// after the current `select_loop!` arm completes. After an unclean
+    /// shutdown, however, a subscriber may hold a block that marshal never
+    /// durably stored. Subscriptions make no durability promise. Durable
+    /// height-ordered delivery is provided by application dispatch, which
+    /// only sends blocks after [`Self::sync_finalized`].
+    ///
     /// Returns true if the block was consumed as the floor anchor.
     async fn ingest<Buf: Buffer<V>>(
         &mut self,
