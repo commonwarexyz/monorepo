@@ -509,7 +509,10 @@ mod tests {
         }
     }
 
-    async fn init_db(context: deterministic::Context, suffix: &str) -> Arc<TracedAsyncRwLock<TestDb>> {
+    async fn init_db(
+        context: deterministic::Context,
+        suffix: &str,
+    ) -> Arc<TracedAsyncRwLock<TestDb>> {
         let db = TestDb::init(context.child("db"), db_config(suffix, &context))
             .await
             .expect("db init should succeed");

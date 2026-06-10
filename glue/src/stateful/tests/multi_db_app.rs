@@ -59,7 +59,7 @@ use commonware_storage::{
 use commonware_utils::{
     non_empty_range,
     range::NonEmptyRange,
-    sync::{TracedAsyncRwLock, Mutex},
+    sync::{Mutex, TracedAsyncRwLock},
     test_rng, NZDuration, NZUsize, NZU64,
 };
 use futures::{Stream, StreamExt};

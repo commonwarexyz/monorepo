@@ -28,7 +28,8 @@ use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock};
 use futures::future::{pending, Either};
 use std::{ops::Deref, sync::Arc};
 
-type KeylessUnjournaledDbHandle<F, E, V, H, C, S> = Arc<TracedAsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
+type KeylessUnjournaledDbHandle<F, E, V, H, C, S> =
+    Arc<TracedAsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
 
 async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
     let mut latest = None;

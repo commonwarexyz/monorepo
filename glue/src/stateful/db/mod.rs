@@ -186,7 +186,9 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// The `db` parameter is the `Arc<TracedAsyncRwLock<Self>>` that wraps this
     /// database, allowing batch types to capture a shared reference for
     /// read-through to committed state.
-    fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> impl Future<Output = Self::Unmerkleized> + Send;
+    fn new_batch(
+        db: &Arc<TracedAsyncRwLock<Self>>,
+    ) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Return true if a merkleized batch matches a committed sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
@@ -607,7 +609,10 @@ where
             T::sync_target(&database).await == converged_target,
             "state sync database target does not match the coordinator target",
         );
-        Ok((Self::new(TracedAsyncRwLock::new("stateful.db", database)), converged_anchor))
+        Ok((
+            Self::new(TracedAsyncRwLock::new("stateful.db", database)),
+            converged_anchor,
+        ))
     }
 }
 
@@ -1830,8 +1835,9 @@ mod tests {
 
     #[test]
     fn single_db_set_reports_unbounded_rewind_depth() {
-        let rewind_depth =
-            <Arc<TracedAsyncRwLock<TestDb>> as DatabaseSet<deterministic::Context>>::max_rewind_depth();
+        let rewind_depth = <Arc<TracedAsyncRwLock<TestDb>> as DatabaseSet<
+            deterministic::Context,
+        >>::max_rewind_depth();
         assert_eq!(rewind_depth, None);
     }
 
@@ -1857,17 +1863,19 @@ mod tests {
 
     #[test]
     fn rewind_window_assertion_accepts_equal_pending_acks_and_rewind_depth() {
-        assert_rewind_window_safety::<deterministic::Context, Arc<TracedAsyncRwLock<OneStepRewindDb>>>(
-            NonZeroUsize::new(1).unwrap(),
-        );
+        assert_rewind_window_safety::<
+            deterministic::Context,
+            Arc<TracedAsyncRwLock<OneStepRewindDb>>,
+        >(NonZeroUsize::new(1).unwrap());
     }
 
     #[test]
     #[should_panic(expected = "marshal max_pending_acks=2 exceeds database_set.max_rewind_depth=1")]
     fn rewind_window_assertion_panics_when_pending_acks_exceed_rewind_depth() {
-        assert_rewind_window_safety::<deterministic::Context, Arc<TracedAsyncRwLock<OneStepRewindDb>>>(
-            NonZeroUsize::new(2).unwrap(),
-        );
+        assert_rewind_window_safety::<
+            deterministic::Context,
+            Arc<TracedAsyncRwLock<OneStepRewindDb>>,
+        >(NonZeroUsize::new(2).unwrap());
     }
 
     #[test]
@@ -1878,14 +1886,20 @@ mod tests {
                 Arc<TracedAsyncRwLock<CountingRewindDb>>,
             );
 
-            let left = Arc::new(TracedAsyncRwLock::new("test", CountingRewindDb {
-                current_target: 2,
-                rewind_count: 0,
-            }));
-            let right = Arc::new(TracedAsyncRwLock::new("test", CountingRewindDb {
-                current_target: 1,
-                rewind_count: 0,
-            }));
+            let left = Arc::new(TracedAsyncRwLock::new(
+                "test",
+                CountingRewindDb {
+                    current_target: 2,
+                    rewind_count: 0,
+                },
+            ));
+            let right = Arc::new(TracedAsyncRwLock::new(
+                "test",
+                CountingRewindDb {
+                    current_target: 1,
+                    rewind_count: 0,
+                },
+            ));
             let databases: DbSet = (left.clone(), right.clone());
 
             <DbSet as DatabaseSet<deterministic::Context>>::rewind_to_targets(&databases, (1, 1))
@@ -1905,9 +1919,12 @@ mod tests {
     fn database_set_prune_calls_managed_db_prune() {
         deterministic::Runner::default().start(|_context| async move {
             let prune_count = Arc::new(AtomicUsize::new(0));
-            let database = Arc::new(TracedAsyncRwLock::new("test", PruneCountingDb {
-                prune_count: prune_count.clone(),
-            }));
+            let database = Arc::new(TracedAsyncRwLock::new(
+                "test",
+                PruneCountingDb {
+                    prune_count: prune_count.clone(),
+                },
+            ));
 
             <Arc<TracedAsyncRwLock<PruneCountingDb>> as DatabaseSet<deterministic::Context>>::prune(
                 &database,
@@ -2851,9 +2868,10 @@ mod tests {
             let writer2 = db2.write().await;
 
             let new_batches =
-                <(Arc<TracedAsyncRwLock<TestDb>>, Arc<TracedAsyncRwLock<TestDb>>) as DatabaseSet<
-                    deterministic::Context,
-                >>::new_batches(&databases);
+                <(
+                    Arc<TracedAsyncRwLock<TestDb>>,
+                    Arc<TracedAsyncRwLock<TestDb>>,
+                ) as DatabaseSet<deterministic::Context>>::new_batches(&databases);
             pin_mut!(new_batches);
             assert!(new_batches.as_mut().now_or_never().is_none());
 
@@ -2881,14 +2899,14 @@ mod tests {
             let (release2_tx, release2_rx) = oneshot::channel();
 
             let databases = (
-                Arc::new(TracedAsyncRwLock::new("test", BlockingFinalizeDb::new(
-                    started1_tx,
-                    release1_rx,
-                ))),
-                Arc::new(TracedAsyncRwLock::new("test", BlockingFinalizeDb::new(
-                    started2_tx,
-                    release2_rx,
-                ))),
+                Arc::new(TracedAsyncRwLock::new(
+                    "test",
+                    BlockingFinalizeDb::new(started1_tx, release1_rx),
+                )),
+                Arc::new(TracedAsyncRwLock::new(
+                    "test",
+                    BlockingFinalizeDb::new(started2_tx, release2_rx),
+                )),
             );
 
             let finalize = <(
@@ -3249,7 +3267,10 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync")
                 .spawn(move |context| async move {
-                    <(Arc<TracedAsyncRwLock<SlowSyncDb>>, Arc<TracedAsyncRwLock<FastSyncDb>>) as StateSyncSet<
+                    <(
+                        Arc<TracedAsyncRwLock<SlowSyncDb>>,
+                        Arc<TracedAsyncRwLock<FastSyncDb>>,
+                    ) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, Arc<AtomicBool>),
                         sha256::Digest,
@@ -3308,7 +3329,10 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
-                    <(Arc<TracedAsyncRwLock<SlowSyncDb>>, Arc<TracedAsyncRwLock<FastSyncDb>>) as StateSyncSet<
+                    <(
+                        Arc<TracedAsyncRwLock<SlowSyncDb>>,
+                        Arc<TracedAsyncRwLock<FastSyncDb>>,
+                    ) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, Arc<AtomicBool>),
                         sha256::Digest,

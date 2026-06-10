@@ -453,10 +453,12 @@ mod tests {
         db.sync().await.unwrap();
 
         let target = db.current_target();
-        let fetch =
-            compact::Resolver::get_compact_state(&Arc::new(TracedAsyncRwLock::new("test", db)), target.clone())
-                .await
-                .expect("compact state should be available");
+        let fetch = compact::Resolver::get_compact_state(
+            &Arc::new(TracedAsyncRwLock::new("test", db)),
+            target.clone(),
+        )
+        .await
+        .expect("compact state should be available");
         (target, fetch)
     }
 

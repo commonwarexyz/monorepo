@@ -16,12 +16,12 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
-use tracing::{debug_span, field, info_span, Span};
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
     fmt::Display,
     sync::Arc,
 };
+use tracing::{debug_span, field, info_span, Span};
 
 /// Creates the span carried with a mailbox request, parented on the enqueuing
 /// caller.
@@ -783,7 +783,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         fallback: CommitmentFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
-        let span = enqueue_span("subscribe_by_commitment", None, None, None, Some(&commitment));
+        let span = enqueue_span(
+            "subscribe_by_commitment",
+            None,
+            None,
+            None,
+            Some(&commitment),
+        );
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             span,
             fallback,
@@ -802,7 +808,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// This is useful when a local-only waiter already exists and later
     /// certification makes a network fetch by notarized round valid.
     pub fn hint_notarized(&self, round: Round, commitment: V::Commitment) {
-        let span = enqueue_span("hint_notarized", Some(&round), None, None, Some(&commitment));
+        let span = enqueue_span(
+            "hint_notarized",
+            Some(&round),
+            None,
+            None,
+            Some(&commitment),
+        );
         let _ = self.sender.enqueue(Message::HintNotarized {
             span,
             round,
@@ -905,7 +917,9 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Use [`crate::marshal::Config::start`] to provide the startup anchor.
     pub fn set_floor(&self, finalization: Finalization<S, V::Commitment>) {
         let span = enqueue_span("set_floor", Some(&finalization.round()), None, None, None);
-        let _ = self.sender.enqueue(Message::SetFloor { span, finalization });
+        let _ = self
+            .sender
+            .enqueue(Message::SetFloor { span, finalization });
     }
 
     /// Requests pruning finalized blocks and certificates below the given height.
@@ -940,11 +954,23 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
             Activity::Notarization(notarization) => {
-                let span = enqueue_span("notarization", Some(&notarization.round()), None, None, None);
+                let span = enqueue_span(
+                    "notarization",
+                    Some(&notarization.round()),
+                    None,
+                    None,
+                    None,
+                );
                 Message::Notarization { span, notarization }
             }
             Activity::Finalization(finalization) => {
-                let span = enqueue_span("finalization", Some(&finalization.round()), None, None, None);
+                let span = enqueue_span(
+                    "finalization",
+                    Some(&finalization.round()),
+                    None,
+                    None,
+                    None,
+                );
                 Message::Finalization { span, finalization }
             }
             _ => return Feedback::Ok,
@@ -1412,7 +1438,8 @@ mod tests {
         ));
         let TestMessage::HintFinalized {
             height, targets, ..
-        } = &drained[1] else {
+        } = &drained[1]
+        else {
             panic!("expected hint");
         };
         assert_eq!(*height, Height::new(10));
@@ -1433,10 +1460,7 @@ mod tests {
         <TestMessage as Policy>::handle(&mut overflow, prune(7));
 
         assert_eq!(
-            overflow
-                .floor
-                .as_ref()
-                .map(|(_, floor)| floor.round()),
+            overflow.floor.as_ref().map(|(_, floor)| floor.round()),
             Some(round(8))
         );
         assert_eq!(
@@ -1471,17 +1495,18 @@ mod tests {
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_7));
-        overflow.hint_finalized(Span::none(), Height::new(8), NonEmptyVec::new(public_key(1)));
+        overflow.hint_finalized(
+            Span::none(),
+            Height::new(8),
+            NonEmptyVec::new(public_key(1)),
+        );
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_8));
         <TestMessage as Policy>::handle(&mut overflow, set_floor(8));
         <TestMessage as Policy>::handle(&mut overflow, prune(8));
         assert_eq!(
-            overflow
-                .floor
-                .as_ref()
-                .map(|(_, floor)| floor.round()),
+            overflow.floor.as_ref().map(|(_, floor)| floor.round()),
             Some(round(8))
         );
         assert_eq!(overflow.messages.len(), 1);
@@ -1518,7 +1543,11 @@ mod tests {
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_6));
-        overflow.hint_finalized(Span::none(), Height::new(6), NonEmptyVec::new(public_key(2)));
+        overflow.hint_finalized(
+            Span::none(),
+            Height::new(6),
+            NonEmptyVec::new(public_key(2)),
+        );
         overflow
             .messages
             .push_back(PendingMessage::Message(get_block_7));

@@ -545,9 +545,7 @@ where
                 response.send_lossy(info);
             }
             Message::GetVerified {
-                round,
-                response,
-                ..
+                round, response, ..
             } => {
                 let block = self.cache.get_verified(round).await.map(Into::into);
                 response.send_lossy(block);
@@ -575,10 +573,7 @@ where
                 buffer.send(round, block, recipients);
             }
             Message::Proposed {
-                round,
-                block,
-                ack,
-                ..
+                round, block, ack, ..
             } => {
                 // If the round has already been pruned by tip advancement,
                 // `cache_verified` is a no-op because the round is below
@@ -597,10 +592,7 @@ where
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Verified {
-                round,
-                block,
-                ack,
-                ..
+                round, block, ack, ..
             } => {
                 // If the round has already been pruned by tip advancement,
                 // `cache_verified` is a no-op because the round is below
@@ -613,10 +605,7 @@ where
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Certified {
-                round,
-                block,
-                ack,
-                ..
+                round, block, ack, ..
             } => {
                 // If the round has already been pruned by tip advancement,
                 // `cache_block` is a no-op because the round is below
@@ -627,10 +616,7 @@ where
                     .await;
                 ack.expect("durable ack present").send_lossy(());
             }
-            Message::Notarization {
-                notarization,
-                ..
-            } => {
+            Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
                 let commitment = notarization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
@@ -651,10 +637,7 @@ where
                     debug!(?round, "notarized block unavailable locally");
                 }
             }
-            Message::Finalization {
-                finalization,
-                ..
-            } => {
+            Message::Finalization { finalization, .. } => {
                 let round = finalization.round();
                 let commitment = finalization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
@@ -723,9 +706,7 @@ where
                 }
             },
             Message::GetFinalization {
-                height,
-                response,
-                ..
+                height, response, ..
             } => {
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
@@ -734,9 +715,7 @@ where
                 response.send_lossy(self.stream.processed_height());
             }
             Message::HintFinalized {
-                height,
-                targets,
-                ..
+                height, targets, ..
             } => {
                 // Skip if finalization is already available locally.
                 if self.get_finalization_by_height(height).await.is_some() {
@@ -782,9 +761,7 @@ where
                 .await;
             }
             Message::HintNotarized {
-                round,
-                commitment,
-                ..
+                round, commitment, ..
             } => {
                 if self
                     .find_block_by_commitment(buffer, commitment)

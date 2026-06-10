@@ -72,7 +72,11 @@ use commonware_codec::{
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
-use commonware_utils::{channel::oneshot, sync::{AsyncRwLock, TracedAsyncRwLock}, Array};
+use commonware_utils::{
+    channel::oneshot,
+    sync::{AsyncRwLock, TracedAsyncRwLock},
+    Array,
+};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.

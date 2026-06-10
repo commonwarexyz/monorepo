@@ -928,7 +928,7 @@ mod tests {
         channel::oneshot,
         non_empty_range,
         range::NonEmptyRange,
-        sync::{TracedAsyncRwLock, Mutex},
+        sync::{Mutex, TracedAsyncRwLock},
         NZUsize, NZU16, NZU64,
     };
     use futures::{Stream, StreamExt};
