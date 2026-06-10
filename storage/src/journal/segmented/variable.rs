@@ -591,8 +591,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// The buffer must be in the on-disk format produced by [Self::encode_item].
     pub(crate) async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
-        let offset = blob.size().await;
-        blob.append_owned(buf).await?;
+        let offset = blob.append_owned(buf).await?;
         trace!(blob = section, offset, "appended item");
         Ok(offset)
     }

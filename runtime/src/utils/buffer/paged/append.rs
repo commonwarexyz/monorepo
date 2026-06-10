@@ -293,8 +293,9 @@ impl<B: Blob> Append<B> {
         Ok((None, 0, invalid_data_found))
     }
 
-    /// Append all bytes in `buf` to the tip of the blob.
-    pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
+    /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
+    /// the first byte was written.
+    pub async fn append(&self, buf: &[u8]) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buffer = self.buffer.write().await;
 
@@ -302,10 +303,11 @@ impl<B: Blob> Append<B> {
         // one full page could be written directly from it.
         let fill = (logical_page_size - (buffer.len() % logical_page_size)) % logical_page_size;
         if buffer.len() + buf.len() <= buffer.capacity || buf.len() < fill + logical_page_size {
+            let offset = buffer.size();
             if buffer.append(buf) {
                 self.flush_internal(buffer, false, false).await?;
             }
-            return Ok(());
+            return Ok(offset);
         }
         drop(buffer);
 
@@ -322,9 +324,10 @@ impl<B: Blob> Append<B> {
     /// flush would), and the remaining sub-page suffix is buffered.
     ///
     /// Like [Self::append], the write is not durable until [Self::sync] is called.
-    pub async fn append_owned(&self, buf: IoBuf) -> Result<(), Error> {
+    pub async fn append_owned(&self, buf: IoBuf) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buf_guard = self.buffer.write().await;
+        let offset = buf_guard.size();
 
         // Take the buffered path unless `buf` would push the buffer over capacity and at least
         // one full page can be written directly from it.
@@ -334,7 +337,7 @@ impl<B: Blob> Append<B> {
             if buf_guard.append(buf.as_ref()) {
                 self.flush_internal(buf_guard, false, false).await?;
             }
-            return Ok(());
+            return Ok(offset);
         }
 
         // Top up the tip to a page boundary so its contents flush as full pages, leaving any
@@ -413,7 +416,7 @@ impl<B: Blob> Append<B> {
         let write_at_offset = boundary / logical_page_size as u64 * physical_page_size;
         blob_state.write_at(write_at_offset, physical_pages).await?;
 
-        Ok(())
+        Ok(offset)
     }
 
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes

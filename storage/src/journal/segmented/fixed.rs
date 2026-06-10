@@ -123,15 +123,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
 
-        let size = blob.size().await;
-        if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-            return Err(Error::InvalidBlobSize(section, size));
-        }
-        let position = size / Self::CHUNK_SIZE_U64;
-
         // Encode the item
         let buf = item.encode_mut();
-        blob.append(&buf).await?;
+        let offset = blob.append(&buf).await?;
+        if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
+            return Err(Error::InvalidBlobSize(section, offset));
+        }
+        let position = offset / Self::CHUNK_SIZE_U64;
         trace!(section, position, "appended item");
 
         Ok(position)
@@ -170,14 +168,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let offset = position
             .checked_mul(Self::CHUNK_SIZE_U64)
             .ok_or(Error::ItemOutOfRange(position))?;
-        let end = offset
-            .checked_add(Self::CHUNK_SIZE_U64)
-            .ok_or(Error::ItemOutOfRange(position))?;
-        if end > blob.size().await {
-            return Err(Error::ItemOutOfRange(position));
-        }
 
-        let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
+        // The read validates bounds against the blob's logical size.
+        let buf = blob
+            .read_at(offset, Self::CHUNK_SIZE)
+            .await
+            .map_err(|err| match err {
+                commonware_runtime::Error::BlobInsufficientLength
+                | commonware_runtime::Error::OffsetOverflow => Error::ItemOutOfRange(position),
+                err => Error::Runtime(err),
+            })?;
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 
