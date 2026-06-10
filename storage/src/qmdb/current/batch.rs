@@ -146,6 +146,27 @@ pub(crate) fn next_candidate<F: Graftable, B: bitmap::Readable<N>, const N: usiz
     (candidate < tip).then(|| Location::<F>::new(candidate))
 }
 
+/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` over the layered
+/// `BitmapBatch` chain, returning the next `floor`. Produces the same sequence as repeatedly
+/// calling [`next_candidate`].
+pub(crate) fn fill_candidates<F: Graftable, B: bitmap::Readable<N>, const N: usize>(
+    bitmap: &B,
+    floor: Location<F>,
+    tip: u64,
+    limit: usize,
+    out: &mut Vec<Location<F>>,
+) -> Location<F> {
+    let mut scan = floor;
+    while out.len() < limit {
+        let Some(candidate) = next_candidate(bitmap, scan, tip) else {
+            break;
+        };
+        out.push(candidate);
+        scan = Location::<F>::new(*candidate + 1);
+    }
+    scan
+}
+
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
 ///
 /// Tries the batch chain's sync [`Readable`] first (which covers nodes appended or overwritten
@@ -365,7 +386,9 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys. Committed-DB operations resolved by
+    /// the read are retained on the batch and consumed by [`merkleize`](Self::merkleize), which
+    /// skips re-reading those keys.
     pub async fn get_many<E, C, I>(
         &self,
         keys: &[&K],
@@ -397,8 +420,8 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip| {
-                next_candidate(&bitmap_parent, floor, tip)
+            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
             })
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
@@ -430,7 +453,9 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys. Committed-DB operations resolved by
+    /// the read are retained on the batch and consumed by [`merkleize`](Self::merkleize), which
+    /// skips re-reading those keys.
     pub async fn get_many<E, C, I>(
         &self,
         keys: &[&K],
@@ -462,8 +487,8 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip| {
-                next_candidate(&bitmap_parent, floor, tip)
+            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
             })
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await

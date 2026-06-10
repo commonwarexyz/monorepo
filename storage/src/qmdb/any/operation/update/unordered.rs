@@ -34,6 +34,9 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type Key = K;
     type Value = V::Value;
     type ValueEncoding = V;
+    type Retained = ();
+
+    fn retained(&self) -> Self::Retained {}
 
     fn key(&self) -> &K {
         &self.0

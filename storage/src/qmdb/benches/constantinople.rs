@@ -1,15 +1,15 @@
 //! Constantinople-shape harness: load+write+merkleize at 32k updates / 1M keys.
 //!
 //! Times the full per-block state pipeline (get_many load, batch writes, merkleize, root) on the
-//! tokio runtime against `any::unordered::fixed::Db<mmr>` with EightCap, matching the production
-//! validator shape. Prints per-iteration latency and the speculative root (a cross-binary parity
-//! check: any optimization must reproduce identical roots).
+//! tokio runtime with EightCap, matching the production validator shape. Runs against either
+//! `any::unordered::fixed::Db<mmr>` or `current::unordered::fixed::Db<mmr>`. Prints per-iteration
+//! latency with a load/write/merkleize phase split and the speculative root (a cross-binary
+//! parity check: any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- [mode] [depth] [iters] [keys] [updates]
+//!   cargo bench -p commonware-storage --bench constantinople -- [db] [depth] [iters] [keys] [updates]
 //!
-//! - mode: "plain" or "fused" (identical since reads always retain resolved locations; both
-//!   accepted for output compatibility with older binaries)
+//! - db: "any" or "current" (default any)
 //! - depth: number of pending ancestor batches under the timed batch (0 or 1)
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
@@ -25,7 +25,7 @@ use commonware_runtime::{
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full, mmr},
-    qmdb::any::FixedConfig,
+    qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
     translator::EightCap,
 };
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -37,7 +37,7 @@ use std::{
 };
 
 type Digest = <Sha256 as Hasher>::Digest;
-type Db = commonware_storage::qmdb::any::unordered::fixed::Db<
+type AnyDb = commonware_storage::qmdb::any::unordered::fixed::Db<
     mmr::Family,
     Context,
     Digest,
@@ -46,11 +46,31 @@ type Db = commonware_storage::qmdb::any::unordered::fixed::Db<
     EightCap,
     Rayon,
 >;
-type Merkleized = std::sync::Arc<
+type AnyMerkleized = std::sync::Arc<
     commonware_storage::qmdb::any::batch::MerkleizedBatch<
         mmr::Family,
         Digest,
         commonware_storage::qmdb::any::unordered::fixed::Update<Digest, Digest>,
+        Rayon,
+    >,
+>;
+const CHUNK_SIZE: usize = 32;
+type CurrentDb = commonware_storage::qmdb::current::unordered::fixed::Db<
+    mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+    Rayon,
+>;
+type CurrentMerkleized = std::sync::Arc<
+    commonware_storage::qmdb::current::batch::MerkleizedBatch<
+        mmr::Family,
+        Digest,
+        commonware_storage::qmdb::any::unordered::fixed::Update<Digest, Digest>,
+        CHUNK_SIZE,
         Rayon,
     >,
 >;
@@ -62,6 +82,13 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 const THREADS: NonZeroUsize = NZUsize!(8);
 const CHURN_BATCHES: u64 = 4;
+
+struct Args {
+    depth: u8,
+    iters: usize,
+    num_keys: u64,
+    num_updates: u64,
+}
 
 fn key(i: u64) -> Digest {
     Sha256::hash(&i.to_be_bytes())
@@ -76,48 +103,31 @@ fn gen_muts(rng: &mut StdRng, num_updates: u64, num_keys: u64) -> Vec<(Digest, D
         .collect()
 }
 
-fn main() {
-    let args: Vec<String> = std::env::args().filter(|a| a != "--bench").collect();
-    let mode = args.get(1).cloned().unwrap_or_else(|| "fused".into());
-    let depth: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let iters: usize = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(15);
-    let num_keys: u64 = args
-        .get(4)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1_000_000);
-    let num_updates: u64 = args.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768);
-    assert!(mode == "plain" || mode == "fused", "mode: plain|fused");
-
-    eprintln!(
-        "constantinople mode={mode} depth={depth} iters={iters} keys={num_keys} updates={num_updates}"
+fn report(db: &str, depth: u8, mut times_ms: Vec<f64>) {
+    times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
+    let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
+    println!(
+        "RESULT db={db} depth={depth} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
+        p(0.1),
+        p(0.5),
+        mean,
+        times_ms[times_ms.len() - 1]
     );
+}
 
-    Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_PAGES);
-        let cfg = FixedConfig {
-            merkle_config: full::Config {
-                journal_partition: "constantinople-merkle-journal".into(),
-                metadata_partition: "constantinople-merkle-metadata".into(),
-                items_per_blob: ITEMS_PER_BLOB,
-                write_buffer: WRITE_BUFFER,
-                strategy: ctx.create_strategy(THREADS).unwrap(),
-                page_cache: pc.clone(),
-            },
-            journal_config: FConfig {
-                partition: "constantinople-log".into(),
-                items_per_blob: ITEMS_PER_BLOB,
-                page_cache: pc,
-                write_buffer: WRITE_BUFFER,
-            },
-            translator: EightCap,
-        };
-        let mut db = Db::init(ctx.child("db"), cfg).await.unwrap();
+// One macro body for both db types: their batch APIs match but share no trait, and a bench does
+// not warrant inventing one.
+macro_rules! run_pipeline {
+    ($db:ident, $args:ident, $label:literal, $merkleized:ty) => {{
+        let args = $args;
+        let mut db = $db;
 
         // Seed all keys in one committed batch.
         let seed_start = Instant::now();
         let mut rng = StdRng::seed_from_u64(42);
         let mut batch = db.new_batch();
-        for i in 0..num_keys {
+        for i in 0..args.num_keys {
             batch = batch.write(key(i), Some(Sha256::hash(&rng.next_u32().to_be_bytes())));
         }
         let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -127,7 +137,7 @@ fn main() {
         // Churn: overwrite batches so inactive ops accumulate above the floor.
         for _ in 0..CHURN_BATCHES {
             let mut batch = db.new_batch();
-            for (k, v) in gen_muts(&mut rng, num_updates, num_keys) {
+            for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                 batch = batch.write(k, Some(v));
             }
             let merkleized = batch.merkleize(&db, None).await.unwrap();
@@ -138,21 +148,21 @@ fn main() {
         eprintln!("seed+churn done in {:?}", seed_start.elapsed());
 
         let mut rng = StdRng::seed_from_u64(99);
-        let mut times_ms: Vec<f64> = Vec::with_capacity(iters);
-        for iter in 0..iters {
+        let mut times_ms: Vec<f64> = Vec::with_capacity(args.iters);
+        for iter in 0..args.iters {
             // Pending ancestors are rebuilt per iteration and never applied (untimed).
-            let mut parent: Option<Merkleized> = None;
-            for _ in 0..depth {
+            let mut parent: Option<$merkleized> = None;
+            for _ in 0..args.depth {
                 let mut b = parent
                     .as_ref()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>());
-                for (k, v) in gen_muts(&mut rng, num_updates, num_keys) {
+                for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                     b = b.write(k, Some(v));
                 }
                 parent = Some(b.merkleize(&db, None).await.unwrap());
             }
 
-            let muts = gen_muts(&mut rng, num_updates, num_keys);
+            let muts = gen_muts(&mut rng, args.num_updates, args.num_keys);
             let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
             let new_batch = || {
                 parent
@@ -167,28 +177,79 @@ fn main() {
             let mut b = new_batch();
             let values = b.get_many(&keys, &db).await.unwrap();
             black_box(&values);
+            let t_load = start.elapsed();
             for (k, v) in &muts {
                 b = b.write(*k, Some(*v));
             }
+            let t_write = start.elapsed();
             let merkleized = b.merkleize(&db, None).await.unwrap();
             let root = merkleized.root();
             let elapsed = start.elapsed();
 
             times_ms.push(elapsed.as_secs_f64() * 1000.0);
-            println!("iter={iter} ms={:.2} root={root}", times_ms[iter]);
+            println!(
+                "iter={iter} ms={:.2} load={:.2} write={:.2} merk={:.2} root={root}",
+                times_ms[iter],
+                t_load.as_secs_f64() * 1000.0,
+                (t_write - t_load).as_secs_f64() * 1000.0,
+                (elapsed - t_write).as_secs_f64() * 1000.0
+            );
         }
 
-        times_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let p = |q: f64| times_ms[((times_ms.len() - 1) as f64 * q) as usize];
-        let mean: f64 = times_ms.iter().sum::<f64>() / times_ms.len() as f64;
-        println!(
-            "RESULT mode={mode} depth={depth} p10={:.2} p50={:.2} mean={:.2} max={:.2}",
-            p(0.1),
-            p(0.5),
-            mean,
-            times_ms[times_ms.len() - 1]
-        );
-
+        report($label, args.depth, times_ms);
         db.destroy().await.unwrap();
+    }};
+}
+
+fn main() {
+    let raw: Vec<String> = std::env::args().filter(|a| a != "--bench").collect();
+    let db_kind = raw.get(1).cloned().unwrap_or_else(|| "any".into());
+    let args = Args {
+        depth: raw.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
+        iters: raw.get(3).and_then(|s| s.parse().ok()).unwrap_or(15),
+        num_keys: raw.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
+        num_updates: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
+    };
+    assert!(db_kind == "any" || db_kind == "current", "db: any|current");
+
+    eprintln!(
+        "constantinople db={db_kind} depth={} iters={} keys={} updates={}",
+        args.depth, args.iters, args.num_keys, args.num_updates
+    );
+
+    Runner::new(RConfig::default()).start(|ctx| async move {
+        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_PAGES);
+        let merkle_config = full::Config {
+            journal_partition: "constantinople-merkle-journal".into(),
+            metadata_partition: "constantinople-merkle-metadata".into(),
+            items_per_blob: ITEMS_PER_BLOB,
+            write_buffer: WRITE_BUFFER,
+            strategy: ctx.create_strategy(THREADS).unwrap(),
+            page_cache: pc.clone(),
+        };
+        let journal_config = FConfig {
+            partition: "constantinople-log".into(),
+            items_per_blob: ITEMS_PER_BLOB,
+            page_cache: pc,
+            write_buffer: WRITE_BUFFER,
+        };
+        if db_kind == "current" {
+            let cfg = CurrentFixedConfig {
+                merkle_config,
+                journal_config,
+                grafted_metadata_partition: "constantinople-grafted-metadata".into(),
+                translator: EightCap,
+            };
+            let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
+            run_pipeline!(db, args, "current", CurrentMerkleized)
+        } else {
+            let cfg = FixedConfig {
+                merkle_config,
+                journal_config,
+                translator: EightCap,
+            };
+            let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
+            run_pipeline!(db, args, "any", AnyMerkleized)
+        }
     });
 }

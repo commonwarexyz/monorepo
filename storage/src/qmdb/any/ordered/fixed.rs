@@ -253,6 +253,126 @@ pub(crate) mod test {
         db.apply_batch(merkleized).await.unwrap();
     }
 
+    /// Reads on a batch retain resolved operations that `merkleize` consumes to skip re-reading
+    /// updated keys (deletes are always re-read for predecessor linkage). The root must be
+    /// byte-identical to a write-only batch's `merkleize` across updates/deletes/creates, both
+    /// with the batch rooted directly at the DB (D=0) and through pending ancestors (D=1, D=2).
+    #[test_traced("WARN")]
+    fn test_ordered_fixed_resolved_merkleize_parity() {
+        type ParentChain = Vec<
+            std::sync::Arc<
+                crate::qmdb::any::batch::MerkleizedBatch<
+                    mmr::Family,
+                    Digest,
+                    crate::qmdb::any::operation::update::Ordered<Digest, FixedEncoding<Digest>>,
+                    Sequential,
+                >,
+            >,
+        >;
+
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&i.to_be_bytes())
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&i.to_le_bytes())
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = create_test_db(ctx.child("db")).await;
+
+            // Seed 500 keys and commit so they live in the committed snapshot. TwoCap makes
+            // translated-bucket collisions common, stressing the sibling-read paths.
+            let mut seed = db.new_batch();
+            for i in 0..500u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
+            // and creates of fresh keys. `make` re-derives the set from a seed so both paths
+            // and all depths see identical mutations.
+            let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
+                let mut rng = test_rng_seeded(salt);
+                let mut out = Vec::new();
+                for _ in 0..200 {
+                    let r = rng.next_u32() % 100;
+                    if r < 60 {
+                        out.push((key(rng.next_u64() % 500), Some(val(rng.next_u64()))));
+                    } else if r < 80 {
+                        out.push((key(rng.next_u64() % 500), None));
+                    } else {
+                        out.push((key(500 + rng.next_u64() % 500), Some(val(rng.next_u64()))));
+                    }
+                }
+                // Dedup last-write-wins.
+                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                for (k, v) in out {
+                    m.insert(k, v);
+                }
+                m.into_iter().collect()
+            };
+
+            // D=0: batch rooted directly at the DB. D=N: through N pending ancestors.
+            for depth in [0u64, 1, 2] {
+                let mut chain: ParentChain = Vec::new();
+                for d in 0..depth {
+                    let mut p = chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |l| l.new_batch::<Sha256>());
+                    for (k, v) in make(900 + d) {
+                        p = p.write(k, v);
+                    }
+                    chain.push(p.merkleize(&db, None).await.unwrap());
+                }
+
+                let muts = make(depth + 1);
+                let new_batch = || {
+                    chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                // Normal path.
+                let mut nb = new_batch();
+                for (k, v) in &muts {
+                    nb = nb.write(*k, *v);
+                }
+                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+
+                // Read-then-write on one batch: the read retains operations that merkleize
+                // consumes. Values and root must match the write-only path.
+                let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+                let mut fb = new_batch();
+                let values = fb.get_many(&keys, &db).await.unwrap();
+                let plain = new_batch().get_many(&keys, &db).await.unwrap();
+                assert_eq!(values, plain, "value mismatch at depth={depth}");
+                for (k, v) in &muts {
+                    fb = fb.write(*k, *v);
+                }
+                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+
+                // Multiple disjoint reads accumulate, and single-key gets retain too.
+                let half = muts.len() / 2;
+                let mut gb = new_batch();
+                gb.get_many(&keys[..half], &db).await.unwrap();
+                for key in &keys[half..] {
+                    gb.get(key, &db).await.unwrap();
+                }
+                for (k, v) in &muts {
+                    gb = gb.write(*k, *v);
+                }
+                let merged_root = gb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(
+                    normal_root, merged_root,
+                    "merged root mismatch at depth={depth}"
+                );
+            }
+        });
+    }
+
     #[test_traced("WARN")]
     // Test the edge case that arises where we're inserting the second key and it precedes the first
     // key, but shares the same translated key.

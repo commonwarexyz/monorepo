@@ -599,12 +599,15 @@ impl<B: Blob> Append<B> {
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
     /// non-overlapping, and within bounds. This amortizes lock acquisition and avoids
     /// per-item buffer allocation compared to calling [`read_at`](Self::read_at) in a loop.
+    ///
+    /// Returns the number of items fully served without a blob read (from the tip buffer and the
+    /// page cache). The remaining items required at least one blob read.
     pub async fn read_many_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: usize,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         assert_eq!(
             buf.len(),
             offsets
@@ -614,7 +617,7 @@ impl<B: Blob> Append<B> {
             "read_many_into requires buf.len() == offsets.len() * item_size"
         );
         if offsets.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         let last_end = offsets[offsets.len() - 1]
@@ -633,7 +636,7 @@ impl<B: Blob> Append<B> {
         // `chunks_exact_mut` yields disjoint per-item slots, so we never have to
         // reborrow the parent buffer while cache/blob destinations remain live.
         if item_size == 0 {
-            return Ok(());
+            return Ok(offsets.len());
         }
         let mut cache_ranges: Vec<(&mut [u8], u64)> = Vec::new();
         for (item_buf, &offset) in buf.chunks_exact_mut(item_size).zip(offsets.iter()) {
@@ -657,14 +660,15 @@ impl<B: Blob> Append<B> {
         drop(buffer);
 
         if cache_ranges.is_empty() {
-            return Ok(());
+            return Ok(offsets.len());
         }
 
         // Fast path: try page cache for all ranges in a single lock acquisition.
         // Fully-cached ranges are removed from cache_ranges; only misses remain.
         self.cache_ref.read_cached_many(self.id, &mut cache_ranges);
+        let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
-            return Ok(());
+            return Ok(offsets.len());
         }
 
         // Slow path: read only the ranges that had cache misses, concurrently.
@@ -680,7 +684,7 @@ impl<B: Blob> Append<B> {
             result?;
         }
 
-        Ok(())
+        Ok(offsets.len() - blob_reads)
     }
 
     /// Reads bytes starting at `logical_offset` into `buf`.

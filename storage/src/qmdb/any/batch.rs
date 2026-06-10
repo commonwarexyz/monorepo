@@ -45,6 +45,21 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 /// of a given key during ordered merkleization.
 type PrevCandidates<K, F, V> = Vec<(K, (V, Location<F>))>;
 
+/// Committed-DB resolutions retained by a batch's reads, keyed by the resolved key and carrying
+/// the location they were read from plus the variant's retained payload.
+type ResolvedReads<F, U> =
+    AHashMap<<U as update::Update>::Key, (Location<F>, <U as update::Update>::Retained)>;
+
+/// Updates pulled out of `mutations` because a read already resolved them:
+/// `(key, new value, old location, old value, old next key)`.
+type RetainedOrdered<F, K, V> = Vec<(
+    K,
+    <V as ValueEncoding>::Value,
+    Location<F>,
+    <V as ValueEncoding>::Value,
+    K,
+)>;
+
 /// What happened to a key in this batch.
 #[derive(Clone)]
 pub(crate) enum DiffEntry<F: Family, V> {
@@ -182,9 +197,10 @@ where
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 
-    /// Committed-DB locations resolved by this batch's reads (`get`/`get_many`), consumed by
-    /// `merkleize`. When a mutation key is present here, `merkleize` reuses the location and
-    /// skips the redundant journal read.
+    /// Committed-DB resolutions retained by this batch's reads (`get`/`get_many`), keyed by the
+    /// key they matched and carrying the location they were read from plus the variant's
+    /// retained payload. Consumed by `merkleize`: when a mutation key is present here,
+    /// `merkleize` reuses the resolution and skips the redundant journal read.
     ///
     /// Only committed-snapshot resolutions are retained. A retained location doubles as the
     /// key's committed provenance (`base_old_loc`), which holds because a committed-resolved
@@ -196,7 +212,7 @@ where
     /// `test_unordered_fixed_retention_survives_ancestor_commit`.
     ///
     /// Interior-mutable because reads take `&self`; never held across an await.
-    resolved: Mutex<AHashMap<U::Key, Location<F>>>,
+    resolved: Mutex<ResolvedReads<F, U>>,
 }
 
 /// A speculative batch of operations whose root digest has been computed,
@@ -436,7 +452,9 @@ impl<'a, K: Ord, F: Family, V> AppliedAncestorResolver<'a, K, F, V> {
 /// and remain sequential candidates.
 ///
 /// `current::batch::next_candidate` mirrors this contract over a layered `BitmapBatch` chain;
-/// both must obey it.
+/// both must obey it. Production uses [`fill_candidates`], which produces the same sequence under
+/// a single read guard; this single-step form is retained as the test oracle.
+#[cfg(test)]
 fn next_candidate<F: Family, const N: usize>(
     bitmap: &Shared<N>,
     floor: Location<F>,
@@ -454,6 +472,22 @@ fn next_candidate<F: Family, const N: usize>(
     }
     let candidate = floor.max(bitmap_len);
     (candidate < tip).then(|| Location::new(candidate))
+}
+
+/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
+/// read guard, returning the next `floor`. Produces the same sequence as repeatedly calling
+/// `next_candidate` (the test oracle above).
+fn fill_candidates<F: Family, const N: usize>(
+    bitmap: &Shared<N>,
+    floor: Location<F>,
+    tip: u64,
+    limit: usize,
+    out: &mut Vec<Location<F>>,
+) -> Location<F> {
+    let mut raw: Vec<u64> = Vec::with_capacity(limit);
+    let next = bitmap.fill_candidates(*floor, tip, limit, &mut raw);
+    out.extend(raw.into_iter().map(Location::new));
+    Location::new(next)
 }
 
 /// Resolve `loc` to an op within the in-memory ancestor region
@@ -701,7 +735,7 @@ where
         active_keys_delta: isize,
         user_steps: u64,
         metadata: Option<U::Value>,
-        mut next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
+        mut fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
         reader: R,
         db: &Db<F, E, C, I, H, U, N, S>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
@@ -731,13 +765,7 @@ where
                 // early exit cannot leave `floor` past unprocessed candidates.
                 let limit = ((total_steps - moved) as usize).min(MAX_CONCURRENT_READS as usize);
                 let mut candidates = Vec::with_capacity(limit);
-                while candidates.len() < limit {
-                    let Some(candidate) = next_candidate(scan_from, fixed_tip) else {
-                        break;
-                    };
-                    candidates.push(candidate);
-                    scan_from = Location::new(*candidate + 1);
-                }
+                scan_from = fill_candidates(scan_from, fixed_tip, limit, &mut candidates);
                 if candidates.is_empty() {
                     break;
                 }
@@ -937,9 +965,9 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. Committed-DB locations resolved by the read are retained on the batch and consumed
-    /// by `merkleize`, which skips re-reading those keys. Keys answered by pending mutations or
-    /// ancestor diffs retain nothing (merkleize re-resolves them in memory).
+    /// keys. Committed-DB operations resolved by the read are retained on the batch and
+    /// consumed by `merkleize`, which skips re-reading those keys. Keys answered by pending
+    /// mutations or ancestor diffs retain nothing (merkleize re-resolves them in memory).
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -996,9 +1024,10 @@ where
         if !db_keys.is_empty() {
             let db_results = db.get_many_with_locations(&db_keys).await?;
             let mut resolved = self.resolved.lock();
+            resolved.reserve(db_keys.len());
             for (slot, result) in db_indices.into_iter().zip(db_results) {
-                results[slot] = result.map(|(value, loc)| {
-                    resolved.insert((*keys[slot]).clone(), loc);
+                results[slot] = result.map(|(value, loc, retained)| {
+                    resolved.insert((*keys[slot]).clone(), (loc, retained));
                     value
                 });
             }
@@ -1040,8 +1069,8 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(db, metadata, |floor, tip| {
-            next_candidate(&db.bitmap, floor, tip)
+        self.merkleize_with_floor_scan(db, metadata, |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
         })
         .await
     }
@@ -1056,7 +1085,7 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Unordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-        next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
+        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
@@ -1071,7 +1100,7 @@ where
         // below, exactly where the read path would have emitted them.
         let mut retained: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(resolved.len());
-        for (key, loc) in resolved {
+        for (key, (loc, ())) in resolved {
             if let Some(mutation) = mutations.remove(&key) {
                 retained.push((key, loc, mutation));
             }
@@ -1203,7 +1232,7 @@ where
             active_keys_delta,
             user_steps,
             metadata,
-            next_candidate,
+            fill_candidates,
             reader,
             db,
         )
@@ -1220,6 +1249,10 @@ where
     Operation<F, update::Ordered<K, V>>: Codec,
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
+    ///
+    /// Consumes the operations retained by this batch's reads: keys loaded via `get`/`get_many`
+    /// before being updated skip the journal re-read their resolution would otherwise require.
+    /// Deleted keys are always re-read for predecessor linkage.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb::any::batch::merkleize",
@@ -1240,8 +1273,8 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        self.merkleize_with_floor_scan(db, metadata, |floor, tip| {
-            next_candidate(&db.bitmap, floor, tip)
+        self.merkleize_with_floor_scan(db, metadata, |floor, tip, limit, out| {
+            fill_candidates(&db.bitmap, floor, tip, limit, out)
         })
         .await
     }
@@ -1256,14 +1289,32 @@ where
         self,
         db: &Db<F, E, C, I, H, update::Ordered<K, V>, N, S>,
         metadata: Option<V::Value>,
-        next_candidate: impl FnMut(Location<F>, u64) -> Option<Location<F>>,
+        fill_candidates: impl FnMut(Location<F>, u64, usize, &mut Vec<Location<F>>) -> Location<F>,
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
+        let resolved = core::mem::take(&mut *self.resolved.lock());
         let (mut mutations, m) = self.into_parts();
+
+        // Pull updates whose committed operation this batch's reads already resolved. They
+        // skip the journal re-read; the retained operation supplies the linkage candidates the
+        // read would have produced. Deletes stay on the read path: a deleted key's own-bucket
+        // read also discovers same-bucket predecessors for the linkage rewrite below.
+        let mut retained: RetainedOrdered<F, K, V> = Vec::with_capacity(resolved.len());
+        for (key, (loc, (old_value, old_next_key))) in resolved {
+            match mutations.remove(&key) {
+                Some(Some(new_value)) => {
+                    retained.push((key, new_value, loc, old_value, old_next_key))
+                }
+                Some(None) => {
+                    mutations.insert(key, None);
+                }
+                None => {}
+            }
+        }
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
@@ -1308,6 +1359,13 @@ where
             } else {
                 deleted.push((key, old_loc));
             }
+        }
+
+        // Emit the contributions the skipped reads would have produced.
+        for (key, new_value, old_loc, old_value, old_next_key) in retained {
+            next_candidates.push(old_next_key);
+            prev_candidates.push((key.clone(), (old_value, old_loc)));
+            updated.push((key, new_value, old_loc));
         }
 
         deleted.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1562,7 +1620,7 @@ where
             active_keys_delta,
             user_steps,
             metadata,
-            next_candidate,
+            fill_candidates,
             reader,
             db,
         )
