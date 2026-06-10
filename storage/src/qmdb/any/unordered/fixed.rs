@@ -387,6 +387,14 @@ pub(crate) mod test {
                 // Duplicate keys in one read resolve identically per slot and retain once.
                 let dup_values = fb.get_many(&[keys[0], keys[0]], &db).await.unwrap();
                 assert_eq!(dup_values[0], dup_values[1]);
+                // Keys read but never written (existing and absent) retain entries that
+                // merkleize must drop without affecting the root.
+                let unwritten: Vec<Digest> = (0..40u64)
+                    .map(|i| key(i * 50))
+                    .chain((0..5).map(|i| key(8000 + i)))
+                    .collect();
+                let unwritten_refs: Vec<&Digest> = unwritten.iter().collect();
+                fb.get_many(&unwritten_refs, &db).await.unwrap();
                 let values = fb.get_many(&keys, &db).await.unwrap();
                 let plain = new_batch().get_many(&keys, &db).await.unwrap();
                 assert_eq!(values, plain, "value mismatch at depth={depth}");

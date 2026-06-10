@@ -345,6 +345,14 @@ pub(crate) mod test {
                 // consumes. Values and root must match the write-only path.
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
+                // Keys read but never written (existing and absent) retain entries that
+                // merkleize must drop without affecting the root.
+                let unwritten: Vec<Digest> = (0..40u64)
+                    .map(|i| key(i * 12))
+                    .chain((0..5).map(|i| key(8000 + i)))
+                    .collect();
+                let unwritten_refs: Vec<&Digest> = unwritten.iter().collect();
+                fb.get_many(&unwritten_refs, &db).await.unwrap();
                 let values = fb.get_many(&keys, &db).await.unwrap();
                 let plain = new_batch().get_many(&keys, &db).await.unwrap();
                 assert_eq!(values, plain, "value mismatch at depth={depth}");
