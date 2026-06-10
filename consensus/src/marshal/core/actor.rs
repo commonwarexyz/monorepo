@@ -573,10 +573,11 @@ where
                 self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
-                // `cache_verified` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_verified(round, block.digest(), block.clone())
+                self.cache
+                    .put_verified(round, block.digest(), block.clone().into())
                     .await;
 
                 // Retain the block in memory so the subsequent `Forward` can
@@ -590,20 +591,24 @@ where
                 self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
-                // `cache_verified` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_verified(round, block.digest(), block).await;
+                self.cache
+                    .put_verified(round, block.digest(), block.into())
+                    .await;
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Certified { round, block, ack } => {
                 self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
-                // `cache_block` is a no-op because the round is below
+                // `put_block` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_block(round, block.digest(), block).await;
+                self.cache
+                    .put_block(round, block.digest(), block.into())
+                    .await;
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Notarization { notarization } => {
@@ -621,7 +626,7 @@ where
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     self.ingest(&block, buffer, application, resolver).await;
-                    self.cache_block(round, digest, block).await;
+                    self.cache.put_block(round, digest, block.into()).await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
@@ -1458,7 +1463,9 @@ where
 
                     // Cache the notarization and block.
                     let height = block.height();
-                    self.cache_block(round, digest, block.clone()).await;
+                    self.cache
+                        .put_block(round, digest, block.clone().into())
+                        .await;
                     self.cache
                         .put_notarization(round, digest, notarization)
                         .await;
@@ -1587,16 +1594,6 @@ where
 
     // -------------------- Prunable Storage --------------------
 
-    /// Add a verified block to the prunable archive.
-    async fn cache_verified(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
-    ) {
-        self.cache.put_verified(round, digest, block.into()).await;
-    }
-
     /// If a block previously accepted via [`Message::Proposed`] matches the
     /// supplied `(round, commitment)`, remove and return it.
     fn take_proposed(&mut self, round: Round, commitment: V::Commitment) -> Option<V::Block> {
@@ -1605,16 +1602,6 @@ where
             return None;
         }
         self.last_proposed_block.take().map(|(_, _, block)| block)
-    }
-
-    /// Add a notarized block to the prunable archive.
-    async fn cache_block(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
-    ) {
-        self.cache.put_block(round, digest, block.into()).await;
     }
 
     /// Sync both finalization archives to durable storage.
