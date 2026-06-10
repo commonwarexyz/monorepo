@@ -35,6 +35,10 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
 /// fast, but not so big we avoid any page faults for the larger benchmarks.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
+/// A page cache capacity large enough to hold every page written by the random-read
+/// benchmarks (data and offsets journals combined), used by their hot-cache variants.
+const HOT_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(28_000);
+
 /// Value of items_per_blob to use in the journal config.
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(100_000);
 
@@ -46,13 +50,14 @@ async fn get_fixed_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
     items_per_blob: NonZeroU64,
+    page_cache_size: NonZeroUsize,
 ) -> FixedJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = FixedConfig {
         partition: partition_name.into(),
         items_per_blob,
         write_buffer: WRITE_BUFFER,
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, page_cache_size),
     };
     FixedJournal::init(context, journal_config).await.unwrap()
 }
@@ -82,6 +87,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
     items_per_section: NonZeroU64,
+    page_cache_size: NonZeroUsize,
 ) -> VariableJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = VariableConfig {
@@ -89,7 +95,7 @@ async fn get_variable_journal<const ITEM_SIZE: usize>(
         items_per_section,
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, page_cache_size),
         write_buffer: WRITE_BUFFER,
     };
     VariableJournal::init(context, journal_config)

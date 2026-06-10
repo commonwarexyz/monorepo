@@ -39,6 +39,7 @@ fn bench_fixed_append(c: &mut Criterion) {
                             ctx.child("storage"),
                             PARTITION,
                             ITEMS_PER_BLOB,
+                            crate::PAGE_CACHE_SIZE,
                         )
                         .await;
 
