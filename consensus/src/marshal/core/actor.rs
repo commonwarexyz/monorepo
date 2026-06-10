@@ -1093,7 +1093,6 @@ where
                 .floor
                 .take_pending_anchor()
                 .expect("pending floor anchor missing");
-            self.block_subscriptions.notify(&block);
             self.update_processed_round_floor(height, finalization.round(), resolver)
                 .await;
             if self.try_repair_gaps(buffer, resolver, application).await {
