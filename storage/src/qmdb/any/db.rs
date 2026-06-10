@@ -258,11 +258,8 @@ where
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<(U::Value, Location<F>, U::Retained)>> = vec![None; keys.len()];
 
-        for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
-                candidates.push((key_idx, *loc));
-            }
-        }
+        self.snapshot
+            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
 
         if candidates.is_empty() {
             return Ok(results);

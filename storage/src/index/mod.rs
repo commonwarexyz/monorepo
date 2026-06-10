@@ -127,6 +127,24 @@ pub trait Unordered: Send + Sync {
     where
         Self::Value: 'a;
 
+    /// Visits every value associated with each key, calling `visit(key_idx, value)`.
+    ///
+    /// Probe order is implementation-defined: implementations may reorder probes for locality,
+    /// so visits are identified by `key_idx` rather than issued in input order.
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: &[K],
+        mut visit: impl FnMut(usize, &'a Self::Value),
+    ) where
+        Self::Value: 'a,
+    {
+        for (key_idx, key) in keys.iter().enumerate() {
+            for value in self.get(key.as_ref()) {
+                visit(key_idx, value);
+            }
+        }
+    }
+
     /// Provides mutable access to the values associated with a translated key, if the key exists.
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>>;
 

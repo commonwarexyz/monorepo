@@ -153,6 +153,25 @@ impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
 
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
+
+    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
+    where
+        V: 'a,
+    {
+        // Probe in translated-key order: consecutive tree descents share upper node paths,
+        // which stay cache-resident across the batch.
+        let mut order: Vec<(T::Key, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(key_idx, key)| (self.translator.transform(key.as_ref()), key_idx))
+            .collect();
+        order.sort_unstable();
+        for (_, key_idx) in order {
+            for value in self.get(keys[key_idx].as_ref()) {
+                visit(key_idx, value);
+            }
+        }
+    }
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
     where
