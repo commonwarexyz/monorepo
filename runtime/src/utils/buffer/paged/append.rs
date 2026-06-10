@@ -36,15 +36,12 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
-use futures::stream::StreamExt;
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
 };
 use tracing::warn;
-
-/// Maximum number of blob reads issued concurrently by [`Append::read_many_into`].
-const MAX_CONCURRENT_BLOB_READS: usize = 64;
 
 /// Indicates which CRC slot in a page record must not be overwritten.
 #[derive(Clone, Copy)]
@@ -678,17 +675,15 @@ impl<B: Blob> Append<B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read only the ranges that had cache misses, concurrently. Concurrency is
-        // bounded so a large cold batch cannot flood the blob with in-flight reads.
+        // Slow path: read only the ranges that had cache misses, concurrently.
         let blob_guard = self.blob_state.read().await;
-        let reads: Vec<_> = cache_ranges
+        let mut reads = cache_ranges
             .iter_mut()
             .map(|(item_buf, offset)| {
                 self.cache_ref
                     .read(&blob_guard.blob, self.id, item_buf, *offset)
             })
-            .collect();
-        let mut reads = futures::stream::iter(reads).buffer_unordered(MAX_CONCURRENT_BLOB_READS);
+            .collect::<FuturesUnordered<_>>();
         while let Some(result) = reads.next().await {
             result?;
         }

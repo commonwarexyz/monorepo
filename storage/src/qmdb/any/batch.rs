@@ -35,9 +35,6 @@ use std::{
 };
 use tracing::debug;
 
-/// Maximum number of journal reads to issue concurrently during floor raising.
-const MAX_CONCURRENT_READS: u64 = 64;
-
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
@@ -721,7 +718,7 @@ where
                 // Collect candidates, capped by the number of active ops still needed.
                 // `scan_from` tracks prefetch progress separately from `floor`, so
                 // early exit cannot leave `floor` past unprocessed candidates.
-                let limit = ((total_steps - moved) as usize).min(MAX_CONCURRENT_READS as usize);
+                let limit = (total_steps - moved) as usize;
                 let mut candidates = Vec::with_capacity(limit);
                 scan_from = fill_candidates(scan_from, fixed_tip, limit, &mut candidates);
                 if candidates.is_empty() {
