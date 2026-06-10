@@ -853,10 +853,7 @@ impl TlsSizeClassCache {
     /// to keep the refill and batching code out of `BufferPoolInner::try_alloc`,
     /// reducing hot-path code size and register pressure.
     #[inline(never)]
-    fn pop_global(
-        &mut self,
-        class: &SizeClassHandle,
-    ) -> Option<TlsSizeClassCacheEntry> {
+    fn pop_global(&mut self, class: &SizeClassHandle) -> Option<TlsSizeClassCacheEntry> {
         // Tiny caches do not batch enough to justify the wider global claim.
         // Keep their miss path equivalent to a single take.
         if self.capacity < MIN_TLS_BATCH_CAPACITY {
@@ -1074,11 +1071,7 @@ impl TlsSizeClassCaches {
     /// reference. The first local push or global refill stores entries whose
     /// pooled headers contain live leases.
     #[inline(always)]
-    fn get_or_init(
-        &mut self,
-        class_id: usize,
-        capacity: usize,
-    ) -> &mut TlsSizeClassCache {
+    fn get_or_init(&mut self, class_id: usize, capacity: usize) -> &mut TlsSizeClassCache {
         if class_id < self.bins.len() && self.bins[class_id].is_some() {
             return self.bins[class_id]
                 .as_mut()
@@ -1095,11 +1088,7 @@ impl TlsSizeClassCaches {
     /// `inline(never)` to keep the resize and allocation path out of pooled
     /// allocation and drop.
     #[inline(never)]
-    fn init(
-        &mut self,
-        class_id: usize,
-        capacity: usize,
-    ) -> &mut TlsSizeClassCache {
+    fn init(&mut self, class_id: usize, capacity: usize) -> &mut TlsSizeClassCache {
         if class_id >= self.bins.len() {
             self.bins.resize_with(class_id + 1, || None);
         }
@@ -1294,7 +1283,9 @@ impl BufferPoolThreadCache {
         };
 
         // SAFETY: `cache` points to this thread's initialized TLS cache.
-        unsafe { cache.as_mut() }.pop(class).map(|entry| entry.buffer)
+        unsafe { cache.as_mut() }
+            .pop(class)
+            .map(|entry| entry.buffer)
     }
 
     /// Resolves the local cache after the fast TLS or class-cache lookup

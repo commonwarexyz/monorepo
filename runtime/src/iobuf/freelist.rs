@@ -209,9 +209,9 @@ impl Freelist {
         layout: Layout,
         prefill: bool,
     ) -> Self {
-        let usable_size = layout.size().saturating_sub(std::mem::size_of::<
-            super::buffer::PooledHeader,
-        >());
+        let usable_size = layout
+            .size()
+            .saturating_sub(std::mem::size_of::<super::buffer::PooledHeader>());
         Self::with_usable_size(capacity, parallelism, usable_size, layout, prefill)
     }
 

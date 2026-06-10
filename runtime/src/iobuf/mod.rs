@@ -282,7 +282,10 @@ impl IoBuf {
         let offset = (me.ptr.as_ptr() as usize)
             .checked_sub(base.as_ptr() as usize)
             .expect("view pointer must be within owner allocation");
-        assert!(offset <= usable_capacity, "view pointer out of owner bounds");
+        assert!(
+            offset <= usable_capacity,
+            "view pointer out of owner bounds"
+        );
         let cap = usable_capacity - offset;
         assert!(me.len <= cap, "view length out of owner bounds");
 
@@ -777,7 +780,6 @@ impl IoBufMut {
     pub const fn clear(&mut self) {
         self.len = 0;
     }
-
 }
 
 impl AsRef<[u8]> for IoBufMut {
@@ -977,11 +979,7 @@ unsafe impl BufMut for IoBufMut {
             }
             // SAFETY: `cnt` is bounded by the unique writable tail just above.
             unsafe {
-                std::ptr::copy_nonoverlapping(
-                    chunk.as_ptr(),
-                    self.ptr.as_ptr().add(self.len),
-                    cnt,
-                );
+                std::ptr::copy_nonoverlapping(chunk.as_ptr(), self.ptr.as_ptr().add(self.len), cnt);
             }
             self.len += cnt;
             src.advance(cnt);
