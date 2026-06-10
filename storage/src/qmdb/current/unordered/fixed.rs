@@ -113,6 +113,9 @@ pub mod test {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
+    use commonware_utils::test_rng_seeded;
+    use rand::RngCore as _;
+    use std::collections::HashMap;
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -173,11 +176,6 @@ pub mod test {
     /// (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]
     pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
-        use commonware_cryptography::Hasher as _;
-        use commonware_utils::test_rng_seeded;
-        use rand::RngCore as _;
-        use std::collections::HashMap;
-
         fn key(i: u64) -> Digest {
             Sha256::hash(&i.to_be_bytes())
         }

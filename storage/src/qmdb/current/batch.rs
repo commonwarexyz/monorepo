@@ -119,7 +119,8 @@ impl<const N: usize> ChunkOverlay<N> {
 ///
 /// Mirrors the contract on `any::batch::next_candidate`: may return only locations that are
 /// *possibly* active in `[floor, tip)`, may skip locations only when known inactive.
-/// `is_active_at` revalidates each candidate, so false positives are tolerated; false negatives
+/// The floor-raise loop revalidates each candidate, so false positives are tolerated; false
+/// negatives
 /// are forbidden.
 ///
 /// False positives can arise two ways:

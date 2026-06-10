@@ -10,7 +10,7 @@
 //!   cargo bench -p commonware-storage --bench constantinople -- [db] [depth] [iters] [keys] [updates]
 //!
 //! - db: "any" or "current" (default any)
-//! - depth: number of pending ancestor batches under the timed batch (0 or 1)
+//! - depth: number of pending ancestor batches under the timed batch
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
 //! - updates: keys written per batch (default 32,768)

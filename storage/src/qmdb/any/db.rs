@@ -119,7 +119,8 @@ pub struct Db<
     pub(crate) active_keys: usize,
 
     /// Activity bitmap over committed operations. Rebuilt from the journal on init; never
-    /// persisted. A hint for floor-raise scans; merkleization re-verifies via `is_active_at`.
+    /// persisted. A hint for floor-raise scans; merkleization re-verifies each candidate
+    /// against the batch diff, ancestor diffs, and snapshot in the floor-raise loop.
     /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
     /// tree leaves and proofs.
     ///

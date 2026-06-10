@@ -144,6 +144,7 @@ pub(crate) mod test {
     };
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;
+    use std::collections::HashMap;
 
     /// A generic type alias for an Any database parameterized by merkle family.
     type AnyTestGeneric<F> = crate::qmdb::any::db::Db<
@@ -302,11 +303,9 @@ pub(crate) mod test {
     /// Reads on a batch retain resolved locations that `merkleize` consumes to skip re-reading
     /// those keys. The root must be byte-identical to a write-only batch's `merkleize` (no
     /// retained reads), across updates/deletes/creates, both with the batch rooted directly at
-    /// the DB (D=0) and through one pending ancestor (D=1).
+    /// the DB (D=0) and through pending ancestors (D=1, D=2).
     #[test_traced("WARN")]
     fn test_unordered_fixed_resolved_merkleize_parity() {
-        use std::collections::HashMap;
-
         type ParentChain = Vec<
             std::sync::Arc<
                 crate::qmdb::any::batch::MerkleizedBatch<
@@ -385,6 +384,9 @@ pub(crate) mod test {
                 // consumes. Values and root must match the write-only path.
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
+                // Duplicate keys in one read resolve identically per slot and retain once.
+                let dup_values = fb.get_many(&[keys[0], keys[0]], &db).await.unwrap();
+                assert_eq!(dup_values[0], dup_values[1]);
                 let values = fb.get_many(&keys, &db).await.unwrap();
                 let plain = new_batch().get_many(&keys, &db).await.unwrap();
                 assert_eq!(values, plain, "value mismatch at depth={depth}");
@@ -440,7 +442,9 @@ pub(crate) mod test {
     /// A batch's retained read locations must stay valid when an ancestor is committed and
     /// dropped between the read and merkleize. Keys resolved through an uncommitted ancestor's
     /// diff retain nothing, so the merkleize-time re-resolution picks up the post-commit
-    /// location and the final state matches a batch that never read.
+    /// location and the final state matches a batch that never read. Keys resolved through the
+    /// committed snapshot retain their location, which the intervening commit cannot move
+    /// (applying an ancestor only relocates keys present in that ancestor's diff).
     #[test_traced("WARN")]
     fn test_unordered_fixed_retention_survives_ancestor_commit() {
         deterministic::Runner::default().start(|ctx| async move {
@@ -470,14 +474,20 @@ pub(crate) mod test {
                 }
                 let p = p.merkleize(&db, None).await.unwrap();
 
-                // Child reads the grandparent-touched keys (resolving through its diff).
+                // Child reads the grandparent-touched keys (resolving through its diff,
+                // retaining nothing) and keys 20..30 (committed-resolved, retained).
                 let b = p.new_batch::<Sha256>();
                 if read_first {
-                    let keys: Vec<Digest> = (0..10u64).map(key).collect();
+                    let keys: Vec<Digest> = (0..10u64).chain(20..30u64).map(key).collect();
                     let key_refs: Vec<&Digest> = keys.iter().collect();
                     let values = b.get_many(&key_refs, &db).await.unwrap();
                     for (i, v) in values.into_iter().enumerate() {
-                        assert_eq!(v, Some(val(i as u64 + 1000)));
+                        let expected = if i < 10 {
+                            val(i as u64 + 1000)
+                        } else {
+                            val(i as u64 + 10)
+                        };
+                        assert_eq!(v, Some(expected));
                     }
                 }
 
@@ -489,6 +499,9 @@ pub(crate) mod test {
                 for i in 0..10u64 {
                     b = b.write(key(i), Some(val(i + 3000)));
                 }
+                for i in 20..30u64 {
+                    b = b.write(key(i), Some(val(i + 4000)));
+                }
                 let b = b.merkleize(&db, None).await.unwrap();
                 db.apply_batch(p).await.unwrap();
                 db.apply_batch(b).await.unwrap();
@@ -496,6 +509,9 @@ pub(crate) mod test {
 
                 for i in 0..10u64 {
                     assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 3000)));
+                }
+                for i in 20..30u64 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 4000)));
                 }
                 roots.push(db.root());
                 db.destroy().await.unwrap();

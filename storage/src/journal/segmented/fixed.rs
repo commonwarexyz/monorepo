@@ -197,6 +197,10 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         positions: &[u64],
         buf: &mut [u8],
     ) -> Result<(Vec<A>, usize), Error> {
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be strictly increasing"
+        );
         if positions.is_empty() {
             return Ok((Vec::new(), 0));
         }

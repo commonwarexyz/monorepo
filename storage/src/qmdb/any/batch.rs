@@ -2337,6 +2337,84 @@ mod tests {
         assert_eq!(next_candidate(&bitmap, loc(0), BITMAP_CHUNK_BITS), None);
     }
 
+    /// `fill_candidates` must produce the exact candidate sequence of repeatedly calling the
+    /// `next_candidate` oracle, across committed bits, the committed-to-tail transition, pruned
+    /// and truncated bitmaps, every batch limit, and tips below the bitmap length.
+    #[test]
+    fn bitmap_fill_candidates_matches_oracle() {
+        let shapes: Vec<(&str, Shared<BITMAP_CHUNK_BYTES>)> = vec![
+            ("empty", shared_with(|_| {})),
+            (
+                "committed_bits",
+                shared_with(|bm| {
+                    bm.extend_to(10);
+                    bm.set_bit(3, true);
+                    bm.set_bit(7, true);
+                }),
+            ),
+            (
+                "transition_into_tail",
+                shared_with(|bm| {
+                    bm.extend_to(5);
+                    bm.set_bit(2, true);
+                }),
+            ),
+            (
+                "pruned",
+                shared_with(|bm| {
+                    bm.extend_to(BITMAP_CHUNK_BITS * 3);
+                    bm.set_bit(BITMAP_CHUNK_BITS * 2 + 5, true);
+                    bm.prune_to_bit(BITMAP_CHUNK_BITS * 2);
+                }),
+            ),
+            (
+                "truncated",
+                shared_with(|bm| {
+                    bm.extend_to(BITMAP_CHUNK_BITS * 2);
+                    bm.set_bit(BITMAP_CHUNK_BITS + 3, true);
+                    bm.truncate(BITMAP_CHUNK_BITS);
+                }),
+            ),
+        ];
+
+        for (name, bitmap) in shapes {
+            let bitmap_len = bitmap::Readable::<BITMAP_CHUNK_BYTES>::len(&bitmap);
+            let start = commonware_utils::bitmap::Readable::pruned_chunks(&bitmap) as u64
+                * BITMAP_CHUNK_BITS;
+            for tip in [
+                start,
+                bitmap_len.saturating_sub(2),
+                bitmap_len,
+                bitmap_len + 6,
+            ] {
+                // Oracle sequence: advance the floor one candidate at a time.
+                let mut expected = Vec::new();
+                let mut floor = loc(start);
+                while let Some(candidate) = next_candidate(&bitmap, floor, tip) {
+                    expected.push(candidate);
+                    floor = loc(*candidate + 1);
+                }
+
+                for limit in 1..=expected.len().max(1) + 1 {
+                    let mut actual = Vec::new();
+                    let mut scan = loc(start);
+                    loop {
+                        let mut batch = Vec::new();
+                        scan = fill_candidates(&bitmap, scan, tip, limit, &mut batch);
+                        if batch.is_empty() {
+                            break;
+                        }
+                        actual.extend(batch);
+                    }
+                    assert_eq!(
+                        actual, expected,
+                        "shape={name} tip={tip} limit={limit} diverged from oracle"
+                    );
+                }
+            }
+        }
+    }
+
     /// Test helper: same logic as `Merkleizer::extract_parent_deleted_creates`
     /// but without requiring a full Merkleizer instance.
     fn extract_parent_deleted_creates<K: Ord + Clone, V: Clone>(

@@ -4387,9 +4387,10 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_many_warm_matches_read() {
-        // Verify the batched warm path is byte-identical to per-item reads across multiple
-        // sections, with a mid-section pruning boundary and a sparse subset of positions.
+    fn test_read_many_sparse_sections_and_hit_accounting() {
+        // Verify the batched read path is byte-identical to per-item reads across multiple
+        // sections, with a mid-section pruning boundary, a sparse subset of positions, and
+        // exact hit/miss accounting over a mixed cached/uncached batch.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_cfg(&context, NZU64!(8));
@@ -4404,15 +4405,38 @@ mod tests {
 
             let reader = journal.reader().await;
 
-            // Warm the page cache so every position is an all-hit batch read.
-            for pos in 11..50u64 {
-                let _ = reader.try_read_sync(pos);
+            fn counter(buffer: &str, name: &str) -> u64 {
+                buffer
+                    .lines()
+                    .find(|l| l.contains(name) && !l.starts_with('#'))
+                    .and_then(|l| l.split_whitespace().last())
+                    .and_then(|v| v.parse().ok())
+                    .expect("counter missing")
             }
 
             // Sparse subset spanning multiple sections, including the pruning boundary.
+            // `try_read_sync` probes do not populate the cache, so the cached subset is
+            // whatever the append path left resident; derive the expected hit count from
+            // probes so the batch read's hit/miss accounting is asserted exactly.
             let positions: Vec<u64> = vec![11, 12, 19, 20, 23, 31, 40, 47, 49];
+            let expected_hits = positions
+                .iter()
+                .filter(|&&pos| reader.try_read_sync(pos).is_some())
+                .count() as u64;
+            let before = context.encode();
             let batch = reader.read_many(&positions).await.unwrap();
+            let after = context.encode();
             assert_eq!(batch.len(), positions.len());
+            assert_eq!(
+                counter(&after, "cache_hits") - counter(&before, "cache_hits"),
+                expected_hits,
+                "batch read hit count should match the cached subset"
+            );
+            assert_eq!(
+                counter(&after, "cache_misses") - counter(&before, "cache_misses"),
+                positions.len() as u64 - expected_hits,
+                "batch read miss count should cover the rest"
+            );
             for (i, &pos) in positions.iter().enumerate() {
                 let single = reader.read(pos).await.unwrap();
                 assert_eq!(batch[i], single);

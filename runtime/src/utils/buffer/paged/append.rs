@@ -616,6 +616,10 @@ impl<B: Blob> Append<B> {
                 .expect("read_many_into buffer length overflow"),
             "read_many_into requires buf.len() == offsets.len() * item_size"
         );
+        assert!(
+            offsets.windows(2).all(|w| w[0] < w[1]),
+            "offsets must be strictly increasing"
+        );
         if offsets.is_empty() {
             return Ok(0);
         }
