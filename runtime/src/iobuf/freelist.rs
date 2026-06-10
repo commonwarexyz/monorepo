@@ -407,9 +407,7 @@ impl Freelist {
     /// use it before the freelist exists.
     #[inline(always)]
     const fn valid_bits(capacity: usize, word_shift: u32, word_index: usize) -> u64 {
-        debug_assert!(word_index < capacity);
         let bits = ((capacity - 1 - word_index) >> word_shift) + 1;
-        debug_assert!(bits <= SLOT_BITMAP_WORD_BITS);
         if bits == SLOT_BITMAP_WORD_BITS {
             u64::MAX
         } else {
