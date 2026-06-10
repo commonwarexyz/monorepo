@@ -39,10 +39,6 @@ use commonware_parallel::Strategy;
 use commonware_utils::sync::{AsyncMutex, RwLock};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Upper bound on the encoded last-commit operation, enforced before any witness is built and
-/// as a decode guard against corrupted length prefixes.
-pub(crate) const MAX_OP_BYTES: usize = 1 << 24;
-
 /// A single durably persisted witness: a complete snapshot of one synced commit.
 ///
 /// The root is not stored: it is recomputed from the rebuilt frontier and authenticated against
@@ -77,7 +73,7 @@ impl<F: Family, D: Digest> Read for WitnessEntry<F, D> {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
-        let op_bytes = Vec::<u8>::read_cfg(buf, &((..=MAX_OP_BYTES).into(), ()))?;
+        let op_bytes = Vec::<u8>::read_cfg(buf, &((..).into(), ()))?;
         let proof = Proof::<F, D>::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?;
         let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
@@ -210,14 +206,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Err(Error::DataCorrupted("witness ahead of in-memory state"));
         }
 
-        let last_commit_op_bytes = last_commit_op_bytes();
-        if last_commit_op_bytes.len() > MAX_OP_BYTES {
-            return Err(Error::CommitTooLarge(
-                last_commit_op_bytes.len(),
-                MAX_OP_BYTES,
-            ));
-        }
-        let witness = build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)?;
+        let witness =
+            build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes())?;
         if self.import_pending.load(Ordering::Relaxed) {
             self.journal.clear_to_size(0).await?;
         }
@@ -405,12 +395,6 @@ where
     D: Digest,
     S: Strategy,
 {
-    if last_commit_op_bytes.len() > MAX_OP_BYTES {
-        return Err(Error::CommitTooLarge(
-            last_commit_op_bytes.len(),
-            MAX_OP_BYTES,
-        ));
-    }
     if merkle.leaves() == 0 {
         return Err(Error::DataCorrupted("missing final commit"));
     }
@@ -541,12 +525,6 @@ where
     H: Hasher,
     S: Strategy,
 {
-    if last_commit_op_bytes.len() > MAX_OP_BYTES {
-        return Err(Error::CommitTooLarge(
-            last_commit_op_bytes.len(),
-            MAX_OP_BYTES,
-        ));
-    }
     let hasher = qmdb::hasher::<H>();
     let batch = {
         let batch = merkle.new_batch().add(&hasher, &last_commit_op_bytes);

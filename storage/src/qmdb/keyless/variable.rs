@@ -390,25 +390,6 @@ mod test {
         });
     }
 
-    /// A commit whose encoded operation exceeds the witness entry decode bound must be rejected
-    /// at commit time, not discovered as corruption on the next reopen.
-    #[test_traced("INFO")]
-    fn test_keyless_variable_compact_rejects_oversized_commit() {
-        deterministic::Runner::default().start(|ctx| async move {
-            let mut compact = open_compact::<mmr::Family>(ctx.child("compact")).await;
-            let floor = compact.inactivity_floor_loc();
-            let metadata = vec![0u8; crate::qmdb::compact::witness::MAX_OP_BYTES + 1];
-            let batch = compact
-                .new_batch()
-                .merkleize(&compact, Some(metadata), floor);
-            compact.apply_batch(batch).unwrap();
-            assert!(matches!(
-                compact.sync().await,
-                Err(crate::qmdb::Error::CommitTooLarge(_, _))
-            ));
-        });
-    }
-
     #[test_traced("INFO")]
     fn test_keyless_db_pruning() {
         deterministic::Runner::default().start(|ctx| async move {

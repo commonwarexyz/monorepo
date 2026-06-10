@@ -1723,60 +1723,6 @@ mod compact_variable_mmr {
         });
     }
 
-    /// A peer commit whose encoded operation exceeds the witness entry decode bound must fail
-    /// the sync instead of persisting a witness that the next reopen cannot decode.
-    #[test_traced("WARN")]
-    fn test_compact_sync_rejects_oversized_commit() {
-        deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-keyless-oversized-{}", context.next_u64());
-            let max_op_bytes = crate::qmdb::compact::witness::MAX_OP_BYTES;
-
-            // A full source can commit metadata larger than the witness entry bound.
-            let mut source_cfg = source_config(&suffix, &context);
-            source_cfg.log.codec_config = ((0..=max_op_bytes + 1024).into(), ());
-            let mut source = SourceDb::init(context.child("source"), source_cfg)
-                .await
-                .unwrap();
-            let metadata = vec![0u8; max_op_bytes + 1];
-            let batch = source.new_batch().append(vec![1]).merkleize(
-                &source,
-                Some(metadata),
-                Location::new(0),
-            );
-            source.apply_batch(batch).await.unwrap();
-            source.commit().await.unwrap();
-            let bounds = source.bounds().await;
-            let target = sync::compact::Target {
-                root: source.root(),
-                leaf_count: bounds.end,
-            };
-
-            let client_cfg = client_config(&suffix, &context);
-            let result: Result<ClientDb, _> = sync::compact::sync(sync::compact::Config {
-                context: context.child("client"),
-                resolver: Arc::new(source),
-                target,
-                db_config: client_cfg.clone(),
-            })
-            .await;
-            let err = result.err().expect("oversized commit must fail sync");
-            assert!(
-                matches!(
-                    err,
-                    sync::Error::Database(crate::qmdb::Error::CommitTooLarge(_, _))
-                ),
-                "sync must fail with CommitTooLarge: {err:?}",
-            );
-
-            // The failed import left no witness behind: the partition opens as a fresh db.
-            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
-                .await
-                .unwrap();
-            assert_eq!(reopened.size(), Location::new(1));
-            reopened.destroy().await.unwrap();
-        });
-    }
-
     /// Abandoning a compact-sync reconstruction before its first persist leaves the previous
     /// witness journal untouched.
     #[test_traced("WARN")]
