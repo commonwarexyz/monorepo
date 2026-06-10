@@ -72,6 +72,20 @@ impl<F: Family, D: Digest> Read for Witness<F, D> {
     }
 }
 
+#[cfg(feature = "arbitrary")]
+impl<F: Family, D: Digest> arbitrary::Arbitrary<'_> for Witness<F, D>
+where
+    D: for<'a> arbitrary::Arbitrary<'a>,
+{
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            op_bytes: u.arbitrary()?,
+            proof: u.arbitrary()?,
+            pinned_nodes: u.arbitrary()?,
+        })
+    }
+}
+
 /// A witness and the root it was verified against.
 #[derive(Clone)]
 pub(crate) struct VerifiedWitness<F: Family, D: Digest> {
@@ -523,6 +537,19 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[cfg(feature = "arbitrary")]
+    mod conformance {
+        use super::*;
+        use crate::merkle::{mmb, mmr};
+        use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256;
+
+        commonware_conformance::conformance_tests! {
+            CodecConformance<Witness<mmr::Family, sha256::Digest>>,
+            CodecConformance<Witness<mmb::Family, sha256::Digest>>,
+        }
+    }
 
     /// Corrupt the entry at `pos` with `f`, preserving the entries above it.
     pub(crate) async fn corrupt_entry<E, F, D>(

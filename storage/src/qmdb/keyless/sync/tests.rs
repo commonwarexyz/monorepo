@@ -1784,6 +1784,9 @@ mod compact_variable_mmr {
             // Rewind is rejected until the import is persisted, even to the imported leaf
             // count itself: the fast path must not report unpersisted state as durable.
             assert!(imported.rewind(target_b.leaf_count).await.is_err());
+
+            // Prune is likewise rejected while the import is pending.
+            assert!(imported.prune(target_b.leaf_count).await.is_err());
             drop(imported);
 
             // The dropped import never touched the journal: state A is still there.

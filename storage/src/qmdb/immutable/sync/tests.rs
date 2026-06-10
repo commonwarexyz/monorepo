@@ -1774,6 +1774,79 @@ mod compact_variable_mmr {
             reopened.destroy().await.unwrap();
         });
     }
+
+    /// Dropping a compact-sync import before its first persist leaves the previous witness
+    /// journal untouched.
+    #[test_traced("WARN")]
+    fn test_compact_sync_dropped_import_preserves_existing_state() {
+        deterministic::Runner::default().start(|mut context| async move {
+            let suffix = format!("compact-immutable-dropped-{}", context.next_u64());
+
+            // Seed the client partition with committed state A.
+            let client_cfg = client_config(&suffix, &context);
+            let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
+                .await
+                .unwrap();
+            let batch = seeded
+                .new_batch()
+                .set(sha256::Digest::from([1; 32]), vec![1])
+                .merkleize(&seeded, Some(vec![1]), Location::new(0));
+            seeded.apply_batch(batch).unwrap();
+            seeded.sync().await.unwrap();
+            let target_a = seeded.target();
+            drop(seeded);
+
+            // Reconstruct state B into the same partition, then drop it before the first
+            // persist (as a cancelled sync would).
+            let mut source =
+                SourceDb::init(context.child("source"), source_config(&suffix, &context))
+                    .await
+                    .unwrap();
+            let batch = source
+                .new_batch()
+                .set(sha256::Digest::from([9; 32]), vec![9])
+                .merkleize(&source, Some(vec![9]), Location::new(0));
+            source.apply_batch(batch).await.unwrap();
+            source.commit().await.unwrap();
+            let bounds = source.bounds().await;
+            let target_b = sync::compact::Target {
+                root: source.root(),
+                leaf_count: bounds.end,
+            };
+            assert_ne!(target_b, target_a);
+            let source = Arc::new(source);
+            let fetched = sync::compact::Resolver::get_compact_state(&source, target_b.clone())
+                .await
+                .unwrap();
+            let validated = sync::compact::ValidatedState {
+                state: fetched.state,
+                root: target_b.root,
+            };
+            let mut imported = <ClientDb as sync::compact::Database>::from_validated_state(
+                context.child("import"),
+                client_cfg.clone(),
+                validated,
+            )
+            .await
+            .unwrap();
+            assert_eq!(imported.target(), target_b);
+
+            // Rewind is rejected until the import is persisted, even to the imported leaf
+            // count itself: the fast path must not report unpersisted state as durable.
+            assert!(imported.rewind(target_b.leaf_count).await.is_err());
+
+            // Prune is likewise rejected while the import is pending.
+            assert!(imported.prune(target_b.leaf_count).await.is_err());
+            drop(imported);
+
+            // The dropped import never touched the journal: state A is still there.
+            let reopened = ClientDb::init(context.child("reopen"), client_cfg)
+                .await
+                .unwrap();
+            assert_eq!(reopened.target(), target_a);
+            reopened.destroy().await.unwrap();
+        });
+    }
 }
 
 mod compact_variable_mmb {

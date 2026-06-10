@@ -6,8 +6,8 @@ use crate::{
     },
     stateful::{
         db::{
-            p2p::standard as qmdb_resolver, DatabaseSet, Merkleized as _, SyncEngineConfig,
-            Unmerkleized as _,
+            p2p::{compact as compact_resolver, standard as qmdb_resolver},
+            DatabaseSet, Merkleized as _, SyncEngineConfig, Unmerkleized as _,
         },
         probe::{Config as ProbeConfig, Probe},
         Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
@@ -48,11 +48,12 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     archive::prunable,
-    journal::contiguous::fixed::Config as FixedLogConfig,
+    journal::contiguous::{fixed::Config as FixedLogConfig, variable::Config as VariableLogConfig},
     mmr::{self, full::Config as MmrJournalConfig, Location},
     qmdb::{
         any::{unordered::fixed, FixedConfig},
-        sync::Target,
+        immutable,
+        sync::{compact as compact_sync, Target},
     },
     translator::TwoCap,
 };
@@ -66,15 +67,21 @@ use futures::{Stream, StreamExt};
 use rand::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-/// The QMDB database type used by the multi-db e2e tests.
-type Qmdb<E> =
+/// The full (journaled) QMDB used as DB-A in the multi-db e2e tests.
+type QmdbA<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-/// A single QMDB database behind a lock.
-type SingleDb<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+/// The compact (witness-only) QMDB used as DB-B, so the suite drives deep rewind,
+/// pruning, and state sync through the compact path as well.
+type QmdbB<E> =
+    immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
-/// Two QMDB databases as a tuple.
-pub(crate) type MultiDatabaseSet<E> = (SingleDb<E>, SingleDb<E>);
+/// A single QMDB database behind a lock.
+type DbA<E> = Arc<AsyncRwLock<QmdbA<E>>>;
+type DbB<E> = Arc<AsyncRwLock<QmdbB<E>>>;
+
+/// A full and a compact QMDB as a tuple.
+pub(crate) type MultiDatabaseSet<E> = (DbA<E>, DbB<E>);
 
 /// A block carrying state from two QMDB databases.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -197,16 +204,17 @@ impl App {
     async fn execute<E: Rng + Spawner + Metrics + Clock + Storage>(
         height: Height,
         batches: (
-            <SingleDb<E> as DatabaseSet<E>>::Unmerkleized,
-            <SingleDb<E> as DatabaseSet<E>>::Unmerkleized,
+            <DbA<E> as DatabaseSet<E>>::Unmerkleized,
+            <DbB<E> as DatabaseSet<E>>::Unmerkleized,
         ),
     ) -> (
-        <SingleDb<E> as DatabaseSet<E>>::Merkleized,
-        <SingleDb<E> as DatabaseSet<E>>::Merkleized,
+        <DbA<E> as DatabaseSet<E>>::Merkleized,
+        <DbB<E> as DatabaseSet<E>>::Merkleized,
     ) {
-        let (mut batch_a, mut batch_b) = batches;
+        let (mut batch_a, batch_b) = batches;
 
-        // DB-A: increment counter
+        // DB-A: increment counter and write a height marker, mirroring the single-db app's
+        // per-block operation count so its state sync spans the same crash windows.
         let counter = Sha256::hash(b"counter");
         let current: u64 = batch_a
             .get(&counter)
@@ -214,11 +222,15 @@ impl App {
             .unwrap()
             .map_or(0, |v| digest_to_u64(&v));
         batch_a = batch_a.write(counter, Some(u64_to_digest(current + 1)));
-
-        // DB-B: write height marker
-        batch_b = batch_b.write(
+        batch_a = batch_a.write(
             Sha256::hash(&height.get().to_be_bytes()),
             Some(u64_to_digest(height.get())),
+        );
+
+        // DB-B: write height marker
+        let batch_b = batch_b.set(
+            Sha256::hash(&height.get().to_be_bytes()),
+            u64_to_digest(height.get()),
         );
 
         let merkleized_a = batch_a.merkleize().await.unwrap();
@@ -311,7 +323,10 @@ impl<E: Rng + Spawner + Metrics + Clock + Storage> Application<E> for App {
     fn sync_targets(block: &Self::Block) -> <Self::Databases as DatabaseSet<E>>::SyncTargets {
         (
             Target::new(block.root_a, block.range_a.clone()),
-            Target::new(block.root_b, block.range_b.clone()),
+            compact_sync::Target {
+                root: block.root_b,
+                leaf_count: block.range_b.end(),
+            },
         )
     }
 }
@@ -426,22 +441,19 @@ impl EngineDefinition for MultiDbEngine {
             },
             translator: TwoCap,
         };
-        let db_config_b = FixedConfig {
-            merkle_config: MmrJournalConfig {
-                journal_partition: format!("{partition_prefix}-qmdb-b-mmr-journal"),
-                metadata_partition: format!("{partition_prefix}-qmdb-b-mmr-metadata"),
-                items_per_blob: NZU64!(11),
-                write_buffer: IO_BUFFER_SIZE,
-                strategy: Sequential,
-                page_cache: page_cache.clone(),
-            },
-            journal_config: FixedLogConfig {
-                partition: format!("{partition_prefix}-qmdb-b-log-journal"),
-                items_per_blob: NZU64!(7),
+        // One witness entry per section so the periodic prune actually drops entries
+        // (pruning is section-aligned).
+        let db_config_b = immutable::fixed::CompactConfig {
+            strategy: Sequential,
+            witness: VariableLogConfig {
+                partition: format!("{partition_prefix}-qmdb-b-witness"),
+                items_per_section: NZU64!(1),
+                compression: None,
+                codec_config: (),
                 page_cache: page_cache.clone(),
                 write_buffer: IO_BUFFER_SIZE,
             },
-            translator: TwoCap,
+            commit_codec_config: (),
         };
         let db_config = (db_config_a, db_config_b);
 
@@ -515,10 +527,13 @@ impl EngineDefinition for MultiDbEngine {
             let empty_db_root = Sha256Digest::from(hex!(
                 "ea6e0567a525372add5e4ef4d0600c18ed47fa5dd041a0ab0d25b60ea8c35978"
             ));
+            let empty_compact_db_root = Sha256Digest::from(hex!(
+                "290cbd39f3eaaca7cb4a92f4a2740fc438cabb99144258b24ba0cf54b3f4cfec"
+            ));
             Block::genesis(
                 empty_db_root,
                 non_empty_range!(Location::new(0), Location::new(1)),
-                empty_db_root,
+                empty_compact_db_root,
                 non_empty_range!(Location::new(0), Location::new(1)),
             )
         };
@@ -577,7 +592,7 @@ impl EngineDefinition for MultiDbEngine {
 
         // QMDB state-sync resolvers (one per database).
         let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, Qmdb<_>>::new(
+            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbA<_>>::new(
                 context.child("qmdb_resolver_a"),
                 qmdb_resolver::Config {
                     peer_provider: oracle.manager(),
@@ -595,23 +610,29 @@ impl EngineDefinition for MultiDbEngine {
             );
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
-        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, Qmdb<_>>::new(
-                context.child("qmdb_resolver_b"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    database: None,
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-            );
+        let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) = compact_resolver::Actor::<
+            _,
+            ed25519::PublicKey,
+            _,
+            _,
+            mmr::Family,
+            QmdbB<_>,
+            Sha256,
+        >::new(
+            context.child("qmdb_resolver_b"),
+            compact_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                database: None,
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
         qmdb_resolver_actor_b.start(qmdb_b_resolver_network);
 
         // Stateful actor
@@ -636,15 +657,15 @@ impl EngineDefinition for MultiDbEngine {
             },
         );
 
-        // Observe the oldest operation either QMDB still retains, to assert pruning ran.
+        // Observe the oldest operation the full QMDB still retains, to assert pruning ran.
+        // The compact db keeps no operation history to observe.
         let prune_observer = stateful_mailbox.clone();
         let oldest_retained: OldestRetained = Arc::new(move || {
             let mailbox = prune_observer.clone();
             Box::pin(async move {
-                let (a, b) = mailbox.subscribe_databases().await;
+                let (a, _b) = mailbox.subscribe_databases().await;
                 let oldest_a = *a.read().await.bounds().await.start;
-                let oldest_b = *b.read().await.bounds().await.start;
-                oldest_a.min(oldest_b)
+                oldest_a
             })
         });
 
