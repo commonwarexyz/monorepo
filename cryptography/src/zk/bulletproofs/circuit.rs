@@ -554,11 +554,11 @@ pub fn r1cs_to_circuit_and_witness<F: Ring + Random>(
 mod zkc {
     use crate::zk::circuit as zk;
     use commonware_math::algebra::{Field, Random, Ring};
-    use commonware_utils::ordered::Set;
+    use commonware_utils::ordered::{Map, Set};
     use rand_core::CryptoRngCore;
     use std::{borrow::Cow, collections::BTreeMap};
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Location {
         One,
         Witness(usize),
@@ -572,7 +572,7 @@ mod zkc {
     enum LinComb<F> {
         Location(Location),
         Constant(F),
-        General(Vec<(F, Location)>),
+        General(Map<Location, F>),
     }
 
     impl<F: Ring> LinComb<F> {
@@ -583,42 +583,55 @@ mod zkc {
                 _ => return None,
             };
             let out = match other {
-                Self::Location(location) => Self::General(vec![(constant, *location)]),
-                Self::Constant(other_constant) => Self::Constant(constant * other_constant),
-                Self::General(items) => Self::General(
-                    items
-                        .iter()
-                        .map(|(w, loc)| (w.clone() * &constant, *loc))
-                        .collect(),
+                Self::Location(location) => Self::General(
+                    Map::try_from([(*location, constant)])
+                        .expect("single entry cannot duplicate keys"),
                 ),
+                Self::Constant(other_constant) => Self::Constant(constant * other_constant),
+                Self::General(items) => {
+                    let mut items = items.clone();
+                    for w in items.values_mut() {
+                        *w = w.clone() * &constant;
+                    }
+                    Self::General(items)
+                }
             };
             Some(out)
         }
 
-        fn iter(&self) -> impl Iterator<Item = (Cow<'_, F>, Location)> {
-            enum LinCombIter<'a, F: Clone> {
-                Single(Option<(Cow<'a, F>, Location)>),
-                General(std::slice::Iter<'a, (F, Location)>),
-            }
-
-            impl<'a, F: Clone> Iterator for LinCombIter<'a, F> {
-                type Item = (Cow<'a, F>, Location);
-
-                fn next(&mut self) -> Option<Self::Item> {
-                    match self {
-                        LinCombIter::Single(item) => item.take(),
-                        LinCombIter::General(items) => {
-                            items.next().map(|(w, loc)| (Cow::Borrowed(w), *loc))
-                        }
-                    }
+        /// Add two linear combinations, merging the weights of duplicate
+        /// locations so the result stays bounded by the number of distinct
+        /// locations rather than the number of terms.
+        fn sum(&self, other: &Self) -> Self {
+            let mut terms: Vec<(Location, F)> = self
+                .iter()
+                .chain(other.iter())
+                .map(|(w, loc)| (loc, w.into_owned()))
+                .collect();
+            terms.sort_by_key(|&(loc, _)| loc);
+            let mut merged: Vec<(Location, F)> = Vec::with_capacity(terms.len());
+            for (loc, w) in terms {
+                match merged.last_mut() {
+                    Some((last, acc)) if *last == loc => *acc += &w,
+                    _ => merged.push((loc, w)),
                 }
             }
+            // Merging adjacent duplicates above leaves every location unique.
+            Self::General(Map::try_from(merged).expect("merged locations should be unique"))
+        }
 
-            match self {
-                Self::Location(loc) => LinCombIter::Single(Some((Cow::Owned(F::one()), *loc))),
-                Self::Constant(w) => LinCombIter::Single(Some((Cow::Borrowed(w), Location::One))),
-                Self::General(items) => LinCombIter::General(items.iter()),
-            }
+        fn iter(&self) -> impl Iterator<Item = (Cow<'_, F>, Location)> {
+            let (single, general) = match self {
+                Self::Location(loc) => (Some((Cow::Owned(F::one()), *loc)), None),
+                Self::Constant(w) => (Some((Cow::Borrowed(w), Location::One)), None),
+                Self::General(items) => (None, Some(items.iter_pairs())),
+            };
+            single.into_iter().chain(
+                general
+                    .into_iter()
+                    .flatten()
+                    .map(|(loc, w)| (Cow::Borrowed(w), *loc)),
+            )
         }
 
         const fn witness(&self) -> Option<usize> {
@@ -872,13 +885,7 @@ mod zkc {
                                 (Some(l_comb), Some(r_comb)) => (l_comb, r_comb),
                             };
                         match *this_node {
-                            zk::CircuitNode::Add(_, _) => LinComb::General(
-                                l_comb
-                                    .iter()
-                                    .map(|(w, loc)| (w.into_owned(), loc))
-                                    .chain(r_comb.iter().map(|(w, loc)| (w.into_owned(), loc)))
-                                    .collect(),
-                            ),
+                            zk::CircuitNode::Add(_, _) => l_comb.sum(r_comb),
                             zk::CircuitNode::Mul(l, r) => {
                                 if let Some(out) = l_comb.mul(r_comb) {
                                     out
@@ -2183,6 +2190,30 @@ mod test {
             let plan = u.arbitrary::<zk::fuzz::Plan>()?;
             fuzz::assert_zkc_conversion_preserves_satisfaction(&plan, u)
         });
+    }
+
+    #[test]
+    fn test_zkc_conversion_add_doubling_chain() {
+        // A shared Add chain (x = x + x, repeated) must convert in time and
+        // memory proportional to the chain length, not 2^length.
+        const DEPTH: usize = 64;
+        let mut expected = F::one();
+        for _ in 0..DEPTH {
+            expected = expected + &expected;
+        }
+        let valued = zk::build_with_values(|ctx| {
+            let mut x = zk::Var::witness(ctx, |_| F::one());
+            for _ in 0..DEPTH {
+                x = x.clone() + &x;
+            }
+            x.assert_eq(&zk::Var::constant(ctx, expected));
+        });
+        let (circuit, witness) = super::zkc_to_circuit_and_witness(
+            Some(&mut test_rng()),
+            valued,
+            &[zk::CircuitIdx::Witness(0)],
+        );
+        assert!(witness.is_satisfied(&circuit));
     }
 
     #[test]
