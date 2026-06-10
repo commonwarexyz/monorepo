@@ -140,8 +140,6 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Append pre-encoded bytes to the given section.
     ///
     /// The buffer must contain one or more encoded items with size [Self::CHUNK_SIZE] each.
-    /// Buffers too large for the write buffer are written directly to the blob without an
-    /// intermediate copy.
     ///
     /// # Panics
     ///

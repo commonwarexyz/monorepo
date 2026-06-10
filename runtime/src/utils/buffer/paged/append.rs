@@ -294,10 +294,6 @@ impl<B: Blob> Append<B> {
     }
 
     /// Append all bytes in `buf` to the tip of the blob.
-    ///
-    /// A `buf` too large to fit in the write buffer is copied once into an owned buffer and
-    /// written through [Self::append_owned]'s direct path, so the write buffer never grows
-    /// meaningfully beyond its capacity no matter how large the append.
     pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buffer = self.buffer.write().await;
