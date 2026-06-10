@@ -398,9 +398,10 @@ impl OwnerRef {
     /// Releases a uniquely-owned mutable allocation.
     ///
     /// The empty check comes first because drained mutable handles
-    /// (`mem::take`, moved-out defaults) are common at drop sites. The pooled
-    /// arm stays inline for the lifecycle hot loop; the aligned arm shares
-    /// the outlined [`release_unique_cold`]. Mutable handles are never
+    /// (`mem::take`, moved-out defaults) are common at drop sites. Both live
+    /// arms stay inline: the pooled arm feeds the lifecycle hot loop, and the
+    /// heap arm is two loads plus `dealloc`, cheaper to inline than the
+    /// outlined call `IoBuf` drops use for it. Mutable handles are never
     /// external-backed (`Bytes` cannot back mutation), so no external arm
     /// exists here.
     ///
@@ -419,8 +420,8 @@ impl OwnerRef {
             return;
         }
         debug_assert_eq!(tag, OWNER_ALIGNED, "IoBufMut owner is never external");
-        // SAFETY: same contract as this method.
-        unsafe { release_unique_cold(self) };
+        // SAFETY: unique heap owner (native aligned or adopted vec).
+        unsafe { release_heap(self.heap()) };
     }
 
     /// Returns true when this owner has exactly one live reference.
@@ -516,10 +517,16 @@ struct HeapHeader {
 
 /// Tail header for pooled allocations.
 ///
-/// Stable fields (`refs` sentinel, `data_base`, `capacity`, `slot`) are
-/// written once when the freelist creates the slot and never change as the
-/// buffer moves between checked-out, thread-local, and global-free states.
-/// The lease is live only while the buffer is outside the global freelist.
+/// Stable fields (`refs` sentinel, `data_base`, `capacity`, `slot`,
+/// `class_id`, `thread_cache_capacity`) are written once when the freelist
+/// creates the slot and never change as the buffer moves between checked-out,
+/// thread-local, and global-free states. The lease is live only while the
+/// buffer is outside the global freelist.
+///
+/// `class_id` and `thread_cache_capacity` duplicate fields of the owning
+/// `SizeClass` so the buffer-return fast path can route into the right
+/// thread-local cache from the header line alone (already loaded for
+/// `data_base`), without a dependent dereference of the class object.
 #[repr(C)]
 pub(crate) struct PooledHeader {
     /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
@@ -533,6 +540,11 @@ pub(crate) struct PooledHeader {
     capacity: usize,
     /// Stable slot id within the owning freelist.
     slot: u32,
+    /// Dense process-global id of the owning size class (the thread-local
+    /// cache registry key).
+    class_id: u32,
+    /// Per-thread cache capacity of the owning size class.
+    thread_cache_capacity: u32,
 }
 
 /// External owner for caller-supplied [`Bytes`] (and vecs that cannot adopt).
@@ -617,14 +629,17 @@ impl PooledBuffer {
     /// # Safety
     ///
     /// `layout` must be the full size-class layout used to allocate this buffer,
-    /// `slot` must be the stable slot id assigned to the allocation, and
-    /// `capacity` must be the usable data capacity for the size class.
+    /// `slot` must be the stable slot id assigned to the allocation, `capacity`
+    /// must be the usable data capacity for the size class, and `class_id` and
+    /// `thread_cache_capacity` must be the owning size class's routing fields.
     #[inline(always)]
     pub(crate) unsafe fn init_owner_header(
         self,
         layout: Layout,
         slot: u32,
         capacity: usize,
+        class_id: u32,
+        thread_cache_capacity: u32,
     ) -> Self {
         // SAFETY: the layout was used to allocate this buffer.
         debug_assert_eq!(self.header, unsafe {
@@ -638,6 +653,9 @@ impl PooledBuffer {
             addr_of_mut!((*self.header.as_ptr()).data_base).write(self.ptr);
             addr_of_mut!((*self.header.as_ptr()).capacity).write(capacity);
             addr_of_mut!((*self.header.as_ptr()).slot).write(slot);
+            addr_of_mut!((*self.header.as_ptr()).class_id).write(class_id);
+            addr_of_mut!((*self.header.as_ptr()).thread_cache_capacity)
+                .write(thread_cache_capacity);
         }
         self
     }
@@ -674,6 +692,35 @@ impl PooledBuffer {
     pub(crate) const unsafe fn slot(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
         unsafe { self.header.as_ref().slot }
+    }
+
+    /// Returns the owning size class's dense process-global id.
+    ///
+    /// Cached in the header so the buffer-return fast path can route into the
+    /// right thread-local cache without dereferencing the class object.
+    ///
+    /// # Safety
+    ///
+    /// The pooled header must have been initialized with
+    /// [`Self::init_owner_header`].
+    #[inline(always)]
+    pub(crate) const unsafe fn class_id(&self) -> u32 {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.header.as_ref().class_id }
+    }
+
+    /// Returns the owning size class's per-thread cache capacity.
+    ///
+    /// Cached in the header for the same reason as [`Self::class_id`].
+    ///
+    /// # Safety
+    ///
+    /// The pooled header must have been initialized with
+    /// [`Self::init_owner_header`].
+    #[inline(always)]
+    pub(crate) const unsafe fn thread_cache_capacity(&self) -> u32 {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.header.as_ref().thread_cache_capacity }
     }
 
     /// Initializes the pooled lease for a buffer leaving global state.

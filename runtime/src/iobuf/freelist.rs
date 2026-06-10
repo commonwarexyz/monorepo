@@ -162,6 +162,10 @@ pub struct Freelist {
     layout: Layout,
     /// Usable data capacity for newly-created pooled buffers.
     usable_size: usize,
+    /// Owning size class's dense id, cached in every created buffer's header.
+    class_id: u32,
+    /// Owning size class's per-thread cache capacity, cached likewise.
+    thread_cache_capacity: u32,
     /// Number of slot ids reserved for created buffers.
     ///
     /// This is a monotonic high-water mark for slot assignment. Draining
@@ -212,16 +216,23 @@ impl Freelist {
         let usable_size = layout
             .size()
             .saturating_sub(std::mem::size_of::<super::buffer::PooledHeader>());
-        Self::with_usable_size(capacity, parallelism, usable_size, layout, prefill)
+        // Standalone freelists have no owning size class; buffers created here
+        // never enter the pool's thread-local cache routing.
+        Self::with_usable_size(capacity, parallelism, usable_size, layout, prefill, 0, 0)
     }
 
     /// Creates a new fixed-capacity freelist with an explicit usable data size.
+    ///
+    /// `class_id` and `thread_cache_capacity` are the owning size class's
+    /// routing fields, cached in every created buffer's pooled header.
     pub(super) fn with_usable_size(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
         usable_size: usize,
         layout: Layout,
         prefill: bool,
+        class_id: u32,
+        thread_cache_capacity: u32,
     ) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
         let capacity = capacity.get() as usize;
@@ -262,6 +273,8 @@ impl Freelist {
         let freelist = Self {
             layout,
             usable_size,
+            class_id,
+            thread_cache_capacity,
             created: AtomicUsize::new(0),
             words,
             storage,
@@ -303,9 +316,18 @@ impl Freelist {
             PooledBuffer::new(self.layout)
         };
         // SAFETY: `self.layout` is the exact allocation layout for this size
-        // class, `slot` is the stable id just reserved for `buffer`, and
-        // `usable_size` is the size-class capacity exposed to callers.
-        let buffer = unsafe { buffer.init_owner_header(self.layout, slot, self.usable_size) };
+        // class, `slot` is the stable id just reserved for `buffer`,
+        // `usable_size` is the size-class capacity exposed to callers, and the
+        // routing fields were captured from the owning class at construction.
+        let buffer = unsafe {
+            buffer.init_owner_header(
+                self.layout,
+                slot,
+                self.usable_size,
+                self.class_id,
+                self.thread_cache_capacity,
+            )
+        };
 
         Some((slot, buffer))
     }
