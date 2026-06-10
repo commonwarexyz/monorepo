@@ -83,14 +83,19 @@
 use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
+use ahash::AHasher;
 use alloc::{
-    collections::BTreeMap,
     sync::{Arc, Weak},
     vec::Vec,
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
-use core::ops::Range;
+use core::{hash::BuildHasherDefault, ops::Range};
+
+/// Overwritten node digests keyed by position. Uses `ahash` (fast on integer keys) with
+/// [BuildHasherDefault] (no per-construction RNG sampling). Iteration order is not observed
+/// by any consumer.
+pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, BuildHasherDefault<AHasher>>;
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
@@ -110,7 +115,7 @@ fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: 
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     parent: Arc<MerkleizedBatch<F, D, S>>,
     appended: Vec<D>,
-    overwrites: BTreeMap<Position<F>, D>,
+    overwrites: Overwrites<F, D>,
     /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
     /// holds positions at that height in push order (monotonically increasing for
     /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
@@ -120,11 +125,11 @@ pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
 
 impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
     /// Create a new batch from `parent`.
-    pub const fn new(parent: Arc<MerkleizedBatch<F, D, S>>) -> Self {
+    pub fn new(parent: Arc<MerkleizedBatch<F, D, S>>) -> Self {
         Self {
             parent,
             appended: Vec::new(),
-            overwrites: BTreeMap::new(),
+            overwrites: Overwrites::default(),
             dirty_nodes: Vec::new(),
         }
     }
@@ -393,7 +398,7 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
 #[allow(clippy::type_complexity)]
 fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     parent: &Arc<MerkleizedBatch<F, D, S>>,
-) -> (Vec<Arc<Vec<D>>>, Vec<Arc<BTreeMap<Position<F>, D>>>) {
+) -> (Vec<Arc<Vec<D>>>, Vec<Arc<Overwrites<F, D>>>) {
     let mut appended = Vec::new();
     let mut overwrites = Vec::new();
 
@@ -433,7 +438,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
     pub(crate) appended: Arc<Vec<D>>,
 
     /// This batch's overwrites only (not accumulated from ancestors).
-    pub(crate) overwrites: Arc<BTreeMap<Position<F>, D>>,
+    pub(crate) overwrites: Arc<Overwrites<F, D>>,
 
     /// Number of nodes in the parent batch.
     pub(crate) parent_size: Position<F>,
@@ -452,7 +457,7 @@ pub struct MerkleizedBatch<F: Family, D: Digest, S: Strategy> {
 
     /// Arc refs to each ancestor's overwrites, collected during merkleize while
     /// ancestors are alive. Root-to-tip order.
-    pub(crate) ancestor_overwrites: Vec<Arc<BTreeMap<Position<F>, D>>>,
+    pub(crate) ancestor_overwrites: Vec<Arc<Overwrites<F, D>>>,
 
     pub(crate) strategy: S,
 }
@@ -472,7 +477,7 @@ impl<F: Family, D: Digest, S: Strategy> MerkleizedBatch<F, D, S> {
         Arc::new(Self {
             parent: None,
             appended: Arc::new(Vec::new()),
-            overwrites: Arc::new(BTreeMap::new()),
+            overwrites: Arc::new(Overwrites::default()),
             parent_size: mem.size(),
             base_size: mem.size(),
             pruning_boundary: Readable::pruning_boundary(mem),
