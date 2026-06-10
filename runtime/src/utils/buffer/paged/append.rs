@@ -322,10 +322,14 @@ impl<B: Blob> Append<B> {
     /// the copy into the write buffer: bytes needed to complete the current partial page are
     /// buffered and flushed through the regular path, the whole pages that follow are written to
     /// the blob as zero-copy slices of `buf` (populating the page cache, exactly as a buffered
-    /// flush would), and any remaining partial-page suffix seeds the write buffer without
-    /// copying.
+    /// flush would), and the remaining sub-page suffix is buffered.
     ///
     /// Like [Self::append], the write is not durable until [Self::sync] is called.
+    ///
+    /// # Warning
+    ///
+    /// Concurrent mutable operations (other appends, resize) are not supported while a `buf`
+    /// too large to buffer is being written and may panic.
     pub async fn append_owned(&self, buf: IoBuf) -> Result<(), Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buf_guard = self.buffer.write().await;
@@ -350,15 +354,14 @@ impl<B: Blob> Append<B> {
         if !buf_guard.is_empty() {
             self.flush_internal(buf_guard, false, false).await?;
 
-            // The flush releases the buffer lock during blob I/O; if a concurrent append claimed
-            // the boundary in the meantime, finish with the buffered path.
+            // The flush releases the buffer lock during blob I/O. Concurrent mutable operations
+            // (other appends, resize) are not supported while the direct path is in flight, so
+            // nothing may claim the boundary in the meantime.
             buf_guard = self.buffer.write().await;
-            if buf_guard.size() != boundary || !buf_guard.is_empty() {
-                if buf_guard.append(&buf.as_ref()[fill..]) {
-                    self.flush_internal(buf_guard, false, false).await?;
-                }
-                return Ok(());
-            }
+            assert!(
+                buf_guard.size() == boundary && buf_guard.is_empty(),
+                "concurrent mutable operation raced a direct-path append"
+            );
         }
 
         // Prepare physical pages for the whole pages remaining in `buf` without copying them.
@@ -367,25 +370,42 @@ impl<B: Blob> Append<B> {
         let mut physical_pages = IoBufs::default();
         self.physical_full_pages(&bulk, None, &mut physical_pages);
 
-        // Cache the bulk pages before releasing the tip lock so reads don't observe stale
-        // persisted bytes during the handoff from tip to cache.
-        let remaining = self.cache_ref.cache(self.id, bulk.as_ref(), boundary);
-        assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
-
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob
-        // while we're writing to it.
+        // while we're writing to it. Everything below up to the write mutates shared state
+        // without an intervening await, so a future dropped before the write leaves no trace;
+        // one dropped during the write is covered by the fatal-failure convention.
         let mut blob_state = self.blob_state.write().await;
         debug_assert!(
             blob_state.partial_page_state.is_none(),
             "an empty tip implies no partial page state"
         );
 
+        // Cache the bulk pages before `replace` publishes the new size and the tip lock is
+        // released, so reads of the bulk range are served from the cache while the blob write
+        // is still in flight. Insert in write-buffer-sized chunks so the cache lock is not held
+        // across the entire copy.
+        let chunk_len = buf_guard.capacity / logical_page_size * logical_page_size;
+        let mut cache_offset = boundary;
+        for chunk in bulk.as_ref().chunks(chunk_len) {
+            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
+            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
+            cache_offset += chunk.len() as u64;
+        }
+
         // Update state before writing, seeding the tip with the partial-page suffix of `buf`.
-        // This may appear to risk data loss if writes fail, but write failures are fatal per
-        // this codebase's design - callers must not use the blob after any mutable method
-        // returns an error.
+        // The suffix (less than one page) is copied: a sub-page tip is never drained by flush,
+        // so seeding it with a view of `buf` would pin the entire backing allocation until the
+        // next append to this blob (or forever, if there is none).
         blob_state.current_page += (bulk_len / logical_page_size) as u64;
-        buf_guard.replace(boundary + bulk_len as u64, buf.slice(fill + bulk_len..));
+        let suffix = buf.slice(fill + bulk_len..);
+        let suffix = if suffix.is_empty() {
+            suffix
+        } else {
+            let mut copied = self.cache_ref.pool().alloc(suffix.len());
+            copied.put_slice(suffix.as_ref());
+            copied.freeze()
+        };
+        buf_guard.replace(boundary + bulk_len as u64, suffix);
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
         assert_eq!(
@@ -1884,11 +1904,15 @@ mod tests {
 
             // 500 bytes = 4 full pages (412 bytes) + 88-byte remainder.
             let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
-            append
-                .append_owned(IoBuf::from(data.clone()))
-                .await
-                .unwrap();
+            let src = IoBuf::from(data.clone());
+            let src_start = src.as_ptr() as usize;
+            let src_range = src_start..src_start + src.len();
+            append.append_owned(src.clone()).await.unwrap();
             assert_eq!(append.size().await, 500);
+
+            // The buffered suffix is a copy, not a view that would pin the input allocation.
+            let tip_ptr = append.buffer.read().await.as_ref().as_ptr() as usize;
+            assert!(!src_range.contains(&tip_ptr));
 
             // The directly written pages populate the page cache, exactly as a buffered flush
             // would.
@@ -2073,6 +2097,58 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(append.size().await, 422);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_append_owned_physical_bytes_match_buffered() {
+        // The direct path must produce byte-identical physical output (page layout, CRC slot
+        // placement, zero padding) to the buffered path for the same logical content.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+
+            let (blob, size) = context
+                .open("test_partition", b"phys_direct")
+                .await
+                .unwrap();
+            let direct = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            direct
+                .append_owned(IoBuf::from(data.clone()))
+                .await
+                .unwrap();
+            direct.sync().await.unwrap();
+            drop(direct);
+
+            // Small appends always stay on the buffered path and force intermediate flushes.
+            let (blob, size) = context
+                .open("test_partition", b"phys_buffered")
+                .await
+                .unwrap();
+            let buffered = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            for chunk in data.chunks(10) {
+                buffered.append(chunk).await.unwrap();
+            }
+            buffered.sync().await.unwrap();
+            drop(buffered);
+
+            let (blob_a, size_a) = context
+                .open("test_partition", b"phys_direct")
+                .await
+                .unwrap();
+            let (blob_b, size_b) = context
+                .open("test_partition", b"phys_buffered")
+                .await
+                .unwrap();
+            assert_eq!(size_a, size_b);
+            let bytes_a = blob_a.read_at(0, size_a as usize).await.unwrap().coalesce();
+            let bytes_b = blob_b.read_at(0, size_b as usize).await.unwrap().coalesce();
+            assert_eq!(bytes_a.as_ref(), bytes_b.as_ref());
         });
     }
 

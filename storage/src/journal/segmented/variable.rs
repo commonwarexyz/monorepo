@@ -2447,6 +2447,85 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_journal_large_item_direct_path() {
+        // Items larger than the write buffer are written directly to the blob. The first append
+        // takes the direct path from an empty tip; the second takes it with a non-empty tip
+        // (holding the first item's sub-page remainder), covering both top-up branches. The
+        // returned offsets must remain correct since callers persist them for random access.
+        const LARGE_SIZE: usize = 2048;
+        type LargeItem = [u8; LARGE_SIZE];
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            let mut first: LargeItem = [0u8; LARGE_SIZE];
+            for (i, byte) in first.iter_mut().enumerate() {
+                *byte = (i % 256) as u8;
+            }
+            let mut second: LargeItem = [0u8; LARGE_SIZE];
+            for (i, byte) in second.iter_mut().enumerate() {
+                *byte = ((i + 7) % 251) as u8;
+            }
+
+            let (first_offset, _) = journal
+                .append(1, &first)
+                .await
+                .expect("Failed to append first item");
+            let (second_offset, _) = journal
+                .append(1, &second)
+                .await
+                .expect("Failed to append second item");
+
+            // Both items are readable at their returned offsets before any sync.
+            let retrieved: LargeItem = journal.get(1, first_offset).await.unwrap();
+            assert_eq!(retrieved, first);
+            let retrieved: LargeItem = journal.get(1, second_offset).await.unwrap();
+            assert_eq!(retrieved, second);
+
+            // Everything survives a sync and reopen.
+            journal.sync(1).await.expect("Failed to sync");
+            drop(journal);
+            let journal = Journal::<_, LargeItem>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            let retrieved: LargeItem = journal.get(1, first_offset).await.unwrap();
+            assert_eq!(retrieved, first);
+            let retrieved: LargeItem = journal.get(1, second_offset).await.unwrap();
+            assert_eq!(retrieved, second);
+
+            {
+                let stream = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, off, _, item) = result.expect("Failed to replay item");
+                    items.push((section, off, item));
+                }
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], (1, first_offset, first));
+                assert_eq!(items[1], (1, second_offset, second));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_journal_non_contiguous_sections() {
         // Test that sections with gaps in numbering work correctly.
         // Sections 1, 5, 10 should all be independent and accessible.

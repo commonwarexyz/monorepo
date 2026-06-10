@@ -1596,6 +1596,60 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_variable_append_many_exceeding_write_buffer() {
+        // A batch much larger than the write buffer takes the direct blob-write path, spanning
+        // multiple sections so append_raw receives interior slices of the encoded batch buffer.
+        // The returned base offsets feed the offsets journal, so every position must remain
+        // readable by random access after the direct writes.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "append-many-direct".into(),
+                items_per_section: NZU64!(25),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, FixedBytes<64>>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Start mid-page with single appends so the batch begins unaligned.
+            let item = |i: usize| {
+                let mut bytes = [0u8; 64];
+                bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                FixedBytes::new(bytes)
+            };
+            journal.append(&item(0)).await.unwrap();
+            journal.append(&item(1)).await.unwrap();
+
+            // ~6.5KB encoded, far above the 1KB write buffer, crossing section boundaries.
+            let items: Vec<_> = (2..102).map(item).collect();
+            let last = journal.append_many(Many::Flat(&items)).await.unwrap();
+            assert_eq!(last, 101);
+
+            // Every item is readable before any sync.
+            for pos in 0..102u64 {
+                assert_eq!(journal.read(pos).await.unwrap(), item(pos as usize));
+            }
+
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, FixedBytes<64>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..102);
+            for pos in 0..102u64 {
+                assert_eq!(journal.read(pos).await.unwrap(), item(pos as usize));
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_variable_init_at_max_size_rejected() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
