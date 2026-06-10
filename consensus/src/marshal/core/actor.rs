@@ -395,9 +395,6 @@ where
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
-                    // A buffered block may be the pending floor anchor. The anchor
-                    // path stores the block and finalization, advances floors,
-                    // prunes below them, and resumes dispatch.
                     self.apply_floor_anchor(&block, &mut buffer, &mut application, &mut resolver)
                         .await;
                     self.block_subscriptions.notify(&block);
