@@ -8,12 +8,11 @@
 //!
 //! # Witness journal
 //!
-//! On every durable sync, this db appends a complete snapshot of the committed state to its
-//! witness journal, so [`Db::rewind`] can restore any synced commit still retained there (history
-//! is bounded only by [`Db::prune`]). Reopen and rewind re-verify the persisted snapshot;
-//! corruption surfaces as [`Error::DataCorrupted`]. The witness (the last-commit operation plus
-//! its inclusion proof) is also what lets compact nodes serve compact sync without retaining
-//! historical operations.
+//! The witness journal holds a complete snapshot of every synced commit, so [`Db::rewind`] can
+//! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
+//! and rewind re-verify the persisted snapshot; corruption surfaces as [`Error::DataCorrupted`].
+//! The witness (the last-commit operation plus its inclusion proof) is also what lets compact
+//! nodes serve compact sync without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
@@ -33,7 +32,7 @@ use crate::{
         batch_chain::{self, Bounds},
         compact::{
             batch as compact_batch,
-            witness::{self, Witness},
+            witness::{self, VerifiedWitness, Witness},
         },
         operation::Key,
         sync::compact as compact_sync,
@@ -56,9 +55,7 @@ pub struct Config<C, S: Strategy> {
     /// Strategy used to parallelize merkleization.
     pub strategy: S,
 
-    /// Configuration for the journal that persists the compact-sync witness. Its `codec_config` is
-    /// ignored; the witness entry codec configuration is supplied internally because the entry
-    /// type and its decode bounds are private to the witness module.
+    /// Configuration for the journal that persists the witness.
     pub witness: JournalConfig<()>,
 
     /// Codec config used to decode the persisted last commit operation on reopen.
@@ -297,14 +294,16 @@ where
 
         let merkle =
             compact_merkle::Merkle::from_compact_state(strategy, leaf_count, pinned_nodes.clone())?;
-        let imported = Witness {
+        let imported = VerifiedWitness {
+            entry: Witness {
+                op_bytes: Self::encode_commit_op(
+                    last_commit_metadata.clone(),
+                    inactivity_floor_loc,
+                ),
+                proof: last_commit_proof,
+                pinned_nodes,
+            },
             root,
-            pinned_nodes,
-            last_commit_op_bytes: Self::encode_commit_op(
-                last_commit_metadata.clone(),
-                inactivity_floor_loc,
-            ),
-            last_commit_proof,
         };
 
         let witness = witness::Store::from_import(journal, imported);
@@ -407,7 +406,7 @@ where
     /// This reflects the last durably persisted commit, which may lag behind live in-memory
     /// mutations until [`Self::sync`] is called.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
-        self.witness.with(Witness::target)
+        self.witness.with(VerifiedWitness::target)
     }
 
     /// Return the compact-sync state for `target`, or a stale-target error if the source's
@@ -421,20 +420,20 @@ where
     {
         // Hold the witness lock only long enough to verify the requested target and snapshot the
         // entry; decode outside it so concurrent readers do not contend.
-        let (op_bytes, last_commit_proof, pinned_nodes, leaf_count) = self.witness.with(|w| {
+        let (entry, leaf_count) = self.witness.with(|w| {
             if target.root != w.root || target.leaf_count != w.leaf_count() {
                 return Err(compact_sync::ServeError::StaleTarget {
                     requested: target.clone(),
                     current: w.target(),
                 });
             }
-            Ok((
-                w.last_commit_op_bytes.clone(),
-                w.last_commit_proof.clone(),
-                w.pinned_nodes.clone(),
-                w.leaf_count(),
-            ))
+            Ok((w.entry.clone(), w.leaf_count()))
         })?;
+        let Witness {
+            op_bytes,
+            proof: last_commit_proof,
+            pinned_nodes,
+        } = entry;
         let op = Operation::<F, K, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
             .map_err(|_| {
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))

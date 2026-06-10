@@ -28,7 +28,7 @@
 //! - `rewind` restores the frontier and the witness from the target journal entry.
 //!
 //! Unsynced in-memory mutations are therefore intentionally not servable: `target()` and
-//! compact-state responses lag behind `apply_batch()` until the next durable sync.
+//! compact-state responses lag behind `apply_batch()` until the db's next sync.
 //!
 //! # Safety and invariants
 //!

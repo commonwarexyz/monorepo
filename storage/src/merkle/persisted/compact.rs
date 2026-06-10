@@ -1,21 +1,14 @@
 //! A compact, in-memory Merkle structure.
 //!
-//! Unlike [`crate::merkle::full`], this type retains only the minimum state required to compute
-//! the current root and continue appending: the leaf count plus the pinned frontier nodes.
-//! Historical nodes accumulate only while mutations are non-durable; once the owning database
-//! persists them, the nodes are discarded and are no longer readable.
+//! Unlike [`crate::merkle::full`], this type retains only the state needed to compute the
+//! current root and append new leaves: the leaf count and the pinned frontier nodes (the
+//! tree's peaks). These suffice because the root is computed by folding the peaks and an
+//! append reads only the peaks it merges with, so a tree rebuilt from a
+//! `(leaf_count, pinned_nodes)` snapshot has the same root and the same future append
+//! behavior as the original.
 //!
-//! # Why peaks are enough
-//!
-//! An MMR/MMB root is computed from the current peaks, and appending a new leaf only touches
-//! peaks. Rebuilding [`Mem`] from `(leaf_count, pinned_nodes)` with no retained nodes
-//! reconstructs an equivalent tree: same root, same future append behavior.
-//!
-//! # Durability
-//!
-//! This structure persists nothing. The owning database journals a snapshot of
-//! `(leaf_count, pinned_nodes)` with every sync and rebuilds the tree on open and rewind via
-//! `Merkle::reset_to`.
+//! Nodes created by appends are retained only until a prune or reset; after that they are no
+//! longer readable.
 
 use crate::merkle::{
     batch,
@@ -102,7 +95,7 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         pinned_nodes: Vec<D>,
     ) -> Result<Mem<F, D>, Error<F>> {
         if !leaves.is_valid() {
-            return Err(Error::DataCorrupted("leaf count exceeds MAX_LEAVES"));
+            return Err(Error::LocationOverflow(leaves));
         }
         if pinned_nodes.len() != F::nodes_to_pin(leaves).count() {
             return Err(Error::InvalidPinnedNodes);
@@ -118,9 +111,8 @@ impl<F: Family, D: Digest, S: Strategy> Merkle<F, D, S> {
         }
     }
 
-    /// Replace the in-memory tree with one rebuilt from a compact state snapshot.
-    ///
-    /// Any state applied since the snapshot was taken is discarded.
+    /// Replace the in-memory tree with one rebuilt from a compact state snapshot, discarding
+    /// the current state.
     pub(crate) fn reset_to(
         &self,
         leaves: Location<F>,
@@ -271,7 +263,7 @@ mod tests {
         let too_many = Location::new(mmr::Family::MAX_LEAVES.as_u64() + 1);
         assert!(matches!(
             merkle.reset_to(too_many, vec![]),
-            Err(Error::DataCorrupted("leaf count exceeds MAX_LEAVES"))
+            Err(Error::LocationOverflow(loc)) if loc == too_many
         ));
     }
 }
