@@ -43,6 +43,7 @@ rand.workspace = true
 rand_chacha.workspace = true
 rand_core.workspace = true
 sha2.workspace = true
+sha2-v010.workspace = true
 thiserror.workspace = true
 x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
@@ -78,7 +79,6 @@ bench = false
 [features]
 default = [ "std" ]
 blake3-parallel = [ "blake3/rayon", "std" ]
-sha2-asm = [ "sha2/asm" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
@@ -119,7 +119,7 @@ std = [
 	"rand/std_rng",
 	"rand_chacha/std",
 	"rand_core/std",
-	"sha2/std",
+	"sha2-v010/std",
 	"thiserror/std",
 	"zeroize/std",
 ]

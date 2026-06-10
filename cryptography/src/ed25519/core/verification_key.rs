@@ -6,7 +6,7 @@ use curve25519_dalek::{
     scalar::Scalar,
     traits::IsIdentity,
 };
-use sha2::{digest::Update, Sha512};
+use sha2_v010::{digest::Update, Sha512};
 
 /// A refinement type for `[u8; 32]` indicating that the bytes represent an
 /// encoding of an Ed25519 verification key.

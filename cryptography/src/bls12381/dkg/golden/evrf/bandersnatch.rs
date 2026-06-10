@@ -50,7 +50,7 @@ use core::{
 };
 use rand::rngs::StdRng;
 use rand_core::CryptoRngCore;
-use sha2::Sha256;
+use sha2_v010::Sha256;
 use std::sync::LazyLock;
 
 /// A scalar in the Bandersnatch scalar field.

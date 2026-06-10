@@ -3,7 +3,7 @@ use commonware_formatting::Hex;
 use core::convert::TryFrom;
 use curve25519_dalek::{constants, scalar::Scalar};
 use rand_core::{CryptoRng, RngCore};
-use sha2::{digest::Update, Digest, Sha512};
+use sha2_v010::{digest::Update, Digest, Sha512};
 
 /// An Ed25519 signing key.
 ///

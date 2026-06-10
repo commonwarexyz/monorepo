@@ -48,7 +48,7 @@ use curve25519_dalek::{
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
 use rand_core::{CryptoRng, RngCore};
-use sha2::{digest::Update, Sha512};
+use sha2_v010::{digest::Update, Sha512};
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(feature = "std")]
