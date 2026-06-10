@@ -3150,3 +3150,57 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    use super::*;
+    use crate::telemetry::metrics::Registry;
+    use bytes::BufMut;
+    use loom::thread;
+
+    // Models the pooled buffer lifecycle across threads: checkout, freeze,
+    // clone, cross-thread final drop, and reuse from the same pool. Whichever
+    // thread drops last must return the buffer to the global freelist with
+    // the refcount sentinel intact so the next checkout works without
+    // reinitialization. The thread cache is disabled so the return path is
+    // the loom-modeled global freelist rather than OS thread-local state,
+    // which loom cannot reset between interleavings.
+    #[test]
+    fn loom_freeze_clone_cross_thread_drop_then_reuse() {
+        loom::model(|| {
+            let mut registry = Registry::default();
+            let config = BufferPoolConfig {
+                pool_min_size: 0,
+                min_size: NZUsize!(64),
+                max_size: NZUsize!(64),
+                max_per_class: NZU32!(2),
+                prefill: false,
+                alignment: NZUsize!(1),
+                parallelism: NZUsize!(1),
+                thread_cache_config: BufferPoolThreadCacheConfig::Disabled,
+            };
+            let pool = BufferPool::new(config, &mut registry);
+
+            let mut buf = pool.alloc(64);
+            assert!(buf.is_pooled());
+            buf.put_slice(b"payload");
+            let frozen = buf.freeze();
+            let clone = frozen.clone();
+
+            let t = thread::spawn(move || {
+                assert_eq!(clone.as_ref(), b"payload");
+                drop(clone);
+            });
+            assert_eq!(frozen.as_ref(), b"payload");
+            drop(frozen);
+            t.join().unwrap();
+
+            // The buffer returned through whichever drop was final; checkout
+            // must succeed and expose a writable buffer again.
+            let mut again = pool.alloc(64);
+            assert!(again.is_pooled());
+            again.put_slice(b"reuse");
+            assert_eq!(again.as_ref(), b"reuse");
+        });
+    }
+}
