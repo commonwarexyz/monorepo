@@ -172,10 +172,7 @@ where
 mod tests {
     use super::*;
     use crate::{
-        marshal::{
-            coding::types::StoredCodedBlock,
-            mocks::block::Block as MockBlock,
-        },
+        marshal::{coding::types::StoredCodedBlock, mocks::block::Block as MockBlock},
         types::{Epoch, Height, View},
     };
     use bytes::{Buf, BufMut};
@@ -267,12 +264,8 @@ mod tests {
             leader,
             parent: (View::new(1), parent_commitment),
         };
-        let inner = InnerBlock::new::<Sha256>(
-            context,
-            Sha256::hash(b"parent"),
-            Height::new(7),
-            1_234_567,
-        );
+        let inner =
+            InnerBlock::new::<Sha256>(context, Sha256::hash(b"parent"), Height::new(7), 1_234_567);
         NoCloneBlock { inner }
     }
 
@@ -287,8 +280,7 @@ mod tests {
         type TestVariant = Coding<NoCloneBlock, TestScheme, Sha256, PublicKey>;
 
         let block = no_clone_block(CONFIG);
-        let coded =
-            CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(block, CONFIG, &Sequential);
+        let coded = CodedBlock::<NoCloneBlock, TestScheme, Sha256>::new(block, CONFIG, &Sequential);
         let expected = coded.commitment();
         let stored = StoredCodedBlock::new(coded);
 

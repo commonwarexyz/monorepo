@@ -1970,13 +1970,7 @@ where
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
                     let next = (block.height(), block.parent(), V::parent_commitment(&block));
                     wrote |= self
-                        .store_finalization(
-                            next.0,
-                            parent_digest,
-                            block,
-                            finalization,
-                            application,
-                        )
+                        .store_finalization(next.0, parent_digest, block, finalization, application)
                         .await;
                     debug!(height = %next.0, "repaired block");
                     (height, parent_digest, parent_commitment) = next;
