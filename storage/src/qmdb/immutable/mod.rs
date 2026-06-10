@@ -703,11 +703,19 @@ where
         // uncommitted ancestor batches.
         //
         // `seen` is only consulted when at least one ancestor diff will be applied, so it is
-        // skipped entirely otherwise. Keys are borrowed from the diffs to avoid cloning.
+        // skipped entirely otherwise.
         let bounds = self.journal.reader().await.bounds();
         let track_shadow = batch.bounds.ancestors.iter().any(|a| a.end > db_size);
         let seen_cap = if track_shadow {
-            batch.diff.len() + batch.ancestor_diffs.iter().map(|d| d.len()).sum::<usize>()
+            batch.diff.len()
+                + batch
+                    .bounds
+                    .ancestors
+                    .iter()
+                    .zip(&batch.ancestor_diffs)
+                    .filter(|(a, _)| a.end > db_size)
+                    .map(|(_, d)| d.len())
+                    .sum::<usize>()
         } else {
             0
         };

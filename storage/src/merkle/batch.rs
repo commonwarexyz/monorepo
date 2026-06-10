@@ -83,17 +83,17 @@
 use crate::merkle::{
     hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
 };
-use ahash::AHasher;
+use ahash::RandomState;
 use alloc::{
     sync::{Arc, Weak},
     vec::Vec,
 };
 use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
-use core::{hash::BuildHasherDefault, ops::Range};
+use core::ops::Range;
 
 /// Overwritten node digests keyed by position.
-pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, BuildHasherDefault<AHasher>>;
+pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
 fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
