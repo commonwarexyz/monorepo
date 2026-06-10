@@ -169,6 +169,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_utils::{sync::Mutex, NZUsize};
+    use futures::FutureExt;
     use std::sync::Arc;
 
     #[derive(Default)]
@@ -237,7 +238,8 @@ mod tests {
 
     impl crate::Blob for SyncTrackingBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
