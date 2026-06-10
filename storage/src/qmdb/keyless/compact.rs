@@ -1,5 +1,5 @@
-//! A keyless authenticated db that discards historical operations, retaining only a
-//! per-sync witness: the state required to rewind and to serve compact sync.
+//! A keyless authenticated db that discards historical operations, retaining only a witness
+//! for each synced commit.
 //!
 //! Mirrors the API of [`crate::qmdb::keyless::Keyless`] (`new_batch -> merkleize ->
 //! apply_batch -> sync`, pipelined batch chains, `StaleBatch` validation) but is backed by
@@ -57,8 +57,8 @@ pub struct Config<C, S: Strategy> {
     pub commit_codec_config: C,
 }
 
-/// A keyless authenticated db that discards historical operations, retaining only a
-/// per-sync witness: the state required to rewind and to serve compact sync.
+/// A keyless authenticated db that discards historical operations, retaining only a witness
+/// for each synced commit.
 pub struct Db<F, E, V, H, C, S: Strategy>
 where
     F: Family,
@@ -920,6 +920,40 @@ mod tests {
             )
             .await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_reopen_rejects_interrupted_import() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "keyless-interrupted-import";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+            db.apply_batch(db.new_batch().append(U64::new(7)).merkleize(
+                &db,
+                Some(U64::new(11)),
+                Location::new(1),
+            ))
+            .unwrap();
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Simulate a crash between an import's journal clear and its entry append: the
+            // journal is empty but its size is nonzero.
+            let journal = open_witness_journal(context.child("clear"), partition).await;
+            let size = journal.size().await;
+            journal.clear_to_size(size.max(1)).await.unwrap();
+            drop(journal);
+
+            // Reopen must fail rather than bootstrap a fresh db.
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen_witness"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await;
+            assert!(matches!(reopened, Err(Error::Journal(_))));
         });
     }
 

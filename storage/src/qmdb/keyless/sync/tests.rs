@@ -1723,12 +1723,12 @@ mod compact_variable_mmr {
         });
     }
 
-    /// Abandoning a compact-sync reconstruction before its first persist leaves the previous
-    /// witness journal untouched.
+    /// Dropping a compact-sync import before its first persist leaves the previous witness
+    /// journal untouched.
     #[test_traced("WARN")]
-    fn test_compact_sync_abandoned_import_preserves_existing_state() {
+    fn test_compact_sync_dropped_import_preserves_existing_state() {
         deterministic::Runner::default().start(|mut context| async move {
-            let suffix = format!("compact-keyless-abandoned-{}", context.next_u64());
+            let suffix = format!("compact-keyless-dropped-{}", context.next_u64());
 
             // Seed the client partition with committed state A.
             let client_cfg = client_config(&suffix, &context);
@@ -1745,7 +1745,7 @@ mod compact_variable_mmr {
             let target_a = seeded.target();
             drop(seeded);
 
-            // Reconstruct state B into the same partition, then abandon it before the first
+            // Reconstruct state B into the same partition, then drop it before the first
             // persist (as a cancelled sync would).
             let mut source =
                 SourceDb::init(context.child("source"), source_config(&suffix, &context))
@@ -1782,7 +1782,7 @@ mod compact_variable_mmr {
             assert_eq!(imported.target(), target_b);
             drop(imported);
 
-            // The abandoned import never touched the journal: state A is still there.
+            // The dropped import never touched the journal: state A is still there.
             let reopened = ClientDb::init(context.child("reopen"), client_cfg)
                 .await
                 .unwrap();

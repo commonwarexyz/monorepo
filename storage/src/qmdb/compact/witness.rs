@@ -124,7 +124,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     }
 
     /// Create a store from a verified compact-sync import that has not been persisted yet. The
-    /// journal is untouched until the first persist replaces its contents with `witness`.
+    /// journal is untouched until the first persist replaces its contents with `witness`. A
+    /// crash during that replacement leaves a journal that fails to reopen; re-syncing
+    /// recovers it.
     pub(crate) fn from_import(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
         Self {
             journal,
@@ -168,7 +170,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         let cached_leaves = self.with(|w| w.leaf_count());
         if cached_leaves == merkle.leaves() {
             if self.import_pending.load(Ordering::Relaxed) {
-                self.journal.clear_to_size(0).await?;
+                self.clear_for_import().await?;
                 let entry = self.with(|w| w.entry.clone());
                 self.append_and_sync(&entry).await?;
             }
@@ -181,7 +183,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         let witness =
             build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes())?;
         if self.import_pending.load(Ordering::Relaxed) {
-            self.journal.clear_to_size(0).await?;
+            self.clear_for_import().await?;
         }
         self.append_and_sync(&witness.entry).await?;
         merkle.prune_to_frontier();
@@ -290,6 +292,16 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             }
         }
         Ok(lo)
+    }
+
+    /// Clear the journal so the imported witness becomes its only entry.
+    ///
+    /// Clears to a nonzero size: if a crash interrupts the import, reopen sees a non-empty
+    /// journal with an unreadable tip and fails, instead of mistaking it for a fresh db.
+    async fn clear_for_import(&self) -> Result<(), Error<F>> {
+        let size = self.journal.size().await;
+        self.journal.clear_to_size(size.max(1)).await?;
+        Ok(())
     }
 
     /// Append `entry` and sync it, making it the durable tip.

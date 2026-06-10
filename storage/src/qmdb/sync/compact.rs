@@ -370,8 +370,7 @@ where
 /// 4. Build the compact db from that already-validated state.
 /// 5. Assert the db root still matches and persist the state.
 ///
-/// A failure (or abandoned sync) before the final persist leaves the local compact db unopened or
-/// unchanged on disk.
+/// A failure before the final persist leaves on-disk state untouched.
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
