@@ -18,7 +18,7 @@ use crate::{
         operation::Operation as OperationTrait,
         update_known_loc, Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
@@ -612,13 +612,13 @@ where
     }
 }
 
-// Functionality requiring Mutable + Persistable journal.
+// Functionality requiring a mutable journal.
 impl<F, E, U, C, I, H, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     F: Family,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -775,31 +775,5 @@ where
     /// Destroy the db, removing all data from disk.
     pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.destroy().await.map_err(Into::into)
-    }
-}
-
-impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>
-where
-    F: Family,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    type Error = crate::qmdb::Error<F>;
-
-    async fn commit(&self) -> Result<(), crate::qmdb::Error<F>> {
-        Self::commit(self).await
-    }
-
-    async fn sync(&self) -> Result<(), crate::qmdb::Error<F>> {
-        Self::sync(self).await
-    }
-
-    async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
-        self.destroy().await
     }
 }

@@ -47,36 +47,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     {
     }
 
-    /// A storage structure with capabilities to persist and recover state across restarts.
-    pub trait Persistable {
-        /// The error type returned when there is a failure from the underlying storage system.
-        type Error;
-
-        /// Durably persist the structure, guaranteeing the current state will survive a crash.
-        ///
-        /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
-        fn commit(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send {
-            self.sync()
-        }
-
-        /// Durably persist the structure, guaranteeing the current state will survive a crash, and that
-        /// no recovery will be needed on startup.
-        ///
-        /// This provides a stronger guarantee than [Self::commit] but may be slower.
-        fn sync(&self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
-
-        /// Destroy the structure, removing all associated storage.
-        ///
-        /// This method consumes the structure and deletes all persisted data, leaving behind no storage
-        /// artifacts. This can be used to clean up disk resources in tests.
-        ///
-        /// # Crash Safety
-        ///
-        /// This operation is intended for final teardown and is not crash-safe. If interrupted,
-        /// reopening the same storage may observe partially removed state. Use a reset operation
-        /// provided by the concrete type when the structure must remain recoverable.
-        fn destroy(self) -> impl std::future::Future<Output = Result<(), Self::Error>> + Send;
-    }
 });
 commonware_macros::stability_scope!(BETA {
     pub mod translator;

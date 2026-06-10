@@ -1,6 +1,8 @@
 //! Benchmarks for applying already-merkleized QMDB batches.
 
-use crate::common::{any_fix_cfg_with, make_fixed_value, seed_db, AnyUFixDb, CHUNK_SIZE};
+use crate::common::{
+    any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyUFixDb, ImmFixDb, CHUNK_SIZE,
+};
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -21,6 +23,7 @@ const UPDATES: [u64; 1] = [16_384];
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 
 type Db = AnyUFixDb<Mmb>;
+type ImmDb = ImmFixDb<Mmb>;
 
 fn write_updates(
     mut batch: <Db as BatchableDb>::Batch,
@@ -148,6 +151,80 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
     elapsed
 }
 
+// Immutable databases are insert-only, so every batch writes fresh keys drawn from `counter`.
+async fn seed_imm_db(db: &mut ImmDb, keys: u64, counter: &mut u64, rng: &mut StdRng) {
+    let mut batch = db.new_batch();
+    for _ in 0..keys {
+        let key = Sha256::hash(&counter.to_be_bytes());
+        *counter += 1;
+        batch = batch.set(key, make_fixed_value(rng));
+    }
+    let floor = db.inactivity_floor_loc();
+    let batch = batch.merkleize(db, None, floor);
+    db.apply_batch(batch).await.unwrap();
+    db.commit().await.unwrap();
+}
+
+async fn open_imm_db(ctx: &Context) -> ImmDb {
+    ImmDb::init(ctx.child("storage"), imm_fix_cfg_with(ctx, ITEMS_PER_BLOB))
+        .await
+        .unwrap()
+}
+
+async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
+    let mut db = open_imm_db(ctx).await;
+    let mut rng = StdRng::seed_from_u64(7);
+    let mut counter = 0u64;
+    seed_imm_db(&mut db, NUM_KEYS, &mut counter, &mut rng).await;
+
+    let mut batch = db.new_batch();
+    for _ in 0..updates {
+        let key = Sha256::hash(&counter.to_be_bytes());
+        counter += 1;
+        batch = batch.set(key, make_fixed_value(&mut rng));
+    }
+    let floor = db.inactivity_floor_loc();
+    let batch = batch.merkleize(&db, None, floor);
+
+    let start = Instant::now();
+    db.apply_batch(batch).await.unwrap();
+    let elapsed = start.elapsed();
+
+    db.destroy().await.unwrap();
+    elapsed
+}
+
+async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> Duration {
+    let mut db = open_imm_db(ctx).await;
+    let mut rng = StdRng::seed_from_u64(7);
+    let mut counter = 0u64;
+    seed_imm_db(&mut db, NUM_KEYS, &mut counter, &mut rng).await;
+    let floor = db.inactivity_floor_loc();
+
+    let mut parent = db.new_batch();
+    for _ in 0..updates {
+        let key = Sha256::hash(&counter.to_be_bytes());
+        counter += 1;
+        parent = parent.set(key, make_fixed_value(&mut rng));
+    }
+    let parent = parent.merkleize(&db, None, floor);
+
+    let mut child = parent.new_batch();
+    for _ in 0..updates {
+        let key = Sha256::hash(&counter.to_be_bytes());
+        counter += 1;
+        child = child.set(key, make_fixed_value(&mut rng));
+    }
+    let child = child.merkleize(&db, None, floor);
+
+    let start = Instant::now();
+    db.apply_batch(child).await.unwrap();
+    let elapsed = start.elapsed();
+
+    db.destroy().await.unwrap();
+    elapsed
+}
+
 fn bench_apply_batch(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
 
@@ -231,6 +308,40 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
                         total += bench_apply_multi_uncommitted(&ctx, updates).await;
+                    }
+                    total
+                });
+            },
+        );
+
+        c.bench_function(
+            &format!(
+                "{}/case=direct variant=immutable::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                module_path!(),
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += bench_imm_direct_apply(&ctx, updates).await;
+                    }
+                    total
+                });
+            },
+        );
+
+        c.bench_function(
+            &format!(
+                "{}/case=uncomm_ancestor variant=immutable::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                module_path!(),
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += bench_imm_apply_with_uncommitted_ancestor(&ctx, updates).await;
                     }
                     total
                 });

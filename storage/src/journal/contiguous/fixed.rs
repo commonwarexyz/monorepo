@@ -94,7 +94,7 @@ use crate::{
         Error,
     },
     metadata::{Config as MetadataConfig, Metadata},
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::CodecFixedShared;
 use commonware_runtime::buffer::paged::CacheRef;
@@ -105,9 +105,17 @@ use commonware_utils::{
 use futures::{future::try_join_all, stream::Stream, StreamExt};
 use std::{
     future::Future,
+    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
 };
 use tracing::warn;
+
+/// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
+/// [`Journal::append_prepared`].
+pub struct PreparedAppend<A> {
+    buf: Vec<u8>,
+    _marker: PhantomData<A>,
+}
 
 /// Metadata key for a mid-section pruning boundary.
 ///
@@ -1132,30 +1140,51 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     // Shared implementation for `append` and `append_many`; public wrappers record metrics.
     async fn append_many_inner<'a>(&'a self, items: Many<'a, A>) -> Result<u64, Error> {
-        if items.is_empty() {
-            return Err(Error::EmptyAppend);
-        }
+        self.write_encoded(self.prepare_append(items)).await
+    }
 
-        // Encode all items into a single contiguous buffer before taking the write guard.
-        // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let items_count = match &items {
-            Many::Flat(items) => items.len(),
-            Many::Nested(nested_items) => nested_items.iter().map(|s| s.len()).sum(),
-        };
-        let mut items_buf = Vec::with_capacity(items_count * A::SIZE);
-        match &items {
+    /// Encode `items` into a buffer that can be appended later with [`Self::append_prepared`].
+    ///
+    /// This lets callers serialize borrowed items synchronously, release those borrows, and
+    /// perform the append without holding unrelated locks across journal I/O.
+    pub fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
+        let mut buf = Vec::with_capacity(items.len() * A::SIZE);
+        match items {
             Many::Flat(items) => {
-                for item in *items {
-                    item.write(&mut items_buf);
+                for item in items {
+                    item.write(&mut buf);
                 }
             }
             Many::Nested(nested_items) => {
-                for items in *nested_items {
+                for items in nested_items {
                     for item in *items {
-                        item.write(&mut items_buf);
+                        item.write(&mut buf);
                     }
                 }
             }
+        }
+        PreparedAppend {
+            buf,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Append items encoded by [`Self::prepare_append`], returning the position of the last item
+    /// appended.
+    ///
+    /// Returns [Error::EmptyAppend] if `prepared` contains no items.
+    pub async fn append_prepared(&self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        let _timer = self.metrics.append_prepared_timer();
+        self.metrics.append_prepared_calls.inc();
+        self.write_encoded(prepared).await
+    }
+
+    // Write pre-encoded items; shared by all append paths. Records no call metrics.
+    async fn write_encoded(&self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        let items_buf = prepared.buf;
+        let items_count = items_buf.len() / A::SIZE;
+        if items_count == 0 {
+            return Err(Error::EmptyAppend);
         }
 
         let _op_guard = self.op_lock.lock().await;
@@ -1420,21 +1449,17 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         Self::rewind(self, size).await
     }
-}
-
-impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
-    type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
-        self.commit().await
+        Self::commit(self).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 

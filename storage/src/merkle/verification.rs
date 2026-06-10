@@ -17,15 +17,16 @@ use crate::merkle::{
     storage::Storage,
     Bagging, Error, Family, Location, Position, Proof,
 };
+use ahash::AHashMap;
 use commonware_cryptography::Digest;
 use core::ops::Range;
 use futures::future::try_join_all;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 /// A store derived from a [Proof] that can be used to generate proofs over any sub-range of the
 /// original range.
 pub struct ProofStore<F: Family, D> {
-    digests: HashMap<Position<F>, D>,
+    digests: AHashMap<Position<F>, D>,
     size: Position<F>,
     /// The fold prefix accumulator from the original proof, if any peaks preceded the proven range.
     fold_acc: Option<D>,
@@ -64,7 +65,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
         let bagging = hasher.root_bagging();
         let digests =
             proof.verify_range_inclusion_and_extract_digests(hasher, elements, start_loc, root)?;
-        let map: HashMap<Position<F>, D> = digests.into_iter().collect();
+        let map: AHashMap<Position<F>, D> = digests.into_iter().collect();
 
         let size = Position::try_from(proof.leaves)?;
 
@@ -236,7 +237,7 @@ impl<F: Family, D: Digest> ProofStore<F, D> {
             locations,
         )?;
 
-        let peak_map: HashMap<Position<F>, D> = peaks.iter().copied().collect();
+        let peak_map: AHashMap<Position<F>, D> = peaks.iter().copied().collect();
 
         let mut digests = Vec::with_capacity(node_positions.len());
         for &pos in &node_positions {
@@ -336,7 +337,7 @@ pub async fn historical_range_proof<
         .await?
         .into_iter()
         .map(|(pos, digest)| digest.ok_or(Error::ElementPruned(pos)).map(|d| (pos, d)))
-        .collect::<Result<HashMap<_, _>, _>>()?;
+        .collect::<Result<AHashMap<_, _>, _>>()?;
 
     bp.build_proof(
         hasher,

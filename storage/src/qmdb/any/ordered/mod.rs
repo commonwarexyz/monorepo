@@ -1,5 +1,3 @@
-#[cfg(any(test, feature = "test-traits"))]
-use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Ordered as Index,
     journal::contiguous::{Contiguous, Reader},
@@ -261,7 +259,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<F, K, V>>,
+        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -279,7 +277,7 @@ crate::qmdb::any::traits::impl_provable! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<F, K, V>>,
+        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,

@@ -1927,6 +1927,7 @@ dependencies = [
 name = "commonware-runtime"
 version = "2026.5.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "axum",
  "bytes",
@@ -2012,6 +2013,7 @@ dependencies = [
  "futures",
  "futures-util",
  "governor",
+ "hashbrown 0.16.1",
  "paste",
  "rand 0.8.5",
  "rstest",

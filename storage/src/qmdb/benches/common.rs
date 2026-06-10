@@ -19,6 +19,7 @@ use commonware_storage::{
             unordered::{fixed::Db as UCFixed, variable::Db as UCVariable},
             FixedConfig as CurrentFixedConfig, VariableConfig as CurrentVariableConfig,
         },
+        immutable::fixed::{Config as ImmutableFixedConfig, Db as IFixed},
         keyless::variable::{Config as KeylessConfig, Db as Keyless},
     },
     translator::EightCap,
@@ -67,6 +68,10 @@ pub type CurUVarVecDb<F> =
 pub type CurOVarVecDb<F> =
     OCVariable<F, Context, Digest, Vec<u8>, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
+// -- Immutable --
+
+pub type ImmFixDb<F> = IFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+
 // -- Keyless --
 
 pub type KeylessDb<F> = Keyless<F, Context, Vec<u8>, Sha256, Rayon>;
@@ -82,6 +87,7 @@ pub async fn open_keyless_db<F: Family>(ctx: Context) -> KeylessDb<F> {
 const PARTITION_FIX: &str = "bench-fixed";
 const PARTITION_VAR: &str = "bench-variable";
 const PARTITION_KEYLESS: &str = "bench-keyless";
+const PARTITION_IMM: &str = "bench-immutable";
 
 fn merkle_cfg(
     suffix: &str,
@@ -136,6 +142,18 @@ pub fn any_fix_cfg_with(
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
+        translator: EightCap,
+    }
+}
+
+pub fn imm_fix_cfg_with(
+    ctx: &(impl BufferPooler + ThreadPooler),
+    items_per_blob: NonZeroU64,
+) -> ImmutableFixedConfig<EightCap, Rayon> {
+    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    ImmutableFixedConfig {
+        merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
+        log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
     }
 }
