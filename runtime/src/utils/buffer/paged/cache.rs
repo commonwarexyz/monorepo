@@ -105,10 +105,6 @@ struct Cache {
     /// The page cache index, with a key composed of (blob id, page number), that maps each cached
     /// page to the index of its slot in `entries` and `slots`.
     ///
-    /// An [AHashMap] (randomly seeded via runtime-rng) rather than std's default SipHash: ahash
-    /// remains DoS-resistant for adversarially influenced page numbers but is several times
-    /// faster on these fixed-width keys, which are hashed on every cached read and insert.
-    ///
     /// # Invariants
     ///
     /// Each `index` entry maps to exactly one `entries` slot, and that entry always has a
