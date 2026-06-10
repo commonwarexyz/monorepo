@@ -587,6 +587,33 @@ mod test {
         }
     }
 
+    /// Wraps a stream to return each read as a fresh, uniquely-owned pooled
+    /// buffer, mirroring the production network backends.
+    ///
+    /// Records the allocation handed out by the most recent read so tests can
+    /// assert that decryption happened in place.
+    struct PoolingStream<S> {
+        inner: S,
+        pool: BufferPool,
+        last_alloc: Arc<Mutex<Range<usize>>>,
+    }
+
+    impl<S: commonware_runtime::Stream> commonware_runtime::Stream for PoolingStream<S> {
+        async fn recv(&mut self, len: usize) -> Result<IoBufs, RuntimeError> {
+            let mut bufs = self.inner.recv(len).await?;
+            let mut buf = self.pool.alloc(len);
+            buf.put(&mut bufs);
+            let buf = buf.freeze();
+            let start = buf.as_ref().as_ptr() as usize;
+            *self.last_alloc.lock() = start..start + buf.len();
+            Ok(buf.into())
+        }
+
+        fn peek(&self, max_len: usize) -> &[u8] {
+            self.inner.peek(max_len)
+        }
+    }
+
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
@@ -631,6 +658,68 @@ mod test {
                 listener_sender.send(&msg[..]).await?;
                 let ack = dialer_receiver.recv().await?;
                 assert_eq!(ack.coalesce(), *msg);
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+
+            let last_alloc = Arc::new(Mutex::new(0..0));
+            let listener_stream = PoolingStream {
+                inner: listener_stream,
+                pool: context.network_buffer_pool().clone(),
+                last_alloc: last_alloc.clone(),
+            };
+
+            let dialer_config = transport_config(dialer_crypto);
+            let listener_config = transport_config(listener_crypto.clone());
+
+            let listener_handle = context.child("listener").spawn(move |context| async move {
+                listen(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, _dialer_receiver) = dial(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await?;
+
+            let (_, _, mut listener_receiver) = listener_handle.await.unwrap()?;
+
+            // Send both messages before receiving so the second frame's varint
+            // is decoded from the peek buffer, exercising in-place decryption
+            // of a sliced frame in addition to a full one.
+            dialer_sender.send(&b"hello"[..]).await?;
+            dialer_sender.send(&b"world"[..]).await?;
+
+            for expected in [&b"hello"[..], &b"world"[..]] {
+                let received = listener_receiver.recv().await?;
+                let plaintext = received.as_single().expect("single buffer expected");
+                let ptr = plaintext.as_ref().as_ptr() as usize;
+                assert!(
+                    last_alloc.lock().contains(&ptr),
+                    "plaintext should reuse the received frame buffer"
+                );
+                assert_eq!(plaintext.as_ref(), expected);
             }
             Ok(())
         })
