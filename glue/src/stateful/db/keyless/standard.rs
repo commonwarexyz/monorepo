@@ -3,11 +3,11 @@
 //!
 //! Keyless databases are append-only. Operations are addressed by
 //! [`Location`] rather than by key.
-//! The wrapper types here capture `Arc<AsyncRwLock<Keyless>>` so the batch API
+//! The wrapper types here capture `Arc<TracedAsyncRwLock<Keyless>>` so the batch API
 //! can read through to committed state.
 
 use crate::stateful::db::{
-    read_lock, ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -33,10 +33,10 @@ use commonware_storage::{
     },
     Persistable,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
 use std::{ops::Deref, sync::Arc};
 
-type KeylessDbHandle<F, E, V, C, H, S> = Arc<AsyncRwLock<Keyless<F, E, V, C, H, S>>>;
+type KeylessDbHandle<F, E, V, C, H, S> = Arc<TracedAsyncRwLock<Keyless<F, E, V, C, H, S>>>;
 
 /// Wraps a keyless [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -100,7 +100,7 @@ where
 
     /// Read a value by location, falling back to committed state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.batch.get(location, &*db).await
     }
 
@@ -112,7 +112,7 @@ where
         &self,
         locations: &[Location<F>],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.batch.get_many(locations, &*db).await
     }
 
@@ -168,7 +168,7 @@ where
 {
     /// Read a value by location, falling back to committed state.
     pub async fn get(&self, location: Location<F>) -> Result<Option<V::Value>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.inner.get(location, &*db).await
     }
 
@@ -180,7 +180,7 @@ where
         &self,
         locations: &[Location<F>],
     ) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.inner.get_many(locations, &*db).await
     }
 }
@@ -199,7 +199,7 @@ where
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         let merkleized = self.batch.merkleize(
             &*db,
             self.metadata,
@@ -259,8 +259,8 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = read_lock(db).await;
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
         KeylessUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
@@ -337,8 +337,8 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = read_lock(db).await;
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
         KeylessUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
@@ -522,7 +522,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -559,7 +559,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("stateful-keyless-matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await

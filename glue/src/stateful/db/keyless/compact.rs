@@ -5,7 +5,7 @@
 //! adapters expose append and merkleization operations but no historical reads.
 
 use crate::stateful::db::{
-    read_lock, ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait, MAX_CHANNEL_DRAIN_PER_TICK,
 };
 use commonware_codec::{EncodeShared, Read as CodecRead};
@@ -24,11 +24,11 @@ use commonware_storage::{
         Error,
     },
 };
-use commonware_utils::{channel::mpsc, sync::AsyncRwLock};
+use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock};
 use futures::future::{pending, Either};
 use std::{ops::Deref, sync::Arc};
 
-type KeylessUnjournaledDbHandle<F, E, V, H, C, S> = Arc<AsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
+type KeylessUnjournaledDbHandle<F, E, V, H, C, S> = Arc<TracedAsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
 
 async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
     let mut latest = None;
@@ -164,7 +164,7 @@ where
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         let merkleized = self.batch.merkleize(
             &*db,
             self.metadata,
@@ -224,8 +224,8 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = read_lock(db).await;
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
         KeylessUnjournaledUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
@@ -284,8 +284,8 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = read_lock(db).await;
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
         KeylessUnjournaledUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
@@ -621,7 +621,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("managed-db");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -655,7 +655,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("matches-sync-target");
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await

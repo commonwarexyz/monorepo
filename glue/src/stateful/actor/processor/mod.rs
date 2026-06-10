@@ -928,7 +928,7 @@ mod tests {
         channel::oneshot,
         non_empty_range,
         range::NonEmptyRange,
-        sync::{AsyncRwLock, Mutex},
+        sync::{TracedAsyncRwLock, Mutex},
         NZUsize, NZU16, NZU64,
     };
     use futures::{Stream, StreamExt};
@@ -950,7 +950,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+    type DbSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {

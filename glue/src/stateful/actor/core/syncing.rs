@@ -358,7 +358,7 @@ mod tests {
     use commonware_utils::{
         acknowledgement::Exact,
         channel::oneshot,
-        sync::{AsyncMutex, AsyncRwLock},
+        sync::{AsyncMutex, TracedAsyncRwLock},
         Acknowledgement, NZUsize, NZU16, NZU64,
     };
     use futures::{pin_mut, poll, FutureExt};
@@ -368,7 +368,7 @@ mod tests {
     struct NoopResolver;
 
     impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<AsyncRwLock<DB>>) {}
+        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<DB>>) {}
     }
 
     struct TestHarness {

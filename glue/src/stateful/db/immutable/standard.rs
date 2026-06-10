@@ -2,11 +2,11 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture `Arc<AsyncRwLock<Immutable>>`
+//! deletions. The wrapper types here capture `Arc<TracedAsyncRwLock<Immutable>>`
 //! so the batch API can read through to committed state.
 
 use crate::stateful::db::{
-    read_lock, ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
+    ManagedDb, Merkleized as MerkleizedTrait, StateSyncDb, SyncEngineConfig,
     Unmerkleized as UnmerkleizedTrait,
 };
 use commonware_codec::{Codec, EncodeShared, Read as CodecRead};
@@ -34,11 +34,11 @@ use commonware_storage::{
     translator::Translator,
     Persistable,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
-    Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
+    Arc<TracedAsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -108,7 +108,7 @@ where
 
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.batch.get(key, &*db).await
     }
 
@@ -116,7 +116,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await
     }
 
@@ -178,7 +178,7 @@ where
 {
     /// Read a value by key, falling back to committed state.
     pub async fn get(&self, key: &K) -> Result<Option<V::Value>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.inner.get(key, &*db).await
     }
 
@@ -186,7 +186,7 @@ where
     ///
     /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         self.inner.get_many(keys, &*db).await
     }
 }
@@ -207,7 +207,7 @@ where
     type Error = Error<F>;
 
     async fn merkleize(self) -> Result<Self::Merkleized, Error<F>> {
-        let db = read_lock(&self.db).await;
+        let db = self.db.read().await;
         let merkleized = self.batch.merkleize(
             &*db,
             self.metadata,
@@ -287,8 +287,8 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = read_lock(db).await;
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),
@@ -372,8 +372,8 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
-        let inner = read_lock(db).await;
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
+        let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
             db: db.clone(),

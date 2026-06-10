@@ -346,14 +346,14 @@ mod tests {
         buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
     #[derive(Clone)]
     struct NoopResolver;
 
     impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<AsyncRwLock<TestDb>>) {}
+        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {

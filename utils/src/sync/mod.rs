@@ -9,6 +9,7 @@
 //! Use async locks only when you must hold a lock guard across an `.await` point:
 //! - [AsyncMutex]
 //! - [AsyncRwLock]
+//! - [TracedAsyncRwLock] when lock acquisitions should be recorded as tracing spans.
 //! - [UpgradableAsyncRwLock] when you need to read first and then conditionally upgrade to write
 //!   without allowing another writer to slip in between.
 //!
@@ -29,6 +30,38 @@ pub use tokio::sync::{
     Barrier, Mutex as AsyncMutex, MutexGuard as AsyncMutexGuard, Notify, RwLock as AsyncRwLock,
     RwLockReadGuard as AsyncRwLockReadGuard, RwLockWriteGuard as AsyncRwLockWriteGuard,
 };
+
+/// A Tokio-based async rwlock whose acquisitions are recorded as tracing spans.
+///
+/// Each lock is identified by a static name, recorded as the `lock` field on the
+/// `utils.lock.read` and `utils.lock.write` spans so wait time is attributable to a
+/// specific lock.
+pub struct TracedAsyncRwLock<T> {
+    name: &'static str,
+    inner: tokio::sync::RwLock<T>,
+}
+
+impl<T> TracedAsyncRwLock<T> {
+    /// Create a new lock wrapping `value`, identified by `name` in traces.
+    pub fn new(name: &'static str, value: T) -> Self {
+        Self {
+            name,
+            inner: tokio::sync::RwLock::new(value),
+        }
+    }
+
+    /// Acquire a shared read guard, recording lock-wait time.
+    #[tracing::instrument(name = "utils.lock.read", level = "info", skip_all, fields(lock = self.name))]
+    pub async fn read(&self) -> AsyncRwLockReadGuard<'_, T> {
+        self.inner.read().await
+    }
+
+    /// Acquire an exclusive write guard, recording lock-wait time.
+    #[tracing::instrument(name = "utils.lock.write", level = "info", skip_all, fields(lock = self.name))]
+    pub async fn write(&self) -> AsyncRwLockWriteGuard<'_, T> {
+        self.inner.write().await
+    }
+}
 
 /// A Tokio-based async rwlock with an upgradable read mode.
 ///
@@ -159,8 +192,25 @@ impl<T> Deref for UpgradableAsyncRwLockUpgradableReadGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AsyncRwLock, UpgradableAsyncRwLock};
+    use super::{AsyncRwLock, TracedAsyncRwLock, UpgradableAsyncRwLock};
     use futures::{pin_mut, FutureExt};
+
+    #[test]
+    fn test_traced_async_rwlock() {
+        futures::executor::block_on(async {
+            let lock = TracedAsyncRwLock::new("test", 100u64);
+
+            let r1 = lock.read().await;
+            let r2 = lock.read().await;
+            assert_eq!(*r1 + *r2, 200);
+
+            drop((r1, r2));
+            let mut writer = lock.write().await;
+            *writer += 1;
+
+            assert_eq!(*writer, 101);
+        });
+    }
 
     #[test]
     fn test_async_rwlock() {
