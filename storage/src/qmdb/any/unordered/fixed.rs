@@ -299,6 +299,214 @@ pub(crate) mod test {
         });
     }
 
+    /// Reads on a batch retain resolved locations that `merkleize` consumes to skip re-reading
+    /// those keys. The root must be byte-identical to a write-only batch's `merkleize` (no
+    /// retained reads), across updates/deletes/creates, both with the batch rooted directly at
+    /// the DB (D=0) and through one pending ancestor (D=1).
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_resolved_merkleize_parity() {
+        use std::collections::HashMap;
+
+        type ParentChain = Vec<
+            std::sync::Arc<
+                crate::qmdb::any::batch::MerkleizedBatch<
+                    mmr::Family,
+                    Digest,
+                    crate::qmdb::any::operation::update::Unordered<Digest, FixedEncoding<Digest>>,
+                    Sequential,
+                >,
+            >,
+        >;
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = create_test_db(ctx.child("db")).await;
+
+            // Seed 2000 keys and commit so they live in the committed snapshot.
+            let mut seed = db.new_batch();
+            for i in 0..2000u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            // Build a mixed mutation set: updates of existing keys, deletes of existing keys,
+            // and creates of fresh keys. `make` re-derives the set from a seed so both paths and
+            // both depths see identical mutations.
+            let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
+                let mut rng = test_rng_seeded(salt);
+                let mut out = Vec::new();
+                for _ in 0..600 {
+                    let r = rng.next_u32() % 100;
+                    if r < 60 {
+                        out.push((key(rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    } else if r < 80 {
+                        out.push((key(rng.next_u64() % 2000), None));
+                    } else {
+                        out.push((key(2000 + rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    }
+                }
+                // Dedup last-write-wins.
+                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                for (k, v) in out {
+                    m.insert(k, v);
+                }
+                m.into_iter().collect()
+            };
+
+            // D=0: batch rooted directly at the DB. D=N: through N pending ancestors.
+            for depth in [0u64, 1, 2] {
+                let mut chain: ParentChain = Vec::new();
+                for d in 0..depth {
+                    let mut p = chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |l| l.new_batch::<Sha256>());
+                    for (k, v) in make(900 + d) {
+                        p = p.write(k, v);
+                    }
+                    chain.push(p.merkleize(&db, None).await.unwrap());
+                }
+
+                let muts = make(depth + 1);
+                let new_batch = || {
+                    chain
+                        .last()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                // Normal path.
+                let mut nb = new_batch();
+                for (k, v) in &muts {
+                    nb = nb.write(*k, *v);
+                }
+                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+
+                // Read-then-write on one batch: the read retains locations that merkleize
+                // consumes. Values and root must match the write-only path.
+                let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+                let mut fb = new_batch();
+                let values = fb.get_many(&keys, &db).await.unwrap();
+                let plain = new_batch().get_many(&keys, &db).await.unwrap();
+                assert_eq!(values, plain, "value mismatch at depth={depth}");
+                for (k, v) in &muts {
+                    fb = fb.write(*k, *v);
+                }
+                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+
+                // Reads after writes: written keys are answered by the pending mutations and
+                // retain nothing; the root must still match.
+                let half = muts.len() / 2;
+                let mut mb = new_batch();
+                for (k, v) in muts.iter().take(half) {
+                    mb = mb.write(*k, *v);
+                }
+                let values = mb.get_many(&keys, &db).await.unwrap();
+                for (i, (_, v)) in muts.iter().enumerate().take(half) {
+                    assert_eq!(values[i], *v, "pending write not visible at depth={depth}");
+                }
+                assert_eq!(
+                    values[half..],
+                    plain[half..],
+                    "unwritten value mismatch at depth={depth}"
+                );
+                for (k, v) in muts.iter().skip(half) {
+                    mb = mb.write(*k, *v);
+                }
+                let mixed_root = mb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(
+                    normal_root, mixed_root,
+                    "mixed root mismatch at depth={depth}"
+                );
+
+                // Multiple disjoint reads accumulate, and single-key gets retain too.
+                let mut gb = new_batch();
+                gb.get_many(&keys[..half], &db).await.unwrap();
+                for key in &keys[half..] {
+                    gb.get(key, &db).await.unwrap();
+                }
+                for (k, v) in &muts {
+                    gb = gb.write(*k, *v);
+                }
+                let merged_root = gb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(
+                    normal_root, merged_root,
+                    "merged root mismatch at depth={depth}"
+                );
+            }
+        });
+    }
+
+    /// A batch's retained read locations must stay valid when an ancestor is committed and
+    /// dropped between the read and merkleize. Keys resolved through an uncommitted ancestor's
+    /// diff retain nothing, so the merkleize-time re-resolution picks up the post-commit
+    /// location and the final state matches a batch that never read.
+    #[test_traced("WARN")]
+    fn test_unordered_fixed_retention_survives_ancestor_commit() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut roots = Vec::new();
+            for read_first in [false, true] {
+                let label = if read_first { "db_read" } else { "db_write" };
+                let mut db = create_test_db(ctx.child(label)).await;
+
+                // Seed and commit keys 0..100.
+                let mut seed = db.new_batch();
+                for i in 0..100u64 {
+                    seed = seed.write(key(i), Some(val(i)));
+                }
+                let seed = seed.merkleize(&db, None).await.unwrap();
+                db.apply_batch(seed).await.unwrap();
+                db.commit().await.unwrap();
+
+                // Grandparent overwrites keys 0..10 (pending), parent touches disjoint keys.
+                let mut gp = db.new_batch();
+                for i in 0..10u64 {
+                    gp = gp.write(key(i), Some(val(i + 1000)));
+                }
+                let gp = gp.merkleize(&db, None).await.unwrap();
+                let mut p = gp.new_batch::<Sha256>();
+                for i in 50..60u64 {
+                    p = p.write(key(i), Some(val(i + 2000)));
+                }
+                let p = p.merkleize(&db, None).await.unwrap();
+
+                // Child reads the grandparent-touched keys (resolving through its diff).
+                let b = p.new_batch::<Sha256>();
+                if read_first {
+                    let keys: Vec<Digest> = (0..10u64).map(key).collect();
+                    let key_refs: Vec<&Digest> = keys.iter().collect();
+                    let values = b.get_many(&key_refs, &db).await.unwrap();
+                    for (i, v) in values.into_iter().enumerate() {
+                        assert_eq!(v, Some(val(i as u64 + 1000)));
+                    }
+                }
+
+                // Commit the grandparent and drop it before the child merkleizes.
+                db.apply_batch(gp).await.unwrap();
+                db.commit().await.unwrap();
+
+                let mut b = b;
+                for i in 0..10u64 {
+                    b = b.write(key(i), Some(val(i + 3000)));
+                }
+                let b = b.merkleize(&db, None).await.unwrap();
+                db.apply_batch(p).await.unwrap();
+                db.apply_batch(b).await.unwrap();
+                db.commit().await.unwrap();
+
+                for i in 0..10u64 {
+                    assert_eq!(db.get(&key(i)).await.unwrap(), Some(val(i + 3000)));
+                }
+                roots.push(db.root());
+                db.destroy().await.unwrap();
+            }
+            assert_eq!(
+                roots[0], roots[1],
+                "read-then-write diverged from write-only"
+            );
+        });
+    }
+
     // -- Generic inner functions for parameterized batch tests --
 
     async fn batch_empty_inner<F: Family>(context: deterministic::Context) {
@@ -813,6 +1021,8 @@ pub(crate) mod test {
 
     #[allow(dead_code)]
     fn assert_non_trait_futures_are_send(db: &AnyTest, key: Digest, value: Digest) {
+        let reader = db.new_batch();
+        is_send(reader.get_many(&[&key], db));
         let batch = db.new_batch().write(key, Some(value));
         is_send(batch.merkleize(db, None));
         is_send(db.get_with_loc(&key));

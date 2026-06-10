@@ -225,6 +225,26 @@ where
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
+        let results = self.get_many_with_locations(keys).await?;
+        Ok(results
+            .into_iter()
+            .map(|result| result.map(|(value, _)| value))
+            .collect())
+    }
+
+    /// Batch read multiple keys, returning per key both the value and the committed location
+    /// it key-matched (or `None` for absent keys).
+    ///
+    /// Identical resolution to [`Self::get_many`] but additionally returns the snapshot
+    /// location that produced each value, letting batch reads retain locations for reuse at
+    /// merkleize.
+    ///
+    /// Results are returned in the same order as the input keys.
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn get_many_with_locations(
+        &self,
+        keys: &[&U::Key],
+    ) -> Result<Vec<Option<(U::Value, Location<F>)>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -236,7 +256,7 @@ where
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        let mut results: Vec<Option<U::Value>> = vec![None; keys.len()];
+        let mut results: Vec<Option<(U::Value, Location<F>)>> = vec![None; keys.len()];
 
         for (key_idx, key) in keys.iter().enumerate() {
             for &loc in self.snapshot.get(key) {
@@ -274,7 +294,7 @@ where
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {
-                results[key_idx] = Some(data.value().clone());
+                results[key_idx] = Some((data.value().clone(), Location::new(pos)));
             }
         }
 

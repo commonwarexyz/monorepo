@@ -168,6 +168,92 @@ pub mod test {
         });
     }
 
+    /// Reads on a batch retain resolved locations that `merkleize` consumes to skip re-reading
+    /// those keys. The root must match a write-only batch's `merkleize`, both rooted at the DB
+    /// (D=0) and through one pending ancestor (D=1).
+    #[test_traced("WARN")]
+    pub fn test_current_unordered_fixed_resolved_merkleize_parity() {
+        use commonware_cryptography::Hasher as _;
+        use commonware_utils::test_rng_seeded;
+        use rand::RngCore as _;
+        use std::collections::HashMap;
+
+        fn key(i: u64) -> Digest {
+            Sha256::hash(&i.to_be_bytes())
+        }
+        fn val(i: u64) -> Digest {
+            Sha256::hash(&(i + 10000).to_be_bytes())
+        }
+
+        deterministic::Runner::default().start(|ctx| async move {
+            let mut db = open_db(ctx.child("current"), "fused-parity".to_string()).await;
+
+            let mut seed = db.new_batch();
+            for i in 0..2000u64 {
+                seed = seed.write(key(i), Some(val(i)));
+            }
+            let seed = seed.merkleize(&db, None).await.unwrap();
+            db.apply_batch(seed).await.unwrap();
+            db.commit().await.unwrap();
+
+            let make = |salt: u64| -> Vec<(Digest, Option<Digest>)> {
+                let mut rng = test_rng_seeded(salt);
+                let mut out = Vec::new();
+                for _ in 0..600 {
+                    let r = rng.next_u32() % 100;
+                    if r < 60 {
+                        out.push((key(rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    } else if r < 80 {
+                        out.push((key(rng.next_u64() % 2000), None));
+                    } else {
+                        out.push((key(2000 + rng.next_u64() % 2000), Some(val(rng.next_u64()))));
+                    }
+                }
+                let mut m: HashMap<Digest, Option<Digest>> = HashMap::new();
+                for (k, v) in out {
+                    m.insert(k, v);
+                }
+                m.into_iter().collect()
+            };
+
+            for depth in [0u8, 1u8] {
+                let parent = if depth == 1 {
+                    let mut p = db.new_batch();
+                    for (k, v) in make(900) {
+                        p = p.write(k, v);
+                    }
+                    Some(p.merkleize(&db, None).await.unwrap())
+                } else {
+                    None
+                };
+
+                let muts = make(depth as u64 + 1);
+                let new_batch = || {
+                    parent
+                        .as_ref()
+                        .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
+                };
+
+                let mut nb = new_batch();
+                for (k, v) in &muts {
+                    nb = nb.write(*k, *v);
+                }
+                let normal_root = nb.merkleize(&db, None).await.unwrap().root();
+
+                let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
+                let mut fb = new_batch();
+                let values = fb.get_many(&keys, &db).await.unwrap();
+                let plain = new_batch().get_many(&keys, &db).await.unwrap();
+                assert_eq!(values, plain, "value mismatch at depth={depth}");
+                for (k, v) in &muts {
+                    fb = fb.write(*k, *v);
+                }
+                let fused_root = fb.merkleize(&db, None).await.unwrap().root();
+                assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
+            }
+        });
+    }
+
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
         shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db);
