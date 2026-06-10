@@ -903,6 +903,10 @@ spawned whom, so it cannot describe that relationship.
 - Prefer `#[tracing::instrument(name = "...", level = "info", skip_all)]` on the function
   performing the work. Always use `skip_all` and opt fields in explicitly; never capture
   parameters implicitly.
+- In `#[instrument(fields(...))]` a bare name declares an empty field: `fields(index)`
+  records nothing. Write `fields(index = index)` to capture the variable. This is the
+  opposite of the span macros, where a bare `info_span!("...", index)` is shorthand for
+  `index = index`.
 - As a rule of thumb, a span name should never be declared twice. If the same name appears
   at two or more call sites, that is a good sign the span belongs as `#[instrument]` on a
   re-usable function.

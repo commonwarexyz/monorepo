@@ -14,11 +14,28 @@ use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
 use rand::Rng;
-use std::{collections::VecDeque, pin::Pin};
-use tracing::{info_span, Span};
+use std::{collections::VecDeque, fmt::Display, pin::Pin};
+use tracing::{field, info_span, Span};
 
 /// Type alias for an ancestor stream sent through the actor mailbox.
 pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = B> + Send>>;
+
+/// Creates the span carried with a mailbox request, parented on the enqueuing
+/// caller.
+fn enqueue_span(
+    operation: &'static str,
+    epoch: impl Display,
+    view: impl Display,
+    digest: Option<&dyn Display>,
+) -> Span {
+    info_span!(
+        "stateful.mailbox",
+        operation,
+        epoch = %epoch,
+        view = %view,
+        digest = digest.map(field::display)
+    )
+}
 
 /// Messages processed by the actor loop.
 pub(crate) enum Message<E, A>
@@ -209,13 +226,7 @@ where
         ancestry: impl Stream<Item = Self::Block> + Send + 'static,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
-        let span = info_span!(
-            parent: &Span::current(),
-            "stateful.mailbox",
-            operation = "propose",
-            epoch = %context.1.epoch(),
-            view = %context.1.view()
-        );
+        let span = enqueue_span("propose", context.1.epoch(), context.1.view(), None);
         let _ = self.sender.enqueue(Message::Propose {
             span,
             context,
@@ -233,13 +244,7 @@ where
         // We must panic if we don't get a response; We cannot override the decision
         // of the application based on the availabilitiy of the actor.
         let (response, receiver) = oneshot::channel();
-        let span = info_span!(
-            parent: &Span::current(),
-            "stateful.mailbox",
-            operation = "verify",
-            epoch = %context.1.epoch(),
-            view = %context.1.view()
-        );
+        let span = enqueue_span("verify", context.1.epoch(), context.1.view(), None);
         let _ = self.sender.enqueue(Message::Verify {
             span,
             context,
@@ -263,17 +268,15 @@ where
         let message = match activity {
             Update::Tip(_, _, _) => return Feedback::Ok,
             Update::Block(block, acknowledgement) => {
-                let digest = block.digest();
                 let context = block.context();
+                let span = enqueue_span(
+                    "finalized",
+                    context.epoch(),
+                    context.view(),
+                    Some(&block.digest()),
+                );
                 Message::Finalized {
-                    span: info_span!(
-                        parent: &Span::current(),
-                        "stateful.mailbox",
-                        operation = "finalized",
-                        epoch = %context.epoch(),
-                        view = %context.view(),
-                        digest = %digest
-                    ),
+                    span,
                     block,
                     acknowledgement,
                 }

@@ -141,7 +141,7 @@ where
                     acknowledgement,
                 }) => {
                     let process = process_span(&span);
-                    if let Some(prune) = async {
+                    let prune = async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                             self.processor
                                 .notify_finalized(self.context.as_present(), &block)
@@ -157,8 +157,8 @@ where
                         prune
                     }
                     .instrument(process)
-                    .await
-                    {
+                    .await;
+                    if let Some(prune) = prune {
                         pending_prune = Some(prune);
                     }
                 }

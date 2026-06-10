@@ -1380,7 +1380,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
-#[tracing::instrument(name = "stateful.db.finalize", level = "info", skip_all, fields(index))]
+#[tracing::instrument(name = "stateful.db.finalize", level = "info", skip_all, fields(index = index))]
 async fn finalize_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     batch: T::Merkleized,
@@ -1402,7 +1402,7 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-#[tracing::instrument(name = "stateful.db.rewind", level = "info", skip_all, fields(index))]
+#[tracing::instrument(name = "stateful.db.rewind", level = "info", skip_all, fields(index = index))]
 async fn rewind_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: T::SyncTarget,
@@ -1424,7 +1424,7 @@ async fn rewind_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-#[tracing::instrument(name = "stateful.db.prune", level = "info", skip_all, fields(index))]
+#[tracing::instrument(name = "stateful.db.prune", level = "info", skip_all, fields(index = index))]
 async fn prune_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: &T::SyncTarget,
