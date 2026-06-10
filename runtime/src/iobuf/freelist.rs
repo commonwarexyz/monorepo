@@ -255,33 +255,24 @@ impl Freelist {
         let word_shift = word_count.trailing_zeros();
         let word_mask = word_count - 1;
 
-        let valid_bits = |word_index: usize| {
-            debug_assert!(word_index < capacity);
-            let bits = ((capacity - 1 - word_index) >> word_shift) + 1;
-            debug_assert!(bits <= SLOT_BITMAP_WORD_BITS);
-            if bits == SLOT_BITMAP_WORD_BITS {
-                u64::MAX
-            } else {
-                (1u64 << bits) - 1
-            }
-        };
-
         // Prefill runs during construction, before any other thread can
         // observe the freelist. Initialize the parking cells and both bitmaps
         // directly instead of routing every slot through the concurrent
         // creation and publication paths.
+        let bitmap_word = |word_index: usize| {
+            let bits = if prefill {
+                Self::valid_bits(capacity, word_shift, word_index)
+            } else {
+                0
+            };
+            CachePadded::new(AtomicU64::new(bits))
+        };
         let words = (0..word_count)
-            .map(|word_index| {
-                let bits = if prefill { valid_bits(word_index) } else { 0 };
-                CachePadded::new(AtomicU64::new(bits))
-            })
+            .map(bitmap_word)
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let reserved = (0..word_count)
-            .map(|word_index| {
-                let bits = if prefill { valid_bits(word_index) } else { 0 };
-                CachePadded::new(AtomicU64::new(bits))
-            })
+            .map(bitmap_word)
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let storage = (0..capacity)
@@ -296,7 +287,7 @@ impl Freelist {
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
-        let freelist = Self {
+        Self {
             layout,
             created: AtomicUsize::new(if prefill { capacity } else { 0 }),
             reserved,
@@ -304,9 +295,7 @@ impl Freelist {
             storage,
             word_mask,
             word_shift,
-        };
-
-        freelist
+        }
     }
 
     /// Creates a new buffer and reserves a stable slot id for it.
@@ -323,7 +312,7 @@ impl Freelist {
     /// The returned buffer does not deallocate itself. The `(slot, buffer)`
     /// pair must be returned to this same freelist before the freelist is
     /// finally dropped, otherwise the buffer leaks.
-    #[inline(always)]
+    #[inline]
     pub(super) fn try_create(&self, zeroed: bool) -> Option<(u32, PooledBuffer)> {
         let capacity = self.storage.len();
 
@@ -344,19 +333,9 @@ impl Freelist {
             for scanned in 0..self.reserved.len() {
                 let word_index = probe.word_index(scanned);
                 let word_ref = &self.reserved[word_index];
-                // Some words have invalid high bits when capacity does not
-                // fill a complete final logical row. For example, with
-                // capacity 10 and 4 words, words 0 and 1 have three valid bits
-                // (slots 0/4/8 and 1/5/9), while words 2 and 3 have only two.
                 // Creation searches for zero bits, so invalid high bits would
                 // look available without this mask.
-                let bits = ((capacity - 1 - word_index) >> self.word_shift) + 1;
-                debug_assert!(bits <= SLOT_BITMAP_WORD_BITS);
-                let valid = if bits == SLOT_BITMAP_WORD_BITS {
-                    u64::MAX
-                } else {
-                    (1u64 << bits) - 1
-                };
+                let valid = Self::valid_bits(capacity, self.word_shift, word_index);
                 // The relaxed load only chooses candidates. The following RMW
                 // decides ownership.
                 let mut available = !word_ref.load(Ordering::Relaxed) & valid;
@@ -411,6 +390,27 @@ impl Freelist {
     const fn slot_index(&self, word_index: usize, bit: usize) -> u32 {
         let slot = (bit << self.word_shift) | word_index;
         slot as u32
+    }
+
+    /// Returns the mask of valid slot bits for a bitmap word.
+    ///
+    /// Some words have invalid high bits when capacity does not fill a
+    /// complete final logical row. For example, with capacity 10 and 4 words,
+    /// words 0 and 1 have three valid bits (slots 0/4/8 and 1/5/9), while
+    /// words 2 and 3 have only two.
+    ///
+    /// This is an associated function rather than a method so construction can
+    /// use it before the freelist exists.
+    #[inline(always)]
+    const fn valid_bits(capacity: usize, word_shift: u32, word_index: usize) -> u64 {
+        debug_assert!(word_index < capacity);
+        let bits = ((capacity - 1 - word_index) >> word_shift) + 1;
+        debug_assert!(bits <= SLOT_BITMAP_WORD_BITS);
+        if bits == SLOT_BITMAP_WORD_BITS {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
     }
 
     /// Puts one tracked buffer into the global freelist.
@@ -1000,6 +1000,7 @@ pub(super) mod tests {
         let prefilled = Freelist::new(NZU32!(10), NZUsize!(4), TEST_LAYOUT, true);
         assert_eq!(created(&prefilled), 10);
         assert_eq!(len(&prefilled), 10);
+        assert!(prefilled.try_create(false).is_none());
 
         let mut seen = [false; 10];
         let mut taken = Vec::new();
@@ -1705,36 +1706,46 @@ mod loom_tests {
     #[test]
     fn concurrent_creates_do_not_duplicate_slots() {
         // `created` admits the two creators, then the relaxed reservation
-        // bitmap chooses their slot ids. Model the smallest same-word race
-        // where both creators may choose the same first candidate and one must
-        // continue to the remaining slot.
-        loom::model(|| {
-            let freelist = Arc::new(single_word_freelist(2));
-            let seen = Arc::new(AtomicUsize::new(0));
-            let expected = 0b11;
-            let leases = Leases::new(freelist.clone());
-            let mut handles = Vec::new();
+        // bitmap chooses their slot ids. Parallelism 1 places both slots in
+        // one word and models the smallest same-word race, where both creators
+        // may choose the same first candidate and one must continue to the
+        // remaining bit. Parallelism 2 gives each slot its own word, so a
+        // creator that claims both permits must fall through its full home
+        // word and reserve the remaining slot in the other stripe.
+        for parallelism in [1, 2] {
+            loom::model(move || {
+                let freelist = Arc::new(Freelist::new(
+                    NZU32!(2),
+                    NZUsize!(parallelism),
+                    Layout::from_size_align(64, 64).unwrap(),
+                    false,
+                ));
+                let seen = Arc::new(AtomicUsize::new(0));
+                let expected = 0b11;
+                let leases = Leases::new(freelist.clone());
+                let mut handles = Vec::new();
 
-            for _ in 0..2 {
-                handles.push(thread::spawn({
-                    let freelist = freelist.clone();
-                    let seen = seen.clone();
-                    let leases = leases.clone();
-                    move || {
-                        while let Some((slot, buffer)) = freelist.try_create(false) {
-                            leases.push_expected(&seen, expected, slot, buffer);
+                for _ in 0..2 {
+                    handles.push(thread::spawn({
+                        let freelist = freelist.clone();
+                        let seen = seen.clone();
+                        let leases = leases.clone();
+                        move || {
+                            while let Some((slot, buffer)) = freelist.try_create(false) {
+                                leases.push_expected(&seen, expected, slot, buffer);
+                            }
                         }
-                    }
-                }));
-            }
+                    }));
+                }
 
-            for handle in handles {
-                handle.join().unwrap();
-            }
+                for handle in handles {
+                    handle.join().unwrap();
+                }
 
-            assert_eq!(seen.load(Ordering::Relaxed), expected);
-            assert_eq!(freelist.created.load(Ordering::Relaxed), 2);
-        });
+                assert_eq!(seen.load(Ordering::Relaxed), expected);
+                assert_eq!(freelist.created.load(Ordering::Relaxed), 2);
+            });
+        }
     }
 
     #[test]
