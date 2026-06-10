@@ -18,7 +18,7 @@ const PARTITION: &str = "variable-test-partition";
 
 /// Replay all items in the given `journal`.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, buffer: usize) {
-    let reader = journal.reader().await;
+    let reader = journal.reader();
     let stream = reader
         .replay(NZUsize!(buffer), 0)
         .await

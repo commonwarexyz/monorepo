@@ -81,11 +81,11 @@
 //! ```
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
-use crate::journal::Error;
-use commonware_codec::{
-    varint::{UInt, MAX_U32_VARINT_SIZE},
-    Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
+use crate::journal::{
+    frame::{decode_item, decode_length_prefix, encode_item_into, find_item, ItemInfo},
+    Error,
 };
+use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay, Writer},
     Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
@@ -93,7 +93,6 @@ use commonware_runtime::{
 use futures::stream::{self, Stream, StreamExt};
 use std::{io::Cursor, num::NonZeroUsize};
 use tracing::{trace, warn};
-use zstd::{bulk::compress, decode_all};
 
 /// Configuration for `Journal` storage.
 #[derive(Clone)]
@@ -115,65 +114,6 @@ pub struct Config<C> {
     pub write_buffer: NonZeroUsize,
 }
 
-/// Decodes a varint length prefix from a buffer.
-/// Returns (item_size, varint_len).
-#[inline]
-fn decode_length_prefix(buf: &mut impl Buf) -> Result<(usize, usize), Error> {
-    let initial = buf.remaining();
-    let size = UInt::<u32>::read(buf)?.0 as usize;
-    let varint_len = initial - buf.remaining();
-    Ok((size, varint_len))
-}
-
-/// Result of finding an item in a buffer (offsets/lengths, not slices).
-enum ItemInfo {
-    /// All item data is available in the buffer.
-    Complete {
-        /// Length of the varint prefix.
-        varint_len: usize,
-        /// Length of the item data.
-        data_len: usize,
-    },
-    /// Only some item data is available.
-    Incomplete {
-        /// Length of the varint prefix.
-        varint_len: usize,
-        /// Bytes of item data available in buffer.
-        prefix_len: usize,
-        /// Full size of the item.
-        total_len: usize,
-    },
-}
-
-/// Find an item in a buffer by decoding its length prefix.
-///
-/// Returns (next_offset, item_info). The buffer is advanced past the varint.
-fn find_item(buf: &mut impl Buf, offset: u64) -> Result<(u64, ItemInfo), Error> {
-    let available = buf.remaining();
-    let (size, varint_len) = decode_length_prefix(buf)?;
-    let next_offset = offset
-        .checked_add(varint_len as u64)
-        .ok_or(Error::OffsetOverflow)?
-        .checked_add(size as u64)
-        .ok_or(Error::OffsetOverflow)?;
-    let buffered = available.saturating_sub(varint_len);
-
-    let item = if buffered >= size {
-        ItemInfo::Complete {
-            varint_len,
-            data_len: size,
-        }
-    } else {
-        ItemInfo::Incomplete {
-            varint_len,
-            prefix_len: buffered,
-            total_len: size,
-        }
-    };
-
-    Ok((next_offset, item))
-}
-
 /// State for replaying a single section's blob.
 struct ReplayState<'a, B: Blob, C> {
     section: u64,
@@ -186,17 +126,6 @@ struct ReplayState<'a, B: Blob, C> {
     codec_config: C,
     compressed: bool,
     done: bool,
-}
-
-/// Decode item data with optional decompression.
-fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) -> Result<V, Error> {
-    if compressed {
-        let decompressed =
-            decode_all(item_data.reader()).map_err(|_| Error::DecompressionFailed)?;
-        V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
-    } else {
-        V::decode_cfg(item_data, cfg).map_err(Error::Codec)
-    }
 }
 
 /// A segmented journal with variable-size entries.
@@ -519,61 +448,10 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Returns `(buf, item_len)` where `item_len` is the length of the encoded (and
     /// possibly compressed) payload, excluding the size prefix.
-    pub(crate) fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
+    fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
         let mut buf = Vec::new();
-        let item_len = Self::encode_item_into(compression, item, &mut buf)?;
+        let item_len = encode_item_into(compression, item, &mut buf)?;
         Ok((buf, item_len))
-    }
-
-    /// Encode an item with its length prefix, appending the encoded bytes to `buf`.
-    ///
-    /// Existing contents of `buf` are preserved; this allows callers to accumulate
-    /// multiple encoded items into a single buffer.
-    ///
-    /// Returns the payload length, excluding the size prefix.
-    pub(crate) fn encode_item_into(
-        compression: Option<u8>,
-        item: &V,
-        buf: &mut Vec<u8>,
-    ) -> Result<u32, Error> {
-        if let Some(compression) = compression {
-            // Compressed: encode first, then compress
-            let encoded = item.encode();
-            let compressed =
-                compress(&encoded, compression as i32).map_err(|_| Error::CompressionFailed)?;
-            let item_len = compressed.len();
-            let item_len_u32: u32 = match item_len.try_into() {
-                Ok(len) => len,
-                Err(_) => return Err(Error::ItemTooLarge(item_len)),
-            };
-            let size_len = UInt(item_len_u32).encode_size();
-            let entry_len = size_len
-                .checked_add(item_len)
-                .ok_or(Error::OffsetOverflow)?;
-
-            buf.reserve(entry_len);
-            UInt(item_len_u32).write(buf);
-            buf.extend_from_slice(&compressed);
-
-            Ok(item_len_u32)
-        } else {
-            // Uncompressed: pre-allocate exact size to avoid copying
-            let item_len = item.encode_size();
-            let item_len_u32: u32 = match item_len.try_into() {
-                Ok(len) => len,
-                Err(_) => return Err(Error::ItemTooLarge(item_len)),
-            };
-            let size_len = UInt(item_len_u32).encode_size();
-            let entry_len = size_len
-                .checked_add(item_len)
-                .ok_or(Error::OffsetOverflow)?;
-
-            buf.reserve(entry_len);
-            UInt(item_len_u32).write(buf);
-            item.write(buf);
-
-            Ok(item_len_u32)
-        }
     }
 
     /// Appends an item to `Journal` in a given `section`, returning the offset
@@ -590,7 +468,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// where the data was written.
     ///
     /// The buffer must be in the on-disk format produced by [Self::encode_item].
-    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
+    async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
         let offset = blob.size().await;
         blob.append(buf).await?;
@@ -642,164 +520,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         Ok(items)
     }
 
-    /// Read consecutive items from the same section. `offsets` must be sorted in strictly
-    /// ascending order and identify items that are adjacent in the section.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`Error::OffsetDataMismatch`] if the on-disk varint at any offset reports a size
-    /// inconsistent with the gap to the next offset. This indicates either on-disk corruption or a
-    /// caller violation of the byte-adjacency precondition.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `offsets` is not strictly increasing.
-    pub(crate) async fn get_many_consecutive(
-        &self,
-        section: u64,
-        offsets: &[u64],
-    ) -> Result<Vec<V>, Error> {
-        if offsets.len() <= 1 {
-            return self.get_many(section, offsets).await;
-        }
-        let blob = self
-            .manager
-            .get(section)?
-            .ok_or(Error::SectionOutOfRange(section))?;
-
-        let start = offsets[0];
-        let end = offsets[offsets.len() - 1];
-        if end <= start {
-            return self.get_many(section, offsets).await;
-        }
-        let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
-        let bytes = blob.read_at(start, range_len).await?.coalesce();
-        let bytes = bytes.as_ref();
-
-        let compressed = self.compression.is_some();
-        let cfg = &self.codec_config;
-        let mut items = Vec::with_capacity(offsets.len());
-        let mut local_offset = 0usize;
-
-        for window in offsets.windows(2) {
-            let offset = window[0];
-            let next_offset = window[1];
-            assert!(offset < next_offset, "offsets must be strictly increasing");
-
-            let item_len =
-                usize::try_from(next_offset - offset).map_err(|_| Error::OffsetOverflow)?;
-
-            let mut cursor = Cursor::new(&bytes[local_offset..]);
-            let (size, varint_len) = decode_length_prefix(&mut cursor)?;
-            let actual_len = size + varint_len;
-            if actual_len != item_len {
-                return Err(Error::OffsetDataMismatch {
-                    section,
-                    offset,
-                    expected_len: item_len,
-                    actual_len,
-                });
-            }
-
-            let data_start = local_offset
-                .checked_add(varint_len)
-                .ok_or(Error::OffsetOverflow)?;
-            let data_end = local_offset
-                .checked_add(item_len)
-                .ok_or(Error::OffsetOverflow)?;
-
-            items.push(decode_item::<V>(
-                &bytes[data_start..data_end],
-                cfg,
-                compressed,
-            )?);
-
-            local_offset = data_end;
-        }
-
-        let (_, _, item) = Self::read(compressed, cfg, blob, end).await?;
-        items.push(item);
-        Ok(items)
-    }
-
-    /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
-    pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
-        let mut buf = Vec::new();
-        self.try_get_sync_into(section, offset, &mut buf)
-    }
-
-    /// Get an item synchronously using caller-provided buffer.
-    pub fn try_get_sync_into(&self, section: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
-        let blob = self.manager.get(section).ok()??;
-        let remaining = blob.try_size()?.checked_sub(offset)?;
-        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
-        if header_len == 0 {
-            return None;
-        }
-
-        // Read the varint header to determine item size.
-        let mut header = [0u8; MAX_U32_VARINT_SIZE];
-        if !blob.try_read_sync(offset, &mut header[..header_len]) {
-            return None;
-        }
-        let mut cursor = Cursor::new(&header[..header_len]);
-        let (_, item_info) = find_item(&mut cursor, offset).ok()?;
-
-        let (varint_len, data_len) = match item_info {
-            ItemInfo::Complete {
-                varint_len,
-                data_len,
-            } => (varint_len, data_len),
-            ItemInfo::Incomplete {
-                varint_len,
-                total_len,
-                ..
-            } => (varint_len, total_len),
-        };
-        let item_len = varint_len.checked_add(data_len)?;
-        if item_len > usize::try_from(remaining).ok()? {
-            return None;
-        }
-
-        // If the full item fits in the header read, decode directly.
-        if item_len <= header_len {
-            return decode_item::<V>(
-                &header[varint_len..varint_len + data_len],
-                &self.codec_config,
-                self.compression.is_some(),
-            )
-            .ok();
-        }
-
-        // Otherwise try reading the full item from cache.
-        buf.resize(item_len, 0);
-        if !blob.try_read_sync(offset, buf) {
-            return None;
-        }
-        decode_item::<V>(
-            &buf[varint_len..varint_len + data_len],
-            &self.codec_config,
-            self.compression.is_some(),
-        )
-        .ok()
-    }
-
     /// Gets the size of the journal for a specific section.
     ///
     /// Returns 0 if the section does not exist.
     pub async fn size(&self, section: u64) -> Result<u64, Error> {
         self.manager.size(section).await
-    }
-
-    /// Rewinds the journal to the given `section` and `offset`, removing any data beyond it.
-    ///
-    /// # Warnings
-    ///
-    /// * This operation is not guaranteed to survive restarts until sync is called.
-    /// * This operation is not atomic, but it will always leave the journal in a consistent state
-    ///   in the event of failure since blobs are always removed in reverse order of section.
-    pub async fn rewind_to_offset(&mut self, section: u64, offset: u64) -> Result<(), Error> {
-        self.manager.rewind(section, offset).await
     }
 
     /// Rewinds the journal to the given `section` and `size`.
@@ -879,6 +604,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use commonware_codec::{varint::UInt, EncodeSize, Write as _};
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, BufMut, Runner, Storage, Supervisor as _};
     use commonware_utils::{NZUsize, NZU16};

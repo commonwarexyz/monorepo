@@ -30,7 +30,7 @@ const ITEM_SIZE: usize = 32;
 /// Read `items_to_read` random items from the given `journal`, awaiting each
 /// result before continuing.
 async fn bench_run_serial(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: usize) {
-    let reader = journal.reader().await;
+    let reader = journal.reader();
     let mut rng = StdRng::seed_from_u64(0);
     for _ in 0..items_to_read {
         let pos = rng.gen_range(0..ITEMS_TO_WRITE);
@@ -43,7 +43,7 @@ async fn bench_run_concurrent(
     journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
 ) {
-    let reader = journal.reader().await;
+    let reader = journal.reader();
     let mut rng = StdRng::seed_from_u64(0);
     let mut futures = Vec::with_capacity(items_to_read);
     for _ in 0..items_to_read {
@@ -58,7 +58,7 @@ async fn bench_run_read_many(
     journal: &Journal<Context, FixedBytes<ITEM_SIZE>>,
     items_to_read: usize,
 ) {
-    let reader = journal.reader().await;
+    let reader = journal.reader();
     let mut rng = StdRng::seed_from_u64(0);
     let mut positions: Vec<u64> = (0..items_to_read)
         .map(|_| rng.gen_range(0..ITEMS_TO_WRITE))
