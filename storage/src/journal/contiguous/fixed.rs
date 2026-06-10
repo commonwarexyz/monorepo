@@ -26,6 +26,20 @@
 //! Data fetched from disk is always checked for integrity before being returned. If the data is
 //! found to be invalid, an error is returned instead.
 //!
+//! # Architecture
+//!
+//! Three types divide the work:
+//!
+//! - [`Journal`] tracks which positions are readable (`bounds`), maps each position to a blob
+//!   and byte offset, and remembers which blobs have writes that are not yet fsynced
+//!   (`dirty_from_blob`) so commit/sync only fsync what changed.
+//!
+//! - `Blobs` owns the files: the contiguous sealed blobs plus the one writable tail, and the
+//!   live-reader count that gates rewind.
+//!
+//! - `Checkpoint` owns the durable recovery hints (mid-blob pruning boundary, recovery
+//!   watermark, staged clear target) consulted before trusting blob state on startup.
+//!
 //! # Concurrency
 //!
 //! Readers are snapshots. [`Journal::reader`] copies the journal's current blobs and bounds into
