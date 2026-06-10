@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 cfg-if.workspace = true
 commonware-macros.workspace = true
+futures = { workspace = true, optional = true }
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
@@ -22,4 +23,4 @@ proptest.workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "dep:rayon" ]
+std = [ "commonware-macros/std", "dep:futures", "dep:rayon" ]
