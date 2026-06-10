@@ -494,6 +494,36 @@ impl<S: Scheme, D: Digest> Viewable for Certificate<S, D> {
     }
 }
 
+impl<S: Scheme, D: Digest> Certificate<S, D> {
+    /// Returns a stable human-readable certificate kind.
+    pub const fn kind_name(&self) -> &'static str {
+        match self {
+            Self::Notarization(_) => "notarization",
+            Self::Nullification(_) => "nullification",
+            Self::Finalization(_) => "finalization",
+        }
+    }
+
+    /// Verifies this certificate against the provided signing scheme.
+    pub fn verify<R: CryptoRngCore>(
+        &self,
+        rng: &mut R,
+        scheme: &S,
+        strategy: &impl Strategy,
+    ) -> bool
+    where
+        S: scheme::Scheme<D>,
+    {
+        match self {
+            Self::Notarization(notarization) => notarization.verify(rng, scheme, strategy),
+            Self::Nullification(nullification) => {
+                nullification.verify::<_, D>(rng, scheme, strategy)
+            }
+            Self::Finalization(finalization) => finalization.verify(rng, scheme, strategy),
+        }
+    }
+}
+
 #[cfg(feature = "arbitrary")]
 impl<S: Scheme, D: Digest> arbitrary::Arbitrary<'_> for Certificate<S, D>
 where

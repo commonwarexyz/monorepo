@@ -3,8 +3,9 @@ use crate::{
     simplex::{
         scheme::Scheme,
         types::{
-            Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
-            Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
+            Activity, Attributable, Certificate, ConflictingFinalize, ConflictingNotarize,
+            Finalization, Notarization, Nullification, NullifyFinalize, Proposal, Vote,
+            VoteTracker,
         },
     },
     types::Participant,
@@ -96,6 +97,8 @@ impl<
 
     /// Stores a notarization certificate.
     pub fn set_notarization(&mut self, notarization: Notarization<S, D>) {
+        self.verifier
+            .set_certificate_proposal(notarization.proposal.clone());
         self.notarization = Some(notarization);
     }
 
@@ -107,6 +110,24 @@ impl<
     /// Stores a finalization certificate.
     pub fn set_finalization(&mut self, finalization: Finalization<S, D>) {
         self.finalization = Some(finalization);
+    }
+
+    /// Returns true if we already have a certificate matching `certificate`'s type.
+    pub const fn has_certificate(&self, certificate: &Certificate<S, D>) -> bool {
+        match certificate {
+            Certificate::Notarization(_) => self.has_notarization(),
+            Certificate::Nullification(_) => self.has_nullification(),
+            Certificate::Finalization(_) => self.has_finalization(),
+        }
+    }
+
+    /// Stores a certificate matching its type.
+    pub fn set_certificate(&mut self, certificate: Certificate<S, D>) {
+        match certificate {
+            Certificate::Notarization(notarization) => self.set_notarization(notarization),
+            Certificate::Nullification(nullification) => self.set_nullification(nullification),
+            Certificate::Finalization(finalization) => self.set_finalization(finalization),
+        }
     }
 
     /// Adds a vote from the network to this round's verifier.
@@ -209,8 +230,7 @@ impl<
                     None => {
                         self.reporter.report(Activity::Finalize(finalize.clone()));
                         self.pending_votes.insert_finalize(finalize.clone());
-                        self.verifier.add(Vote::Finalize(finalize), false);
-                        true
+                        self.verifier.add(Vote::Finalize(finalize), false)
                     }
                 }
             }
@@ -457,11 +477,23 @@ impl<
         if self.has_finalization() {
             return None;
         }
-        if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
+        let proposal = self.verifier.proposal()?;
+        if self
+            .verified_votes
+            .iter_finalizes()
+            .filter(|finalize| &finalize.proposal == proposal)
+            .count()
+            < self.participants.quorum::<N3f1>() as usize
+        {
             return None;
         }
-        let finalization =
-            Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
+        let finalization = Finalization::from_finalizes(
+            scheme,
+            self.verified_votes
+                .iter_finalizes()
+                .filter(|finalize| &finalize.proposal == proposal),
+            strategy,
+        )?;
         self.set_finalization(finalization.clone());
         Some(finalization)
     }

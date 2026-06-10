@@ -1,6 +1,7 @@
 use super::round::Round;
 use crate::{
     simplex::{
+        accepts_optimistic_future_view,
         elector::{Config as ElectorConfig, Elector},
         interesting,
         metrics::{Leader, Timeout, TimeoutReason},
@@ -83,6 +84,51 @@ impl ParentPayloadError {
     }
 }
 
+/// Tracks local nullify votes and nullification certificates by view.
+#[derive(Default)]
+struct NullifyTracker {
+    nullify_votes: BTreeSet<View>,
+    nullification_certificates: BTreeSet<View>,
+}
+
+impl NullifyTracker {
+    fn record_nullify_vote(&mut self, view: View) {
+        self.nullify_votes.insert(view);
+    }
+
+    fn record_nullification_certificate(&mut self, view: View) {
+        self.nullification_certificates.insert(view);
+    }
+
+    fn highest_nullification_in_range(&self, start: View, end: View) -> Option<View> {
+        self.nullification_certificates
+            .range(start..=end)
+            .next_back()
+            .copied()
+    }
+
+    fn covered_by_term_nullification(&self, view: View, term_length: NonZeroU64) -> bool {
+        let term_start = view.term_start(term_length);
+        self.nullification_certificates
+            .range(term_start..=view)
+            .next_back()
+            .is_some()
+    }
+
+    fn has_prior_local_nullify_vote_in_term(&self, view: View, term_length: NonZeroU64) -> bool {
+        let term_start = view.term_start(term_length);
+        self.nullify_votes
+            .range(term_start..view)
+            .next_back()
+            .is_some()
+    }
+
+    fn prune_below(&mut self, min: View) {
+        self.nullification_certificates = self.nullification_certificates.split_off(&min);
+        self.nullify_votes = self.nullify_votes.split_off(&min);
+    }
+}
+
 /// Configuration for initializing [`State`].
 pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub scheme: S,
@@ -95,6 +141,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub term_length: NonZeroU64,
     pub term_stop_notarize_on_nullify: bool,
     pub finalization_timeout: Duration,
+    pub term_optimistic_views: u64,
 }
 
 /// Per-[Epoch] state machine.
@@ -113,21 +160,17 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     term_length: NonZeroU64,
     term_stop_notarize_on_nullify: bool,
     finalization_timeout: Duration,
+    term_optimistic_views: u64,
     view: View,
     last_finalized: View,
     genesis: Option<D>,
     views: BTreeMap<View, Round<S, D>>,
 
-    /// Views for which we have voted to nullify.
-    ///
-    /// Used to enforce the term safety rules that suppress later same-term
-    /// finalize votes, and optionally later same-term notarize votes.
-    nullify_views: BTreeSet<View>,
+    /// Local nullify and nullification-certificate view indexes used for term safety.
+    nullify_tracker: NullifyTracker,
 
-    /// Views for which we have nullification certificates. Used to answer term-level
-    /// nullification queries efficiently (for parent validation and entry certificate fallback)
-    /// without scanning all tracked rounds.
-    nullification_views: BTreeSet<View>,
+    /// Parent payload selected when peer proposal verification was started.
+    verification_parents: BTreeMap<View, (View, D)>,
 
     certification_candidates: BTreeSet<View>,
     outstanding_certifications: BTreeSet<View>,
@@ -141,6 +184,36 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
 impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
     State<E, S, L, D>
 {
+    /// Returns the latest prior view with an explicit notarization or finalization.
+    fn last_directly_notarized_before(&self, view: View) -> View {
+        self.views
+            .range(..view)
+            .rev()
+            .find_map(|(&candidate, _)| self.is_directly_notarized(candidate).then_some(candidate))
+            .unwrap_or(GENESIS_VIEW)
+    }
+
+    fn within_term_optimistic_views(&self, view: View) -> bool {
+        if self.term_optimistic_views == 0 || view.is_term_start(self.term_length) {
+            return false;
+        }
+        let anchor = self.last_directly_notarized_before(view);
+        let optimistic_hops = view.get().saturating_sub(anchor.get()).saturating_sub(1);
+        optimistic_hops <= self.term_optimistic_views
+    }
+
+    fn active_views_from_current(&self) -> Vec<View> {
+        self.views
+            .range(self.view..)
+            .map(|(&view, _)| view)
+            .collect()
+    }
+
+    /// Returns true when `parent` may be used as optimistic same-term ancestry.
+    fn allows_optimistic_parent(&self, parent: View) -> bool {
+        self.within_term_optimistic_views(parent.next())
+    }
+
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = context.gauge("current_view", "current view");
         let tracked_views = context.gauge("tracked_views", "tracked views");
@@ -164,12 +237,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             term_length: cfg.term_length,
             term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
             finalization_timeout: cfg.finalization_timeout,
+            term_optimistic_views: cfg.term_optimistic_views,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
             genesis: None,
             views: BTreeMap::new(),
-            nullify_views: BTreeSet::new(),
-            nullification_views: BTreeSet::new(),
+            nullify_tracker: NullifyTracker::default(),
+            verification_parents: BTreeMap::new(),
             certification_candidates: BTreeSet::new(),
             outstanding_certifications: BTreeSet::new(),
             current_view,
@@ -228,28 +302,54 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .min(first_unfinalized.term_start(self.term_length))
     }
 
-    /// Returns whether a vote for `pending` is still relevant for progress.
-    pub fn is_interesting_vote(&self, pending: View) -> bool {
+    fn is_interesting(&self, pending: View, allow_unbounded_future: bool) -> bool {
         interesting(
             self.activity_timeout,
             self.last_finalized,
             self.view,
             pending,
-            false,
+            allow_unbounded_future,
             self.term_length,
+            self.term_optimistic_views,
         )
+    }
+
+    /// Returns whether a vote for `pending` is still relevant for progress.
+    pub fn is_interesting_vote(&self, pending: View) -> bool {
+        self.is_interesting(pending, false)
     }
 
     /// Returns whether a certificate for `pending` is relevant for progress.
     pub fn is_interesting_certificate(&self, pending: View) -> bool {
-        interesting(
-            self.activity_timeout,
-            self.last_finalized,
-            self.view,
-            pending,
-            true,
-            self.term_length,
-        )
+        self.is_interesting(pending, true)
+    }
+
+    /// Returns true if locally emitted work for `view` is still admissible to peers.
+    fn peer_admissible_view(&self, view: View) -> bool {
+        view <= self.view
+            || accepts_optimistic_future_view(
+                self.view,
+                view,
+                self.term_length,
+                self.term_optimistic_views,
+            )
+    }
+
+    /// Returns true if verification work for `view` should be issued now.
+    fn can_verify(&self, view: View) -> bool {
+        if !self.peer_admissible_view(view) {
+            return false;
+        }
+        if view <= self.view {
+            return true;
+        }
+        if view.term_start(self.term_length) != self.view.term_start(self.term_length) {
+            return true;
+        }
+        if self.within_term_optimistic_views(view) {
+            return self.notarized_parent_payload(self.view).is_some();
+        }
+        self.explicit_parent_payload(self.view).is_some()
     }
 
     /// Returns true when the local signer is the participant with index `idx`.
@@ -283,12 +383,28 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Sets the leader for the given view if it is not already set.
     fn set_leader(&mut self, view: View, certificate: Option<&S::Certificate>) {
+        if self
+            .views
+            .get(&view)
+            .is_some_and(|round| round.leader().is_some())
+        {
+            return;
+        }
         let leader = self.elector.elect(Rnd::new(self.epoch, view), certificate);
         let round = self.create_round(view);
+        round.set_leader(leader);
+    }
+
+    /// Copies the same-term stable leader into an optimistic successor.
+    fn inherit_leader(&mut self, from: View, to: View) {
+        let Some(leader) = self.views.get(&from).and_then(|round| round.leader()) else {
+            return;
+        };
+        let round = self.create_round(to);
         if round.leader().is_some() {
             return;
         }
-        round.set_leader(leader);
+        round.set_leader(leader.idx);
     }
 
     /// Ensures a round exists for the given view.
@@ -358,7 +474,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             (is_retry, reason, round.leader())
         };
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
-        self.nullify_views.insert(view);
+        self.nullify_tracker.record_nullify_vote(view);
         if let Some(leader) = leader {
             self.timeouts
                 .get_or_create(&Timeout::new(&leader.key, reason))
@@ -397,10 +513,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let term_start = prev.term_start(self.term_length);
             // Check for the highest nullification in the previous term
             if let Some(nullification) = self
-                .nullification_views
-                .range(term_start..=prev)
-                .next_back()
-                .copied()
+                .nullify_tracker
+                .highest_nullification_in_range(term_start, prev)
                 .and_then(|v| self.nullification(v).cloned())
             {
                 return Some(Certificate::Nullification(nullification));
@@ -425,11 +539,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         notarization: Notarization<S, D>,
     ) -> (bool, Option<S::PublicKey>) {
         let view = notarization.view();
-        // Do not advance to the next view until the certification passes
         self.set_leader(view.next(), Some(&notarization.certificate));
         let result = self.create_round(view).add_notarization(notarization);
-        if result.0 && view > self.last_finalized {
-            self.certification_candidates.insert(view);
+        if result.0 {
+            if view > self.last_finalized {
+                self.certification_candidates.insert(view);
+            }
+            self.slide_optimistic_frontier(view);
         }
         result
     }
@@ -454,7 +570,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let round = self.create_round(view);
         let added = round.add_nullification(nullification);
         let leader = added.then(|| round.leader()).flatten();
-        self.nullification_views.insert(view);
+        self.nullify_tracker.record_nullification_certificate(view);
 
         if let Some(leader) = leader {
             self.nullifications.get_or_create_by(&leader.key).inc();
@@ -487,7 +603,28 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         self.enter_view(view.next());
         self.set_leader(view.next(), Some(&finalization.certificate));
-        self.create_round(view).add_finalization(finalization)
+        let result = self.create_round(view).add_finalization(finalization);
+        if result.0 {
+            self.slide_optimistic_frontier(view);
+        }
+        result
+    }
+
+    /// Returns true if an optimistic notarize vote for `view` has enough local parent evidence.
+    fn optimistic_notarize_parent_ready(&self, view: View) -> bool {
+        if !self.within_term_optimistic_views(view) {
+            return true;
+        }
+        let Some(parent) = self.previous_in_term(view) else {
+            return true;
+        };
+
+        let parent_completed = view == self.view && self.explicit_parent_payload(parent).is_some();
+        parent_completed
+            || self
+                .views
+                .get(&parent)
+                .is_some_and(|round| round.broadcast_notarize())
     }
 
     /// Construct a notarize vote for this view when we're ready to sign.
@@ -495,13 +632,23 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// When `term_stop_notarize_on_nullify` is enabled, a prior local nullify in
     /// the same term suppresses later same-term notarize votes.
     pub fn construct_notarize(&mut self, view: View) -> Option<Notarize<S, D>> {
+        if !self.peer_admissible_view(view) {
+            return None;
+        }
         if self.term_stop_notarize_on_nullify && self.has_prior_local_nullify_in_term(view) {
+            return None;
+        }
+        if !self.optimistic_notarize_parent_ready(view) {
+            return None;
+        }
+        if !self.verified_parent_matches(view) {
             return None;
         }
         let candidate = self
             .views
             .get_mut(&view)
             .and_then(|round| round.construct_notarize().cloned())?;
+        self.prepare_optimistic_successor(view);
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
@@ -512,9 +659,22 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     ///
     /// The term safety rule applies: do not vote to finalize a later view in a
     /// term if we already voted to nullify an earlier view in that same term.
+    ///
+    /// Indirect notarization can make a view usable as ancestry, but does not
+    /// replace the local certification requirement for finalization.
+    ///
+    /// Within a term, the immediate parent must also be certified and either
+    /// have our local finalize vote or already have a finalization certificate.
+    /// We do not need to walk farther back because a certifiable parent would
+    /// already have triggered our finalize vote unless term safety was blocked
+    /// by a prior nullify, which the guard above already enforces.
     pub fn construct_finalize(&mut self, view: View) -> Option<Finalize<S, D>> {
         // We don't need to finalize views that are already finalized.
         if view <= self.last_finalized {
+            return None;
+        }
+
+        if !self.peer_admissible_view(view) {
             return None;
         }
 
@@ -522,10 +682,25 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return None;
         }
 
+        let round = self.views.get(&view)?;
+        if !round.is_certified() {
+            return None;
+        }
+        if let Some(parent) = self.previous_in_term(view) {
+            if !self
+                .views
+                .get(&parent)
+                .is_some_and(|round| round.allows_child_finalize())
+            {
+                return None;
+            }
+        }
         let candidate = self
             .views
             .get_mut(&view)
-            .and_then(|round| round.construct_finalize().cloned())?;
+            .expect("view must exist")
+            .construct_finalize()?
+            .clone();
 
         // Signing can only fail if we are a verifier, so we don't need to worry about
         // unwinding our broadcast toggle.
@@ -559,7 +734,10 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Returns the proposal for `view` if it is eligible for forwarding.
     pub fn forwardable_proposal(&self, view: View) -> Option<Proposal<D>> {
         let round = self.views.get(&view)?;
-        if round.finalization().is_some() || round.is_certified() {
+        if round.finalization().is_some()
+            || round.is_certified()
+            || (round.notarization().is_some() && !round.is_failed_certification())
+        {
             return round.proposal().cloned();
         }
         None
@@ -582,14 +760,15 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Replays a journaled artifact into the appropriate round during recovery.
     ///
     /// Restores round-level broadcast flags (via [`Round::replay`]) and
-    /// tracking sets (`nullify_views`, `nullification_views`) so that
-    /// term-safety checks work correctly after a restart.
+    /// term-nullify tracking so recovery
+    /// preserves the same optimistic ancestry decisions as the pre-restart node.
     pub fn replay(&mut self, artifact: &Artifact<S, D>) {
         if let Artifact::Nullify(n) = artifact {
-            self.nullify_views.insert(n.view());
+            self.nullify_tracker.record_nullify_vote(n.view());
         }
         if let Artifact::Nullification(n) = artifact {
-            self.nullification_views.insert(n.view());
+            self.nullify_tracker
+                .record_nullification_certificate(n.view());
         }
         self.create_round(artifact.view()).replay(artifact);
     }
@@ -614,7 +793,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// If the round has already been marked timed out, this preserves the existing
     /// retry schedule.
     ///
-    /// This only records the first timeout reason for the view. Metrics are emitted
+    /// This only records the first timeout reason for the current view. Metrics are emitted
     /// when the first timeout nullify vote is constructed.
     pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view != self.view {
@@ -626,6 +805,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if round.is_retrying_nullify() {
             return;
         }
+        if matches!(reason, TimeoutReason::Inactivity) && round.has_unequivocated_proposal() {
+            return;
+        }
         let (_, is_first_timeout) = round.set_timeout_reason(reason);
         if is_first_timeout {
             round.set_deadlines(now, now, now);
@@ -634,39 +816,42 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
     /// Attempt to propose a new block.
     pub fn try_propose(&mut self) -> Option<Context<D, S::PublicKey>> {
-        // Perform fast checks before lookback
-        let view = self.view;
-        if view == GENESIS_VIEW {
-            return None;
-        }
-        if !self
-            .views
-            .get_mut(&view)
-            .expect("view must exist")
-            .should_propose()
-        {
-            return None;
-        }
-
-        // Look for parent
-        let parent = self.find_parent(view);
-        let (parent_view, parent_payload) = match parent {
-            Ok(parent) => parent,
-            Err(missing) => {
-                debug!(%view, %missing, "missing parent during proposal");
-                return None;
+        for view in self.active_views_from_current() {
+            if view == GENESIS_VIEW {
+                continue;
             }
-        };
-        let leader = self
-            .views
-            .get_mut(&view)
-            .expect("view must exist")
-            .try_propose()?;
-        Some(Context {
-            round: Rnd::new(self.epoch, view),
-            leader: leader.key,
-            parent: (parent_view, parent_payload),
-        })
+            if !self.peer_admissible_view(view) {
+                continue;
+            }
+            if !self
+                .views
+                .get(&view)
+                .is_some_and(|round| round.should_propose())
+            {
+                continue;
+            }
+
+            let (parent_view, parent_payload) = match self.find_parent(view) {
+                Ok(parent) => parent,
+                Err(missing) => {
+                    debug!(%view, %missing, "missing parent during proposal");
+                    continue;
+                }
+            };
+            let Some(leader) = self
+                .views
+                .get_mut(&view)
+                .and_then(|round| round.try_propose())
+            else {
+                continue;
+            };
+            return Some(Context {
+                round: Rnd::new(self.epoch, view),
+                leader: leader.key,
+                parent: (parent_view, parent_payload),
+            });
+        }
+        None
     }
 
     /// Records a locally constructed proposal once the automaton finishes building it.
@@ -681,6 +866,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     ///
     /// Returns true if the proposal should trigger verification, false otherwise.
     pub fn set_proposal(&mut self, view: View, proposal: Proposal<D>) -> bool {
+        self.prepare_optimistic_successor(view);
         self.create_round(view).set_proposal(proposal)
     }
 
@@ -691,38 +877,61 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// ask us to fetch junk).
     #[allow(clippy::type_complexity)]
     pub fn try_verify(&mut self) -> Option<(Context<D, S::PublicKey>, Proposal<D>)> {
-        let view = self.view;
-        let (leader, proposal) = self.views.get(&view)?.should_verify()?;
-        let parent_payload = match self.parent_payload(&proposal) {
-            Ok(parent_payload) => parent_payload,
-            Err(err) => {
-                if err.invalid_proposal() {
-                    warn!(round = ?proposal.round, ?err, "proposal failed verification");
-                    self.trigger_timeout(view, TimeoutReason::InvalidProposal);
-                } else {
-                    debug!(
-                        %view,
-                        ?proposal,
-                        ?err,
-                        "proposal exists but ancestry is not yet certified"
-                    );
-                }
-                return None;
+        for view in self.active_views_from_current() {
+            if !self.can_verify(view) {
+                continue;
             }
-        };
-        if !self.views.get_mut(&view)?.try_verify() {
-            return None;
+            let Some((leader, proposal)) = self
+                .views
+                .get(&view)
+                .and_then(|round| round.should_verify())
+            else {
+                continue;
+            };
+            let parent_payload = match self.parent_payload(&proposal) {
+                Ok(parent_payload) => parent_payload,
+                Err(err) => {
+                    if err.invalid_proposal() {
+                        warn!(round = ?proposal.round, ?err, "proposal failed verification");
+                        self.trigger_timeout(view, TimeoutReason::InvalidProposal);
+                    } else {
+                        debug!(
+                            %view,
+                            ?proposal,
+                            ?err,
+                            "proposal exists but ancestry is not yet notarized"
+                        );
+                    }
+                    continue;
+                }
+            };
+            if !self
+                .views
+                .get_mut(&view)
+                .is_some_and(|round| round.try_verify())
+            {
+                continue;
+            }
+            self.verification_parents
+                .insert(view, (proposal.parent, parent_payload));
+            return Some((
+                Context {
+                    round: proposal.round,
+                    leader: leader.key,
+                    parent: (proposal.parent, parent_payload),
+                },
+                proposal,
+            ));
         }
-        let context = Context {
-            round: proposal.round,
-            leader: leader.key,
-            parent: (proposal.parent, parent_payload),
-        };
-        Some((context, proposal))
+        None
     }
 
     /// Marks proposal verification as complete when the peer payload validates.
     pub fn verified(&mut self, view: View) -> bool {
+        if !self.verified_parent_matches(view) {
+            self.verification_parents.remove(&view);
+            return false;
+        }
         self.views
             .get_mut(&view)
             .map(|round| round.verified())
@@ -754,6 +963,17 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 if view <= self.last_finalized {
                     return None;
                 }
+
+                let proposal = self.views.get(&view)?.proposal()?.clone();
+                if let Err(err) = self.certification_parent_ready(&proposal) {
+                    if err.invalid_proposal() {
+                        warn!(round = ?proposal.round, ?err, "proposal failed certification precheck");
+                    } else {
+                        self.certification_candidates.insert(view);
+                    }
+                    return None;
+                }
+
                 let candidate = self.views.get_mut(&view)?.try_certify()?;
                 Some(candidate)
             })
@@ -767,6 +987,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn certified(&mut self, view: View, is_success: bool) -> Option<Notarization<S, D>> {
         let round = self.views.get_mut(&view)?;
         round.certified(is_success);
+        if !is_success {
+            let now = self.context.current();
+            let (_, is_first_timeout) =
+                round.set_timeout_reason(TimeoutReason::FailedCertification);
+            if is_first_timeout {
+                round.set_deadlines(now, now, now);
+            }
+        }
 
         // Remove from outstanding since certification is complete
         self.outstanding_certifications.remove(&view);
@@ -779,8 +1007,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 
         if is_success {
             self.enter_view(view.next());
-        } else {
-            self.trigger_timeout(view, TimeoutReason::FailedCertification);
         }
 
         Some(notarization)
@@ -791,50 +1017,166 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let min = self.min_active();
         let kept = self.views.split_off(&min);
         let removed = replace(&mut self.views, kept).into_keys().collect();
+        self.verification_parents = self.verification_parents.split_off(&min);
 
         // A nullification can cover the rest of its term, and a local nullify
         // blocks finalization in the same term. Use the same floor as journal
         // pruning so restart preserves the safety evidence we keep in memory.
         let retain_from = self.retention_floor();
-        self.nullification_views = self.nullification_views.split_off(&retain_from);
-        self.nullify_views = self.nullify_views.split_off(&retain_from);
+        self.nullify_tracker.prune_below(retain_from);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
         removed
     }
 
-    /// Returns the payload of the proposal if it is certified (including finalized).
-    fn is_certified(&self, view: View) -> Option<&D> {
-        // Special case for genesis view
+    /// Returns true if the view has a direct notarization certificate.
+    fn is_directly_notarized(&self, view: View) -> bool {
+        if view == GENESIS_VIEW {
+            return true;
+        }
+        self.views
+            .get(&view)
+            .is_some_and(|round| round.notarization().is_some() || round.finalization().is_some())
+    }
+
+    fn explicit_parent_payload(&self, view: View) -> Option<&D> {
         if view == GENESIS_VIEW {
             return Some(self.genesis.as_ref().expect("genesis must be present"));
         }
-
-        // Check for explicit certification
         let round = self.views.get(&view)?;
         if round.finalization().is_some() || round.is_certified() {
-            return Some(&round.proposal().expect("proposal must exist").payload);
+            return round.proposal().map(|proposal| &proposal.payload);
         }
         None
     }
 
+    fn parent_payload_for_child(&self, child: View, parent: View) -> Option<&D> {
+        if !child.is_term_start(self.term_length) && self.within_term_optimistic_views(child) {
+            return self.notarized_parent_payload(parent);
+        }
+        self.explicit_parent_payload(parent)
+    }
+
+    /// Returns the payload of a parent we can safely use for optimistic validation.
+    fn notarized_parent_payload(&self, view: View) -> Option<&D> {
+        if view == GENESIS_VIEW {
+            return Some(self.genesis.as_ref().expect("genesis must be present"));
+        }
+
+        if self.is_directly_notarized(view) {
+            let round = self.views.get(&view)?;
+            // Do not extend a proposal our own certification rejected. A
+            // finalization certificate overrides the local rejection.
+            if round.is_failed_certification() && round.finalization().is_none() {
+                return None;
+            }
+            return round.proposal().map(|proposal| &proposal.payload);
+        }
+
+        if !self.allows_optimistic_parent(view) {
+            return None;
+        }
+
+        let round = self.views.get(&view)?;
+        if !round.has_unequivocated_proposal()
+            || !round.broadcast_notarize()
+            || !round.is_verified()
+        {
+            return None;
+        }
+
+        let proposal = round.proposal()?;
+        if proposal.parent < self.last_finalized {
+            return None;
+        }
+        if let Some(missing_view) = self.first_unnullified_view(proposal.parent, proposal.view()) {
+            debug!(%view, %missing_view, "optimistic ancestor missing nullification");
+            return None;
+        }
+        self.notarized_parent_payload(proposal.parent)?;
+        Some(&proposal.payload)
+    }
+
+    /// Prepares the next round within the same term so stable leaders can chain proposals.
+    fn prepare_optimistic_successor(&mut self, view: View) {
+        let next = view.next();
+        if next.term_start(self.term_length) != view.term_start(self.term_length)
+            || !self.within_term_optimistic_views(next)
+        {
+            return;
+        }
+        self.inherit_leader(view, next);
+    }
+
+    /// Slides the optimistic frontier forward within `view`'s term.
+    ///
+    /// This keeps the lookahead window moving as direct notarizations arrive,
+    /// instead of only extending when proposals/notarize votes happen at the
+    /// previous edge of the window.
+    fn slide_optimistic_frontier(&mut self, view: View) {
+        if self.term_optimistic_views == 0 || self.term_length.get() <= 1 {
+            return;
+        }
+
+        let term_start = view.term_start(self.term_length);
+        let term_end = view.next_term_start(self.term_length);
+        let Some(mut frontier) = self
+            .views
+            .range(term_start..term_end)
+            .next_back()
+            .map(|(&v, _)| v)
+        else {
+            return;
+        };
+
+        while frontier.next() < term_end {
+            let next = frontier.next();
+            if !self.within_term_optimistic_views(next) {
+                break;
+            }
+            self.inherit_leader(frontier, next);
+            frontier = next;
+        }
+    }
+
+    fn verified_parent_matches(&self, view: View) -> bool {
+        // Entries exist only for peer proposals (recorded in try_verify). A locally
+        // built proposal's parent can only be displaced by conflicting certificates
+        // for the parent view, which requires more than f faults.
+        let Some((parent_view, parent_payload)) = self.verification_parents.get(&view) else {
+            return true;
+        };
+        let Some(proposal) = self.views.get(&view).and_then(|round| round.proposal()) else {
+            return false;
+        };
+        if proposal.parent != *parent_view {
+            return false;
+        }
+        self.parent_payload(proposal)
+            .is_ok_and(|payload| payload == *parent_payload)
+    }
+
     /// Returns whether `view` is covered by a prior-or-equal nullification in its term.
     fn covered_by_term_nullification(&self, view: View) -> bool {
-        let term_start = view.term_start(self.term_length);
-        self.nullification_views
-            .range(term_start..=view)
-            .next_back()
-            .is_some()
+        self.nullify_tracker
+            .covered_by_term_nullification(view, self.term_length)
     }
 
     /// Returns whether we have already locally nullified an earlier view in `view`'s term.
     fn has_prior_local_nullify_in_term(&self, view: View) -> bool {
-        let term_start = view.term_start(self.term_length);
-        self.nullify_views
-            .range(term_start..view)
-            .next_back()
-            .is_some()
+        self.nullify_tracker
+            .has_prior_local_nullify_vote_in_term(view, self.term_length)
+    }
+
+    fn previous_in_term(&self, view: View) -> Option<View> {
+        if view == GENESIS_VIEW || view.is_term_start(self.term_length) {
+            return None;
+        }
+        Some(
+            view.previous()
+                .expect("non-genesis non-term-start views must have a predecessor"),
+        )
     }
 
     /// Returns the first non-nullified view in the open interval (after, before).
@@ -872,8 +1214,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let parent = view
                 .previous()
                 .expect("non-genesis views must have a previous view");
-            return self
-                .is_certified(parent)
+            let payload = self.parent_payload_for_child(view, parent);
+            return payload
                 .copied()
                 .map(|payload| (parent, payload))
                 .ok_or(parent);
@@ -884,7 +1226,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .views
             .range(..view)
             .rev()
-            .find_map(|(&v, _)| self.is_certified(v).map(|p| (v, p)));
+            .find_map(|(&v, _)| self.explicit_parent_payload(v).map(|p| (v, p)));
         let (candidate, payload) = match result {
             Some((v, p)) => (v, p),
             None => (
@@ -911,7 +1253,65 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// - It is certified (or finalized, which implies certification).
     /// - All views between it and the proposal view have been nullified.
     fn parent_payload(&self, proposal: &Proposal<D>) -> Result<D, ParentPayloadError> {
-        // Sanity check that the parent view is less than the proposal view.
+        self.validate_parent_span(proposal)?;
+        let (view, parent) = (proposal.view(), proposal.parent);
+
+        // May return `None` if the parent view is not yet either:
+        // - notarized and certified
+        // - finalized
+        let payload = self.parent_payload_for_child(view, parent);
+        payload
+            .copied()
+            .ok_or(ParentPayloadError::ParentNotCertified {
+                proposal_view: view,
+                parent_view: parent,
+            })
+    }
+
+    /// Returns whether certification may run for a proposal.
+    ///
+    /// Optimistic notarize votes can make a same-term child notarized before
+    /// its immediate parent has certified, but certification waits for explicit
+    /// certified or finalized parent ancestry.
+    fn certification_parent_ready(&self, proposal: &Proposal<D>) -> Result<(), ParentPayloadError> {
+        let (view, parent) = (proposal.view(), proposal.parent);
+        if view <= parent {
+            return Err(ParentPayloadError::ParentNotBeforeProposal {
+                proposal_view: view,
+                parent_view: parent,
+            });
+        }
+
+        if view.is_term_start(self.term_length) {
+            return Ok(());
+        }
+
+        if parent < self.last_finalized {
+            return Err(ParentPayloadError::ParentBeforeFinalized {
+                proposal_view: view,
+                parent_view: parent,
+                last_finalized: self.last_finalized,
+            });
+        }
+
+        if view != parent.next() {
+            return Err(ParentPayloadError::IntraTermProposalSkipsViews {
+                proposal_view: view,
+                parent_view: parent,
+            });
+        }
+
+        if self.explicit_parent_payload(parent).is_some() {
+            return Ok(());
+        }
+
+        Err(ParentPayloadError::ParentNotCertified {
+            proposal_view: view,
+            parent_view: parent,
+        })
+    }
+
+    fn validate_parent_span(&self, proposal: &Proposal<D>) -> Result<(), ParentPayloadError> {
         let (view, parent) = (proposal.view(), proposal.parent);
         if view <= parent {
             return Err(ParentPayloadError::ParentNotBeforeProposal {
@@ -946,20 +1346,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             });
         }
 
-        // May return `None` if the parent view is not yet either:
-        // - notarized and certified
-        // - finalized
-        //
-        // We do not request the parent's notarization from the resolver
-        // (a nullification covering the parent satisfies its term anchor).
-        // Until it arrives via gossip or buffered votes, we cannot vote for
-        // this proposal, but we still advance on later certificates.
-        self.is_certified(parent)
-            .copied()
-            .ok_or(ParentPayloadError::ParentNotCertified {
-                proposal_view: view,
-                parent_view: parent,
-            })
+        Ok(())
     }
 
     /// Returns the certificate for the parent of the proposal at the given view.
@@ -987,10 +1374,13 @@ mod tests {
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
-    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_cryptography::{
+        certificate::{mocks::Fixture, Scheme as _},
+        sha256::Digest as Sha256Digest,
+    };
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
-    use commonware_utils::{futures::AbortablePool, NZU64};
+    use commonware_utils::{futures::AbortablePool, ordered::Set, NZU64};
     use std::time::Duration;
 
     fn test_genesis() -> Sha256Digest {
@@ -1026,11 +1416,69 @@ mod tests {
                     .expect("term length must be non-zero"),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
+                term_optimistic_views: 0,
             },
         );
         let mut state = state;
         state.set_genesis(test_genesis());
         (fixture, state)
+    }
+
+    #[derive(Clone, Default)]
+    struct RequireCertificate;
+
+    #[derive(Clone)]
+    struct RequireCertificateElector<S> {
+        _phantom: std::marker::PhantomData<S>,
+    }
+
+    impl<S: certificate::Scheme> ElectorConfig<S> for RequireCertificate {
+        type Elector = RequireCertificateElector<S>;
+
+        fn build(
+            self,
+            participants: &Set<S::PublicKey>,
+            _term_length: std::num::NonZeroU64,
+        ) -> Self::Elector {
+            assert!(!participants.is_empty(), "no participants");
+            RequireCertificateElector {
+                _phantom: std::marker::PhantomData,
+            }
+        }
+    }
+
+    impl<S: certificate::Scheme> Elector<S> for RequireCertificateElector<S> {
+        fn elect(&self, round: Rnd, certificate: Option<&S::Certificate>) -> Participant {
+            assert!(
+                certificate.is_some() || round.view() == View::new(1),
+                "certificate required after view 1"
+            );
+            Participant::new(0)
+        }
+    }
+
+    fn notarization_from_all(
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+        proposal: &Proposal<Sha256Digest>,
+    ) -> Notarization<ed25519::Scheme, Sha256Digest> {
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        Notarization::from_notarizes(verifier, votes.iter(), &Sequential).expect("notarization")
+    }
+
+    fn finalization_from_all(
+        verifier: &ed25519::Scheme,
+        schemes: &[ed25519::Scheme],
+        proposal: &Proposal<Sha256Digest>,
+    ) -> Finalization<ed25519::Scheme, Sha256Digest> {
+        let votes: Vec<_> = schemes
+            .iter()
+            .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+            .collect();
+        Finalization::from_finalizes(verifier, votes.iter(), &Sequential).expect("finalization")
     }
 
     #[test]
@@ -1054,6 +1502,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -1136,6 +1585,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1148,7 +1598,7 @@ mod tests {
             // Timeout-mode nullify: first emission should not be marked as retry.
             let (was_retry, _) = state
                 .construct_nullify(state.current_view())
-                .expect("first timeout nullify should exist");
+                .expect("first nullify should exist");
             assert!(!was_retry, "first timeout is not a retry");
 
             // Set retry deadline
@@ -1179,7 +1629,7 @@ mod tests {
             // Timeout-mode nullify: second emission should be marked as retry.
             let (was_retry, _) = state
                 .construct_nullify(state.current_view())
-                .expect("retry timeout nullify should exist");
+                .expect("retry nullify should exist");
             assert!(was_retry, "subsequent timeout should be treated as retry");
 
             // Confirm retry deadline is set
@@ -1215,6 +1665,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1222,7 +1673,7 @@ mod tests {
             let view = state.current_view();
             let (was_retry, _) = state
                 .construct_nullify(view)
-                .expect("first timeout nullify should exist");
+                .expect("first nullify should exist");
             assert!(!was_retry, "first timeout should not be marked as retry");
 
             let leader = state.leader_index(view).expect("leader must be set");
@@ -1231,7 +1682,7 @@ mod tests {
             assert_eq!(
                 state.timeouts.get_or_create(&label).get(),
                 1,
-                "first timeout nullify should record a leader-timeout metric"
+                "first nullify should record a leader-timeout metric"
             );
 
             context.sleep(Duration::from_secs(2)).await;
@@ -1274,6 +1725,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1282,7 +1734,7 @@ mod tests {
             state.trigger_timeout(view, TimeoutReason::MissingProposal);
             let (was_retry, _) = state
                 .construct_nullify(view)
-                .expect("first timeout nullify should exist");
+                .expect("first nullify should exist");
             assert!(!was_retry);
 
             let leader = state.leader_index(view).expect("leader must be set");
@@ -1294,7 +1746,7 @@ mod tests {
 
             let (was_retry, _) = state
                 .construct_nullify(view)
-                .expect("retry timeout nullify should exist");
+                .expect("retry nullify should exist");
             assert!(was_retry);
             assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
         });
@@ -1319,6 +1771,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1385,6 +1838,7 @@ mod tests {
                 term_length: NZU64!(3),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1462,6 +1916,114 @@ mod tests {
     }
 
     #[test]
+    fn finalization_timeout_respects_retry_backoff() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let timeout_retry = Duration::from_secs(3);
+            let epoch = Epoch::new(35);
+            let elector: crate::simplex::elector::RoundRobinElector<ed25519::Scheme> =
+                <RoundRobin>::default().build(schemes[0].participants(), NZU64!(3));
+            let leader_idx = usize::from(elector.elect(Rnd::new(epoch, View::new(1)), None));
+            let local_idx = (leader_idx + 1) % schemes.len();
+            let cfg = Config {
+                scheme: schemes[local_idx].clone(),
+                elector: <RoundRobin>::default(),
+                epoch,
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry,
+                term_length: NZU64!(3),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
+            };
+            let mut state = State::new(context.child("state"), cfg);
+            state.set_genesis(test_genesis());
+
+            let certify_view = |state: &mut TestState,
+                                schemes: &[ed25519::Scheme],
+                                verifier: &ed25519::Scheme,
+                                view: View,
+                                parent: View,
+                                payload: [u8; 32]| {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(35), view),
+                    parent,
+                    Sha256Digest::from(payload),
+                );
+                assert!(state.set_proposal(view, proposal.clone()));
+                assert!(state.try_verify().is_some());
+                assert!(state.verified(view));
+                let votes: Vec<_> = schemes
+                    .iter()
+                    .map(|scheme| Notarize::sign(scheme, proposal.clone()).expect("notarize"))
+                    .collect();
+                let notarization =
+                    Notarization::from_notarizes(verifier, votes.iter(), &Sequential)
+                        .expect("notarization");
+                assert!(state.add_notarization(notarization).0);
+            };
+
+            certify_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                View::new(1),
+                GENESIS_VIEW,
+                [1u8; 32],
+            );
+            context.sleep(Duration::from_secs(1)).await;
+            assert!(state.certified(View::new(1), true).is_some());
+            assert_eq!(state.current_view(), View::new(2));
+
+            certify_view(
+                &mut state,
+                &schemes,
+                &verifier,
+                View::new(2),
+                View::new(1),
+                [2u8; 32],
+            );
+            context.sleep(Duration::from_millis(1500)).await;
+            assert!(state.certified(View::new(2), true).is_some());
+            assert_eq!(state.current_view(), View::new(3));
+
+            let proposal_v3 = Proposal::new(
+                Rnd::new(epoch, View::new(3)),
+                View::new(2),
+                Sha256Digest::from([3u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(3), proposal_v3));
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(3)));
+
+            context.sleep(Duration::from_secs(2)).await;
+            let (deadline, reason) = state.next_timeout();
+            assert_eq!(reason, TimeoutReason::FinalizationTimeout);
+            assert!(deadline <= context.current());
+
+            let view = state.current_view();
+            state.trigger_timeout(view, reason);
+            let (is_retry, nullify) = state
+                .construct_nullify(view)
+                .expect("same-term timeout should nullify current view");
+            assert!(!is_retry);
+            assert_eq!(nullify.view(), view);
+
+            assert_eq!(
+                state.next_timeout(),
+                (context.current() + timeout_retry, TimeoutReason::Retry),
+                "retry backoff should not be preempted by same-term timeout"
+            );
+        });
+    }
+
+    #[test]
     fn finalization_timeout_ignores_prior_terms() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -1480,6 +2042,7 @@ mod tests {
                 term_length: NZU64!(3),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1532,6 +2095,7 @@ mod tests {
                 term_length: NZU64!(3),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: same_term_timeout,
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1597,6 +2161,7 @@ mod tests {
                 term_length: NZU64!(3),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: same_term_timeout,
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1651,6 +2216,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1687,6 +2253,69 @@ mod tests {
     }
 
     #[test]
+    fn inactivity_timeout_ignores_buffered_current_proposal() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let certification_timeout = Duration::from_secs(10);
+            let mut state = State::new(
+                context.child("state"),
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(15),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout,
+                    timeout_retry: Duration::from_secs(30),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(20),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(15), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([118u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(parent.clone()));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(15), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([119u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child));
+
+            let finalizes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, parent.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&verifier, finalizes.iter(), &Sequential).unwrap();
+            assert!(state.add_finalization(finalization).0);
+            assert_eq!(state.current_view(), View::new(2));
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(2)));
+
+            let now = context.current();
+            state.trigger_timeout(View::new(2), TimeoutReason::Inactivity);
+
+            let (deadline, reason) = state.next_timeout();
+            assert_eq!(reason, TimeoutReason::CertificationTimeout);
+            assert_eq!(deadline, now + certification_timeout);
+        });
+    }
+
+    #[test]
     fn entering_next_view_resets_expired_timeout_state() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -1707,6 +2336,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1783,6 +2413,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1809,7 +2440,7 @@ mod tests {
             // First emitted nullify should record the metric.
             let (was_retry, _) = state
                 .construct_nullify(view)
-                .expect("first timeout nullify should exist");
+                .expect("first nullify should exist");
             assert!(!was_retry);
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
@@ -1817,7 +2448,7 @@ mod tests {
             state.trigger_timeout(view, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
                 .construct_nullify(view)
-                .expect("retry timeout nullify should exist");
+                .expect("retry nullify should exist");
             assert!(was_retry);
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
@@ -1846,13 +2477,15 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
             let current = state.current_view();
             let next = current.next();
 
-            // Non-current views are not eligible.
+            // Without a nullification certificate, non-current views are not eligible.
+            // Timeout mode is reserved for current-view timeout handling.
             assert!(state.construct_nullify(next).is_none());
 
             // Observe a nullification for current view, which advances us to the next view.
@@ -1869,17 +2502,17 @@ mod tests {
             assert!(state.add_nullification(current_nullification));
             assert_eq!(state.current_view(), next);
 
-            // Past views remain ineligible even if they have a nullification certificate.
+            // Nullify remains current-view only.
             assert!(state.construct_nullify(current).is_none());
 
             // Timeout path on current view: first attempt then retry.
             let (was_retry, _) = state
                 .construct_nullify(next)
-                .expect("first timeout nullify for current view should be emitted");
+                .expect("first nullify for current view should be emitted");
             assert!(!was_retry);
             let (was_retry, _) = state
                 .construct_nullify(next)
-                .expect("retry timeout nullify for current view should be emitted");
+                .expect("retry nullify for current view should be emitted");
             assert!(was_retry);
         });
     }
@@ -1903,6 +2536,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -1963,6 +2597,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2000,7 +2635,7 @@ mod tests {
                     .unwrap();
             state.add_notarization(notarization);
 
-            // The parent is still not certified
+            // The parent is still not certified.
             assert_eq!(
                 state.parent_payload(&proposal),
                 Err(ParentPayloadError::ParentNotCertified {
@@ -2038,6 +2673,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2235,6 +2871,1081 @@ mod tests {
                     missing_view: View::new(6),
                 })
             );
+        });
+    }
+
+    #[test]
+    fn same_term_future_verify_uses_local_parent_notarize() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent_payload = Sha256Digest::from([91u8; 32]);
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                parent_payload,
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(parent));
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([92u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child.clone()));
+
+            assert!(
+                state.try_verify().is_none(),
+                "future same-term verification should wait for local parent notarize"
+            );
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let (ctx, proposal) = state
+                .try_verify()
+                .expect("child should verify once local parent notarize exists");
+            assert_eq!(ctx.round.view(), View::new(2));
+            assert_eq!(ctx.parent, (View::new(1), parent_payload));
+            assert_eq!(proposal, child);
+        });
+    }
+
+    #[test]
+    fn term_optimistic_views_zero_disables_intra_term_lookahead() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([93u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(parent.clone()));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let parent_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, parent.clone()).unwrap())
+                .collect();
+            let parent_notarization =
+                Notarization::from_notarizes(&verifier, parent_votes.iter(), &Sequential)
+                    .expect("parent notarization");
+            assert!(state.add_notarization(parent_notarization).0);
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([94u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.try_verify().is_none());
+
+            let child_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, child.clone()).unwrap())
+                .collect();
+            let child_notarization =
+                Notarization::from_notarizes(&verifier, child_votes.iter(), &Sequential)
+                    .expect("child notarization");
+            assert!(state.add_notarization(child_notarization).0);
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.round.view(), View::new(1));
+
+            assert!(state.certified(View::new(1), true).is_some());
+            assert!(state.try_verify().is_some());
+        });
+    }
+
+    #[test]
+    fn optimistic_child_certification_waits_for_parent() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([101u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(parent.clone()));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let parent_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, parent.clone()).unwrap())
+                .collect();
+            let parent_notarization =
+                Notarization::from_notarizes(&verifier, parent_votes.iter(), &Sequential)
+                    .expect("parent notarization");
+            assert!(state.add_notarization(parent_notarization).0);
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([102u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child.clone()));
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(2)));
+
+            let child_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, child.clone()).unwrap())
+                .collect();
+            let child_notarization =
+                Notarization::from_notarizes(&verifier, child_votes.iter(), &Sequential)
+                    .expect("child notarization");
+            assert!(state.add_notarization(child_notarization).0);
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert!(candidates
+                .iter()
+                .any(|(proposal, _)| proposal.round.view() == View::new(1)));
+
+            assert!(state.certified(View::new(1), false).is_some());
+
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(9), View::new(1)))
+                        .unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(nullification));
+
+            assert_eq!(
+                state.find_parent(View::new(6)),
+                Ok((GENESIS_VIEW, test_genesis()))
+            );
+            let next_term_proposal = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(6)),
+                View::new(2),
+                Sha256Digest::from([103u8; 32]),
+            );
+            assert_eq!(
+                state.parent_payload(&next_term_proposal),
+                Err(ParentPayloadError::ParentNotCertified {
+                    proposal_view: View::new(6),
+                    parent_view: View::new(2),
+                })
+            );
+            assert!(state.certify_candidates().is_empty());
+        });
+    }
+
+    #[test]
+    fn term_optimistic_views_bounds_chain_length() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let first = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([95u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(first));
+
+            let second = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([96u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), second));
+            assert!(
+                state.try_verify().is_none(),
+                "future same-term verification should wait for local parent notarize"
+            );
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            assert!(
+                state.try_verify().is_some(),
+                "future view should verify after local parent notarize"
+            );
+            assert!(state.verified(View::new(2)));
+            assert!(state.construct_notarize(View::new(2)).is_some());
+
+            let third = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(3)),
+                View::new(2),
+                Sha256Digest::from([97u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(3), third));
+            assert!(
+                state.try_verify().is_none(),
+                "depth=1 should block a second optimistic hop"
+            );
+        });
+    }
+
+    #[test]
+    fn optimistic_successor_inherits_leader_without_none_election() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { verifier, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier,
+                    elector: RequireCertificate,
+                    epoch: Epoch::new(99),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(99), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([9u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(1), proposal));
+            assert!(state
+                .views
+                .get(&View::new(2))
+                .and_then(|round| round.leader())
+                .is_some());
+        });
+    }
+
+    #[test]
+    fn catch_up_from_parent_finalization_allows_child_notarize() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([111u8; 32]),
+            );
+            let finalization = finalization_from_all(&verifier, &schemes, &parent);
+            assert!(state.add_finalization(finalization).0);
+            assert_eq!(state.current_view(), View::new(2));
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([112u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child.clone()));
+            let (ctx, proposal) = state.try_verify().expect("child should verify");
+            assert_eq!(proposal, child);
+            assert_eq!(ctx.parent, (View::new(1), parent.payload));
+            assert!(state.verified(View::new(2)));
+            assert!(state.construct_notarize(View::new(2)).is_some());
+        });
+    }
+
+    #[test]
+    fn catch_up_from_parent_certification_allows_child_notarize() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([113u8; 32]),
+            );
+            let notarization = notarization_from_all(&verifier, &schemes, &parent);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(1), true).is_some());
+            assert_eq!(state.current_view(), View::new(2));
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([114u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child.clone()));
+            let (ctx, proposal) = state.try_verify().expect("child should verify");
+            assert_eq!(proposal, child);
+            assert_eq!(ctx.parent, (View::new(1), parent.payload));
+            assert!(state.verified(View::new(2)));
+            assert!(state.construct_notarize(View::new(2)).is_some());
+        });
+    }
+
+    #[test]
+    fn failed_certification_round_is_not_forwardable_after_nullification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let (
+                Fixture {
+                    schemes, verifier, ..
+                },
+                mut state,
+            ) = setup_state(&mut context, 4, 13, 10, 1);
+
+            let view = View::new(1);
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(13), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([116u8; 32]),
+            );
+            let notarization = notarization_from_all(&verifier, &schemes, &proposal);
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(view, false).is_some());
+
+            let nullify_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| {
+                    Nullify::sign::<Sha256Digest>(scheme, Rnd::new(Epoch::new(13), view)).unwrap()
+                })
+                .collect();
+            let nullification =
+                Nullification::from_nullifies(&verifier, &nullify_votes, &Sequential)
+                    .expect("nullification");
+            assert!(state.add_nullification(nullification));
+            assert_eq!(state.current_view(), View::new(2));
+            assert!(state.forwardable_proposal(view).is_none());
+        });
+    }
+
+    #[test]
+    fn pending_optimistic_child_verification_rejects_replaced_parent_notarization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent_a = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([117u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(1), parent_a.clone()));
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(1)));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([118u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child.clone()));
+            let (ctx, proposal) = state.try_verify().expect("child should verify");
+            assert_eq!(proposal, child);
+            assert_eq!(ctx.parent, (View::new(1), parent_a.payload));
+
+            let parent_b = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([119u8; 32]),
+            );
+            let notarization = notarization_from_all(&verifier, &schemes, &parent_b);
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_some());
+            assert_eq!(state.parent_payload(&child), Ok(parent_b.payload));
+            assert!(!state.verified(View::new(2)));
+            assert!(state.construct_notarize(View::new(2)).is_none());
+        });
+    }
+
+    #[test]
+    fn verified_optimistic_child_notarize_rejects_replaced_parent_finalization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent_a = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([120u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(1), parent_a.clone()));
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(1)));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([121u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child.clone()));
+            let (ctx, proposal) = state.try_verify().expect("child should verify");
+            assert_eq!(proposal, child);
+            assert_eq!(ctx.parent, (View::new(1), parent_a.payload));
+            assert!(state.verified(View::new(2)));
+
+            let parent_b = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([122u8; 32]),
+            );
+            let finalization = finalization_from_all(&verifier, &schemes, &parent_b);
+            let (added, equivocator) = state.add_finalization(finalization);
+            assert!(added);
+            assert!(equivocator.is_some());
+            assert_eq!(state.parent_payload(&child), Ok(parent_b.payload));
+            assert!(state.construct_notarize(View::new(2)).is_none());
+        });
+    }
+
+    #[test]
+    fn failed_certification_blocks_optimistic_child_notarize() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([116u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(1), parent.clone()));
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(1)));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let notarization = notarization_from_all(&verifier, &schemes, &parent);
+            assert!(state.add_notarization(notarization).0);
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([117u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), child));
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(2)));
+
+            // Local certification rejects the parent and we nullify it. The
+            // optimistic child must no longer be signable.
+            assert!(state.certified(View::new(1), false).is_some());
+            assert!(state.construct_nullify(View::new(1)).is_some());
+            assert!(
+                state.construct_notarize(View::new(2)).is_none(),
+                "failed-certified parent must not unlock optimistic child notarize"
+            );
+
+            // A finalization certificate for the parent overrides the local
+            // rejection and restores it as usable ancestry.
+            let finalization = finalization_from_all(&verifier, &schemes, &parent);
+            assert!(state.add_finalization(finalization).0);
+            assert!(state.construct_notarize(View::new(2)).is_some());
+        });
+    }
+
+    #[test]
+    fn same_term_notarize_respects_peer_admissible_window() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            for view in [View::new(1), View::new(2), View::new(3)] {
+                let proposal = Proposal::new(
+                    Rnd::new(Epoch::new(9), view),
+                    view.previous().unwrap_or(GENESIS_VIEW),
+                    Sha256Digest::from([view.get() as u8; 32]),
+                );
+                assert!(state.set_proposal(view, proposal));
+                assert!(state.verified(view));
+                assert!(
+                    state.construct_notarize(view).is_some(),
+                    "view {view} is peer-admissible from current view 1"
+                );
+            }
+
+            let view = View::new(4);
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(9), view),
+                View::new(3),
+                Sha256Digest::from([4u8; 32]),
+            );
+            assert!(state.set_proposal(view, proposal));
+            assert!(state.verified(view));
+            assert!(
+                state.construct_notarize(view).is_none(),
+                "view 4 is outside the peer-admissible window from current view 1"
+            );
+        });
+    }
+
+    #[test]
+    fn certify_candidates_wait_for_parent_certification() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[1].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(9),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([98u8; 32]),
+            );
+            let parent_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, parent.clone()).unwrap())
+                .collect();
+            let parent_notarization =
+                Notarization::from_notarizes(&verifier, parent_votes.iter(), &Sequential)
+                    .expect("parent notarization");
+            assert!(state.add_notarization(parent_notarization).0);
+
+            let child = Proposal::new(
+                Rnd::new(Epoch::new(9), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([99u8; 32]),
+            );
+            let child_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, child.clone()).unwrap())
+                .collect();
+            let child_notarization =
+                Notarization::from_notarizes(&verifier, child_votes.iter(), &Sequential)
+                    .expect("child notarization");
+            assert!(state.add_notarization(child_notarization).0);
+
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.round.view(), View::new(1));
+
+            assert!(state.certified(View::new(1), true).is_some());
+            let candidates = state.certify_candidates();
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0.round.view(), View::new(2));
+        });
+    }
+
+    #[test]
+    fn optimistic_frontier_slides_with_direct_notarization() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(10),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let proposal_v1 = Proposal::new(
+                Rnd::new(Epoch::new(10), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([98u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(proposal_v1));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let proposal_v2 = Proposal::new(
+                Rnd::new(Epoch::new(10), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([99u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), proposal_v2.clone()));
+            assert!(state.verified(View::new(2)));
+            assert!(state.construct_notarize(View::new(2)).is_some());
+
+            assert!(state.views.contains_key(&View::new(3)));
+            assert!(
+                !state.views.contains_key(&View::new(4)),
+                "depth window should initially stop at view 3"
+            );
+
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal_v2.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
+            assert!(state.add_notarization(notarization).0);
+
+            assert!(
+                state.views.contains_key(&View::new(4)),
+                "direct notarization should slide optimistic frontier"
+            );
+        });
+    }
+
+    #[test]
+    fn indirect_notarization_still_requires_certification_for_finalize() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(10),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let ancestor = Proposal::new(
+                Rnd::new(Epoch::new(10), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([101u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(ancestor));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let descendant = Proposal::new(
+                Rnd::new(Epoch::new(10), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([102u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), descendant.clone()));
+            assert!(state.verified(View::new(2)));
+
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, descendant.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
+            let (added, equivocator) = state.add_notarization(notarization);
+            assert!(added);
+            assert!(equivocator.is_none());
+            assert_eq!(
+                state.notarized_parent_payload(View::new(1)).copied(),
+                Some(Sha256Digest::from([101u8; 32]))
+            );
+            let round = state.views.get(&View::new(1)).expect("ancestor round");
+            assert!(round.proposal().is_some());
+            assert!(round.is_verified());
+
+            assert!(state.construct_finalize(View::new(1)).is_none());
+        });
+    }
+
+    #[test]
+    fn indirect_notarization_requires_verified_unequivocated_ancestors() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(11),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let view1 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([111u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(view1));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let view2 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([112u8; 32]),
+            );
+            state.create_round(View::new(2));
+            assert!(state.proposed(view2));
+            assert!(state.construct_notarize(View::new(2)).is_some());
+            let conflicting_view2 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([113u8; 32]),
+            );
+            assert!(!state.set_proposal(View::new(2), conflicting_view2));
+
+            let view3 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(3)),
+                View::new(2),
+                Sha256Digest::from([114u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(3), view3.clone()));
+            assert!(state.verified(View::new(3)));
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, view3.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
+            assert!(state.add_notarization(notarization).0);
+
+            assert!(state.notarized_parent_payload(View::new(2)).is_none());
+        });
+    }
+
+    #[test]
+    fn optimistic_notarize_requires_parent_participation_within_term() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(11),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+            assert!(state.enter_view(View::new(2)));
+
+            let proposal_v2 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([118u8; 32]),
+            );
+            state.create_round(View::new(2));
+            assert!(state.proposed(proposal_v2));
+            assert!(state.construct_notarize(View::new(2)).is_none());
+
+            let proposal_v1 = Proposal::new(
+                Rnd::new(Epoch::new(11), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([119u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(proposal_v1));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+            assert!(state.construct_notarize(View::new(2)).is_some());
+        });
+    }
+
+    #[test]
+    fn failed_certification_still_nullifies_current_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(13),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(13), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([115u8; 32]),
+            );
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
+
+            assert!(state.add_notarization(notarization).0);
+            assert_eq!(state.current_view(), View::new(1));
+
+            assert!(state.certified(View::new(1), false).is_some());
+
+            let (is_retry, nullify) = state
+                .construct_nullify(View::new(1))
+                .expect("failed certification should still nullify the current view");
+            assert!(!is_retry);
+            assert_eq!(nullify.view(), View::new(1));
+            let (is_retry, nullify) = state
+                .construct_nullify(View::new(1))
+                .expect("failed certification nullify should allow retry");
+            assert!(is_retry);
+            assert_eq!(nullify.view(), View::new(1));
         });
     }
 
@@ -2469,7 +4180,7 @@ mod tests {
             let mut state = State::new(
                 context.child("state"),
                 Config {
-                    scheme: verifier.clone(),
+                    scheme: schemes[1].clone(),
                     elector: <RoundRobin>::default(),
                     epoch,
                     activity_timeout: ViewDelta::new(20),
@@ -2479,6 +4190,7 @@ mod tests {
                     term_length: NZU64!(5),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2497,7 +4209,7 @@ mod tests {
                 Notarization::from_notarizes(&verifier, notarization_votes.iter(), &Sequential)
                     .expect("notarization");
             state.add_notarization(notarization);
-            assert!(state.enter_view(View::new(3)));
+            assert!(state.leader_index(View::new(3)).is_some());
 
             // Inject a proposal at view 3 whose parent is view 1. Both are
             // in the same term (views 1-5), so this is an intra-term skip.
@@ -2511,9 +4223,11 @@ mod tests {
             let initial_deadline = state.next_timeout();
             assert!(initial_deadline.0 > context.current());
 
-            // Permanent ancestry error should immediately expire the timeout.
+            // Permanent ancestry error in a non-current view should not emit
+            // a nullify vote for that non-current view.
             assert!(state.try_verify().is_none());
-            assert!(state.next_timeout().0 <= context.current());
+            assert!(state.construct_nullify(View::new(3)).is_none());
+            assert_eq!(state.next_timeout(), initial_deadline);
         });
     }
 
@@ -2539,6 +4253,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2598,6 +4313,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2655,6 +4371,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2727,6 +4444,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2781,6 +4499,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -2821,6 +4540,7 @@ mod tests {
                     term_length: NZU64!(1),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -2830,6 +4550,141 @@ mod tests {
 
             // Shouldn't finalize the certificate's proposal (proposal_b)
             assert!(restarted.construct_finalize(view).is_none());
+        });
+    }
+
+    #[test]
+    fn replay_restores_indirect_notarization_state() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let local_scheme = schemes[1].clone();
+            let ancestor = Proposal::new(
+                Rnd::new(Epoch::new(12), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([121u8; 32]),
+            );
+            let descendant = Proposal::new(
+                Rnd::new(Epoch::new(12), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([122u8; 32]),
+            );
+
+            let mut state = State::new(
+                context.child("initial"),
+                Config {
+                    scheme: local_scheme.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(12),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            state.set_genesis(test_genesis());
+            state.create_round(View::new(1));
+            assert!(state.proposed(ancestor));
+            let local_vote = state
+                .construct_notarize(View::new(1))
+                .expect("local notarize vote");
+            assert!(state.set_proposal(View::new(2), descendant.clone()));
+            assert!(state.verified(View::new(2)));
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, descendant.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, votes.iter(), &Sequential).unwrap();
+            assert!(state.add_notarization(notarization.clone()).0);
+            assert_eq!(
+                state.notarized_parent_payload(View::new(1)).copied(),
+                Some(Sha256Digest::from([121u8; 32]))
+            );
+
+            let mut restarted = State::new(
+                context.child("restarted"),
+                Config {
+                    scheme: local_scheme,
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(12),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 2,
+                },
+            );
+            restarted.set_genesis(test_genesis());
+            restarted.replay(&Artifact::Notarize(local_vote));
+            assert!(restarted.set_proposal(View::new(2), descendant));
+            assert!(restarted.verified(View::new(2)));
+            restarted.add_notarization(notarization.clone());
+            restarted.replay(&Artifact::Notarization(notarization));
+
+            assert_eq!(
+                restarted.notarized_parent_payload(View::new(1)).copied(),
+                Some(Sha256Digest::from([121u8; 32]))
+            );
+        });
+    }
+
+    #[test]
+    fn trigger_timeout_ignores_optimistic_future_view() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: schemes[0].clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch: Epoch::new(14),
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(10),
+                    certification_timeout: Duration::from_secs(10),
+                    timeout_retry: Duration::from_secs(30),
+                    term_length: NZU64!(5),
+                    term_stop_notarize_on_nullify: false,
+                    finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 1,
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            let parent = Proposal::new(
+                Rnd::new(Epoch::new(14), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([116u8; 32]),
+            );
+            state.create_round(View::new(1));
+            assert!(state.proposed(parent));
+            assert!(state.construct_notarize(View::new(1)).is_some());
+
+            let future = Proposal::new(
+                Rnd::new(Epoch::new(14), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([117u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), future));
+            assert_eq!(state.current_view(), View::new(1));
+
+            let initial_deadline = state.next_timeout();
+            state.trigger_timeout(View::new(2), TimeoutReason::InvalidProposal);
+
+            assert!(state.construct_nullify(View::new(2)).is_none());
+            assert_eq!(state.next_timeout(), initial_deadline);
         });
     }
 
@@ -2852,6 +4707,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -2981,6 +4837,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3134,7 +4991,7 @@ mod tests {
 
             // Late certification completion is still accepted until the view is finalized.
             assert!(state.certified(view, true).is_some());
-            assert!(state.is_certified(view).is_some());
+            assert!(state.explicit_parent_payload(view).is_some());
         });
     }
 
@@ -3159,6 +5016,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3232,6 +5090,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3313,6 +5172,7 @@ mod tests {
                     term_length: NZU64!(5),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -3375,6 +5235,7 @@ mod tests {
                     term_length: NZU64!(5),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             state.set_genesis(test_genesis());
@@ -3443,6 +5304,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -3526,6 +5388,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3544,9 +5407,7 @@ mod tests {
             assert!(state.verified(view));
 
             // Timeout path emits a first-attempt nullify.
-            let (retry, _) = state
-                .construct_nullify(view)
-                .expect("timeout nullify should exist");
+            let (retry, _) = state.construct_nullify(view).expect("nullify should exist");
             assert!(!retry);
 
             // Attempt to notarize after timeout
@@ -3573,6 +5434,7 @@ mod tests {
                 term_length: NZU64!(5),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3619,6 +5481,7 @@ mod tests {
                 term_length: NZU64!(3),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3693,6 +5556,7 @@ mod tests {
                 term_length: NZU64!(1),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3738,6 +5602,7 @@ mod tests {
                 term_length: NZU64!(5),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3746,10 +5611,8 @@ mod tests {
             let view = state.current_view();
             assert_eq!(view, View::new(1));
 
-            // Emit a timeout nullify vote for view 1.
-            let (was_retry, _) = state
-                .construct_nullify(view)
-                .expect("timeout nullify should exist");
+            // Emit a nullify vote for view 1.
+            let (was_retry, _) = state.construct_nullify(view).expect("nullify should exist");
             assert!(!was_retry);
 
             // Now suppose view 1 finalizes and view 2 is certified in the same
@@ -3815,6 +5678,7 @@ mod tests {
                 term_length: NZU64!(5),
                 term_stop_notarize_on_nullify: true,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3874,6 +5738,7 @@ mod tests {
                 term_length: NZU64!(5),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -3916,7 +5781,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_restores_nullify_views_for_term_safety() {
+    fn term_safety_blocks_finalize_after_same_term_finalization_cert() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -3934,10 +5799,166 @@ mod tests {
                 term_length: NZU64!(5),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+
+            let view = state.current_view();
+            let (was_retry, _) = state
+                .construct_nullify(view)
+                .expect("timeout nullify should exist");
+            assert!(!was_retry);
+
+            let proposal = Proposal::new(
+                Rnd::new(Epoch::new(1), view),
+                GENESIS_VIEW,
+                Sha256Digest::from([42u8; 32]),
+            );
+            let fin_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let finalization =
+                Finalization::from_finalizes(&verifier, fin_votes.iter(), &Sequential)
+                    .expect("finalization");
+            state.add_finalization(finalization);
+            assert_eq!(state.current_view(), View::new(2));
+
+            let proposal_v2 = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([43u8; 32]),
+            );
+            state.set_proposal(View::new(2), proposal_v2.clone());
+            assert!(state.try_verify().is_some());
+            assert!(state.verified(View::new(2)));
+
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal_v2.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            state.add_notarization(notarization);
+
+            // Certify view 2.
+            assert!(state.certified(View::new(2), true).is_some());
+
+            assert!(
+                state.construct_finalize(View::new(2)).is_none(),
+                "same-term nullify should continue blocking later finalize votes"
+            );
+        });
+    }
+
+    #[test]
+    fn recovered_parent_finalization_allows_same_term_child_finalize() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(20),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+                term_length: NZU64!(5),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
+            };
+            let mut state = State::new(context, cfg);
+            state.set_genesis(test_genesis());
+            assert!(state.enter_view(View::new(2)));
+
+            let proposal_v2 = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([44u8; 32]),
+            );
+            assert!(state.set_proposal(View::new(2), proposal_v2.clone()));
+
+            let notarize_votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal_v2.clone()).unwrap())
+                .collect();
+            let notarization =
+                Notarization::from_notarizes(&verifier, notarize_votes.iter(), &Sequential)
+                    .expect("notarization");
+            assert!(state.add_notarization(notarization).0);
+            assert!(state.certified(View::new(2), true).is_some());
+
+            assert!(state.construct_finalize(View::new(2)).is_none());
+
+            let proposal_v1 = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([45u8; 32]),
+            );
+            let finalize_votes_v1: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal_v1.clone()).unwrap())
+                .collect();
+            let finalization_v1 =
+                Finalization::from_finalizes(&verifier, finalize_votes_v1.iter(), &Sequential)
+                    .expect("finalization");
+            state.add_finalization(finalization_v1);
+
+            assert!(state.construct_finalize(View::new(2)).is_some());
+        });
+    }
+
+    #[test]
+    fn replay_restores_term_nullify_tracking_for_term_safety() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(1),
+                activity_timeout: ViewDelta::new(20),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(3),
+                term_length: NZU64!(5),
+                term_stop_notarize_on_nullify: false,
+                finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
 
-            // Helper that prepares a certified notarization at view 2.
-            let build_certified_view_2 = |state: &mut State<_, _, _, _>| {
+            // Helper that prepares a locally finalized parent at view 1 and a
+            // certified child at view 2 within the same term.
+            let build_finalizable_view_2 = |state: &mut State<_, _, _, _>| {
+                let proposal_v1 = Proposal::new(
+                    Rnd::new(Epoch::new(1), View::new(1)),
+                    GENESIS_VIEW,
+                    Sha256Digest::from([98u8; 32]),
+                );
+                assert!(state.set_proposal(View::new(1), proposal_v1.clone()));
+                assert!(state.try_verify().is_some());
+                assert!(state.verified(View::new(1)));
+                let notarizes_v1: Vec<_> = schemes
+                    .iter()
+                    .map(|scheme| Notarize::sign(scheme, proposal_v1.clone()).unwrap())
+                    .collect();
+                let notarization_v1 =
+                    Notarization::from_notarizes(&verifier, notarizes_v1.iter(), &Sequential)
+                        .expect("notarization");
+                assert!(state.add_notarization(notarization_v1).0);
+                assert!(state.certified(View::new(1), true).is_some());
+                assert!(state.construct_finalize(View::new(1)).is_some());
+
                 let proposal = Proposal::new(
                     Rnd::new(Epoch::new(1), View::new(2)),
                     View::new(1),
@@ -3959,13 +5980,14 @@ mod tests {
             // Baseline: without replayed nullify, finalization is allowed at view 2.
             let mut baseline = State::new(context.child("baseline"), cfg);
             baseline.set_genesis(test_genesis());
-            build_certified_view_2(&mut baseline);
+            build_finalizable_view_2(&mut baseline);
             assert!(
                 baseline.construct_finalize(View::new(2)).is_some(),
                 "finalize should be allowed without prior nullify"
             );
 
-            // Restarted state: replay local nullify at view 1, then same certified view 2.
+            // Restarted state: replay local nullify at view 1, then restore the
+            // same certified suffix via replay/local certification artifacts.
             let mut restarted = State::new(
                 context.child("restarted"),
                 Config {
@@ -3979,6 +6001,7 @@ mod tests {
                     term_length: NZU64!(5),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -3986,7 +6009,40 @@ mod tests {
                 Nullify::sign::<Sha256Digest>(&schemes[0], Rnd::new(Epoch::new(1), View::new(1)))
                     .expect("nullify");
             restarted.replay(&Artifact::Nullify(nullify));
-            build_certified_view_2(&mut restarted);
+
+            let proposal_v1 = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(1)),
+                GENESIS_VIEW,
+                Sha256Digest::from([98u8; 32]),
+            );
+            let local_notarize_v1 =
+                Notarize::sign(&schemes[0], proposal_v1.clone()).expect("local notarize");
+            restarted.replay(&Artifact::Notarize(local_notarize_v1));
+            let notarizes_v1: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal_v1.clone()).unwrap())
+                .collect();
+            let notarization_v1 =
+                Notarization::from_notarizes(&verifier, notarizes_v1.iter(), &Sequential)
+                    .expect("notarization");
+            assert!(restarted.add_notarization(notarization_v1).0);
+            assert!(restarted.certified(View::new(1), true).is_some());
+
+            let proposal_v2 = Proposal::new(
+                Rnd::new(Epoch::new(1), View::new(2)),
+                View::new(1),
+                Sha256Digest::from([99u8; 32]),
+            );
+            assert!(restarted.set_proposal(View::new(2), proposal_v2.clone()));
+            let notarize_votes_v2: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Notarize::sign(scheme, proposal_v2.clone()).unwrap())
+                .collect();
+            let notarization_v2 =
+                Notarization::from_notarizes(&verifier, notarize_votes_v2.iter(), &Sequential)
+                    .expect("notarization");
+            assert!(restarted.add_notarization(notarization_v2).0);
+            assert!(restarted.certified(View::new(2), true).is_some());
 
             assert!(
                 restarted.construct_finalize(View::new(2)).is_none(),
@@ -4014,6 +6070,7 @@ mod tests {
                 term_length: NZU64!(20),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
@@ -4089,6 +6146,7 @@ mod tests {
                     term_length: NZU64!(20),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
+                    term_optimistic_views: 0,
                 },
             );
             restarted.set_genesis(test_genesis());
@@ -4147,6 +6205,7 @@ mod tests {
                 term_length: NZU64!(3),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());
@@ -4155,7 +6214,7 @@ mod tests {
             let view1 = View::new(1);
             let (was_retry, _) = state
                 .construct_nullify(view1)
-                .expect("timeout nullify should exist");
+                .expect("nullify should exist");
             assert!(!was_retry);
 
             // Receive nullification certificate for view 1 and skip to next term start (view 4).
@@ -4219,6 +6278,7 @@ mod tests {
                 term_length: NZU64!(3),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
+                term_optimistic_views: 0,
             };
             let mut state = State::new(context, cfg);
             state.set_genesis(test_genesis());

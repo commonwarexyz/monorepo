@@ -125,6 +125,7 @@ pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
     pub term_length: NonZeroU64,
+    pub term_optimistic_views: u64,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -155,6 +156,7 @@ impl Arbitrary<'_> for FuzzInput {
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
         let term_length = NZU64!(u.int_in_range(1..=5)?);
+        let term_optimistic_views = u.int_in_range(1..=term_length.get())?;
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -186,6 +188,7 @@ impl Arbitrary<'_> for FuzzInput {
             degraded_network,
             required_containers,
             term_length,
+            term_optimistic_views,
             strategy,
         })
     }
@@ -348,6 +351,7 @@ fn spawn_honest_validator<
         &[Ed25519PublicKey],
     ),
     term_length: NonZeroU64,
+    term_optimistic_views: u64,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,
@@ -412,6 +416,7 @@ where
         term_length,
         term_stop_notarize_on_nullify: false,
         finalization_timeout: Duration::from_secs(12),
+        term_optimistic_views,
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -458,6 +463,7 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 ctx,
                 (&oracle, &participants),
                 input.term_length,
+                input.term_optimistic_views,
                 schemes[i].clone(),
                 validator.clone(),
                 relay.clone(),
@@ -680,6 +686,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 term_length: input.term_length,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
+                term_optimistic_views: input.term_optimistic_views,
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
                 page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -716,6 +723,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 ctx,
                 (&oracle, participants.as_ref()),
                 input.term_length,
+                input.term_optimistic_views,
                 schemes[idx].clone(),
                 validator.clone(),
                 relay.clone(),
