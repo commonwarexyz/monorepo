@@ -736,6 +736,17 @@ impl SizeClassLease {
         // SAFETY: this lease owns one strong reference.
         unsafe { self.token.release() };
     }
+
+    /// Consumes the lease without releasing its strong reference.
+    ///
+    /// The returned token still represents one owned strong reference; the
+    /// caller takes over responsibility for releasing it. Batch returns use
+    /// this to park many buffers first and release their references together
+    /// afterwards.
+    #[inline(always)]
+    const fn into_token(self) -> SizeClassToken {
+        self.token
+    }
 }
 
 /// Free tracked buffer owned by a thread-local size-class cache.
@@ -947,17 +958,65 @@ impl TlsSizeClassCache {
         let start = end - spill;
         // Stop tracking slots before moving them out.
         self.len = start;
-
-        for index in (start..end).rev() {
-            // SAFETY: `start..end` was initialized before `len` was lowered
-            // to `start`. Reading each slot moves it out and leaves the slot
-            // uninitialized.
-            let entry = unsafe { self.entries.as_mut_ptr().add(index).read().assume_init() };
-            entry.return_global();
-        }
+        self.return_global_batch(start, end);
 
         // Keep the incoming entry local after making room.
         self.push_local(entry);
+    }
+
+    /// Returns the initialized entries in `start..end` to their class-global
+    /// freelist as one batch.
+    ///
+    /// All entries in one cache belong to the same size class, so their header
+    /// leases own strong references represented by one shared token. Each
+    /// lease is consumed without being released, the whole batch parks with
+    /// one coalesced [`Freelist::put_batch`] (one atomic `fetch_or` per
+    /// touched bitmap word instead of one per entry), and the strong
+    /// references are released only after every buffer is parked. Parking
+    /// before releasing matters: if the public pool is already gone and these
+    /// leases are the last references, releasing first would drop the
+    /// freelist before the buffers returned to it.
+    ///
+    /// The caller must have already lowered `len` below `start`, transferring
+    /// ownership of the entries in `start..end` to this function.
+    #[inline(never)]
+    fn return_global_batch(&mut self, start: usize, end: usize) {
+        debug_assert!(start < end && end <= self.capacity);
+        debug_assert!(self.len <= start);
+        let count = end - start;
+        let entries = self.entries.as_mut_ptr();
+
+        // Read the shared token from the first entry's live lease. The
+        // not-yet-released lease references keep the class (and its freelist)
+        // alive until the releases below.
+        // SAFETY: `start..end` was initialized and ownership transferred to
+        // this function; the entry is only borrowed here.
+        let token = unsafe { (*entries.add(start)).assume_init_ref().buffer.lease() }.token;
+
+        // SAFETY: the lease strong references consumed below are not released
+        // until after the batch insert completes.
+        let class = unsafe { token.as_ref() };
+        class.global.put_batch((start..end).map(|index| {
+            // SAFETY: `start..end` was initialized before `len` was lowered.
+            // Reading moves each entry out and leaves the slot uninitialized.
+            let mut entry = unsafe { entries.add(index).read().assume_init() };
+            // SAFETY: local cache entries keep a live lease in the pooled
+            // header. The strong reference it owns is intentionally not
+            // released here; the token releases below settle it.
+            let _token = unsafe { entry.buffer.take_lease() }.into_token();
+            debug_assert_eq!(_token, token, "cache entries must share one size class");
+            // SAFETY: pooled buffers in this cache came from this class, so
+            // their stable header fields are initialized.
+            let slot = unsafe { entry.buffer.slot() };
+            (slot, entry.buffer)
+        }));
+
+        // Release the strong references only now that every buffer is parked.
+        for _ in 0..count {
+            // SAFETY: each lease consumed above owned one strong reference
+            // that has not been released yet.
+            unsafe { token.release() };
+        }
     }
 }
 
@@ -967,13 +1026,12 @@ impl Drop for TlsSizeClassCache {
             return;
         }
 
-        let entries = self.entries.as_mut_ptr();
-        for index in (0..self.len).rev() {
-            // SAFETY: `0..self.len` is initialized. Reading each slot moves it
-            // out and leaves the slot uninitialized.
-            let entry = unsafe { entries.add(index).read().assume_init() };
-            entry.return_global();
-        }
+        // Flush remaining entries (thread exit or explicit flush) with one
+        // coalesced batch insert.
+        let end = self.len;
+        // Stop tracking slots before moving them out.
+        self.len = 0;
+        self.return_global_batch(0, end);
     }
 }
 
@@ -1353,10 +1411,11 @@ impl BufferPoolInner {
 ///
 /// # Alignment
 ///
-/// Buffer alignment is guaranteed only at the base pointer (when `cursor == 0`).
-/// After calling [`bytes::Buf::advance`], the pointer returned by `as_mut_ptr()` may
-/// no longer be aligned. For direct I/O operations that require alignment,
-/// do not advance the buffer before use.
+/// Buffer alignment is guaranteed only at the allocation base, where a
+/// freshly allocated buffer's pointer starts. After [`bytes::Buf::advance`],
+/// the pointer returned by `as_mut_ptr()` may no longer be aligned. For
+/// direct I/O operations that require alignment, do not advance the buffer
+/// before use.
 #[derive(Clone)]
 pub struct BufferPool {
     inner: Arc<BufferPoolInner>,
