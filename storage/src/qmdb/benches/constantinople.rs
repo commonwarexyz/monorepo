@@ -1,16 +1,16 @@
 //! Constantinople-shape harness: load+write+merkleize at 32k updates / 1M keys.
 //!
 //! Times the full per-block state pipeline (get_many load, batch writes, merkleize, root) on the
-//! tokio runtime with EightCap, matching the production validator shape. Runs against either
-//! `any::unordered::fixed::Db<mmr>` or `current::unordered::fixed::Db<mmr>`. Prints per-iteration
-//! latency with a load/write/merkleize phase split and the speculative root (a cross-binary
-//! parity check: any optimization must reproduce identical roots).
+//! tokio runtime with EightCap, matching the production validator shape. Runs against the
+//! unordered or ordered fixed `any`/`current` DBs over `mmr`. Prints per-iteration latency with
+//! a load/write/merkleize phase split and the speculative root (a cross-binary parity check:
+//! any optimization must reproduce identical roots).
 //!
 //! Usage:
 //!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates]
 //!
-//! - db: "any" or "current" (required; without it the harness no-ops so blanket
-//!   `cargo bench --benches` invocations skip it)
+//! - db: "any", "current", "any-ordered", or "current-ordered" (required; without it the
+//!   harness no-ops so blanket `cargo bench --benches` invocations skip it)
 //! - depth: number of pending ancestor batches under the timed batch
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
@@ -71,6 +71,42 @@ type CurrentMerkleized = std::sync::Arc<
         mmr::Family,
         Digest,
         commonware_storage::qmdb::any::unordered::fixed::Update<Digest, Digest>,
+        CHUNK_SIZE,
+        Rayon,
+    >,
+>;
+type AnyOrderedDb = commonware_storage::qmdb::any::ordered::fixed::Db<
+    mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    Rayon,
+>;
+type AnyOrderedMerkleized = std::sync::Arc<
+    commonware_storage::qmdb::any::batch::MerkleizedBatch<
+        mmr::Family,
+        Digest,
+        commonware_storage::qmdb::any::ordered::fixed::Update<Digest, Digest>,
+        Rayon,
+    >,
+>;
+type CurrentOrderedDb = commonware_storage::qmdb::current::ordered::fixed::Db<
+    mmr::Family,
+    Context,
+    Digest,
+    Digest,
+    Sha256,
+    EightCap,
+    CHUNK_SIZE,
+    Rayon,
+>;
+type CurrentOrderedMerkleized = std::sync::Arc<
+    commonware_storage::qmdb::current::batch::MerkleizedBatch<
+        mmr::Family,
+        Digest,
+        commonware_storage::qmdb::any::ordered::fixed::Update<Digest, Digest>,
         CHUNK_SIZE,
         Rayon,
     >,
@@ -219,7 +255,13 @@ fn main() {
         num_keys: raw.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
         num_updates: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
     };
-    assert!(db_kind == "any" || db_kind == "current", "db: any|current");
+    assert!(
+        matches!(
+            db_kind.as_str(),
+            "any" | "current" | "any-ordered" | "current-ordered"
+        ),
+        "db: any|current|any-ordered|current-ordered"
+    );
 
     eprintln!(
         "constantinople db={db_kind} depth={} iters={} keys={} updates={}",
@@ -242,23 +284,45 @@ fn main() {
             page_cache: pc,
             write_buffer: WRITE_BUFFER,
         };
-        if db_kind == "current" {
-            let cfg = CurrentFixedConfig {
-                merkle_config,
-                journal_config,
-                grafted_metadata_partition: "constantinople-grafted-metadata".into(),
-                translator: EightCap,
-            };
-            let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
-            run_pipeline!(db, args, "current", CurrentMerkleized)
-        } else {
-            let cfg = FixedConfig {
-                merkle_config,
-                journal_config,
-                translator: EightCap,
-            };
-            let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
-            run_pipeline!(db, args, "any", AnyMerkleized)
+        match db_kind.as_str() {
+            "current" => {
+                let cfg = CurrentFixedConfig {
+                    merkle_config,
+                    journal_config,
+                    grafted_metadata_partition: "constantinople-grafted-metadata".into(),
+                    translator: EightCap,
+                };
+                let db = CurrentDb::init(ctx.child("db"), cfg).await.unwrap();
+                run_pipeline!(db, args, "current", CurrentMerkleized)
+            }
+            "current-ordered" => {
+                let cfg = CurrentFixedConfig {
+                    merkle_config,
+                    journal_config,
+                    grafted_metadata_partition: "constantinople-grafted-metadata".into(),
+                    translator: EightCap,
+                };
+                let db = CurrentOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                run_pipeline!(db, args, "current-ordered", CurrentOrderedMerkleized)
+            }
+            "any-ordered" => {
+                let cfg = FixedConfig {
+                    merkle_config,
+                    journal_config,
+                    translator: EightCap,
+                };
+                let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
+                run_pipeline!(db, args, "any-ordered", AnyOrderedMerkleized)
+            }
+            _ => {
+                let cfg = FixedConfig {
+                    merkle_config,
+                    journal_config,
+                    translator: EightCap,
+                };
+                let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
+                run_pipeline!(db, args, "any", AnyMerkleized)
+            }
         }
     });
 }
