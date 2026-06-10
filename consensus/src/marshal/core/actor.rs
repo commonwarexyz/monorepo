@@ -1056,10 +1056,6 @@ where
     }
 
     /// Applies a block if it satisfies the current floor transition.
-    ///
-    /// Whenever the block matches the pending anchor, subscribers waiting on it
-    /// are notified here. Callers that consume a `true` return must not assume
-    /// any other delivery path will wake those subscribers.
     async fn apply_floor_anchor<Buf: Buffer<V>>(
         &mut self,
         block: &V::Block,
