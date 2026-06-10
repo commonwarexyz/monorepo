@@ -310,8 +310,8 @@ impl OwnerRef {
     /// The refcount uses `1` as the reusable sentinel (see the module docs),
     /// so the unshared fast path is a single Acquire load followed by release:
     /// no read-modify-write. The decrement path for shared owners is outlined
-    /// in [`Self::drop_shared_slow`]; it is definitionally cold because it
-    /// runs at most once per clone.
+    /// in [`Self::drop_shared_slow`]: the lifecycle hot loop drops unshared
+    /// handles, and a shared decrement happens at most once per clone.
     ///
     /// # Safety
     ///
@@ -339,11 +339,11 @@ impl OwnerRef {
 
     /// Decrements a shared refcount and releases on the final drop.
     ///
-    /// Two shared owners dropping concurrently can both miss the fast path:
-    /// one observes `> 1`, the other decrements to `1` in between. The
-    /// `old == 1` branch below is that race's loser-turned-winner: its
-    /// decrement hit zero, so it restores the sentinel and releases. The
-    /// branch is reachable only under true concurrency (covered by loom).
+    /// Reached when the fast-path load observed a shared count. If every
+    /// other handle drops between that load and this decrement, the decrement
+    /// itself hits zero (`old == 1`): this drop is then the final owner, so
+    /// it restores the sentinel and releases. That branch is reachable only
+    /// under true concurrency (covered by loom).
     ///
     /// # Safety
     ///
