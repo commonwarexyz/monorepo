@@ -72,8 +72,7 @@
 //! # Consistency
 //!
 //! Data written to `Journal` may not be immediately persisted to `Storage`. It is up to the caller
-//! to determine when to force pending data to be durably written using `commit` or `sync`. When
-//! calling `close`, all pending data is automatically synced and any open blobs are closed.
+//! to determine when to force pending data to be durably written using `commit` or `sync`.
 //!
 //! # Pruning
 //!
@@ -111,7 +110,6 @@ use commonware_runtime::{
     buffer::paged::{self, CacheRef, Replay, Writer},
     Blob, Buf,
 };
-use commonware_utils::NZUsize;
 use futures::{
     stream::{self, Stream},
     StreamExt,
@@ -128,11 +126,7 @@ use tracing::warn;
 
 /// Return the first retained logical position in `blob`.
 #[inline]
-pub(super) fn first_in_blob(
-    pruning_boundary: u64,
-    blob: u64,
-    items_per_blob: u64,
-) -> Result<u64, Error> {
+fn first_in_blob(pruning_boundary: u64, blob: u64, items_per_blob: u64) -> Result<u64, Error> {
     let start = blob
         .checked_mul(items_per_blob)
         .ok_or(Error::OffsetOverflow)?;
@@ -216,14 +210,18 @@ pub struct Journal<E: Context, A> {
 }
 
 impl<E: Context, A: CodecFixedShared> Journal<E, A> {
-    /// Size of each entry in bytes.
-    pub const CHUNK_SIZE: usize = A::SIZE;
+    /// Size of each entry in bytes. Evaluating this rejects zero-size item types at compile
+    /// time, which would otherwise divide by zero in the chunk math.
+    pub const CHUNK_SIZE: NonZeroUsize = match NonZeroUsize::new(A::SIZE) {
+        Some(size) => size,
+        None => panic!("journal item size must be nonzero"),
+    };
 
     /// Size of each entry in bytes (as u64).
-    pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
+    pub const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE.get() as u64;
 
     /// Convert an item count to a byte length, failing on overflow.
-    pub(super) fn items_to_bytes(items: u64) -> Result<u64, Error> {
+    fn items_to_bytes(items: u64) -> Result<u64, Error> {
         items
             .checked_mul(Self::CHUNK_SIZE_U64)
             .ok_or(Error::OffsetOverflow)
@@ -699,6 +697,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Return an owned snapshot of the journal. Bounds are frozen at creation; take a new
     /// reader to observe later appends.
+    ///
+    /// Readers must be dropped before re-initializing the journal's partition: a freshly
+    /// initialized journal's reader gate cannot see readers taken from this one, so its
+    /// init-time repairs and rewinds may truncate blobs in place under them.
     pub fn reader(&self) -> Reader<E, A> {
         Reader {
             snapshot: self.blobs.to_snapshot(self.bounds.clone()),
@@ -709,7 +711,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 
     /// Return the recovery watermark.
-    pub(crate) fn recovery_watermark(&self) -> u64 {
+    pub(super) fn recovery_watermark(&self) -> u64 {
         self.checkpoint
             .watermark()
             .expect("recovery watermark must exist after init")
@@ -747,10 +749,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         // Encode all items into a single contiguous buffer up front.
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let items_count = match &items {
-            Many::Flat(items) => items.len(),
-            Many::Nested(nested_items) => nested_items.iter().map(|s| s.len()).sum(),
-        };
+        let items_count = items.len();
         let mut items_buf = Vec::with_capacity(items_count * A::SIZE);
         match &items {
             Many::Flat(items) => {
@@ -779,8 +778,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let mut written = 0;
         while written < items_count {
             let (_, pos_in_blob) = self.position_to_blob(self.bounds.end);
-            let remaining_space = (self.items_per_blob.get() - pos_in_blob) as usize;
-            let batch_count = remaining_space.min(items_count - written);
+            // Take the min in u64: casting `remaining_space` first would truncate on 32-bit
+            // targets, where an exact multiple of 2^32 yields a zero batch that never advances.
+            let remaining_space = self.items_per_blob.get() - pos_in_blob;
+            let batch_count = remaining_space.min((items_count - written) as u64) as usize;
             let start = written * A::SIZE;
             let end = start + batch_count * A::SIZE;
             // Overflow checked above.
@@ -837,6 +838,13 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let pos_in_blob = size - first_in_blob(self.bounds.start, blob, self.items_per_blob.get())?;
         let byte_offset = Self::items_to_bytes(pos_in_blob)?;
 
+        // Refuse before persisting a lowered watermark: a refused rewind is retryable and
+        // should leave no side effects (a lowered watermark is safe but forces consumers to
+        // re-replay synced items after a crash). The truncation paths below re-check the gate.
+        if self.blobs.readers_outstanding() {
+            return Err(Error::BlobInUse(blob));
+        }
+
         // Persist a lowered recovery watermark before blob state moves backward.
         if self.checkpoint.lower_watermark(size) {
             self.checkpoint.sync().await?;
@@ -887,14 +895,6 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         let new_boundary = min_blob
             .checked_mul(self.items_per_blob.get())
             .ok_or(Error::OffsetOverflow)?;
-        // Pruning boundary only moves forward.
-        if self.bounds.start >= new_boundary {
-            return Err(Error::Corruption(format!(
-                "pruning boundary {} not before new oldest blob boundary {new_boundary}",
-                self.bounds.start
-            )));
-        }
-
         self.blobs.prune(min_blob).await?;
         self.bounds.start = new_boundary;
 
@@ -981,10 +981,10 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 /// `bounds()` remains readable, including across a concurrent prune. A rewind into the snapshot's
 /// range is refused ([Error::BlobInUse]) while it is alive, so its bytes never change underneath it.
 pub struct Reader<E: Context, A> {
-    pub(super) snapshot: Snapshot<E::Blob>,
-    pub(super) items_per_blob: NonZeroU64,
-    pub(super) metrics: Arc<Metrics<E>>,
-    pub(super) _phantom: PhantomData<A>,
+    snapshot: Snapshot<E::Blob>,
+    items_per_blob: NonZeroU64,
+    metrics: Arc<Metrics<E>>,
+    _phantom: PhantomData<A>,
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<E, A> {
@@ -995,10 +995,7 @@ impl<E: Context, A: CodecFixedShared> Reader<E, A> {
         let blob = pos / items_per_blob;
         let pos_in_blob = pos - first_in_blob(self.snapshot.bounds.start, blob, items_per_blob)?;
         let offset = Journal::<E, A>::items_to_bytes(pos_in_blob)?;
-        let handle = self
-            .snapshot
-            .handle(blob)
-            .ok_or_else(|| Error::Corruption(format!("blob {blob} missing from snapshot")))?;
+        let handle = self.snapshot.require_handle(blob)?;
         Ok((handle, offset))
     }
 
@@ -1118,13 +1115,10 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
                 .map(|miss| Journal::<E, A>::items_to_bytes(miss.position - first_position))
                 .collect::<Result<_, _>>()?;
 
-            let handle = self
-                .snapshot
-                .handle(blob)
-                .ok_or_else(|| Error::Corruption(format!("blob {blob} missing from snapshot")))?;
+            let handle = self.snapshot.require_handle(blob)?;
             let buf = &mut reusable_buf[..group.len() * chunk_size];
             handle
-                .read_many_into(buf, &blob_offsets, NZUsize!(chunk_size))
+                .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                 .await?;
 
             for (miss, slice) in group.iter().zip(buf.chunks_exact(chunk_size)) {
@@ -1313,7 +1307,9 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
             if state.next_pos >= state.end_pos {
                 return None;
             }
-            let count = ((state.end_pos - state.next_pos) as usize).min(batch_items);
+            // Take the min in u64: casting the item count first would truncate on 32-bit
+            // targets, where an exact multiple of 2^32 yields a zero batch that never advances.
+            let count = (state.end_pos - state.next_pos).min(batch_items as u64) as usize;
             let mut buf = vec![0u8; count * chunk_size];
             let byte_offset =
                 match Journal::<E, A>::items_to_bytes(state.next_pos - state.tail_first) {
@@ -2071,7 +2067,7 @@ mod tests {
             journal.sync().await.unwrap();
             assert_eq!(journal.recovery_watermark(), 15);
 
-            // Persist the recovered metadata (watermark=9) as init_with_metadata does before
+            // Persist the recovered metadata (watermark=9) as init_with_checkpoint does before
             // applying the rewind repair. This simulates a crash after metadata sync but before
             // the repair removes stale blobs.
             journal
@@ -4270,7 +4266,7 @@ mod tests {
             checkpoint.sync().await.unwrap();
             drop(checkpoint);
 
-            // This name would fail `RecoveryBlobs::open` if init tried to parse stale blobs before
+            // This name would fail `Partition::open_all` if init tried to parse stale blobs before
             // honoring the clear intent.
             let (blob, _) = context.open(&blob_part, b"not-u64").await.unwrap();
             blob.write_at_sync(0, vec![1, 2, 3]).await.unwrap();
@@ -4684,7 +4680,9 @@ mod tests {
             let snapshot = journal.reader();
             assert!(matches!(journal.rewind(3).await, Err(Error::BlobInUse(0))));
 
-            // The refused rewind left the journal fully usable.
+            // The refused rewind left the journal fully usable and had no side effects: the
+            // watermark was not lowered.
+            assert_eq!(journal.recovery_watermark(), 12);
             assert_eq!(snapshot.read(11).await.unwrap(), test_digest(11));
             drop(snapshot);
 
@@ -4719,6 +4717,8 @@ mod tests {
             // the rewound offsets are reappended).
             let snapshot = journal.reader();
             assert!(matches!(journal.rewind(2).await, Err(Error::BlobInUse(_))));
+            // The refused rewind had no side effects: the watermark was not lowered.
+            assert_eq!(journal.recovery_watermark(), 8);
             // The snapshot still reads its original, unchanged bytes.
             assert_eq!(snapshot.read(6).await.unwrap(), test_digest(6));
 

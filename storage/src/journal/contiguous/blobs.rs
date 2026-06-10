@@ -72,13 +72,18 @@ impl<E: Context> Partition<E> {
             .map_err(Error::Runtime)
     }
 
+    /// Scan a partition's blob names, treating a missing partition as empty.
+    async fn scan_names(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
+        match context.scan(name).await {
+            Ok(names) => Ok(names),
+            Err(RError::PartitionMissing(_)) => Ok(Vec::new()),
+            Err(err) => Err(Error::Runtime(err)),
+        }
+    }
+
     /// Scan the partition and open every existing blob as a [`Writer`], keyed by blob index.
     pub(super) async fn open_all(&self) -> Result<BTreeMap<u64, Writer<E::Blob>>, Error> {
-        let stored = match self.context.scan(&self.name).await {
-            Ok(names) => names,
-            Err(RError::PartitionMissing(_)) => Vec::new(),
-            Err(err) => return Err(Error::Runtime(err)),
-        };
+        let stored = Self::scan_names(&self.context, &self.name).await?;
 
         let mut blobs = BTreeMap::new();
         for name in stored {
@@ -115,17 +120,9 @@ impl<E: Context> Partition<E> {
     /// Both containing data is corruption.
     // TODO(#2941): Remove legacy partition support
     pub(super) async fn select(context: &E, prefix: &str) -> Result<String, Error> {
-        async fn scan_names<E: Context>(context: &E, name: &str) -> Result<Vec<Vec<u8>>, Error> {
-            match context.scan(name).await {
-                Ok(blobs) => Ok(blobs),
-                Err(RError::PartitionMissing(_)) => Ok(Vec::new()),
-                Err(err) => Err(Error::Runtime(err)),
-            }
-        }
-
         let new_partition = format!("{prefix}-blobs");
-        let legacy_blobs = scan_names(context, prefix).await?;
-        let new_blobs = scan_names(context, &new_partition).await?;
+        let legacy_blobs = Self::scan_names(context, prefix).await?;
+        let new_blobs = Self::scan_names(context, &new_partition).await?;
 
         if !legacy_blobs.is_empty() && !new_blobs.is_empty() {
             return Err(Error::Corruption(format!(
@@ -202,7 +199,7 @@ impl<E: Context> Blobs<E> {
             None => partition.open(tail_blob).await?,
         };
 
-        // The retained run must reach the tail: `oldest_blob_index = tail_blob - sealed.len()`.
+        // The retained blobs must reach the tail: `oldest_blob_index = tail_blob - sealed.len()`.
         // A gap (scanned blobs that do not end at `tail_blob`) is corruption.
         let oldest_blob_index = tail_blob
             .checked_sub(sealed.len() as u64)
@@ -236,6 +233,13 @@ impl<E: Context> Blobs<E> {
     /// A write handle for the tail.
     pub(super) const fn tail_writer(&self) -> &Writer<E::Blob> {
         &self.tail
+    }
+
+    /// Whether any [`Snapshot`] is live. A new reader can't be created while the caller holds
+    /// `&mut self`, so this only accounts for snapshots taken earlier. The Acquire load pairs
+    /// with the Release in [`Snapshot`]'s drop, so a `false` result means their reads are done.
+    pub(super) fn readers_outstanding(&self) -> bool {
+        self.readers.load(Ordering::Acquire) != 0
     }
 
     /// Capture an owned [`Snapshot`] of the current blobs, readable within `bounds`. The
@@ -309,9 +313,8 @@ impl<E: Context> Blobs<E> {
         let current_bytes = self.tail.size().await;
         debug_assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
-            // A new reader can't be created while we hold `&mut self`, so this only accounts for
-            // snapshots taken earlier; refuse the in-place truncation while any are live.
-            if self.readers.load(Ordering::Acquire) != 0 {
+            // Refuse the in-place truncation while any snapshot is live.
+            if self.readers_outstanding() {
                 return Err(Error::BlobInUse(self.tail_blob_index()));
             }
             self.tail
@@ -342,10 +345,8 @@ impl<E: Context> Blobs<E> {
             .filter(|&idx| idx < self.sealed.len())
             .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
 
-        // A new reader can't be created while we hold `&mut self`, so this only accounts for
-        // snapshots taken earlier; refuse the in-place truncation while any are live. The Acquire
-        // load pairs with the Release in `Snapshot::drop`, so a count of 0 means their reads are done.
-        if self.readers.load(Ordering::Acquire) != 0 {
+        // Refuse the in-place truncation while any snapshot is live.
+        if self.readers_outstanding() {
             return Err(Error::BlobInUse(blob));
         }
 
@@ -400,9 +401,9 @@ impl<E: Context> Blobs<E> {
     }
 
     /// Make every blob from `start_blob` onward durable.
-    pub(super) async fn sync_from(&mut self, blob: u64) -> Result<(), Error> {
-        let blob = blob.max(self.oldest_blob_index);
-        let dirty_sealed = &self.sealed[(blob - self.oldest_blob_index) as usize..];
+    pub(super) async fn sync_from(&mut self, start_blob: u64) -> Result<(), Error> {
+        let start_blob = start_blob.max(self.oldest_blob_index);
+        let dirty_sealed = &self.sealed[(start_blob - self.oldest_blob_index) as usize..];
         try_join_all(dirty_sealed.iter().map(|sealed| sealed.sync()))
             .await
             .map_err(Error::Runtime)?;
@@ -498,7 +499,8 @@ pub(super) struct Snapshot<B: Blob> {
     pub(super) bounds: Range<u64>,
 
     /// The journal's live-reader count, shared with [`Blobs`]. Incremented at capture and
-    /// decremented on drop; a nonzero count blocks in-place truncation of sealed blobs.
+    /// decremented on drop; a nonzero count blocks in-place truncation of the tail and of
+    /// sealed blobs during rewind.
     readers: Arc<AtomicUsize>,
 }
 
@@ -537,6 +539,13 @@ impl<B: Blob> Snapshot<B> {
         }
         let idx = blob.checked_sub(self.oldest_blob_index)?;
         self.sealed.get(idx as usize).map(Handle::Sealed)
+    }
+
+    /// Resolve the read handle for `blob`, treating absence as corruption: callers only ask
+    /// for blobs implied by positions validated against `bounds`.
+    pub(super) fn require_handle(&self, blob: u64) -> Result<Handle<'_, B>, Error> {
+        self.handle(blob)
+            .ok_or_else(|| Error::Corruption(format!("blob {blob} missing from snapshot")))
     }
 }
 

@@ -99,7 +99,7 @@ impl<C> Config<C> {
     }
 }
 
-/// Inner journal state protected by a lock for interior mutability.
+/// Inner journal state, shared with [Reader] through the lock.
 struct Inner<E: Context, V: Codec> {
     /// The underlying variable-length data journal.
     data: variable::Journal<E, V>,
@@ -227,7 +227,8 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 pub struct Journal<E: Context, V: Codec> {
     /// Inner state for data journal metadata.
     ///
-    /// Reads can proceed during `commit()` and `sync()`, while mutators take the write side.
+    /// Every mutator takes `&mut self`, so the lock is never contended; it remains only to
+    /// hand [Reader] a shared guard.
     inner: AsyncRwLock<Inner<E, V>>,
 
     /// Index mapping positions to byte offsets within the data journal.
@@ -740,7 +741,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Append items to the journal, returning the position of the last item appended.
     ///
-    /// Acquires the write lock once for all items instead of per-item.
     /// Returns [Error::EmptyAppend] if items is empty.
     pub async fn append_many<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
         let _timer = self.metrics.append_many_timer();
@@ -754,7 +754,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         }
         let items_count = items.len();
 
-        // Encode every item into a single buffer for bulk-writing before grabbing write guard.
+        // Encode every item into a single buffer for bulk-writing.
         let mut encoded = Vec::new();
         let mut item_starts = Vec::with_capacity(items_count);
         let mut encode = |item: &V| {
@@ -776,7 +776,6 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             }
         }
 
-        // Mutating operations are serialized by taking the write guard.
         let mut inner = self.inner.write().await;
 
         // Reject the append before writing anything (to either the data or offsets journal) if
@@ -884,7 +883,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(pruned)
     }
 
-    /// Flush dirty data sections to storage under the read lock, allowing concurrent reads.
+    /// Flush dirty data sections to storage.
     ///
     /// Sections are synced concurrently. Ordering is not required for recovery: appends only add
     /// data, so committed sections are never at risk, and recovery replays the data journal as the

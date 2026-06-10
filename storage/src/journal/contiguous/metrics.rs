@@ -36,7 +36,7 @@ pub(super) struct CommonMetrics<E: Clock> {
     pub pruning_boundary: Gauge,
     /// Readable items retained.
     pub retained: Gauge,
-    /// Items in the section containing the newest retained item.
+    /// Items in the blob containing the newest retained item.
     pub tail_items: Gauge,
     /// Single-item append calls.
     pub append_calls: Counter,
@@ -77,7 +77,7 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
             .gauge("retained", "Number of readable items retained");
         let tail_items = context.as_ref().gauge(
             "tail_items",
-            "Items in the section containing the newest retained item",
+            "Items in the blob containing the newest retained item",
         );
         let append_calls = context
             .as_ref()
@@ -171,15 +171,15 @@ impl<E: Clock> CommonMetrics<E> {
     }
 
     /// Update state gauges from current bounds.
-    pub(super) fn update(&self, size: u64, pruning_boundary: u64, items_per_section: u64) {
+    pub(super) fn update(&self, size: u64, pruning_boundary: u64, items_per_blob: u64) {
         let _ = self.size.try_set(size);
         let _ = self.pruning_boundary.try_set(pruning_boundary);
         let _ = self.retained.try_set(size.saturating_sub(pruning_boundary));
         let tail_items = if size == pruning_boundary {
             0
         } else {
-            let tail_section_start = ((size - 1) / items_per_section) * items_per_section;
-            size - pruning_boundary.max(tail_section_start)
+            let tail_start = ((size - 1) / items_per_blob) * items_per_blob;
+            size - pruning_boundary.max(tail_start)
         };
         let _ = self.tail_items.try_set(tail_items);
     }

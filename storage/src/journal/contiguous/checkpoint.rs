@@ -11,7 +11,9 @@
 //! - The recovery watermark: a floor on the journal size that external consumers (such as the
 //!   [variable journal](super::variable::Journal), which indexes its data with a fixed journal)
 //!   have durably recorded. Items below the watermark must survive a crash; items above it may
-//!   be replayed or discarded.
+//!   be replayed, discarded, or (after an in-place rewind followed by new appends) decode to a
+//!   value from neither the pre- nor post-rewind history, so consumers must not treat them as
+//!   authenticated.
 //! - The clear target, while a clear/reset is in progress: the target is recorded before any
 //!   blob is deleted, so a crash mid-clear is finished on reopen instead of being misread as
 //!   corruption.
@@ -44,7 +46,7 @@ const CLEAR_TARGET_KEY: u64 = 2;
 const RECOVERY_WATERMARK_KEY: u64 = 3;
 
 /// The journal's durable recovery checkpoint.
-pub(crate) struct Checkpoint<E: Context> {
+pub(super) struct Checkpoint<E: Context> {
     metadata: Metadata<E, u64, VecU64>,
 }
 

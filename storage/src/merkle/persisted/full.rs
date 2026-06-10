@@ -26,11 +26,7 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
-use commonware_utils::{
-    range::NonEmptyRange,
-    sequence::prefixed_u64::U64,
-    sync::{AsyncMutex, RwLock},
-};
+use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64, sync::RwLock};
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
@@ -154,9 +150,6 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strate
     /// contents change only when the pruning boundary moves.
     pub(crate) metadata: Metadata<E, U64, Vec<u8>>,
 
-    /// Serializes concurrent sync calls.
-    pub(crate) sync_lock: AsyncMutex<()>,
-
     /// The strategy to use for parallelization.
     pub(crate) strategy: S,
 }
@@ -278,7 +271,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 }),
                 journal,
                 metadata,
-                sync_lock: AsyncMutex::new(()),
                 strategy: cfg.strategy,
             });
         }
@@ -409,7 +401,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             }),
             journal,
             metadata,
-            sync_lock: AsyncMutex::new(()),
             strategy: cfg.strategy,
         })
     }
@@ -529,7 +520,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             }),
             journal,
             metadata,
-            sync_lock: AsyncMutex::new(()),
             strategy: cfg.config.strategy,
         })
     }
@@ -596,8 +586,6 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
     /// Sync the structure to disk.
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
-        let _sync_guard = self.sync_lock.lock().await;
-
         let journal_size = Position::<F>::new(self.journal.size());
 
         // Snapshot nodes in the mem that are missing from the journal, along with the pinned
@@ -636,7 +624,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         // Append missing nodes to the journal without holding the mem read lock.
         self.journal.append_many(Many::Flat(&missing_nodes)).await?;
 
-        // Sync the journal while still holding the sync_lock to ensure durability before returning.
+        // Sync the journal to ensure durability before returning.
         self.journal.sync().await?;
 
         // Now that the missing nodes are in the journal, it's safe to prune them from the

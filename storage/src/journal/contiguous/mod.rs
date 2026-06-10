@@ -42,7 +42,7 @@ pub trait Reader: Send + Sync {
     /// Read multiple items at the given positions, which must be strictly increasing.
     ///
     /// The default implementation calls [`read`](Self::read) in a loop. Concrete journal
-    /// implementations override this to amortize lock acquisition and batch I/O.
+    /// implementations override this to batch I/O.
     fn read_many(
         &self,
         positions: &[u64],
@@ -146,7 +146,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Append items to the journal, returning the position of the last item appended.
     ///
     /// The default implementation calls [Self::append] in a loop. Concrete implementations
-    /// may override this to acquire the write lock once for all items.
+    /// may override this to encode and write all items in one batch.
     ///
     /// Returns [Error::EmptyAppend] if items is empty.
     fn append_many<'a>(
