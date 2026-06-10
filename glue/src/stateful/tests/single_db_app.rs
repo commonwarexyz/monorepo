@@ -586,6 +586,7 @@ impl EngineDefinition for SingleDbEngine {
             term_length: NZU64!(1),
             term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(3),
+            term_optimistic_views: 0,
             forwarding: ForwardingPolicy::Disabled,
         };
 

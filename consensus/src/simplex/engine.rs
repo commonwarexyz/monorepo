@@ -72,6 +72,7 @@ impl<
                 mailbox_size: cfg.mailbox_size,
                 skip_timeout: cfg.skip_timeout,
                 term_length: cfg.term_length,
+                term_optimistic_views: cfg.term_optimistic_views,
                 forwarding: cfg.forwarding,
             },
         );
@@ -97,6 +98,7 @@ impl<
                 term_length: cfg.term_length,
                 term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
                 finalization_timeout: cfg.finalization_timeout,
+                term_optimistic_views: cfg.term_optimistic_views,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,
                 page_cache: cfg.page_cache,

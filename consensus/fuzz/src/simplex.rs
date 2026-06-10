@@ -138,6 +138,7 @@ mod tests {
             configuration: N4F1C3,
             required_containers: containers,
             term_length,
+            term_optimistic_views: term_length.get(),
             degraded_network: false,
             strategy: StrategyChoice::AnyScope,
         }
