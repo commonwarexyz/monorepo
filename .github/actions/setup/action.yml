@@ -93,8 +93,7 @@ runs:
         if [ -n "$ADDITIONAL_CACHE_KEY" ]; then
           key="${key}-${ADDITIONAL_CACHE_KEY}"
         fi
-        key="${key// /-}"
-        key="${key//\//-}"
+        key="$(printf '%s' "$key" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
     - name: Configure rust cache workspace
       id: rust-cache-workspace
