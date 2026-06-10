@@ -879,6 +879,15 @@ fn foo() -> usize {
 Spans represent discrete, time-limited units of work and are exported to OTLP in
 production. Follow these rules when adding instrumentation:
 
+#### Spans are not part of the runtime context
+
+Tracing is deliberately decoupled from the runtime context (`Supervisor::child`,
+`Supervisor::with_attribute`). Context identity feeds metrics and supervision; spans
+are created independently at the work site. A trace follows a request as it hops
+between actors. A span's parent is whoever asked for the work, which is usually a
+different task on the other side of a mailbox. The context tree only records who
+spawned whom, so it cannot describe that relationship.
+
 #### Naming
 
 - Span names are dot-separated paths (e.g. `component.module.operation`). Never use `::`
