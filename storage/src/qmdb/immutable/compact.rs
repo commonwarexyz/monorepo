@@ -25,8 +25,8 @@
 
 use super::operation::Operation;
 use crate::{
-    journal::contiguous::variable::Config as JournalConfig,
-    merkle::{batch, compact as compact_merkle, Family, Location, Proof},
+    journal::contiguous::variable::{self, Config as JournalConfig},
+    merkle::{batch, compact as compact_merkle, Family, Location},
     qmdb::{
         self,
         any::value::ValueEncoding,
@@ -274,28 +274,42 @@ where
     /// supplied witness/root pair. The import lives only in memory until the first
     /// [`Self::sync`], which replaces the journal's contents with it. Until then, dropping the
     /// handle leaves the previous on-disk state untouched, and rewind/prune are rejected.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn init_from_verified_state(
-        merkle: compact_merkle::Merkle<F, H::Digest, S>,
+        strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
         commit_codec_config: C,
-        last_commit_metadata: Option<V::Value>,
-        inactivity_floor_loc: Location<F>,
-        root: H::Digest,
-        last_commit_op_bytes: Vec<u8>,
-        last_commit_proof: Proof<F, H::Digest>,
-        pinned_nodes: Vec<H::Digest>,
+        validated: compact_sync::ValidatedState<F, Operation<F, K, V>, H::Digest>,
     ) -> Result<Self, Error<F>> {
+        let compact_sync::ValidatedState {
+            state:
+                compact_sync::State {
+                    leaf_count,
+                    pinned_nodes,
+                    last_commit_op,
+                    last_commit_proof,
+                },
+            root,
+            inactivity_floor: inactivity_floor_loc,
+        } = validated;
+        let last_commit_loc = Location::new(*leaf_count - 1);
+        let Operation::Commit(last_commit_metadata, op_floor) = last_commit_op else {
+            return Err(Error::UnexpectedData(last_commit_loc));
+        };
+        if op_floor != inactivity_floor_loc {
+            return Err(Error::DataCorrupted("inactivity floor mismatch"));
+        }
+
+        let merkle =
+            compact_merkle::Merkle::from_compact_state(strategy, leaf_count, pinned_nodes.clone())?;
         let imported = witness::witness_from_authenticated_state(
             &merkle,
             root,
             inactivity_floor_loc,
-            last_commit_op_bytes,
+            Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc),
             last_commit_proof,
             pinned_nodes,
         )?;
 
-        let last_commit_loc = Location::new(*merkle.leaves() - 1);
         let witness = witness::Store::from_import(journal, imported);
         Ok(Self {
             merkle,
@@ -323,8 +337,8 @@ where
         Operation<F, K, V>: Read<Cfg = C>,
     {
         // Bootstrap: append an initial Commit(None, 0) on first open.
-        let journal =
-            witness::open_journal::<E, F, H::Digest>(witness_context, witness_config).await?;
+        let journal: witness::Journal<E, F, H::Digest> =
+            variable::Journal::init(witness_context, witness_config).await?;
         let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, K, V>>(
             journal,
             &mut merkle,
@@ -338,7 +352,7 @@ where
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
-        let last_commit_loc = Location::new(*witness.with(|w| w.leaf_count) - 1);
+        let last_commit_loc = Location::new(*witness.with(|w| w.leaf_count()) - 1);
 
         Ok(Self {
             merkle,
@@ -411,7 +425,7 @@ where
         // Hold the witness lock only long enough to verify the requested target and snapshot the
         // entry; decode outside it so concurrent readers do not contend.
         let (op_bytes, last_commit_proof, pinned_nodes, leaf_count) = self.witness.with(|w| {
-            if target.root != w.root || target.leaf_count != w.leaf_count {
+            if target.root != w.root || target.leaf_count != w.leaf_count() {
                 return Err(compact_sync::ServeError::StaleTarget {
                     requested: target.clone(),
                     current: w.target(),
@@ -421,7 +435,7 @@ where
                 w.last_commit_op_bytes.clone(),
                 w.last_commit_proof.clone(),
                 w.pinned_nodes.clone(),
-                w.leaf_count,
+                w.leaf_count(),
             ))
         })?;
         let op = Operation::<F, K, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
@@ -521,7 +535,7 @@ where
         F: Family,
     {
         // Fast path: already exactly at `target` with no uncommitted state.
-        if self.size() == target && self.witness.with(|w| w.leaf_count) == target {
+        if self.size() == target && self.witness.with(|w| w.leaf_count()) == target {
             return Ok(());
         }
 
@@ -559,7 +573,6 @@ where
 mod tests {
     use super::*;
     use crate::{
-        journal::contiguous::variable,
         merkle::mmr,
         qmdb::{any::value::FixedEncoding, compact::witness},
     };
@@ -603,9 +616,7 @@ mod tests {
         partition: &str,
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
         let cfg = witness_config(partition, &context);
-        witness::open_journal::<_, mmr::Family, Digest>(context, cfg)
-            .await
-            .unwrap()
+        variable::Journal::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("INFO")]

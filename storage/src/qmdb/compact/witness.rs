@@ -33,7 +33,7 @@ use crate::{
     qmdb::{self, sync::compact::Target, Error},
     Context,
 };
-use commonware_codec::{Decode as _, EncodeSize, RangeCfg, Read, Write};
+use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::sync::{AsyncMutex, RwLock};
@@ -42,24 +42,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// Upper bound on the encoded last-commit operation, enforced before any witness is built and
 /// as a decode guard against corrupted length prefixes.
 pub(crate) const MAX_OP_BYTES: usize = 1 << 24;
-
-/// Codec configuration for decoding a [`WitnessEntry`] read back from the journal.
-#[derive(Clone)]
-pub(crate) struct WitnessEntryCfg {
-    op_bytes: RangeCfg<usize>,
-    proof_digests: usize,
-    pinned_nodes: RangeCfg<usize>,
-}
-
-impl Default for WitnessEntryCfg {
-    fn default() -> Self {
-        Self {
-            op_bytes: (..=MAX_OP_BYTES).into(),
-            proof_digests: MAX_PROOF_DIGESTS_PER_ELEMENT,
-            pinned_nodes: (..=MAX_PINNED_NODES).into(),
-        }
-    }
-}
 
 /// A single durably persisted witness: a complete snapshot of one synced commit.
 ///
@@ -92,15 +74,12 @@ impl<F: Family, D: Digest> Write for WitnessEntry<F, D> {
 }
 
 impl<F: Family, D: Digest> Read for WitnessEntry<F, D> {
-    type Cfg = WitnessEntryCfg;
+    type Cfg = ();
 
-    fn read_cfg(
-        buf: &mut impl bytes::Buf,
-        cfg: &Self::Cfg,
-    ) -> Result<Self, commonware_codec::Error> {
-        let op_bytes = Vec::<u8>::read_cfg(buf, &(cfg.op_bytes, ()))?;
-        let proof = Proof::<F, D>::read_cfg(buf, &cfg.proof_digests)?;
-        let pinned_nodes = Vec::<D>::read_cfg(buf, &(cfg.pinned_nodes, ()))?;
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &()) -> Result<Self, commonware_codec::Error> {
+        let op_bytes = Vec::<u8>::read_cfg(buf, &((..=MAX_OP_BYTES).into(), ()))?;
+        let proof = Proof::<F, D>::read_cfg(buf, &MAX_PROOF_DIGESTS_PER_ELEMENT)?;
+        let pinned_nodes = Vec::<D>::read_cfg(buf, &((..=MAX_PINNED_NODES).into(), ()))?;
         Ok(Self {
             op_bytes,
             proof,
@@ -127,8 +106,6 @@ pub(crate) type Journal<E, F, D> = variable::Journal<E, WitnessEntry<F, D>>;
 pub(crate) struct Witness<F: Family, D: Digest> {
     /// Root committed by the tip witness entry.
     pub(crate) root: D,
-    /// Total leaves in the committed Merkle, which also identifies the tip commit location.
-    pub(crate) leaf_count: Location<F>,
     /// Pinned frontier nodes of the committed Merkle; not the proof path.
     pub(crate) pinned_nodes: Vec<D>,
     /// Encoded last-commit operation bytes used for root verification and serving.
@@ -138,36 +115,18 @@ pub(crate) struct Witness<F: Family, D: Digest> {
 }
 
 impl<F: Family, D: Digest> Witness<F, D> {
+    /// Total leaves in the committed Merkle, which also identifies the tip commit location.
+    pub(crate) const fn leaf_count(&self) -> Location<F> {
+        self.last_commit_proof.leaves
+    }
+
     /// The compact-sync target this witness can serve: its root and leaf count.
     pub(crate) const fn target(&self) -> Target<F, D> {
         Target {
             root: self.root,
-            leaf_count: self.leaf_count,
+            leaf_count: self.leaf_count(),
         }
     }
-}
-
-/// Open the witness journal for a compact db.
-pub(crate) async fn open_journal<E, F, D>(
-    context: E,
-    cfg: variable::Config<()>,
-) -> Result<Journal<E, F, D>, Error<F>>
-where
-    E: Context,
-    F: Family,
-    D: Digest,
-{
-    let cfg = variable::Config {
-        partition: cfg.partition,
-        items_per_section: cfg.items_per_section,
-        compression: cfg.compression,
-        // The caller's config carries `()` as a placeholder codec config; the real entry codec
-        // config is private to this module and substituted here.
-        codec_config: WitnessEntryCfg::default(),
-        page_cache: cfg.page_cache,
-        write_buffer: cfg.write_buffer,
-    };
-    Ok(variable::Journal::init(context, cfg).await?)
 }
 
 /// A contiguous journal plus an in-memory cache of the tip witness.
@@ -236,7 +195,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         // Normally the cache mirrors the journal tip, so the state is already durable and there
         // is nothing to do. During a pending import the cached witness is not in the journal
         // yet, so it is exactly what must be persisted: replace the journal's contents with it.
-        let cached_leaves = self.with(|w| w.leaf_count);
+        let cached_leaves = self.with(|w| w.leaf_count());
         if cached_leaves == merkle.leaves() {
             if self.import_pending.load(Ordering::Relaxed) {
                 self.journal.clear_to_size(0).await?;
@@ -409,7 +368,6 @@ where
         let last_commit_proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
         Ok(Witness {
             root,
-            leaf_count,
             pinned_nodes,
             last_commit_op_bytes,
             last_commit_proof,
@@ -457,11 +415,13 @@ where
         return Err(Error::DataCorrupted("missing final commit"));
     }
     let leaf_count = merkle.leaves();
+    if last_commit_proof.leaves != leaf_count {
+        return Err(Error::DataCorrupted("invalid compact witness"));
+    }
     let last_commit_loc = Location::<F>::new(*leaf_count - 1);
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
     Ok(Witness {
         root,
-        leaf_count,
         pinned_nodes,
         last_commit_op_bytes,
         last_commit_proof,
@@ -533,7 +493,6 @@ where
     }
     let witness = Witness {
         root,
-        leaf_count,
         pinned_nodes,
         last_commit_op_bytes,
         last_commit_proof,
