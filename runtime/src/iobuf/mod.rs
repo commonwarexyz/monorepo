@@ -265,6 +265,12 @@ impl IoBuf {
             };
         }
 
+        // External owners always decline: `Bytes` cannot back a mutable
+        // handle, so `IoBufMut` is never external-backed.
+        if self.owner.is_external() {
+            return Err(self);
+        }
+
         // SAFETY: owner is non-empty and live.
         if !unsafe { self.owner.is_unique() } {
             return Err(self);
@@ -417,7 +423,7 @@ impl Buf for IoBuf {
 
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
-        let (ptr, len, _, owner) = owner_from_vec(vec);
+        let (ptr, len, owner) = owner_from_vec(vec);
         Self { ptr, len, owner }
     }
 }
@@ -904,8 +910,7 @@ unsafe impl BufMut for IoBufMut {
 
 impl From<Vec<u8>> for IoBufMut {
     fn from(vec: Vec<u8>) -> Self {
-        let (ptr, len, cap, owner) = owner_from_vec(vec);
-        Self { ptr, len, cap, owner }
+        Self::from(vec.as_slice())
     }
 }
 
@@ -3959,20 +3964,22 @@ mod tests {
         let pooled = pooled_mut.freeze();
         assert!(!pooled.as_ptr().is_null());
 
-        let unique = IoBuf::from_bytes(Bytes::from(vec![1u8, 2, 3]));
-        let unique_mut = unique.try_into_mut().expect("unique bytes should convert");
+        // A vec with spare capacity adopts its allocation, so the unique
+        // immutable view recovers mutability zero-copy.
+        let mut adopted_vec = Vec::with_capacity(64);
+        adopted_vec.extend_from_slice(&[1u8, 2, 3]);
+        let unique = IoBuf::from(adopted_vec);
+        let unique_mut = unique.try_into_mut().expect("adopted vec should convert");
         assert_eq!(unique_mut.as_ref(), &[1u8, 2, 3]);
 
-        let shared = IoBuf::from_bytes(Bytes::from(vec![4u8, 5, 6]));
+        let shared = IoBuf::from(vec![4u8, 5, 6]);
         let _shared_clone = shared.clone();
         assert!(shared.try_into_mut().is_err());
 
-        let original = Bytes::from_static(b"copied");
-        let copied = IoBuf::from_bytes(original);
-        let copied_mut = copied
-            .try_into_mut()
-            .expect("from_bytes copies static/shared bytes into owned storage");
-        assert_eq!(copied_mut.as_ref(), b"copied");
+        // External-backed views (exactly-sized vecs, `Bytes`) always decline
+        // mutable recovery.
+        let external = IoBuf::from(vec![7u8, 8, 9]);
+        assert!(external.try_into_mut().is_err());
 
         let expected: &[u8] = &[9u8, 8];
         let eq_buf = IoBuf::from(vec![9u8, 8]);
