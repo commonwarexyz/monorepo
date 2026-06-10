@@ -209,7 +209,8 @@ impl IoBuf {
     /// Afterwards `self` contains bytes `[at, len)`, and the returned [`IoBuf`]
     /// contains bytes `[0, at)`.
     ///
-    /// This is an `O(1)` zero-copy operation.
+    /// This is an `O(1)` zero-copy operation. Empty halves detach from the
+    /// owner so pooled allocations are not pinned by empty views.
     ///
     /// # Panics
     ///
@@ -245,9 +246,14 @@ impl IoBuf {
 
     /// Try to convert this buffer into [`IoBufMut`] without copying.
     ///
-    /// Succeeds when this immutable view is the unique owner of its backing
-    /// allocation. Uniquely-owned slices can become mutable; their capacity is
-    /// recovered from the allocation base and the current view offset.
+    /// Succeeds when this view is the unique owner of a native (aligned,
+    /// pooled, or adopted-vec) allocation, including uniquely-owned slices:
+    /// capacity is recovered from the allocation base and the current view
+    /// offset, so spare capacity beyond the view returns with it. Empty
+    /// buffers convert trivially.
+    ///
+    /// Declines for shared owners, non-empty static views, and
+    /// external-backed views (`Bytes` cannot back a mutable handle).
     pub fn try_into_mut(self) -> Result<IoBufMut, Self> {
         if self.owner.is_empty() {
             return if self.len == 0 {
@@ -394,6 +400,10 @@ impl Buf for IoBuf {
         Ok(())
     }
 
+    /// Drains `len` readable bytes into [`Bytes`].
+    ///
+    /// Zero-copy despite the trait method's name: a shared view is carved
+    /// off and converted through the `From<IoBuf> for Bytes` fast paths.
     #[inline]
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
         assert!(len <= self.len, "copy_to_bytes out of bounds");
@@ -462,7 +472,7 @@ impl From<&'static [u8]> for IoBuf {
 
 /// Convert an [`IoBuf`] into a [`Vec<u8>`].
 ///
-/// This conversion may copy.
+/// This conversion copies the readable bytes.
 impl From<IoBuf> for Vec<u8> {
     fn from(buf: IoBuf) -> Self {
         buf.as_ref().to_vec()
@@ -653,6 +663,10 @@ impl IoBufMut {
     }
 
     /// Create a buffer of `len` bytes, all initialized to zero.
+    ///
+    /// Unlike [`Self::with_capacity`], the full buffer is immediately
+    /// readable (`len() == capacity() == len`), which suits APIs that fill a
+    /// preallocated buffer such as `read_exact`.
     #[inline]
     pub fn zeroed(len: usize) -> Self {
         Self::zeroed_with_alignment(len, NonZeroUsize::MIN)
@@ -718,6 +732,10 @@ impl IoBufMut {
     }
 
     /// Freeze into immutable [`IoBuf`].
+    ///
+    /// Free: the owner word moves to the immutable handle without touching
+    /// the refcount. Freezing an empty buffer releases the allocation
+    /// immediately so empty immutable views never pin pool memory.
     #[inline]
     pub fn freeze(self) -> IoBuf {
         let me = ManuallyDrop::new(self);
@@ -747,6 +765,8 @@ impl IoBufMut {
     }
 
     /// Truncates the buffer to `len` readable bytes.
+    ///
+    /// Has no effect when `len` is greater than the current length.
     #[inline]
     pub fn truncate(&mut self, len: usize) {
         self.len = self.len.min(len);
