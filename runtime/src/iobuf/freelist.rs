@@ -324,6 +324,8 @@ impl Freelist {
             })
             .ok()?;
 
+        // Capture this thread's probe state once so the inner loop does not
+        // repeatedly touch thread-local storage.
         let probe = SlotBitmapProbe::new(self.word_mask, self.word_shift);
 
         // The capacity permit guarantees that some valid reservation bit is
@@ -341,6 +343,8 @@ impl Freelist {
                 let mut available = !word_ref.load(Ordering::Relaxed) & valid;
 
                 while available != 0 {
+                    // Probe a thread-specific bit order inside the chosen word so
+                    // colliding threads do not all stampede bit 0 first.
                     let bit = probe.select_set_bit(available);
                     let mask = 1u64 << bit;
                     // This needs atomic uniqueness, not memory publication: no
