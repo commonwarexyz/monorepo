@@ -398,13 +398,10 @@ impl Freelist {
 
     /// Returns the mask of valid slot bits for a bitmap word.
     ///
-    /// Some words have invalid high bits when capacity does not fill a
-    /// complete final logical row. For example, with capacity 10 and 4 words,
-    /// words 0 and 1 have three valid bits (slots 0/4/8 and 1/5/9), while
-    /// words 2 and 3 have only two.
-    ///
-    /// This is an associated function rather than a method so construction can
-    /// use it before the freelist exists.
+    /// Some words have invalid high bits when capacity does not fill a complete
+    /// final logical row. For example, with capacity 10 and 4 words, words 0
+    /// and 1 have three valid bits (slots 0/4/8 and 1/5/9), while words 2 and 3
+    /// have only two.
     #[inline(always)]
     const fn valid_bits(capacity: usize, word_shift: u32, word_index: usize) -> u64 {
         let bits = ((capacity - 1 - word_index) >> word_shift) + 1;
