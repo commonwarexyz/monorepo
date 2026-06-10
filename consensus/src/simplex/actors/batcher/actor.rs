@@ -8,7 +8,7 @@ use crate::{
         types::{Activity, Certificate, Proposal, Vote},
         Plan,
     },
-    types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
+    types::{Epoch, Participant, Round as Rnd, TermLength, View, ViewDelta},
     Epochable, Relay, Reporter, Viewable,
 };
 use commonware_actor::mailbox;
@@ -31,7 +31,6 @@ use commonware_utils::{
     ordered::{Quorum, Set},
     N3f1, PrioritySet,
 };
-use core::num::NonZeroU64;
 use rand_core::CryptoRngCore;
 use std::{
     collections::BTreeMap,
@@ -70,7 +69,7 @@ where
     skip_timeout: Duration,
     forwarding: ForwardingPolicy,
     epoch: Epoch,
-    term_length: NonZeroU64,
+    term_length: TermLength,
 
     /// Tracks the last activity time for each participant.
     /// Entries may be pruned when the latest activity is no longer recent.

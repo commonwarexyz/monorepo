@@ -352,10 +352,9 @@ pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use crate::types::{Round, View, ViewDelta};
+        use crate::types::{Round, TermLength, View, ViewDelta};
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
-        use std::num::NonZeroU64;
 
         mod actors;
         pub mod config;
@@ -379,7 +378,7 @@ cfg_if::cfg_if! {
             current: View,
             pending: View,
             allow_unbounded_future: bool,
-            term_length: NonZeroU64,
+            term_length: TermLength,
         ) -> bool {
             // If the view is genesis, skip it, genesis doesn't have votes
             if pending.is_zero() {
@@ -555,7 +554,7 @@ mod tests {
     #[test]
     fn test_interesting() {
         let activity_timeout = ViewDelta::new(10);
-        let term_length = NZU64!(10);
+        let term_length = TermLength::new(NZU64!(10));
 
         assert!(!interesting(
             activity_timeout,
@@ -903,7 +902,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1144,7 +1143,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1254,7 +1253,7 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -1334,7 +1333,7 @@ mod tests {
 
             let elector = RoundRobin::default();
             let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
-            let term_length = NZU64!(1);
+            let term_length = TermLength::ONE;
             let built_elector = elector.clone().build(&participants_set, term_length);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
@@ -1560,7 +1559,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -1718,7 +1717,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -1897,7 +1896,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2022,7 +2021,7 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2154,7 +2153,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2384,7 +2383,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2547,7 +2546,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2743,7 +2742,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -2934,7 +2933,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3133,7 +3132,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -3305,7 +3304,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3473,7 +3472,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -3663,7 +3662,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -3788,7 +3787,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -3898,7 +3897,7 @@ mod tests {
                     let cfg = mocks::equivocator::Config {
                         scheme: schemes[idx_scheme].clone(),
                         epoch: Epoch::new(333),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         relay: relay.clone(),
                         hasher: Sha256::default(),
                         elector: elector.clone(),
@@ -3946,7 +3945,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4043,7 +4042,7 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4199,7 +4198,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4348,7 +4347,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4514,7 +4513,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -4646,7 +4645,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -4772,7 +4771,7 @@ mod tests {
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 16),
@@ -4951,7 +4950,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5291,7 +5290,7 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: NZU64!(1),
+                        term_length: TermLength::ONE,
                         term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
@@ -5500,7 +5499,7 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
@@ -5559,7 +5558,7 @@ mod tests {
         seed: u64,
         shutdowns: usize,
         interval: ViewDelta,
-        term_length: NonZeroU64,
+        term_length: TermLength,
         mut fixture: F,
     ) -> String
     where
@@ -5887,8 +5886,8 @@ mod tests {
         L: Elector<S>,
     {
         assert_eq!(
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), NZU64!(1), fixture),
-            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), NZU64!(1), fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), TermLength::ONE, fixture),
+            run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), TermLength::ONE, fixture),
         );
     }
 
@@ -5902,14 +5901,14 @@ mod tests {
                 0,
                 10,
                 ViewDelta::new(15),
-                NZU64!(3),
+                TermLength::new(NZU64!(3)),
                 ed25519::fixture
             ),
             run_hailstorm::<_, _, RoundRobin>(
                 0,
                 10,
                 ViewDelta::new(15),
-                NZU64!(3),
+                TermLength::new(NZU64!(3)),
                 ed25519::fixture
             )
         );
@@ -5997,7 +5996,7 @@ mod tests {
 
             let activity_timeout = ViewDelta::new(10);
             let skip_timeout = Duration::from_secs(11);
-            let term_length = NZU64!(1);
+            let term_length = TermLength::ONE;
             let namespace = b"consensus".to_vec();
             let link = link.clone();
             let trailing_finalizations = campaign.trailing_finalizations;

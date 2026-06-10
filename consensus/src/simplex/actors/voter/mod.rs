@@ -6,14 +6,14 @@ mod state;
 
 use crate::{
     simplex::{elector::Config as Elector, types::Activity, Floor, Plan},
-    types::{Epoch, ViewDelta},
+    types::{Epoch, TermLength, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
 pub use actor::Actor;
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_runtime::buffer::paged::CacheRef;
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::num::NonZeroUsize;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::Message;
@@ -43,7 +43,7 @@ pub struct Config<
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub activity_timeout: ViewDelta,
-    pub term_length: NonZeroU64,
+    pub term_length: TermLength,
     pub term_stop_notarize_on_nullify: bool,
     pub finalization_timeout: Duration,
     pub replay_buffer: NonZeroUsize,
@@ -277,7 +277,7 @@ mod tests {
             certification_timeout,
             timeout_retry,
             activity_timeout: ViewDelta::new(10),
-            term_length: NZU64!(1),
+            term_length: TermLength::ONE,
             term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(4),
             replay_buffer: NZUsize!(10240),
@@ -329,7 +329,7 @@ mod tests {
         certification_timeout: Duration,
         timeout_retry: Duration,
         finalization_timeout: Duration,
-        term_length: NonZeroU64,
+        term_length: TermLength,
         certify_latency_ms: f64,
         should_certify: mocks::application::Certifier<Sha256Digest>,
     ) -> (
@@ -543,7 +543,7 @@ mod tests {
             certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
             activity_timeout: ViewDelta::new(10),
-            term_length: NZU64!(1),
+            term_length: TermLength::ONE,
             term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(7),
             replay_buffer: NZUsize!(1024 * 1024),
@@ -973,7 +973,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
@@ -1206,7 +1206,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
                 activity_timeout,
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
@@ -1856,7 +1856,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2002,7 +2002,7 @@ mod tests {
             let elector_config = RoundRobin::<Sha256>::default();
             let temp_elector: RoundRobinElector<S> = elector_config
                 .clone()
-                .build(schemes[0].participants(), NZU64!(1));
+                .build(schemes[0].participants(), TermLength::ONE);
             let leader_idx = temp_elector.elect(view2_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 
@@ -2048,7 +2048,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2244,7 +2244,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2340,7 +2340,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2487,7 +2487,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -2640,7 +2640,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let built_elector: RoundRobinElector<S> =
-                elector.clone().build(schemes[0].participants(), NZU64!(2));
+                elector.clone().build(schemes[0].participants(), TermLength::new(NZU64!(2)));
             let leader_idx = built_elector.elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
             let (mut mailbox, mut batcher_receiver, relay) = setup_voter_with_term_and_latency(
@@ -2653,7 +2653,7 @@ mod tests {
                 Duration::from_secs(4),
                 Duration::from_secs(2),
                 Duration::from_secs(5),
-                NZU64!(2),
+                TermLength::new(NZU64!(2)),
                 3500.0,
                 mocks::application::Certifier::Always,
             )
@@ -2997,7 +2997,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout,
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
@@ -3212,7 +3212,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
@@ -3414,7 +3414,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
@@ -3582,7 +3582,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
@@ -3927,7 +3927,7 @@ mod tests {
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
@@ -4214,7 +4214,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4343,7 +4343,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4485,7 +4485,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4648,7 +4648,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4752,7 +4752,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -4925,7 +4925,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -5040,7 +5040,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -5210,7 +5210,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -5327,7 +5327,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -5497,7 +5497,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -5673,7 +5673,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -5776,7 +5776,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -5957,7 +5957,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -6143,7 +6143,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -6333,7 +6333,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -6566,7 +6566,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
+                .build(&participants.clone().try_into().unwrap(), TermLength::ONE);
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6682,7 +6682,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
+                .build(&participants.clone().try_into().unwrap(), TermLength::ONE);
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6831,7 +6831,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap(), NZU64!(1));
+                .build(&participants.clone().try_into().unwrap(), TermLength::ONE);
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -7276,7 +7276,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -7392,7 +7392,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -8414,7 +8414,7 @@ mod tests {
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let leader_idx = elector
                 .clone()
-                .build(schemes[0].participants(), NZU64!(1))
+                .build(schemes[0].participants(), TermLength::ONE)
                 .elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 
@@ -8622,7 +8622,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -8750,7 +8750,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -8899,7 +8899,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -9013,7 +9013,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -9157,7 +9157,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -9277,7 +9277,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
@@ -9417,7 +9417,7 @@ mod tests {
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),

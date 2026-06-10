@@ -7,7 +7,7 @@ use commonware_consensus::{
     simplex::{
         self, elector::RoundRobin, scheme::bls12381_threshold::standard::Scheme, Engine, Floor,
     },
-    types::{Epoch, ViewDelta},
+    types::{Epoch, TermLength, ViewDelta},
 };
 use commonware_cryptography::{
     bls12381::primitives::{
@@ -260,7 +260,7 @@ fn main() {
                 fetch_concurrent: NZUsize!(32),
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 forwarding: simplex::ForwardingPolicy::Disabled,

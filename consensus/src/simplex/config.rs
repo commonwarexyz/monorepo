@@ -3,14 +3,14 @@ use super::{
     types::{Activity, Context, Finalization},
 };
 use crate::{
-    types::{Epoch, ViewDelta},
+    types::{Epoch, TermLength, ViewDelta},
     CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
 use commonware_runtime::buffer::paged::CacheRef;
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::num::NonZeroUsize;
 use rand_core::CryptoRngCore;
 use std::time::Duration;
 
@@ -187,7 +187,7 @@ where
     /// When `term_length` is greater than 1, views are grouped into terms and the same
     /// leader serves for each view in the term. If a nullification is formed in any view
     /// of a term, participants skip the rest of the term.
-    pub term_length: NonZeroU64,
+    pub term_length: TermLength,
 
     /// If true, stop voting to notarize later views in a term after voting to
     /// nullify any earlier view in that term.

@@ -9,7 +9,7 @@ use crate::{
             Finalize, Notarization, Notarize, Nullification, Nullify, NullifyFinalize, Subject,
         },
     },
-    types::{Round, View},
+    types::{Round, TermLength, View},
     Monitor, Viewable,
 };
 use commonware_actor::Feedback;
@@ -26,9 +26,8 @@ use commonware_utils::{
     },
     ordered::{Quorum, Set},
     sync::Mutex,
-    N3f1, NZU64,
+    N3f1,
 };
-use core::num::NonZeroU64;
 use rand_core::CryptoRngCore;
 use std::{
     collections::{HashMap, HashSet},
@@ -53,7 +52,7 @@ pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest>
     pub participants: Set<S::PublicKey>,
     scheme: S,
     elector: L::Elector,
-    term_length: NonZeroU64,
+    term_length: TermLength,
 
     pub leaders: Arc<Mutex<HashMap<View, S::PublicKey>>>,
     pub certified: Arc<Mutex<HashSet<View>>>,
@@ -111,10 +110,10 @@ where
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        Self::new_with_term_length(context, cfg, NZU64!(1))
+        Self::new_with_term_length(context, cfg, TermLength::ONE)
     }
 
-    pub fn new_with_term_length(context: E, cfg: Config<S, L>, term_length: NonZeroU64) -> Self {
+    pub fn new_with_term_length(context: E, cfg: Config<S, L>, term_length: TermLength) -> Self {
         // Build elector with participants
         let elector = cfg.elector.build(&cfg.participants, term_length);
 

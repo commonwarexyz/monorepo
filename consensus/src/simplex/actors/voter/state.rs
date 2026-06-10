@@ -12,7 +12,7 @@ use crate::{
         },
         Floor,
     },
-    types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
+    types::{Epoch, Participant, Round as Rnd, TermLength, View, ViewDelta},
     Viewable,
 };
 use commonware_cryptography::{certificate, Digest};
@@ -21,7 +21,6 @@ use commonware_runtime::{
     Clock, Metrics,
 };
 use commonware_utils::futures::Aborter;
-use core::num::NonZeroU64;
 use rand_core::CryptoRngCore;
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -92,7 +91,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
-    pub term_length: NonZeroU64,
+    pub term_length: TermLength,
     pub term_stop_notarize_on_nullify: bool,
     pub finalization_timeout: Duration,
 }
@@ -110,7 +109,7 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     leader_timeout: Duration,
     certification_timeout: Duration,
     timeout_retry: Duration,
-    term_length: NonZeroU64,
+    term_length: TermLength,
     term_stop_notarize_on_nullify: bool,
     finalization_timeout: Duration,
     view: View,
@@ -1105,8 +1104,9 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: std::num::NonZeroU64::new(term_length)
-                    .expect("term length must be non-zero"),
+                term_length: TermLength::new(
+                    std::num::NonZeroU64::new(term_length).expect("term length must be non-zero"),
+                ),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             },
@@ -1134,7 +1134,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -1216,7 +1216,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             };
@@ -1295,7 +1295,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             };
@@ -1354,7 +1354,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(30),
             };
@@ -1399,7 +1399,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -1465,7 +1465,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(3),
+                term_length: TermLength::new(NZU64!(3)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -1560,7 +1560,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(3),
+                term_length: TermLength::new(NZU64!(3)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
             };
@@ -1612,7 +1612,7 @@ mod tests {
                 leader_timeout: Duration::from_millis(10),
                 certification_timeout: Duration::from_millis(20),
                 timeout_retry: retry,
-                term_length: NZU64!(3),
+                term_length: TermLength::new(NZU64!(3)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: same_term_timeout,
             };
@@ -1677,7 +1677,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(3),
+                term_length: TermLength::new(NZU64!(3)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: same_term_timeout,
             };
@@ -1731,7 +1731,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -1787,7 +1787,7 @@ mod tests {
                 leader_timeout,
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -1863,7 +1863,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -1926,7 +1926,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -1983,7 +1983,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -2043,7 +2043,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -2118,7 +2118,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -2559,7 +2559,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    term_length: NZU64!(5),
+                    term_length: TermLength::new(NZU64!(5)),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -2619,7 +2619,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -2678,7 +2678,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -2735,7 +2735,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -2807,7 +2807,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -2861,7 +2861,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -2901,7 +2901,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(1),
+                    term_length: TermLength::ONE,
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -2932,7 +2932,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3061,7 +3061,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3239,7 +3239,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3312,7 +3312,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3393,7 +3393,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(5),
+                    term_length: TermLength::new(NZU64!(5)),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -3455,7 +3455,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(5),
+                    term_length: TermLength::new(NZU64!(5)),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -3523,7 +3523,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3606,7 +3606,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3653,7 +3653,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(5),
+                term_length: TermLength::new(NZU64!(5)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3699,7 +3699,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(3),
+                term_length: TermLength::new(NZU64!(3)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3773,7 +3773,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3818,7 +3818,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(5),
+                term_length: TermLength::new(NZU64!(5)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3895,7 +3895,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(5),
+                term_length: TermLength::new(NZU64!(5)),
                 term_stop_notarize_on_nullify: true,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -3954,7 +3954,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(5),
+                term_length: TermLength::new(NZU64!(5)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -4014,7 +4014,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(5),
+                term_length: TermLength::new(NZU64!(5)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -4059,7 +4059,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(5),
+                    term_length: TermLength::new(NZU64!(5)),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -4094,7 +4094,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(20),
+                term_length: TermLength::new(NZU64!(20)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -4169,7 +4169,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(20),
+                    term_length: TermLength::new(NZU64!(20)),
                     term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(4),
                 },
@@ -4227,7 +4227,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(3),
+                term_length: TermLength::new(NZU64!(3)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };
@@ -4299,7 +4299,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: NZU64!(3),
+                term_length: TermLength::new(NZU64!(3)),
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
             };

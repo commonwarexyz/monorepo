@@ -1,10 +1,10 @@
 use crate::{
     simplex::types::{Certificate, Notarization, Nullification},
-    types::View,
+    types::{TermLength, View},
     Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
-use core::num::{NonZeroU64, NonZeroUsize};
+use core::num::NonZeroUsize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// Why a resolver fetch was requested.
@@ -60,7 +60,7 @@ pub struct State<S: Scheme, D: Digest> {
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
     /// Number of views in each leader term.
-    term_length: NonZeroU64,
+    term_length: TermLength,
     /// Maps notarization view -> request views it satisfied.
     /// When a higher-view notarization satisfies a lower-view request,
     /// we track it here so we can re-request on certification failure.
@@ -72,7 +72,7 @@ pub struct State<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> State<S, D> {
     /// Create a new instance of [State].
-    pub fn new(fetch_concurrent: NonZeroUsize, term_length: NonZeroU64) -> Self {
+    pub fn new(fetch_concurrent: NonZeroUsize, term_length: TermLength) -> Self {
         Self {
             current_view: View::zero(),
             floor: None,
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn handle_nullification_requests_missing_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2), NZU64!(1));
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2), TermLength::ONE);
         let mut outstanding = BTreeSet::new();
 
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
@@ -408,7 +408,8 @@ mod tests {
     #[test]
     fn fetch_requests_only_term_anchor_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), NZU64!(5));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, View::new(14));
@@ -439,7 +440,8 @@ mod tests {
     #[test]
     fn same_term_nullification_serves_later_views_until_pruned() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), NZU64!(5));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
         state.handle(Certificate::Nullification(nullification_v2.clone()), None);
@@ -467,7 +469,8 @@ mod tests {
     #[test]
     fn nullification_below_floor_can_cover_unresolved_term_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), NZU64!(5));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
         let mut outstanding = BTreeSet::new();
 
         let finalization_v3 = build_finalization(&schemes, &verifier, View::new(3));
@@ -495,7 +498,8 @@ mod tests {
     #[test]
     fn floor_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), NZU64!(1));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::ONE);
         let mut outstanding = BTreeSet::new();
 
         for view in 4..=6 {
@@ -528,7 +532,7 @@ mod tests {
     #[test]
     fn produce_returns_floor_or_nullifications() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2), NZU64!(1));
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(2), TermLength::ONE);
 
         let finalization = build_finalization(&schemes, &verifier, View::new(3));
         let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
@@ -564,7 +568,8 @@ mod tests {
     #[test]
     fn certification_failure_re_requests_satisfied_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), NZU64!(1));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
         let effects = state.handle(
@@ -601,7 +606,8 @@ mod tests {
     #[test]
     fn certification_success_clears_tracking() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), NZU64!(1));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
         let effects = state.handle(
@@ -632,7 +638,8 @@ mod tests {
     #[test]
     fn certification_success_refills_next_term_anchor_window() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(1), NZU64!(5));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(1), TermLength::new(NZU64!(5)));
         let mut outstanding = BTreeSet::new();
 
         let nullification_v14 = build_nullification(&schemes, &verifier, View::new(14));
@@ -661,7 +668,8 @@ mod tests {
     #[test]
     fn finalization_upgrades_certified_notarization_at_same_view() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), NZU64!(1));
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
         let effects = state.handle(Certificate::Notarization(notarization_v5.clone()), None);

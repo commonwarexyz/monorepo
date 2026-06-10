@@ -9,7 +9,7 @@ use crate::{
         scheme::Scheme,
         types::Certificate,
     },
-    types::{Epoch, View},
+    types::{Epoch, TermLength, View},
     Epochable, Viewable,
 };
 use bytes::Bytes;
@@ -27,7 +27,7 @@ use commonware_runtime::{
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
 use std::{
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroUsize,
     time::Duration,
 };
 use tracing::{debug, info_span};
@@ -47,7 +47,7 @@ pub struct Actor<
 
     epoch: Epoch,
     mailbox_size: NonZeroUsize,
-    term_length: NonZeroU64,
+    term_length: TermLength,
     fetch_timeout: Duration,
 
     state: State<S, D>,
@@ -455,7 +455,7 @@ mod tests {
                 mailbox_size: NZUsize!(8),
                 fetch_concurrent: NZUsize!(4),
                 fetch_timeout: Duration::from_secs(1),
-                term_length: NZU64!(5),
+                term_length: TermLength::new(NZU64!(5)),
             },
         );
         actor
@@ -519,7 +519,7 @@ mod tests {
                 schemes, verifier, ..
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let nullification = build_nullification(&schemes, &verifier, EPOCH, View::new(6));
-            assert!(View::new(6).same_term(View::new(10), NZU64!(5)));
+            assert!(View::new(6).same_term(View::new(10), TermLength::new(NZU64!(5))));
             let mut actor = build_actor(context, verifier);
 
             let validated = actor.validate(

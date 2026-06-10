@@ -9,7 +9,7 @@ use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
     simplex::{self, elector::Config as Elector, scheme, types::Context, Floor, Plan},
-    types::{Epoch, Epocher, FixedEpocher, Height, ViewDelta},
+    types::{Epoch, Epocher, FixedEpocher, Height, TermLength, ViewDelta},
     CertifiableAutomaton, Relay,
 };
 use commonware_cryptography::{
@@ -359,7 +359,7 @@ where
                 fetch_concurrent: NZUsize!(32),
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
-                term_length: commonware_utils::NZU64!(1),
+                term_length: TermLength::ONE,
                 term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 forwarding: simplex::ForwardingPolicy::Disabled,

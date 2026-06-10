@@ -30,7 +30,7 @@ use commonware_consensus::{
         mocks::scheme::{self as scheme_mocks, Scheme as MockScheme},
         types::Context,
     },
-    types::{Epoch, FixedEpocher, Height, Round, View, ViewDelta},
+    types::{Epoch, FixedEpocher, Height, Round, TermLength, View, ViewDelta},
     Block as ConsensusBlock, CertifiableBlock, Heightable,
 };
 use commonware_cryptography::{
@@ -601,7 +601,7 @@ impl EngineDefinition for SingleDbEngine {
             skip_timeout: Duration::from_secs(5),
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
-            term_length: NZU64!(1),
+            term_length: TermLength::ONE,
             term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(3),
             forwarding: ForwardingPolicy::Disabled,

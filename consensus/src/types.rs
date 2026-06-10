@@ -18,6 +18,8 @@
 //!   type safety to prevent mixing epoch, height, and view deltas. Type aliases [`EpochDelta`],
 //!   [`HeightDelta`], and [`ViewDelta`] are provided for convenience.
 //!
+//! - [`TermLength`]: The number of consecutive views in which a leader remains stable (a "term").
+//!
 //! - [`Epocher`]: Mechanism for determining epoch boundaries.
 //!
 //! - [`coding::Commitment`]: A unique identifier combining a block digest, coding digest, context
@@ -322,11 +324,11 @@ impl View {
     /// term boundaries are: [1, term_length], [term_length+1, 2*term_length], ...
     ///
     /// When `term_length` is 1, every view is its own term (no grouping).
-    pub const fn term_start(self, term_length: NonZeroU64) -> Self {
-        let term_length = term_length.get();
-        if term_length == 1 {
+    pub const fn term_start(self, term_length: TermLength) -> Self {
+        if term_length.is_one() {
             return self;
         }
+        let term_length = term_length.get();
         let Self(view) = self;
         if view == 0 {
             return self;
@@ -338,13 +340,13 @@ impl View {
     }
 
     /// Returns whether this view is the first view of its term.
-    pub const fn is_term_start(self, term_length: NonZeroU64) -> bool {
+    pub const fn is_term_start(self, term_length: TermLength) -> bool {
         let start = self.term_start(term_length);
         self.get() == start.get()
     }
 
     /// Returns whether this view shares a term with `other`.
-    pub const fn same_term(self, other: Self, term_length: NonZeroU64) -> bool {
+    pub const fn same_term(self, other: Self, term_length: TermLength) -> bool {
         let start = self.term_start(term_length);
         let other_start = other.term_start(term_length);
         start.get() == other_start.get()
@@ -355,8 +357,8 @@ impl View {
     /// See [`term_start`](View::term_start) for term boundary semantics.
     ///
     /// When `term_length` is 1, returns `self`.
-    pub const fn term_end(self, term_length: NonZeroU64) -> Self {
-        if self.0 == 0 || term_length.get() == 1 {
+    pub const fn term_end(self, term_length: TermLength) -> Self {
+        if self.0 == 0 || term_length.is_one() {
             return self;
         }
         let term_length = term_length.get();
@@ -371,7 +373,7 @@ impl View {
     /// Returns the first view of the term that follows this view's term.
     ///
     /// When `term_length` is 1, returns `self.next()`.
-    pub const fn next_term_start(self, term_length: NonZeroU64) -> Self {
+    pub const fn next_term_start(self, term_length: TermLength) -> Self {
         self.term_end(term_length).next()
     }
 }
@@ -485,6 +487,52 @@ pub type HeightDelta = Delta<Height>;
 /// [`ViewDelta`] represents a distance between views or a duration measured in views.
 /// It is commonly used for timeouts, activity tracking windows, and view arithmetic.
 pub type ViewDelta = Delta<View>;
+
+/// Number of consecutive views in which a leader remains stable (a "term").
+///
+/// When the term length is 1, every view is its own term and each view has an
+/// independently elected leader. When greater than 1, views are grouped into
+/// terms and the same leader serves for every view in the term.
+///
+/// Unlike [`ViewDelta`], which represents an offset added to or subtracted from
+/// a view, a term length is a period that partitions the view space. It is
+/// always non-zero.
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TermLength(NonZeroU64);
+
+impl TermLength {
+    /// A term length of one view (every view has an independently elected leader).
+    pub const ONE: Self = Self(NonZeroU64::MIN);
+
+    /// Creates a new term length.
+    pub const fn new(length: NonZeroU64) -> Self {
+        Self(length)
+    }
+
+    /// Returns the number of views per term.
+    pub const fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    /// Returns true when the term length is one, meaning every view is its own
+    /// term and stable leaders are disabled.
+    pub const fn is_one(self) -> bool {
+        self.0.get() == 1
+    }
+}
+
+impl Default for TermLength {
+    fn default() -> Self {
+        Self::ONE
+    }
+}
+
+impl Display for TermLength {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
 
 /// A unique identifier combining epoch and view for a consensus round.
 ///
@@ -1370,7 +1418,7 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).term_start(commonware_utils::NZU64!(term_length)),
+                View::new(view).term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
                 View::new(expected),
                 "view={view}, term_length={term_length}"
             );
@@ -1392,7 +1440,7 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).term_end(commonware_utils::NZU64!(term_length)),
+                View::new(view).term_end(TermLength::new(commonware_utils::NZU64!(term_length))),
                 View::new(expected),
                 "view={view}, term_length={term_length}"
             );
@@ -1413,7 +1461,7 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).is_term_start(commonware_utils::NZU64!(term_length)),
+                View::new(view).is_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
                 expected,
                 "view={view}, term_length={term_length}"
             );
@@ -1434,7 +1482,7 @@ mod tests {
         ];
         for (a, b, term_length, expected) in cases {
             assert_eq!(
-                View::new(a).same_term(View::new(b), commonware_utils::NZU64!(term_length)),
+                View::new(a).same_term(View::new(b), TermLength::new(commonware_utils::NZU64!(term_length))),
                 expected,
                 "a={a}, b={b}, term_length={term_length}"
             );
@@ -1455,7 +1503,7 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).next_term_start(commonware_utils::NZU64!(term_length)),
+                View::new(view).next_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
                 View::new(expected),
                 "view={view}, term_length={term_length}"
             );
@@ -1465,13 +1513,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "view term_end overflow")]
     fn test_view_term_end_overflow_panics() {
-        let _ = View::new(u64::MAX).term_end(commonware_utils::NZU64!(2));
+        let _ = View::new(u64::MAX).term_end(TermLength::new(commonware_utils::NZU64!(2)));
     }
 
     #[test]
     #[should_panic(expected = "view overflow")]
     fn test_view_next_term_start_overflow_panics() {
-        let _ = View::new(u64::MAX).next_term_start(commonware_utils::NZU64!(1));
+        let _ = View::new(u64::MAX).next_term_start(TermLength::ONE);
     }
 
     #[test]

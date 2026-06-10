@@ -50,7 +50,7 @@ mod gui;
 use clap::{value_parser, Arg, Command};
 use commonware_consensus::{
     simplex::{self, elector::RoundRobin},
-    types::{Epoch, ViewDelta},
+    types::{Epoch, TermLength, ViewDelta},
 };
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager as _};
@@ -226,7 +226,7 @@ fn main() {
             fetch_concurrent: NZUsize!(32),
             page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
-            term_length: commonware_utils::NZU64!(1),
+            term_length: TermLength::ONE,
             term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(12),
             forwarding: simplex::ForwardingPolicy::Disabled,

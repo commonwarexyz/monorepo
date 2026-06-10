@@ -7,7 +7,7 @@ use crate::{
         scheme::Scheme,
         types::{Certificate, Notarize, Proposal, Vote},
     },
-    types::{Epoch, Participant, Round, View},
+    types::{Epoch, Participant, Round, TermLength, View},
     Viewable,
 };
 use commonware_codec::{Decode, Encode};
@@ -15,7 +15,6 @@ use commonware_cryptography::{certificate, Hasher};
 use commonware_p2p::{Receiver, Recipients, Sender};
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Spawner};
 use commonware_utils::ordered::Quorum;
-use core::num::NonZeroU64;
 use rand::{seq::IteratorRandom, Rng};
 use std::{collections::HashSet, sync::Arc};
 
@@ -23,7 +22,7 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>, H: Hasher> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
-    pub term_length: NonZeroU64,
+    pub term_length: TermLength,
     pub relay: Arc<Relay<H::Digest, S::PublicKey>>,
     pub hasher: H,
 }

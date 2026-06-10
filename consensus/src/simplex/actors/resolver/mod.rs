@@ -8,12 +8,11 @@ mod actor;
 mod ingress;
 mod state;
 
-use crate::types::Epoch;
+use crate::types::{Epoch, TermLength};
 pub use actor::Actor;
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
-use core::num::NonZeroU64;
 pub use ingress::Mailbox;
 #[cfg(test)]
 pub use ingress::MailboxMessage;
@@ -31,5 +30,5 @@ pub struct Config<S: Scheme, B: Blocker, T: Strategy> {
     pub mailbox_size: NonZeroUsize,
     pub fetch_concurrent: NonZeroUsize,
     pub fetch_timeout: Duration,
-    pub term_length: NonZeroU64,
+    pub term_length: TermLength,
 }

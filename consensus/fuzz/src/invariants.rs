@@ -6,27 +6,26 @@ use crate::{
 use commonware_codec::{Encode, Read};
 use commonware_consensus::{
     simplex::{elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme},
-    types::View,
+    types::{TermLength, View},
 };
 use commonware_cryptography::{
     certificate::{self, Signers},
     sha256::Digest as Sha256Digest,
 };
-use core::num::NonZeroU64;
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
 fn nullification_conflicts(
     nullified_view: u64,
     finalized_view: u64,
-    term_length: NonZeroU64,
+    term_length: TermLength,
 ) -> bool {
     let nullified_view = View::new(nullified_view);
     let finalized_view = View::new(finalized_view);
     nullified_view <= finalized_view && nullified_view.same_term(finalized_view, term_length)
 }
 
-pub fn check<P: Simplex>(n: u32, term_length: NonZeroU64, replicas: Vec<ReplicaState>) {
+pub fn check<P: Simplex>(n: u32, term_length: TermLength, replicas: Vec<ReplicaState>) {
     let threshold = bounds::quorum(n) as usize;
 
     // Invariant: agreement
@@ -320,7 +319,7 @@ mod tests {
         let result = panic::catch_unwind(|| {
             check::<SimplexEd25519>(
                 4,
-                NZU64!(5),
+                TermLength::new(NZU64!(5)),
                 vec![(notarizations, nullifications, finalizations)],
             );
         });

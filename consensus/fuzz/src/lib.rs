@@ -20,7 +20,7 @@ use commonware_consensus::{
         types::{Certificate, Vote},
         Engine, Floor, ForwardingPolicy,
     },
-    types::{Delta, Epoch, View},
+    types::{Delta, Epoch, TermLength, View},
     Monitor, Viewable,
 };
 use commonware_cryptography::{
@@ -45,7 +45,7 @@ pub use simplex::{
 };
 use std::{
     collections::HashMap,
-    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
+    num::{NonZeroU16, NonZeroUsize},
     panic,
     sync::Arc,
     time::Duration,
@@ -124,7 +124,7 @@ async fn setup_degraded_network<E: Clock>(
 pub struct FuzzInput {
     pub raw_bytes: Vec<u8>,
     pub required_containers: u64,
-    pub term_length: NonZeroU64,
+    pub term_length: TermLength,
     pub degraded_network: bool,
     pub configuration: Configuration,
     pub partition: Partition,
@@ -154,7 +154,7 @@ impl Arbitrary<'_> for FuzzInput {
 
         let required_containers =
             u.int_in_range(MIN_REQUIRED_CONTAINERS..=MAX_REQUIRED_CONTAINERS)?;
-        let term_length = NZU64!(u.int_in_range(1..=5)?);
+        let term_length = TermLength::new(NZU64!(u.int_in_range(1..=5)?));
 
         // SmallScope mutations with round-based injections - 80%,
         // AnyScope mutations - 10%,
@@ -347,7 +347,7 @@ fn spawn_honest_validator<
         &Oracle<Ed25519PublicKey, deterministic::Context>,
         &[Ed25519PublicKey],
     ),
-    term_length: NonZeroU64,
+    term_length: TermLength,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
     relay: Arc<relay::Relay<Sha256Digest, Ed25519PublicKey>>,

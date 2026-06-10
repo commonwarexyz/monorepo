@@ -72,12 +72,11 @@
 
 use crate::{
     simplex::elector::{Config as ElectorConfig, Elector as Elected},
-    types::{Participant, Round, View},
+    types::{Participant, Round, TermLength, View},
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_p2p::simulated::SplitTarget;
 use commonware_utils::ordered::Set;
-use core::num::NonZeroU64;
 use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
@@ -175,7 +174,7 @@ impl Scenario {
     pub fn partitions_with_term_length<P: Clone>(
         &self,
         view: View,
-        term_length: NonZeroU64,
+        term_length: TermLength,
         participants: &[P],
     ) -> (Vec<P>, Vec<P>) {
         let idx = term_index(view, term_length);
@@ -210,7 +209,7 @@ impl Scenario {
     pub fn route_with_term_length<P: PartialEq>(
         &self,
         view: View,
-        term_length: NonZeroU64,
+        term_length: TermLength,
         sender: &P,
         participants: &[P],
     ) -> SplitTarget {
@@ -231,7 +230,7 @@ fn view_index(view: View) -> usize {
     usize::try_from(view.get().saturating_sub(1)).expect("view index fits in usize")
 }
 
-fn term_index(view: View, term_length: NonZeroU64) -> usize {
+fn term_index(view: View, term_length: TermLength) -> usize {
     let term_start = view.term_start(term_length);
     let idx = term_start.get().saturating_sub(1) / term_length.get();
     usize::try_from(idx).expect("term index fits in usize")
@@ -263,7 +262,7 @@ pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec
 /// Returns the strict disjoint split for the leader term containing `view`.
 pub fn view_partitions_with_term_length<P: Clone>(
     view: View,
-    term_length: NonZeroU64,
+    term_length: TermLength,
     participants: &[P],
 ) -> (Vec<P>, Vec<P>) {
     view_partitions(view.term_start(term_length), participants)
@@ -283,7 +282,7 @@ pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[
 /// Routes a sender according to [`view_partitions_with_term_length`].
 pub fn view_route_with_term_length<P: Clone + PartialEq>(
     view: View,
-    term_length: NonZeroU64,
+    term_length: TermLength,
     sender: &P,
     participants: &[P],
 ) -> SplitTarget {
@@ -338,7 +337,7 @@ impl<C> Elector<C> {
 pub struct ElectorState<E> {
     fallback: E,
     round_leaders: Arc<[Participant]>,
-    term_length: NonZeroU64,
+    term_length: TermLength,
 }
 
 impl<S, C> ElectorConfig<S> for Elector<C>
@@ -348,7 +347,7 @@ where
 {
     type Elector = ElectorState<C::Elector>;
 
-    fn build(self, participants: &Set<S::PublicKey>, term_length: NonZeroU64) -> Self::Elector {
+    fn build(self, participants: &Set<S::PublicKey>, term_length: TermLength) -> Self::Elector {
         ElectorState {
             fallback: self.fallback.build(participants, term_length),
             round_leaders: self.round_leaders,
@@ -1802,7 +1801,7 @@ mod tests {
             ],
         };
         let participants: Vec<u32> = (0..3).collect();
-        let term_length = NZU64!(3);
+        let term_length = TermLength::new(NZU64!(3));
 
         let (primary, secondary) =
             scenario.partitions_with_term_length(View::new(3), term_length, &participants);
@@ -1889,7 +1888,7 @@ mod tests {
     #[test]
     fn view_helpers_can_follow_stable_leader_terms() {
         let participants: Vec<u32> = (0..5).collect();
-        let term_length = NZU64!(3);
+        let term_length = TermLength::new(NZU64!(3));
 
         assert_eq!(
             view_partitions_with_term_length(View::new(3), term_length, &participants),
@@ -2267,12 +2266,12 @@ mod tests {
                 framework.participants,
             ),
             &participants,
-            NZU64!(1),
+            TermLength::ONE,
         );
         let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
             RoundRobin::<Sha256>::default(),
             &participants,
-            NZU64!(1),
+            TermLength::ONE,
         );
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
@@ -2310,7 +2309,7 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
-        let term_length = NZU64!(3);
+        let term_length = TermLength::new(NZU64!(3));
         let twins = <Elector<RoundRobin<Sha256>> as ElectorConfig<ed25519::Scheme>>::build(
             Elector::new(RoundRobin::<Sha256>::default(), &scenario, 3),
             &participants,
