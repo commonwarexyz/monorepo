@@ -192,12 +192,12 @@ where
     /// next key, and re-reading them costs more in cache upkeep than it saves.
     ///
     /// Only committed-snapshot resolutions are cached. A cached location doubles as the
-    /// key's committed provenance (`base_old_loc`), which holds because a committed-resolved
-    /// key was in no live ancestor diff and a legal intervening commit (applying this batch's
-    /// own ancestors) can only relocate keys present in an ancestor diff. Ancestor-diff
-    /// resolutions are never cached: their op-gen position is an uncommitted location whose
-    /// committed provenance differs, and re-resolving them at merkleize is in-memory work (no
-    /// journal read is saved).
+    /// key's previous committed location (`base_old_loc`), which holds because a
+    /// committed-resolved key was in no live ancestor diff and a legal intervening commit
+    /// (applying this batch's own ancestors) can only relocate keys present in an ancestor
+    /// diff. Ancestor-diff resolutions are never cached: their op-gen position is an
+    /// uncommitted location, and re-resolving them at merkleize is in-memory work (no journal
+    /// read is saved).
     ///
     /// Interior-mutable because reads take `&self`; never held across an await.
     resolved: Mutex<ResolvedReads<F, U>>,
@@ -435,11 +435,6 @@ impl<'a, K: Ord, F: Family, V> AppliedAncestorResolver<'a, K, F, V> {
 
 /// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
 /// read guard, returning the next `floor`.
-///
-/// The committed prefix is indexed by `bitmap`, so unset bits can be skipped without reading
-/// their operations. Locations beyond the bitmap's length are uncommitted ancestor operations
-/// and remain sequential candidates. `current::batch::fill_candidates` mirrors this contract
-/// over a layered `BitmapBatch` chain; both must obey it.
 fn fill_candidates<F: Family, const N: usize>(
     bitmap: &Shared<N>,
     floor: Location<F>,
@@ -743,8 +738,8 @@ where
                     let Some(key) = op.key().cloned() else {
                         continue; // skip CommitFloor and other non-keyed ops
                     };
-                    // A single batch-diff lookup drives the activity check, the base
-                    // provenance, and the in-place diff update below. Revalidation is required
+                    // A single batch-diff lookup drives the activity check, the previous
+                    // committed location, and the in-place diff update below. Revalidation is required
                     // even for candidates whose committed bitmap bit is set: this batch's diff
                     // or an uncommitted ancestor diff may supersede the committed location, and
                     // neither source is reflected in the bitmap.
@@ -928,9 +923,8 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. Committed-DB locations resolved by the read are cached on the batch; unordered
-    /// `merkleize` consumes them to skip re-reading those keys. Keys answered by pending
-    /// mutations or ancestor diffs cache nothing (merkleize re-resolves them in memory).
+    /// keys. Each unique read resolved from the committed DB is cached on the batch for reuse
+    /// at merkleize.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -1082,8 +1076,8 @@ where
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
 
-        // Write a user mutation at the next batch location, preserving the committed-base
-        // provenance of the operation it supersedes.
+        // Write a user mutation at the next batch location, preserving the previous committed
+        // location of the key it supersedes.
         let mut emit = |key: K, base_old_loc: Option<Location<F>>, mutation: Option<V::Value>| {
             let new_loc = Location::new(m.base_size + ops.len() as u64);
             match mutation {

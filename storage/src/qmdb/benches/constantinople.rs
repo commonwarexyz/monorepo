@@ -2,16 +2,16 @@
 //!
 //! Times the full per-block state pipeline (get_many load, batch writes, merkleize, root) on the
 //! tokio runtime with EightCap, matching the production validator shape. Runs against the
-//! unordered or ordered fixed `any`/`current` DBs over `mmr`. Prints per-iteration latency with
+//! unordered or ordered fixed `any`/`current` DBs over `mmb`. Prints per-iteration latency with
 //! a load/write/merkleize phase split and the speculative root (a cross-binary parity check:
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
 //!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates]
 //!
-//! - db: one of "any::unordered::fixed::mmr", "any::ordered::fixed::mmr",
-//!   "any::unordered::variable::mmr", "current::unordered::fixed::mmr", or
-//!   "current::ordered::fixed::mmr", matching the qmdb criterion bench variant names
+//! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
+//!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
+//!   "current::ordered::fixed::mmb", matching the qmdb criterion bench variant names
 //!   (required; without it the harness no-ops so blanket `cargo bench --benches`
 //!   invocations skip it)
 //! - depth: number of pending ancestor batches under the timed batch
@@ -28,7 +28,7 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
-    merkle::{full, mmr},
+    merkle::{full, mmb},
     qmdb::{any::FixedConfig, current::FixedConfig as CurrentFixedConfig},
     translator::EightCap,
 };
@@ -42,7 +42,7 @@ use std::{
 
 type Digest = <Sha256 as Hasher>::Digest;
 type AnyDb = commonware_storage::qmdb::any::unordered::fixed::Db<
-    mmr::Family,
+    mmb::Family,
     Context,
     Digest,
     Digest,
@@ -52,7 +52,7 @@ type AnyDb = commonware_storage::qmdb::any::unordered::fixed::Db<
 >;
 type AnyMerkleized = std::sync::Arc<
     commonware_storage::qmdb::any::batch::MerkleizedBatch<
-        mmr::Family,
+        mmb::Family,
         Digest,
         commonware_storage::qmdb::any::unordered::fixed::Update<Digest, Digest>,
         Rayon,
@@ -60,7 +60,7 @@ type AnyMerkleized = std::sync::Arc<
 >;
 const CHUNK_SIZE: usize = 32;
 type CurrentDb = commonware_storage::qmdb::current::unordered::fixed::Db<
-    mmr::Family,
+    mmb::Family,
     Context,
     Digest,
     Digest,
@@ -71,7 +71,7 @@ type CurrentDb = commonware_storage::qmdb::current::unordered::fixed::Db<
 >;
 type CurrentMerkleized = std::sync::Arc<
     commonware_storage::qmdb::current::batch::MerkleizedBatch<
-        mmr::Family,
+        mmb::Family,
         Digest,
         commonware_storage::qmdb::any::unordered::fixed::Update<Digest, Digest>,
         CHUNK_SIZE,
@@ -79,7 +79,7 @@ type CurrentMerkleized = std::sync::Arc<
     >,
 >;
 type AnyOrderedDb = commonware_storage::qmdb::any::ordered::fixed::Db<
-    mmr::Family,
+    mmb::Family,
     Context,
     Digest,
     Digest,
@@ -89,14 +89,14 @@ type AnyOrderedDb = commonware_storage::qmdb::any::ordered::fixed::Db<
 >;
 type AnyOrderedMerkleized = std::sync::Arc<
     commonware_storage::qmdb::any::batch::MerkleizedBatch<
-        mmr::Family,
+        mmb::Family,
         Digest,
         commonware_storage::qmdb::any::ordered::fixed::Update<Digest, Digest>,
         Rayon,
     >,
 >;
 type CurrentOrderedDb = commonware_storage::qmdb::current::ordered::fixed::Db<
-    mmr::Family,
+    mmb::Family,
     Context,
     Digest,
     Digest,
@@ -107,7 +107,7 @@ type CurrentOrderedDb = commonware_storage::qmdb::current::ordered::fixed::Db<
 >;
 type CurrentOrderedMerkleized = std::sync::Arc<
     commonware_storage::qmdb::current::batch::MerkleizedBatch<
-        mmr::Family,
+        mmb::Family,
         Digest,
         commonware_storage::qmdb::any::ordered::fixed::Update<Digest, Digest>,
         CHUNK_SIZE,
@@ -116,7 +116,7 @@ type CurrentOrderedMerkleized = std::sync::Arc<
 >;
 
 type AnyVarDb = commonware_storage::qmdb::any::unordered::variable::Db<
-    mmr::Family,
+    mmb::Family,
     Context,
     Digest,
     Digest,
@@ -126,7 +126,7 @@ type AnyVarDb = commonware_storage::qmdb::any::unordered::variable::Db<
 >;
 type AnyVarMerkleized = std::sync::Arc<
     commonware_storage::qmdb::any::batch::MerkleizedBatch<
-        mmr::Family,
+        mmb::Family,
         Digest,
         commonware_storage::qmdb::any::unordered::variable::Update<Digest, Digest>,
         Rayon,
@@ -279,13 +279,13 @@ fn main() {
     assert!(
         matches!(
             db_kind.as_str(),
-            "any::unordered::fixed::mmr"
-                | "any::ordered::fixed::mmr"
-                | "any::unordered::variable::mmr"
-                | "current::unordered::fixed::mmr"
-                | "current::ordered::fixed::mmr"
+            "any::unordered::fixed::mmb"
+                | "any::ordered::fixed::mmb"
+                | "any::unordered::variable::mmb"
+                | "current::unordered::fixed::mmb"
+                | "current::ordered::fixed::mmb"
         ),
-        "db: any::unordered::fixed::mmr|any::ordered::fixed::mmr|any::unordered::variable::mmr|current::unordered::fixed::mmr|current::ordered::fixed::mmr"
+        "db: any::unordered::fixed::mmb|any::ordered::fixed::mmb|any::unordered::variable::mmb|current::unordered::fixed::mmb|current::ordered::fixed::mmb"
     );
     assert!(
         args.iters > 0 && args.num_keys > 0 && args.num_updates > 0,
@@ -315,7 +315,7 @@ fn main() {
             write_buffer: WRITE_BUFFER,
         };
         match db_kind.as_str() {
-            "current::unordered::fixed::mmr" => {
+            "current::unordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
                     merkle_config,
                     journal_config,
@@ -326,11 +326,11 @@ fn main() {
                 run_pipeline!(
                     db,
                     args,
-                    "current::unordered::fixed::mmr",
+                    "current::unordered::fixed::mmb",
                     CurrentMerkleized
                 )
             }
-            "current::ordered::fixed::mmr" => {
+            "current::ordered::fixed::mmb" => {
                 let cfg = CurrentFixedConfig {
                     merkle_config,
                     journal_config,
@@ -341,20 +341,20 @@ fn main() {
                 run_pipeline!(
                     db,
                     args,
-                    "current::ordered::fixed::mmr",
+                    "current::ordered::fixed::mmb",
                     CurrentOrderedMerkleized
                 )
             }
-            "any::ordered::fixed::mmr" => {
+            "any::ordered::fixed::mmb" => {
                 let cfg = FixedConfig {
                     merkle_config,
                     journal_config,
                     translator: EightCap,
                 };
                 let db = AnyOrderedDb::init(ctx.child("db"), cfg).await.unwrap();
-                run_pipeline!(db, args, "any::ordered::fixed::mmr", AnyOrderedMerkleized)
+                run_pipeline!(db, args, "any::ordered::fixed::mmb", AnyOrderedMerkleized)
             }
-            "any::unordered::variable::mmr" => {
+            "any::unordered::variable::mmb" => {
                 let cfg = commonware_storage::qmdb::any::VariableConfig {
                     merkle_config,
                     journal_config: VConfig {
@@ -368,7 +368,7 @@ fn main() {
                     translator: EightCap,
                 };
                 let db = AnyVarDb::init(ctx.child("db"), cfg).await.unwrap();
-                run_pipeline!(db, args, "any::unordered::variable::mmr", AnyVarMerkleized)
+                run_pipeline!(db, args, "any::unordered::variable::mmb", AnyVarMerkleized)
             }
             _ => {
                 let cfg = FixedConfig {
@@ -377,7 +377,7 @@ fn main() {
                     translator: EightCap,
                 };
                 let db = AnyDb::init(ctx.child("db"), cfg).await.unwrap();
-                run_pipeline!(db, args, "any::unordered::fixed::mmr", AnyMerkleized)
+                run_pipeline!(db, args, "any::unordered::fixed::mmb", AnyMerkleized)
             }
         }
     });
