@@ -266,9 +266,6 @@ impl OwnerRef {
     /// `self` must be a live external owner, and the caller must bound the
     /// returned borrow by the owner's liveness (the handle that supplied
     /// `self` keeps a reference for at least that long).
-    // TODO(iobuf-v2 step 2): the `From<IoBuf> for Bytes` slice_ref fast path
-    // consumes this; drop the allow once that lands.
-    #[allow(dead_code)]
     #[inline(always)]
     pub(crate) unsafe fn external_bytes<'a>(self) -> &'a Bytes {
         // SAFETY: guaranteed by the caller.
@@ -650,7 +647,7 @@ impl PooledBuffer {
     /// The pooled header must have been initialized with
     /// [`Self::init_owner_header`].
     #[inline(always)]
-    pub(crate) unsafe fn capacity(&self) -> usize {
+    pub(crate) const unsafe fn capacity(&self) -> usize {
         // SAFETY: guaranteed by the caller.
         unsafe { self.header.as_ref().capacity }
     }
@@ -666,7 +663,7 @@ impl PooledBuffer {
     /// The pooled header must have been initialized with
     /// [`Self::init_owner_header`].
     #[inline(always)]
-    pub(crate) unsafe fn slot(&self) -> u32 {
+    pub(crate) const unsafe fn slot(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
         unsafe { self.header.as_ref().slot }
     }
@@ -693,7 +690,7 @@ impl PooledBuffer {
     /// This pooled buffer must be checked out or parked in a thread-local cache,
     /// so its lease field is initialized.
     #[inline(always)]
-    pub(crate) unsafe fn lease(&self) -> &SizeClassLease {
+    pub(crate) const unsafe fn lease(&self) -> &SizeClassLease {
         // SAFETY: guaranteed by the caller.
         unsafe { &*self.header.as_ref().lease.as_ptr() }
     }
@@ -706,7 +703,7 @@ impl PooledBuffer {
     /// the buffer must not be treated as checked out or locally cached until a
     /// new lease is initialized.
     #[inline(always)]
-    pub(crate) unsafe fn take_lease(&mut self) -> SizeClassLease {
+    pub(crate) const unsafe fn take_lease(&mut self) -> SizeClassLease {
         // SAFETY: guaranteed by the caller.
         unsafe { self.header.as_mut().lease.assume_init_read() }
     }
@@ -892,7 +889,7 @@ fn heap_layout(capacity: usize, alignment: usize) -> (Layout, usize) {
 /// `ptr` must be the base of an allocation created with `layout`, and `layout`
 /// must be a full pooled layout (see [`pooled_layout`]).
 #[inline(always)]
-unsafe fn pooled_header_for_layout(ptr: NonNull<u8>, layout: Layout) -> NonNull<PooledHeader> {
+const unsafe fn pooled_header_for_layout(ptr: NonNull<u8>, layout: Layout) -> NonNull<PooledHeader> {
     let header_offset = layout
         .size()
         .checked_sub(size_of::<PooledHeader>())
@@ -987,10 +984,8 @@ unsafe fn release_heap(header: NonNull<HeapHeader>) {
 #[inline]
 unsafe fn release_external(owner: NonNull<ExternalOwner>) {
     // SAFETY: guaranteed by the caller.
-    debug_assert_eq!(
-        unsafe { owner.as_ref() }.refs.load(Ordering::Relaxed),
-        1
-    );
+    let owner_ref = unsafe { owner.as_ref() };
+    debug_assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
     // SAFETY: the owner box was leaked at construction; dropping it here drops
     // the inner `Bytes` exactly once.
     drop(unsafe { Box::from_raw(owner.as_ptr()) });
