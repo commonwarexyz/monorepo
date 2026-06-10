@@ -1772,7 +1772,7 @@ mod compact_variable_mmr {
                 state: fetched.state,
                 root: target_b.root,
             };
-            let imported = <ClientDb as sync::compact::Database>::from_validated_state(
+            let mut imported = <ClientDb as sync::compact::Database>::from_validated_state(
                 context.child("import"),
                 client_cfg.clone(),
                 validated,
@@ -1780,6 +1780,10 @@ mod compact_variable_mmr {
             .await
             .unwrap();
             assert_eq!(imported.target(), target_b);
+
+            // Rewind is rejected until the import is persisted, even to the imported leaf
+            // count itself: the fast path must not report unpersisted state as durable.
+            assert!(imported.rewind(target_b.leaf_count).await.is_err());
             drop(imported);
 
             // The dropped import never touched the journal: state A is still there.

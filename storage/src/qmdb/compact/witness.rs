@@ -105,8 +105,8 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     cache: RwLock<VerifiedWitness<F, D>>,
     /// Whether the cached witness came from compact sync and has not been written to the
     /// journal yet. While set, the journal still holds the partition's previous contents; the
-    /// first persist replaces them with the cached witness and clears this flag. Accessed only
-    /// under `sync_lock`, so loads and stores are `Relaxed`.
+    /// first persist replaces them with the cached witness and clears this flag. Mutated only
+    /// under `sync_lock`; reads hold `sync_lock` or the db's `&mut`, so `Relaxed` suffices.
     import_pending: AtomicBool,
     /// Serializes persist/rewind/prune.
     sync_lock: AsyncMutex<()>,
@@ -196,7 +196,9 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// of the restored tip.
     ///
     /// Rewinding to a pruned leaf count, or one no entry commits, returns
-    /// [`merkle::Error::RewindBeyondHistory`]. The rewind is made durable before returning.
+    /// [`merkle::Error::RewindBeyondHistory`]. The target entry is verified before the journal
+    /// is truncated, so a corrupt entry fails the rewind with the journal intact. The rewind is
+    /// made durable before returning.
     pub(crate) async fn rewind<H, S, Op>(
         &self,
         merkle: &compact::Merkle<F, D, S>,
@@ -212,26 +214,25 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         let _guard = self.sync_lock.lock().await;
         self.check_import_persisted()?;
 
-        let pos = self
+        let (pos, entry) = self
             .position_of(target)
             .await?
             .ok_or(Error::Merkle(merkle::Error::RewindBeyondHistory))?;
-        self.journal.rewind(pos + 1).await?;
-        self.journal.sync().await?;
-
-        let (witness, op) = load_tip::<E, F, H, S, Op>(
-            &self.journal,
+        let (witness, op) = rebuild_and_verify::<F, D, H, S, Op>(
+            entry,
             merkle,
             commit_codec_config,
             last_commit_floor,
-        )
-        .await?;
+        )?;
+        self.journal.rewind(pos + 1).await?;
+        self.journal.sync().await?;
         self.replace(witness);
         Ok(op)
     }
 
     /// Drop all entries committing fewer than `pruning_boundary` leaves, bounding how far back
-    /// [`Self::rewind`] can reach. The tip entry always survives.
+    /// [`Self::rewind`] can reach. The tip entry always survives. Only whole journal sections
+    /// are dropped, so some entries below the boundary may survive.
     pub(crate) async fn prune(&self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         let _guard = self.sync_lock.lock().await;
         self.check_import_persisted()?;
@@ -252,6 +253,11 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok(())
     }
 
+    /// Whether a compact-sync import is not yet durable.
+    pub(crate) fn import_pending(&self) -> bool {
+        self.import_pending.load(Ordering::Relaxed)
+    }
+
     /// Reject operations on a journal whose contents an unpersisted compact-sync import is
     /// about to replace.
     fn check_import_persisted(&self) -> Result<(), Error<F>> {
@@ -261,16 +267,19 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         Ok(())
     }
 
-    /// Find the journal position of the entry committing exactly `target` leaves, or `None`
-    /// if no retained entry does.
-    async fn position_of(&self, target: Location<F>) -> Result<Option<u64>, Error<F>> {
+    /// Find the journal position and entry committing exactly `target` leaves, or `None` if
+    /// no retained entry does.
+    async fn position_of(
+        &self,
+        target: Location<F>,
+    ) -> Result<Option<(u64, Witness<F, D>)>, Error<F>> {
         let reader = self.journal.reader().await;
         let pos = Self::first_at_or_above(&reader, target).await?;
         if pos >= reader.bounds().end {
             return Ok(None);
         }
         let entry = reader.read(pos).await?;
-        Ok((entry.proof.leaves == target).then_some(pos))
+        Ok((entry.proof.leaves == target).then_some((pos, entry)))
     }
 
     /// Binary search for the first retained position whose entry commits at least `leaf_count`
@@ -374,10 +383,6 @@ pub(crate) fn validate_inactivity_floor<F: Family>(
 }
 
 /// Load the tip witness from the journal and rebuild the Merkle from it.
-///
-/// The Merkle is reset to the entry's `(leaf_count, pinned_nodes)`, the root is recomputed from
-/// the rebuilt frontier, and the persisted proof is verified against that root before anything
-/// is served.
 async fn load_tip<E, F, H, S, Op>(
     journal: &Journal<E, F, H::Digest>,
     merkle: &compact::Merkle<F, H::Digest, S>,
@@ -399,8 +404,32 @@ where
         let reader = journal.reader().await;
         reader.read(size - 1).await?
     };
+    rebuild_and_verify::<F, H::Digest, H, S, Op>(
+        entry,
+        merkle,
+        commit_codec_config,
+        last_commit_floor,
+    )
+}
 
-    let leaf_count = entry.proof.leaves;
+/// Rebuild the Merkle from `witness` and verify the witness against it.
+///
+/// The Merkle is reset to the witness's `(leaf_count, pinned_nodes)`, the root is recomputed
+/// from the rebuilt frontier, and the witness's proof is verified against that root.
+fn rebuild_and_verify<F, D, H, S, Op>(
+    witness: Witness<F, D>,
+    merkle: &compact::Merkle<F, D, S>,
+    commit_codec_config: &Op::Cfg,
+    last_commit_floor: impl FnOnce(&Op) -> Option<Location<F>>,
+) -> Result<(VerifiedWitness<F, D>, Op), Error<F>>
+where
+    F: Family,
+    D: Digest,
+    H: Hasher<Digest = D>,
+    S: Strategy,
+    Op: Read,
+{
+    let leaf_count = witness.proof.leaves;
     if leaf_count == 0 {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
@@ -408,14 +437,14 @@ where
     // Decode the commit op to get the inactivity floor, which determines the inactive peak
     // boundary used for root computation.
     let last_commit_loc = Location::new(*leaf_count - 1);
-    let last_commit_op = Op::decode_cfg(entry.op_bytes.as_ref(), commit_codec_config)
+    let last_commit_op = Op::decode_cfg(witness.op_bytes.as_ref(), commit_codec_config)
         .map_err(|_| Error::DataCorrupted("invalid commit operation"))?;
     let inactivity_floor_loc = last_commit_floor(&last_commit_op)
         .ok_or(Error::DataCorrupted("last operation was not a commit"))?;
     validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
 
     merkle
-        .reset_to(leaf_count, entry.pinned_nodes.clone())
+        .reset_to(leaf_count, witness.pinned_nodes.clone())
         .map_err(|_| Error::DataCorrupted("invalid compact witness"))?;
     let inactive_peaks =
         F::inactive_peaks(F::location_to_position(leaf_count), inactivity_floor_loc);
@@ -423,15 +452,21 @@ where
     let root = merkle
         .root(&hasher, inactive_peaks)
         .map_err(|_| Error::DataCorrupted("failed to compute compact witness root"))?;
-    if !entry.proof.verify_range_inclusion(
+    if !witness.proof.verify_range_inclusion(
         &hasher,
-        &[entry.op_bytes.as_slice()],
+        &[witness.op_bytes.as_slice()],
         last_commit_loc,
         &root,
     ) {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
-    Ok((VerifiedWitness { entry, root }, last_commit_op))
+    Ok((
+        VerifiedWitness {
+            entry: witness,
+            root,
+        },
+        last_commit_op,
+    ))
 }
 
 /// Open the witness store for an existing or new compact db, returning it with the decoded
@@ -492,6 +527,31 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// Corrupt the entry at `pos` with `f`, preserving the entries above it.
+    pub(crate) async fn corrupt_entry<E, F, D>(
+        journal: &Journal<E, F, D>,
+        pos: u64,
+        f: impl FnOnce(&mut Witness<F, D>),
+    ) where
+        E: Context,
+        F: Family,
+        D: Digest,
+    {
+        let mut entries = Vec::new();
+        {
+            let reader = journal.reader().await;
+            for p in pos..reader.bounds().end {
+                entries.push(reader.read(p).await.unwrap());
+            }
+        }
+        f(&mut entries[0]);
+        journal.rewind(pos).await.unwrap();
+        for entry in &entries {
+            journal.append(entry).await.unwrap();
+        }
+        journal.sync().await.unwrap();
+    }
 
     /// Read the tip witness entry's components.
     pub(crate) async fn tip<E, F, D>(journal: &Journal<E, F, D>) -> (Vec<u8>, Proof<F, D>, Vec<D>)

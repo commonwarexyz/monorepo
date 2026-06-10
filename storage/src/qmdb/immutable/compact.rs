@@ -513,8 +513,8 @@ where
     }
 
     /// Rewind the db to the synced commit with exactly `target` operations, discarding any
-    /// uncommitted batches and any later commits. The rewind is synced before this method
-    /// returns.
+    /// uncommitted batches and any later commits. The rewind is made durable before this
+    /// method returns.
     ///
     /// # Errors
     ///
@@ -525,8 +525,11 @@ where
     where
         F: Family,
     {
-        // Fast path: already exactly at `target` with no uncommitted state.
-        if self.size() == target && self.witness.with(|w| w.leaf_count()) == target {
+        // Fast path: already durably at `target` with no uncommitted state.
+        if self.size() == target
+            && self.witness.with(|w| w.leaf_count()) == target
+            && !self.witness.import_pending()
+        {
             return Ok(());
         }
 
@@ -548,7 +551,8 @@ where
         Ok(())
     }
 
-    /// Drop witnesses for commits with fewer than `pruning_boundary` operations.
+    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Only whole
+    /// journal sections are dropped, so some witness below the boundary may survive.
     pub async fn prune(&self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.witness.prune(pruning_boundary).await
     }
@@ -937,6 +941,71 @@ mod tests {
             )
             .await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_rejects_corrupt_target_entry() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-corrupt-rewind-target";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                    .merkleize(&db, None, Location::new(1)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let rewind_target = db.target().leaf_count;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[2]), Sha256::fill(2u8))
+                    .merkleize(&db, None, Location::new(1)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let tip_target = db.target();
+            drop(db);
+
+            // Corrupt the rewind target's entry (the journal holds bootstrap, target, tip).
+            let journal = open_witness_journal(context.child("corrupt"), partition).await;
+            witness::tests::corrupt_entry(&journal, 1, |entry| {
+                entry.pinned_nodes[0] = Sha256::fill(0xff);
+            })
+            .await;
+            drop(journal);
+
+            // The tip entry is intact, so reopen succeeds.
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let mut reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.target(), tip_target);
+
+            // The corrupt entry fails the rewind before any truncation.
+            assert!(matches!(
+                reopened.rewind(rewind_target).await,
+                Err(Error::DataCorrupted(_))
+            ));
+            drop(reopened);
+
+            // The newer history survives: reopen still lands on the original tip.
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen2"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.target(), tip_target);
+            reopened.destroy().await.unwrap();
         });
     }
 
