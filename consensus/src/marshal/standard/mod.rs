@@ -1400,6 +1400,140 @@ mod tests {
         })
     }
 
+    #[test_traced("WARN")]
+    fn test_standard_below_floor_anchor_delivery_wakes_subscriber() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(60));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
+
+            let victim = participants[0].clone();
+            let server = participants[1].clone();
+            let peers = vec![victim.clone(), server.clone()];
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                peers.clone(),
+            )
+            .await;
+
+            let victim_setup = StandardHarness::setup_validator(
+                context.child("victim"),
+                &mut oracle,
+                victim.clone(),
+                ConstantProvider::new(schemes[0].clone()),
+            )
+            .await;
+            let server_setup = StandardHarness::setup_validator(
+                context.child("server"),
+                &mut oracle,
+                server.clone(),
+                ConstantProvider::new(schemes[1].clone()),
+            )
+            .await;
+            let app = victim_setup.application;
+            let mut mailbox = victim_setup.mailbox;
+            let mut server_handle: ValidatorHandle<StandardHarness> = ValidatorHandle {
+                mailbox: server_setup.mailbox,
+                extra: server_setup.extra,
+            };
+
+            // Advance the victim's processed floor to height 3 on the canonical chain.
+            let mut parent = Sha256::hash(b"");
+            let mut canonical = Vec::new();
+            for i in 1..=3u64 {
+                let block = make_raw_block(parent, Height::new(i), i);
+                parent = block.digest();
+                canonical.push(block);
+            }
+            for block in &canonical {
+                let height = block.height();
+                let round = Round::new(Epoch::zero(), View::new(height.get()));
+                assert!(mailbox.verified(round, block.clone()).await);
+                let finalization = StandardHarness::make_finalization(
+                    Proposal {
+                        round,
+                        parent: View::new(height.get() - 1),
+                        payload: block.digest(),
+                    },
+                    &schemes,
+                    QUORUM,
+                );
+                StandardHarness::report_finalization(&mut mailbox, finalization).await;
+            }
+            while !app.blocks().contains_key(&Height::new(3)) {
+                context.sleep(Duration::from_millis(50)).await;
+            }
+
+            // A conflicting finalization commits to a fork block at a height at
+            // or below the processed floor (only reachable when a Byzantine
+            // quorum double-finalizes).
+            let fork = make_raw_block(canonical[0].digest(), Height::new(2), 999);
+            let fork_round = Round::new(Epoch::zero(), View::new(4));
+
+            // The server caches the fork block so it can serve the resolver fetch.
+            StandardHarness::propose(&mut server_handle, fork_round, &fork).await;
+
+            // Subscribe while the fork block is unavailable on the victim.
+            let subscription = mailbox.subscribe_by_digest(fork.digest(), DigestFallback::Wait);
+
+            // Record a pending floor anchor for the unavailable fork block and
+            // start the resolver fetch.
+            let fork_finalization = StandardHarness::make_finalization(
+                Proposal {
+                    round: fork_round,
+                    parent: View::new(1),
+                    payload: fork.digest(),
+                },
+                &schemes,
+                QUORUM,
+            );
+            mailbox.set_floor(fork_finalization);
+
+            // Barrier: mailbox messages are FIFO, so this confirms `set_floor`
+            // recorded the pending anchor.
+            assert!(mailbox.get_block(&fork.digest()).await.is_none());
+
+            // Links come up only now, so the fork block can only arrive through
+            // the resolver fetch started by `set_floor`.
+            setup_network_links(&mut oracle, &peers, LINK).await;
+
+            // The delivery takes the at-or-below-floor branch, which must still
+            // wake subscribers waiting on the block.
+            let received = select! {
+                result = subscription => {
+                    result.expect("subscription should receive the floor anchor")
+                },
+                _ = context.sleep(Duration::from_secs(10)) => {
+                    panic!("subscriber not woken by below-floor anchor delivery");
+                },
+            };
+            assert_eq!(received.digest(), fork.digest());
+
+            // The pending floor was consumed, so dispatch continues on the
+            // canonical chain.
+            let next = make_raw_block(canonical[2].digest(), Height::new(4), 4);
+            let next_round = Round::new(Epoch::zero(), View::new(5));
+            assert!(mailbox.verified(next_round, next.clone()).await);
+            let next_finalization = StandardHarness::make_finalization(
+                Proposal {
+                    round: next_round,
+                    parent: View::new(3),
+                    payload: next.digest(),
+                },
+                &schemes,
+                QUORUM,
+            );
+            StandardHarness::report_finalization(&mut mailbox, next_finalization).await;
+            while !app.blocks().contains_key(&Height::new(4)) {
+                context.sleep(Duration::from_millis(50)).await;
+            }
+        })
+    }
+
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum WrapperKind {
         Inline,
