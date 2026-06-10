@@ -13,11 +13,10 @@
 //! [`Drop`] only release buffers currently parked here. **An outstanding buffer
 //! that is never returned will leak**.
 //!
-//! The buffer pool keeps this requirement by pairing every pooled backing
-//! outside the freelist with a size-class lease, and by banking one strong
-//! size-class reference for every buffer held in a thread-local cache. Those
-//! leases and banked references keep the owning size class, and therefore this
-//! freelist, alive until the buffer returns here.
+//! The buffer pool keeps this requirement by storing a live size-class lease in
+//! every pooled buffer outside the freelist, including buffers held in a
+//! thread-local cache. Those leases keep the owning size class, and therefore
+//! this freelist, alive until the buffer returns here.
 //!
 //! This is intentionally narrower than a general multi-producer, multi-consumer
 //! queue:
@@ -151,9 +150,9 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 /// class. Pooled backing values and thread-local caches may temporarily hold
 /// [`PooledBuffer`] handles, but those handles must eventually return here so
 /// they can be released with the correct layout. The buffer pool keeps the
-/// freelist alive for those outstanding handles with pooled-backing leases
-/// or TLS-banked size-class references. Draining or dropping the freelist
-/// only deallocates buffers currently parked in it.
+/// freelist alive for those outstanding handles with live leases stored in
+/// pooled headers. Draining or dropping the freelist only deallocates buffers
+/// currently parked in it.
 ///
 /// The bitmap is intentionally striped over a power-of-two number of words.
 /// That makes the slot-to-word mapping cheap and keeps small freelists from
@@ -161,6 +160,8 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 pub struct Freelist {
     /// Allocation layout shared by every tracked buffer.
     layout: Layout,
+    /// Usable data capacity for newly-created pooled buffers.
+    usable_size: usize,
     /// Number of slot ids reserved for created buffers.
     ///
     /// This is a monotonic high-water mark for slot assignment. Draining
@@ -201,9 +202,24 @@ impl Freelist {
     ///
     /// If `prefill` is true, creates `capacity` buffers and makes them
     /// immediately available in the freelist.
+    #[cfg(any(test, feature = "bench"))]
     pub fn new(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
+        layout: Layout,
+        prefill: bool,
+    ) -> Self {
+        let usable_size = layout.size().saturating_sub(std::mem::size_of::<
+            super::buffer::PooledHeader,
+        >());
+        Self::with_usable_size(capacity, parallelism, usable_size, layout, prefill)
+    }
+
+    /// Creates a new fixed-capacity freelist with an explicit usable data size.
+    pub(super) fn with_usable_size(
+        capacity: NonZeroU32,
+        parallelism: NonZeroUsize,
+        usable_size: usize,
         layout: Layout,
         prefill: bool,
     ) -> Self {
@@ -245,6 +261,7 @@ impl Freelist {
 
         let freelist = Self {
             layout,
+            usable_size,
             created: AtomicUsize::new(0),
             words,
             storage,
@@ -285,6 +302,10 @@ impl Freelist {
         } else {
             PooledBuffer::new(self.layout)
         };
+        // SAFETY: `self.layout` is the exact allocation layout for this size
+        // class, `slot` is the stable id just reserved for `buffer`, and
+        // `usable_size` is the size-class capacity exposed to callers.
+        let buffer = unsafe { buffer.init_owner_header(self.layout, slot, self.usable_size) };
 
         Some((slot, buffer))
     }
