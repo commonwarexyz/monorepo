@@ -253,13 +253,13 @@ where
             .to_vec()
     }
 
-    /// Build a compact db handle from already-verified compact state.
+    /// Build a compact db handle from already-validated compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and already authenticated the
     /// supplied witness/root pair. The import lives only in memory until the first
     /// [`Self::sync`], which replaces the journal's contents with it. Until then, dropping the
     /// handle leaves the previous on-disk state untouched, and rewind/prune are rejected.
-    pub(crate) fn init_from_verified_state(
+    pub(crate) fn init_from_validated_state(
         strategy: S,
         journal: witness::Journal<E, F, H::Digest>,
         commit_codec_config: C,
@@ -283,7 +283,7 @@ where
         let merkle =
             compact_merkle::Merkle::from_compact_state(strategy, leaf_count, pinned_nodes.clone())?;
         let imported = VerifiedWitness {
-            entry: Witness {
+            witness: Witness {
                 op_bytes: Self::encode_commit_op(
                     last_commit_metadata.clone(),
                     inactivity_floor_loc,
@@ -413,7 +413,7 @@ where
                     current: w.target(),
                 });
             }
-            Ok((w.entry.clone(), w.leaf_count()))
+            Ok((w.witness.clone(), w.leaf_count()))
         })?;
         let Witness {
             op_bytes,
@@ -536,8 +536,8 @@ where
         Ok(())
     }
 
-    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Only whole
-    /// journal sections are dropped, so some witness below the boundary may survive.
+    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
+    /// below the boundary may survive.
     pub async fn prune(&self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.witness.prune(pruning_boundary).await
     }

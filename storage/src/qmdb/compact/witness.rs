@@ -72,22 +72,18 @@ impl<F: Family, D: Digest> Read for Witness<F, D> {
     }
 }
 
-/// The contiguous variable journal that backs a witness [`Store`].
-pub(crate) type Journal<E, F, D> = variable::Journal<E, Witness<F, D>>;
-
-/// In-memory snapshot of the tip witness: the tip entry plus its verified root.
+/// A witness and the root it was verified against.
 #[derive(Clone)]
 pub(crate) struct VerifiedWitness<F: Family, D: Digest> {
-    /// The tip witness entry.
-    pub(crate) entry: Witness<F, D>,
-    /// Root committed by `entry`.
+    pub(crate) witness: Witness<F, D>,
+    /// Root committed by `witness`.
     pub(crate) root: D,
 }
 
 impl<F: Family, D: Digest> VerifiedWitness<F, D> {
-    /// Total leaves in the committed Merkle, which also identifies the tip commit location.
+    /// Total leaves in the committed Merkle, which also identifies the last commit's location.
     pub(crate) const fn leaf_count(&self) -> Location<F> {
-        self.entry.proof.leaves
+        self.witness.proof.leaves
     }
 
     /// The compact-sync target this witness can serve: its root and leaf count.
@@ -99,15 +95,21 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
     }
 }
 
+/// The contiguous variable journal that backs a witness [`Store`].
+pub(crate) type Journal<E, F, D> = variable::Journal<E, Witness<F, D>>;
+
 /// A contiguous journal plus an in-memory cache of the tip witness.
 pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     journal: Journal<E, F, D>,
-    cache: RwLock<VerifiedWitness<F, D>>,
+
+    tip_witness: RwLock<VerifiedWitness<F, D>>,
+
     /// Whether the cached witness came from compact sync and has not been written to the
     /// journal yet. While set, the journal still holds the partition's previous contents; the
     /// first persist replaces them with the cached witness and clears this flag. Mutated only
     /// under `sync_lock`; reads hold `sync_lock` or the db's `&mut`, so `Relaxed` suffices.
     import_pending: AtomicBool,
+
     /// Serializes persist/rewind/prune.
     sync_lock: AsyncMutex<()>,
 }
@@ -117,20 +119,20 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     pub(crate) fn new(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
         Self {
             journal,
-            cache: RwLock::new(witness),
+            tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(false),
             sync_lock: AsyncMutex::new(()),
         }
     }
 
-    /// Create a store from a verified compact-sync import that has not been persisted yet. The
+    /// Create a store from a validated compact-sync import that has not been persisted yet. The
     /// journal is untouched until the first persist replaces its contents with `witness`. A
     /// crash during that replacement leaves a journal that fails to reopen; re-syncing
     /// recovers it.
     pub(crate) fn from_import(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
         Self {
             journal,
-            cache: RwLock::new(witness),
+            tip_witness: RwLock::new(witness),
             import_pending: AtomicBool::new(true),
             sync_lock: AsyncMutex::new(()),
         }
@@ -138,12 +140,12 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
 
     /// Read the cached witness without exposing the underlying lock to db code.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&VerifiedWitness<F, D>) -> R) -> R {
-        f(&self.cache.read())
+        f(&self.tip_witness.read())
     }
 
     /// Replace the cached witness after the matching compact Merkle state is persisted or loaded.
     pub(crate) fn replace(&self, witness: VerifiedWitness<F, D>) {
-        *self.cache.write() = witness;
+        *self.tip_witness.write() = witness;
     }
 
     /// Persist the current compact state as a new witness journal entry.
@@ -171,8 +173,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         if cached_leaves == merkle.leaves() {
             if self.import_pending.load(Ordering::Relaxed) {
                 self.clear_for_import().await?;
-                let entry = self.with(|w| w.entry.clone());
-                self.append_and_sync(&entry).await?;
+                let witness = self.with(|w| w.witness.clone());
+                self.append_and_sync(&witness).await?;
             }
             return Ok(());
         }
@@ -180,14 +182,14 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
             return Err(Error::DataCorrupted("witness ahead of in-memory state"));
         }
 
-        let witness =
+        let verified =
             build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes())?;
         if self.import_pending.load(Ordering::Relaxed) {
             self.clear_for_import().await?;
         }
-        self.append_and_sync(&witness.entry).await?;
+        self.append_and_sync(&verified.witness).await?;
         merkle.prune_to_frontier();
-        self.replace(witness);
+        self.replace(verified);
         Ok(())
     }
 
@@ -231,8 +233,8 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     }
 
     /// Drop all entries committing fewer than `pruning_boundary` leaves, bounding how far back
-    /// [`Self::rewind`] can reach. The tip entry always survives. Only whole journal sections
-    /// are dropped, so some entries below the boundary may survive.
+    /// [`Self::rewind`] can reach. The tip entry always survives. Some entries
+    /// below the boundary may survive.
     pub(crate) async fn prune(&self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         let _guard = self.sync_lock.lock().await;
         self.check_import_persisted()?;
@@ -357,7 +359,7 @@ where
             .collect::<Vec<_>>();
         let proof = mem.proof(&hasher, last_commit_loc, inactive_peaks)?;
         Ok(VerifiedWitness {
-            entry: Witness {
+            witness: Witness {
                 op_bytes: last_commit_op_bytes,
                 proof,
                 pinned_nodes,
@@ -460,13 +462,7 @@ where
     ) {
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
-    Ok((
-        VerifiedWitness {
-            entry: witness,
-            root,
-        },
-        last_commit_op,
-    ))
+    Ok((VerifiedWitness { witness, root }, last_commit_op))
 }
 
 /// Open the witness store for an existing or new compact db, returning it with the decoded
@@ -518,8 +514,8 @@ where
     merkle.apply_batch(&batch)?;
 
     // The initial commit has one leaf and an inactivity floor of 0.
-    let witness = build_witness::<F, H, S>(merkle, Location::new(0), last_commit_op_bytes)?;
-    journal.append(&witness.entry).await?;
+    let verified = build_witness::<F, H, S>(merkle, Location::new(0), last_commit_op_bytes)?;
+    journal.append(&verified.witness).await?;
     journal.sync().await?;
     Ok(())
 }

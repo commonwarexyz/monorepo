@@ -177,7 +177,7 @@ where
                 config.witness,
             )
             .await?;
-        Self::init_from_verified_state(config.strategy, journal, config.commit_codec_config, state)
+        Self::init_from_validated_state(config.strategy, journal, config.commit_codec_config, state)
     }
 
     fn inactivity_floor(op: &Self::Op) -> Option<Location<Self::Family>> {
