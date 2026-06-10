@@ -107,8 +107,16 @@ use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
     mem::{align_of, offset_of, size_of, ManuallyDrop, MaybeUninit},
     ptr::{addr_of_mut, NonNull},
-    sync::atomic::{fence, AtomicUsize, Ordering},
+    sync::atomic::Ordering,
 };
+
+cfg_if::cfg_if! {
+    if #[cfg(feature = "loom")] {
+        use loom::sync::atomic::{fence, AtomicUsize};
+    } else {
+        use std::sync::atomic::{fence, AtomicUsize};
+    }
+}
 
 const OWNER_EMPTY: usize = 0b00;
 const OWNER_ALIGNED: usize = 0b01;
@@ -1181,5 +1189,68 @@ mod tests {
         assert!(layout.size() >= size + size_of::<PooledHeader>());
         assert!(layout.align() >= align_of::<PooledHeader>());
         assert!(layout.align() >= 64);
+    }
+}
+
+#[cfg(all(test, feature = "loom"))]
+mod loom_tests {
+    use super::*;
+    use loom::{
+        sync::{atomic::AtomicUsize, Arc},
+        thread,
+    };
+
+    // Models the owner refcount protocol under true concurrency. The
+    // restore-sentinel branch in `drop_shared_slow` (a decrement that hits
+    // zero because another thread decremented between this thread's Acquire
+    // load and its fetch_sub) is unreachable single-threaded, so loom is the
+    // only coverage it has.
+
+    // External payload that counts how many times it is released.
+    struct Tracker(Arc<AtomicUsize>);
+
+    impl Drop for Tracker {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl AsRef<[u8]> for Tracker {
+        fn as_ref(&self) -> &[u8] {
+            &[1, 2, 3]
+        }
+    }
+
+    #[test]
+    fn loom_shared_clone_drop_releases_exactly_once() {
+        loom::model(|| {
+            let released = Arc::new(AtomicUsize::new(0));
+            let bytes = Bytes::from_owner(Tracker(released.clone()));
+            let (_, len, owner) = owner_from_bytes(bytes);
+            assert_eq!(len, 3);
+
+            // Three references: this thread plus two spawned droppers.
+            // SAFETY: `owner` is live with one reference owned here.
+            unsafe { owner.clone_shared() };
+            // SAFETY: as above.
+            unsafe { owner.clone_shared() };
+
+            let t1 = thread::spawn(move || {
+                // SAFETY: this thread owns one reference.
+                unsafe { owner.drop_shared() };
+            });
+            let t2 = thread::spawn(move || {
+                // SAFETY: this thread owns one reference.
+                unsafe { owner.drop_shared() };
+            });
+            // SAFETY: the main thread owns the remaining reference.
+            unsafe { owner.drop_shared() };
+            t1.join().unwrap();
+            t2.join().unwrap();
+
+            // Exactly one drop released the payload, whichever interleaving
+            // won the final-owner race.
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        });
     }
 }
