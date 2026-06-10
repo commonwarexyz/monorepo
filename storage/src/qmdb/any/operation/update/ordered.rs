@@ -42,9 +42,9 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type Key = K;
     type Value = V::Value;
     type ValueEncoding = V;
-    type Retained = (V::Value, K);
+    type Cached = (V::Value, K);
 
-    fn retained(&self) -> Self::Retained {
+    fn cached(&self) -> Self::Cached {
         (self.value.clone(), self.next_key.clone())
     }
 

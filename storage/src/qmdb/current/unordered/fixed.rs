@@ -171,7 +171,7 @@ pub mod test {
         });
     }
 
-    /// Reads on a batch retain resolved locations that `merkleize` consumes to skip re-reading
+    /// Reads on a batch cache resolved locations that `merkleize` consumes to skip re-reading
     /// those keys. The root must match a write-only batch's `merkleize`, both rooted at the DB
     /// (D=0) and through one pending ancestor (D=1).
     #[test_traced("WARN")]

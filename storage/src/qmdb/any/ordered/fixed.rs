@@ -253,7 +253,7 @@ pub(crate) mod test {
         db.apply_batch(merkleized).await.unwrap();
     }
 
-    /// Reads on a batch retain resolved operations that `merkleize` consumes to skip re-reading
+    /// Reads on a batch cache resolved operations that `merkleize` consumes to skip re-reading
     /// updated keys (deletes are always re-read for predecessor linkage). The root must be
     /// byte-identical to a write-only batch's `merkleize` across updates/deletes/creates, both
     /// with the batch rooted directly at the DB (D=0) and through pending ancestors (D=1, D=2).
@@ -341,11 +341,11 @@ pub(crate) mod test {
                 }
                 let normal_root = nb.merkleize(&db, None).await.unwrap().root();
 
-                // Read-then-write on one batch: the read retains operations that merkleize
+                // Read-then-write on one batch: the read caches operations that merkleize
                 // consumes. Values and root must match the write-only path.
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
-                // Keys read but never written (existing and absent) retain entries that
+                // Keys read but never written (existing and absent) cache entries that
                 // merkleize must drop without affecting the root.
                 let unwritten: Vec<Digest> = (0..40u64)
                     .map(|i| key(i * 12))
@@ -362,7 +362,7 @@ pub(crate) mod test {
                 let fused_root = fb.merkleize(&db, None).await.unwrap().root();
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
 
-                // Multiple disjoint reads accumulate, and single-key gets retain too.
+                // Multiple disjoint reads accumulate, and single-key gets populate the cache too.
                 let half = muts.len() / 2;
                 let mut gb = new_batch();
                 gb.get_many(&keys[..half], &db).await.unwrap();
@@ -384,10 +384,10 @@ pub(crate) mod test {
     /// A key deleted by a pending ancestor and re-written by the child must merkleize
     /// identically whether or not its committed bucket siblings were read first. Its committed
     /// location only surfaces through a sibling's bucket walk (gather skips ancestor-deleted
-    /// keys), so if retention suppressed the walk for read-then-updated siblings, the key would
+    /// keys), so if caching suppressed the walk for read-then-updated siblings, the key would
     /// be emitted as a create instead of an update and the root would diverge.
     #[test_traced("WARN")]
-    fn test_ordered_fixed_retained_sibling_bucket_parity() {
+    fn test_ordered_fixed_cached_sibling_bucket_parity() {
         fn dkey(bucket: u16, tail: u64) -> Digest {
             let mut b = [0u8; 32];
             b[..2].copy_from_slice(&bucket.to_be_bytes());
@@ -401,7 +401,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|ctx| async move {
             // Filler keys occupy the lowest committed locations so the ancestor's floor raise
             // moves them, not the dense bucket. The sibling reads then resolve through the
-            // committed snapshot (and are retained) rather than through an ancestor diff.
+            // committed snapshot (and are cached) rather than through an ancestor diff.
             let mut db = create_test_db(ctx.child("db")).await;
             let mut seed = db.new_batch();
             for i in 0..10u64 {
@@ -434,7 +434,7 @@ pub(crate) mod test {
             }
             let normal_root = nb.merkleize(&db, None).await.unwrap().root();
 
-            // Read all committed siblings first (retaining their resolutions), then write.
+            // Read all committed siblings first (caching their resolutions), then write.
             let mut fb = ancestor.new_batch::<Sha256>();
             let siblings: Vec<Digest> = (1..4u64).map(|i| dkey(1, i)).collect();
             let sibling_refs: Vec<&Digest> = siblings.iter().collect();
@@ -448,11 +448,11 @@ pub(crate) mod test {
     }
 
     /// Randomized dense-bucket parity sweep: prefix-controlled keys force every translated
-    /// bucket to be dense, so retained reads, ancestor deletes, rewrites of ancestor-deleted
+    /// bucket to be dense, so cached reads, ancestor deletes, rewrites of ancestor-deleted
     /// keys, and collision siblings constantly interact. The read-then-write root must match
     /// the write-only root for every seed and ancestor depth.
     #[test_traced("WARN")]
-    fn test_ordered_fixed_dense_bucket_retention_parity_sweep() {
+    fn test_ordered_fixed_dense_bucket_caching_parity_sweep() {
         type Merkleized = std::sync::Arc<
             crate::qmdb::any::batch::MerkleizedBatch<
                 mmr::Family,
@@ -478,7 +478,7 @@ pub(crate) mod test {
         deterministic::Runner::default().start(|ctx| async move {
             // Fillers occupy the lowest committed locations so pending ancestors' floor raises
             // consume them first, leaving most dense-bucket keys committed-resolved (and thus
-            // retained when read).
+            // cached when read).
             let mut db = create_test_db(ctx.child("db")).await;
             let mut seed = db.new_batch();
             for i in 0..16u64 {
@@ -738,7 +738,7 @@ pub(crate) mod test {
             }
 
             // Make sure size-constrained batches of operations are provable from the oldest
-            // retained op to tip.
+            // cached op to tip.
             let max_ops = NZU64!(4);
             let end_loc = db.bounds().await.end;
             let start_loc = db.log.merkle.bounds().start;

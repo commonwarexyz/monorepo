@@ -36,12 +36,15 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::stream::StreamExt;
 use std::{
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
 };
 use tracing::warn;
+
+/// Maximum number of blob reads issued concurrently by [`Append::read_many_into`].
+const MAX_CONCURRENT_BLOB_READS: usize = 64;
 
 /// Indicates which CRC slot in a page record must not be overwritten.
 #[derive(Clone, Copy)]
@@ -608,6 +611,9 @@ impl<B: Blob> Append<B> {
         offsets: &[u64],
         item_size: usize,
     ) -> Result<usize, Error> {
+        if offsets.is_empty() {
+            return Ok(0);
+        }
         assert_eq!(
             buf.len(),
             offsets
@@ -620,9 +626,6 @@ impl<B: Blob> Append<B> {
             offsets.windows(2).all(|w| w[0] < w[1]),
             "offsets must be strictly increasing"
         );
-        if offsets.is_empty() {
-            return Ok(0);
-        }
 
         let last_end = offsets[offsets.len() - 1]
             .checked_add(item_size as u64)
@@ -675,15 +678,17 @@ impl<B: Blob> Append<B> {
             return Ok(offsets.len());
         }
 
-        // Slow path: read only the ranges that had cache misses, concurrently.
+        // Slow path: read only the ranges that had cache misses, concurrently. Concurrency is
+        // bounded so a large cold batch cannot flood the blob with in-flight reads.
         let blob_guard = self.blob_state.read().await;
-        let mut reads = cache_ranges
+        let reads: Vec<_> = cache_ranges
             .iter_mut()
             .map(|(item_buf, offset)| {
                 self.cache_ref
                     .read(&blob_guard.blob, self.id, item_buf, *offset)
             })
-            .collect::<FuturesUnordered<_>>();
+            .collect();
+        let mut reads = futures::stream::iter(reads).buffer_unordered(MAX_CONCURRENT_BLOB_READS);
         while let Some(result) = reads.next().await {
             result?;
         }
@@ -1531,6 +1536,62 @@ mod tests {
                 .await
                 .unwrap();
 
+            let read: Vec<u8> = synced.iter().chain(tip.iter()).copied().collect();
+            for (i, &off) in offsets.iter().enumerate() {
+                assert_eq!(
+                    &buf[i * item_size..(i + 1) * item_size],
+                    &read[off as usize..off as usize + item_size],
+                );
+            }
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_read_many_into_straddle_prefix_miss() {
+        // A straddling item whose synced prefix page is NOT in the page cache: the
+        // suffix is copied from the tip buffer and the prefix is read from the blob
+        // without clobbering it, and the item is counted as a blob read.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"rmany_smiss")
+                .await
+                .unwrap();
+            // Single-page cache so residency is deterministic.
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Write 3 pages and sync, then a partial page that stays in the tip.
+            let synced: Vec<u8> = (0u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize * 3)
+                .collect();
+            append.append(&synced).await.unwrap();
+            append.sync().await.unwrap();
+            let item_size = 10;
+            let tip: Vec<u8> = (100u8..=255)
+                .cycle()
+                .take(PAGE_SIZE.get() as usize / 2)
+                .collect();
+            append.append(&tip).await.unwrap();
+
+            // Fault page 0 in, evicting whatever sync left resident, so the straddle
+            // prefix page (page 2) is guaranteed not cached.
+            let _ = append.read_at(0, item_size).await.unwrap();
+
+            let straddle_off = synced.len() as u64 - (item_size as u64 / 2);
+            let tip_off = synced.len() as u64 + item_size as u64;
+            let offsets = [straddle_off, tip_off];
+            let mut buf = vec![0u8; offsets.len() * item_size];
+            let hits = append
+                .read_many_into(&mut buf, &offsets, item_size)
+                .await
+                .unwrap();
+
+            // The tip-only item is a hit; the straddle item required a blob read.
+            assert_eq!(hits, 1);
             let read: Vec<u8> = synced.iter().chain(tip.iter()).copied().collect();
             for (i, &off) in offsets.iter().enumerate() {
                 assert_eq!(

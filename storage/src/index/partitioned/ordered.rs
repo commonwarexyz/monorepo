@@ -82,7 +82,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
     {
         // Probe in key-prefix order so consecutive probes hit the same partition and descend
         // through shared upper tree nodes within it. Sixteen bytes cover the partition prefix
-        // (P <= 2) plus the largest cap translator (8 bytes).
+        // (P <= 2) plus the largest cap translator (8 bytes). The locality holds only for
+        // prefix-preserving translators (raw-key order then matches translated-key order); for
+        // any other translator this is just an arbitrary, still-correct probe order.
         let mut order: Vec<(u128, usize)> = keys
             .iter()
             .enumerate()

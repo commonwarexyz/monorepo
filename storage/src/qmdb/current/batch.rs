@@ -117,11 +117,10 @@ impl<const N: usize> ChunkOverlay<N> {
 /// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
 /// bitmap bit is unset, avoiding I/O reads for inactive operations.
 ///
-/// Mirrors the contract on `any::batch::next_candidate`: may return only locations that are
-/// *possibly* active in `[floor, tip)`, may skip locations only when known inactive.
-/// The floor-raise loop revalidates each candidate, so false positives are tolerated; false
-/// negatives
-/// are forbidden.
+/// Mirrors the contract on `any::batch::fill_candidates`: may return only locations that are
+/// *possibly* active in `[floor, tip)`, may skip locations only when known inactive. The
+/// floor-raise loop revalidates each candidate, so false positives are tolerated; false
+/// negatives are forbidden.
 ///
 /// False positives can arise two ways:
 /// - In the committed prefix, an uncommitted ancestor batch in the chain may have superseded
@@ -388,7 +387,7 @@ where
     /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys. Committed-DB operations resolved by
-    /// the read are retained on the batch and consumed by [`merkleize`](Self::merkleize), which
+    /// the read are cached on the batch and consumed by [`merkleize`](Self::merkleize), which
     /// skips re-reading those keys.
     pub async fn get_many<E, C, I>(
         &self,
@@ -455,7 +454,7 @@ where
     /// Batch read multiple keys.
     ///
     /// Returns results in the same order as the input keys. Committed-DB operations resolved by
-    /// the read are retained on the batch and consumed by [`merkleize`](Self::merkleize), which
+    /// the read are cached on the batch and consumed by [`merkleize`](Self::merkleize), which
     /// skips re-reading those keys.
     pub async fn get_many<E, C, I>(
         &self,

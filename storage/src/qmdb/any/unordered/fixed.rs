@@ -300,9 +300,9 @@ pub(crate) mod test {
         });
     }
 
-    /// Reads on a batch retain resolved locations that `merkleize` consumes to skip re-reading
+    /// Reads on a batch cache resolved locations that `merkleize` consumes to skip re-reading
     /// those keys. The root must be byte-identical to a write-only batch's `merkleize` (no
-    /// retained reads), across updates/deletes/creates, both with the batch rooted directly at
+    /// cached reads), across updates/deletes/creates, both with the batch rooted directly at
     /// the DB (D=0) and through pending ancestors (D=1, D=2).
     #[test_traced("WARN")]
     fn test_unordered_fixed_resolved_merkleize_parity() {
@@ -380,14 +380,14 @@ pub(crate) mod test {
                 }
                 let normal_root = nb.merkleize(&db, None).await.unwrap().root();
 
-                // Read-then-write on one batch: the read retains locations that merkleize
+                // Read-then-write on one batch: the read caches locations that merkleize
                 // consumes. Values and root must match the write-only path.
                 let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
                 let mut fb = new_batch();
-                // Duplicate keys in one read resolve identically per slot and retain once.
+                // Duplicate keys in one read resolve identically per slot and cache once.
                 let dup_values = fb.get_many(&[keys[0], keys[0]], &db).await.unwrap();
                 assert_eq!(dup_values[0], dup_values[1]);
-                // Keys read but never written (existing and absent) retain entries that
+                // Keys read but never written (existing and absent) cache entries that
                 // merkleize must drop without affecting the root.
                 let unwritten: Vec<Digest> = (0..40u64)
                     .map(|i| key(i * 50))
@@ -405,7 +405,7 @@ pub(crate) mod test {
                 assert_eq!(normal_root, fused_root, "root mismatch at depth={depth}");
 
                 // Reads after writes: written keys are answered by the pending mutations and
-                // retain nothing; the root must still match.
+                // cache nothing; the root must still match.
                 let half = muts.len() / 2;
                 let mut mb = new_batch();
                 for (k, v) in muts.iter().take(half) {
@@ -429,7 +429,7 @@ pub(crate) mod test {
                     "mixed root mismatch at depth={depth}"
                 );
 
-                // Multiple disjoint reads accumulate, and single-key gets retain too.
+                // Multiple disjoint reads accumulate, and single-key gets populate the cache too.
                 let mut gb = new_batch();
                 gb.get_many(&keys[..half], &db).await.unwrap();
                 for key in &keys[half..] {
@@ -447,14 +447,14 @@ pub(crate) mod test {
         });
     }
 
-    /// A batch's retained read locations must stay valid when an ancestor is committed and
+    /// A batch's cached read locations must stay valid when an ancestor is committed and
     /// dropped between the read and merkleize. Keys resolved through an uncommitted ancestor's
-    /// diff retain nothing, so the merkleize-time re-resolution picks up the post-commit
+    /// diff cache nothing, so the merkleize-time re-resolution picks up the post-commit
     /// location and the final state matches a batch that never read. Keys resolved through the
-    /// committed snapshot retain their location, which the intervening commit cannot move
+    /// committed snapshot cache their location, which the intervening commit cannot move
     /// (applying an ancestor only relocates keys present in that ancestor's diff).
     #[test_traced("WARN")]
-    fn test_unordered_fixed_retention_survives_ancestor_commit() {
+    fn test_unordered_fixed_caching_survives_ancestor_commit() {
         deterministic::Runner::default().start(|ctx| async move {
             let mut roots = Vec::new();
             for read_first in [false, true] {
@@ -483,7 +483,7 @@ pub(crate) mod test {
                 let p = p.merkleize(&db, None).await.unwrap();
 
                 // Child reads the grandparent-touched keys (resolving through its diff,
-                // retaining nothing) and keys 20..30 (committed-resolved, retained).
+                // caching nothing) and keys 20..30 (committed-resolved, cached).
                 let b = p.new_batch::<Sha256>();
                 if read_first {
                     let keys: Vec<Digest> = (0..10u64).chain(20..30u64).map(key).collect();

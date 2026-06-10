@@ -228,9 +228,9 @@ macro_rules! run_pipeline {
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 
-            // Timed: load all touched keys, write them, merkleize, read root. Reads retain
+            // Timed: load all touched keys, write them, merkleize, read root. Reads cache
             // resolved locations on the batch, so merkleize skips re-reading those keys. Load
-            // and writes must share one batch for that retention to apply.
+            // and writes must share one batch for that caching to apply.
             let start = Instant::now();
             let mut b = new_batch();
             let values = b.get_many(&keys, &db).await.unwrap();
@@ -286,6 +286,10 @@ fn main() {
                 | "current::ordered::fixed::mmr"
         ),
         "db: any::unordered::fixed::mmr|any::ordered::fixed::mmr|any::unordered::variable::mmr|current::unordered::fixed::mmr|current::ordered::fixed::mmr"
+    );
+    assert!(
+        args.iters > 0 && args.num_keys > 0 && args.num_updates > 0,
+        "iters, keys, and updates must be non-zero"
     );
 
     eprintln!(

@@ -23,15 +23,11 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// The value encoding (fixed or variable).
     type ValueEncoding: ValueEncoding<Value = Self::Value>;
 
-    /// Data retained from a committed-DB read for reuse at merkleize, alongside the location.
-    ///
-    /// Unordered op generation needs only the location, so it retains nothing extra. Ordered op
-    /// generation also consumes the read operation's linkage payload (prior value and next key),
-    /// so it retains both.
-    type Retained: Clone + Send + Sync;
+    /// Data cached from a committed-DB read for reuse at merkleize, alongside the location.
+    type Cached: Clone + Send + Sync;
 
-    /// Extract the retained payload from a read operation.
-    fn retained(&self) -> Self::Retained;
+    /// Extract the cached payload from a read operation.
+    fn cached(&self) -> Self::Cached;
 
     /// The updated key.
     fn key(&self) -> &Self::Key;

@@ -375,6 +375,61 @@ mod tests {
         });
     }
 
+    fn run_index_get_many<I: Unordered<Value = u64>>(index: &mut I) {
+        // "ab" and "abX" share a translated bucket; "zz" lives in a different bucket (and a
+        // different partition for partitioned indexes).
+        index.insert(b"ab", 1);
+        index.insert(b"ab", 2);
+        index.insert(b"abX", 3);
+        index.insert(b"zz", 4);
+
+        // Visits must be attributed to the requesting slot regardless of probe order, missing
+        // keys produce no visits, and duplicate input keys are visited once per slot.
+        let keys: Vec<&[u8]> = vec![b"zz", b"missing", b"ab", b"zz"];
+        let mut visits: Vec<Vec<u64>> = vec![Vec::new(); keys.len()];
+        index.get_many(&keys, |key_idx, value| visits[key_idx].push(*value));
+        assert_eq!(visits[0], vec![4]);
+        assert!(visits[1].is_empty());
+        assert_eq!(visits[2], vec![3, 2, 1]);
+        assert_eq!(visits[3], vec![4]);
+
+        // Empty input visits nothing.
+        index.get_many::<&[u8]>(&[], |_, _| panic!("no visits expected"));
+    }
+
+    #[test_traced]
+    fn test_hash_index_get_many() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_get_many(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_get_many() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_get_many(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_partitioned_index_get_many() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.child("unordered"));
+                run_index_get_many(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context.child("ordered"));
+                run_index_get_many(&mut index);
+            }
+        });
+    }
+
     fn run_index_cursor_find<I: Unordered<Value = u64>>(index: &mut I) {
         let key = b"test_key";
 
