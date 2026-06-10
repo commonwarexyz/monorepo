@@ -1,4 +1,54 @@
 //! Utilities for creating arithmetic circuits.
+//!
+//! A [`Circuit`] holds the additions and multiplications making up a
+//! computation over a ring `F`, along with assertions that two values in
+//! the computation are equal. The inputs to the computation are constants,
+//! or witnesses, whose values are chosen by the prover. Proof systems
+//! consume circuits to prove that the assertions hold, without revealing
+//! the witnesses.
+//!
+//! Circuits are built by writing plain Rust over [`Var`], which implements
+//! the algebra traits from [`commonware_math`]. This allows the same code to
+//! be generic over `F` and `Var<F>`. The building code runs in one of two
+//! modes:
+//!
+//! - [`build`] records only the circuit itself (verifier mode),
+//! - [`build_with_values`] also computes every value in the computation as
+//!   the circuit is constructed (prover mode).
+//!
+//! Because both modes run the same code, the prover and the verifier
+//! construct the same circuit.
+//!
+//! # Example
+//!
+//! ```
+//! use commonware_cryptography::zk::circuit::{build_with_values, Var};
+//! use commonware_math::test::F;
+//!
+//! // Constrain a witness `x` to satisfy `x^3 + x + 5 = 35`.
+//! let valued = build_with_values(|ctx| {
+//!     let x = Var::witness(ctx, |_| F::from(3u64));
+//!     let out = x.clone() * &x * &x + &x + &Var::constant(ctx, F::from(5u64));
+//!     out.assert_eq(&Var::constant(ctx, F::from(35u64)));
+//! });
+//! assert!(valued.is_satisfied());
+//! ```
+//!
+//! # Caveats
+//!
+//! ## Witness Closures
+//!
+//! The `init` closure passed to [`Var::witness`] must not use the
+//! [`Context`], for example by creating new vars: the build deadlocks,
+//! hanging without an error. Compute the witness value using only the
+//! [`Values`] view the closure receives.
+//!
+//! ## Inversion
+//!
+//! [`Field::inv`] requires that inverting zero produce zero. Circuit-backed
+//! vars deviate: inverting zero adds an unsatisfiable constraint instead,
+//! with no error when building. Generic code relying on `inv(0) = 0` will
+//! produce circuits that can never be satisfied.
 
 use commonware_math::algebra::{Additive, Field, Multiplicative, Object, Ring};
 use commonware_utils::sync::Mutex;
@@ -8,6 +58,12 @@ use std::{
     ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
+/// Identifies a value in a [`Circuit`]: a constant, a witness, or the
+/// output of an operation.
+///
+/// Witnesses are numbered in allocation order, letting callers name
+/// specific witnesses after building, for example to choose which values a
+/// proof system should commit to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CircuitIdx {
     Constant(u32),
@@ -15,11 +71,24 @@ pub enum CircuitIdx {
     Node(u32),
 }
 
+/// An addition or multiplication of two earlier values.
 pub(crate) enum CircuitNode {
     Add(CircuitIdx, CircuitIdx),
     Mul(CircuitIdx, CircuitIdx),
 }
 
+/// An arithmetic circuit over `F`.
+///
+/// Create one with [`build`] or [`build_with_values`]. On its own, a
+/// circuit only describes constraints; proving and verifying that they hold
+/// is the job of a proof system consuming it.
+//
+// Exposing the structure of the circuit directly (here and in CircuitNode
+// and ValuedCircuit) is not ideal: proof systems would be better served by
+// an abstraction over it. We should wait until we have a few different
+// backends before designing one, so that we don't freeze an abstraction
+// that won't work for all of our use cases. In the meantime, exposing the
+// structure at the crate pub level is not harmful.
 pub struct Circuit<F> {
     pub(crate) witnesses: u32,
     pub(crate) constants: Vec<F>,
@@ -58,11 +127,10 @@ impl<F> Circuit<F> {
     }
 }
 
-/// A circuit together with concrete values for every witness and every node.
+/// A circuit together with concrete values for its whole computation.
 ///
-/// Populated incrementally by [`build_with_values`] as the circuit is
-/// constructed in prover mode. Witness indices resolve to `witnesses[i]`, and
-/// node indices to `nodes[i]`.
+/// Produced by [`build_with_values`]. Use [`Self::is_satisfied`] to check
+/// whether the values satisfy the circuit's assertions.
 pub struct ValuedCircuit<F> {
     pub(crate) circuit: Circuit<F>,
     pub(crate) witnesses: Vec<F>,
@@ -98,12 +166,38 @@ struct ValuesBuilder<F> {
     nodes: Vec<F>,
 }
 
-/// A snapshot of the circuit's storage during prover-mode construction, passed
-/// to recipe closures so they can compute values from already-allocated
-/// witnesses, constants, and node outputs.
+/// A view of the values assigned so far during prover-mode construction.
 ///
-/// Holds locks on the underlying state for its lifetime, so closures receiving
-/// a view must not call back into the [`Context`].
+/// A view is passed to witness `init` closures, which read the values of
+/// earlier vars with [`Var::value`]. This is how a prover supplies values
+/// that are cheaper to verify than to compute with circuit operations, such
+/// as inverses: compute the value natively, then constrain it with
+/// assertions.
+///
+/// Closures receiving a view must not call back into the [`Context`], for
+/// example by creating new vars: doing so deadlocks.
+///
+/// # Example
+///
+/// ```
+/// use commonware_cryptography::zk::circuit::{build_with_values, Var};
+/// use commonware_math::{
+///     algebra::{Field, Ring},
+///     test::F,
+/// };
+///
+/// let valued = build_with_values(|ctx| {
+///     let x = Var::witness(ctx, |_| F::from(3u64));
+///     // The prover computes the inverse natively...
+///     let inv = Var::witness(ctx, {
+///         let x = x.clone();
+///         move |v| x.value(v).inv()
+///     });
+///     // ...and the circuit checks it with a single multiplication.
+///     (x * &inv).assert_eq(&Var::one());
+/// });
+/// assert!(valued.is_satisfied());
+/// ```
 #[derive(Clone, Copy)]
 pub struct Values<'a, F> {
     constants: &'a [F],
@@ -129,6 +223,12 @@ struct ContextInner<F> {
     circuit: Mutex<Circuit<F>>,
 }
 
+/// A handle for recording operations into a circuit being built.
+///
+/// A context is passed to the closure given to [`build`] or
+/// [`build_with_values`], and is captured by the [`Var`]s created from it.
+/// Contexts are `Copy`, so they can be passed around freely; vars from two
+/// different builds cannot be mixed.
 pub struct Context<'ctx, F> {
     inner: &'ctx ContextInner<F>,
     /// Make this struct invariant in 'ctx, so two Contexts from different
@@ -155,6 +255,9 @@ impl<'ctx, F> Context<'ctx, F> {
         init: impl for<'a> FnOnce(Values<'a, F>) -> Option<F>,
         reserve: impl FnOnce(&mut Circuit<F>) -> CircuitIdx,
     ) -> CircuitIdx {
+        // Both locks are held while `init` runs, so an `init` closure that
+        // calls back into the Context deadlocks. This is why Values forbids
+        // doing so.
         let mut circuit = self.inner.circuit.lock();
         if let Some(values) = &self.inner.values {
             let mut values = values.lock();
@@ -221,6 +324,21 @@ enum VarInner<'ctx, F> {
     },
 }
 
+/// A value in a circuit being built.
+///
+/// Vars are created with [`Self::witness`] and [`Self::constant`], combined
+/// with the usual arithmetic operators, and constrained with
+/// [`Self::assert_eq`]. Vars implement the algebra traits from
+/// [`commonware_math`], so code written against [`Ring`] or [`Field`] runs
+/// unchanged over circuit values.
+///
+/// Values produced by [`Additive::zero`] and [`Ring::one`] are "native":
+/// they live outside the circuit until combined with a circuit value. This
+/// is visible in two places: equality compares what vars refer to, not what
+/// they evaluate to (a native var is never equal to a circuit-backed var,
+/// even when their values agree), and [`Self::assert_eq`] panics on two
+/// unequal native vars. Generic code that branches on equality may
+/// therefore behave differently over vars than over plain values.
 #[derive(Clone)]
 pub struct Var<'ctx, F> {
     inner: VarInner<'ctx, F>,
@@ -256,6 +374,14 @@ impl<F: PartialEq> PartialEq for Var<'_, F> {
 impl<F: Eq> Eq for Var<'_, F> {}
 
 impl<'ctx, F> Var<'ctx, F> {
+    /// Allocate a fresh witness.
+    ///
+    /// In prover mode, `init` receives the values assigned so far, and must
+    /// return the value of this witness. In verifier mode, `init` does not
+    /// run.
+    ///
+    /// `init` must not use the [`Context`]: doing so deadlocks. See
+    /// [`Values`].
     pub fn witness(ctx: Context<'ctx, F>, init: impl for<'a> FnOnce(Values<'a, F>) -> F) -> Self {
         Self {
             inner: VarInner::Circuit {
@@ -265,6 +391,7 @@ impl<'ctx, F> Var<'ctx, F> {
         }
     }
 
+    /// Create a var with a fixed, public value.
     pub fn constant(ctx: Context<'ctx, F>, value: F) -> Self {
         Self {
             inner: VarInner::Circuit {
@@ -274,6 +401,14 @@ impl<'ctx, F> Var<'ctx, F> {
         }
     }
 
+    /// Assert that this var equals `other`.
+    ///
+    /// The constraint must hold for the circuit to be satisfied.
+    ///
+    /// # Panics
+    ///
+    /// Panics if both vars are native and their values differ, since there
+    /// is no circuit to record the failure in.
     pub fn assert_eq(&self, other: &Self)
     where
         F: Clone + PartialEq,
@@ -301,6 +436,7 @@ impl<'ctx, F> Var<'ctx, F> {
 }
 
 impl<'ctx, F: Clone> Var<'ctx, F> {
+    /// The value of this var, under a prover-mode assignment.
     pub fn value(&self, values: Values<'_, F>) -> F {
         match &self.inner {
             VarInner::Native(value) => value.clone(),
@@ -434,6 +570,8 @@ impl<'ctx, F: Ring> Ring for Var<'ctx, F> {
     }
 }
 
+/// Unlike the [`Field::inv`] contract, inverting a circuit-backed zero does
+/// not produce zero: it adds an unsatisfiable constraint to the circuit.
 impl<'ctx, F: Field> Field for Var<'ctx, F> {
     fn inv(&self) -> Self {
         match &self.inner {
@@ -451,7 +589,9 @@ impl<'ctx, F: Field> Field for Var<'ctx, F> {
     }
 }
 
-/// Build a circuit without computing a witness assignment (verifier mode).
+/// Build a circuit without computing an assignment (verifier mode).
+///
+/// Witness `init` closures do not run in this mode.
 pub fn build<F: Ring + PartialEq>(f: impl for<'ctx> FnOnce(Context<'ctx, F>)) -> Circuit<F> {
     let inner = ContextInner {
         values: None,
@@ -465,6 +605,9 @@ pub fn build<F: Ring + PartialEq>(f: impl for<'ctx> FnOnce(Context<'ctx, F>)) ->
 }
 
 /// Build a circuit while simultaneously computing the assignment (prover mode).
+///
+/// Each witness's value comes from the `init` closure passed to
+/// [`Var::witness`].
 pub fn build_with_values<F: Ring + PartialEq>(
     f: impl for<'ctx> FnOnce(Context<'ctx, F>),
 ) -> ValuedCircuit<F> {
@@ -488,6 +631,8 @@ pub fn build_with_values<F: Ring + PartialEq>(
     }
 }
 
+/// Fuzzing utilities, comparing circuit satisfaction against native
+/// evaluation of the same operations.
 #[commonware_macros::stability(ALPHA)]
 #[cfg(any(test, feature = "fuzz"))]
 pub mod fuzz {

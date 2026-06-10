@@ -551,6 +551,14 @@ pub fn r1cs_to_circuit_and_witness<F: Ring + Random>(
     (circuit, witness)
 }
 
+/// Conversion from `zk::Circuit`s into bulletproofs circuits.
+///
+/// The conversion linearizes: every circuit value is expressed as a linear
+/// combination of columns of the weight matrix. Additions and
+/// multiplications by constants combine linearly; each multiplication of two
+/// non-constant values becomes a multiplication gate, whose output wire is a
+/// new column. Each assertion `(l, r)` then becomes a matrix row enforcing
+/// `l - r = 0`.
 mod zkc {
     use crate::zk::circuit as zk;
     use commonware_math::algebra::{Field, Random, Ring};
@@ -558,6 +566,12 @@ mod zkc {
     use rand_core::CryptoRngCore;
     use std::{borrow::Cow, collections::BTreeMap};
 
+    /// A column of the bulletproofs weight matrix.
+    ///
+    /// The column layout is `1 | committed values | left wires | right wires
+    /// | output wires`. `Witness` is a provisional location for a witness
+    /// not yet pinned to a column; `location_to_col` resolves it through
+    /// `witness_locations`.
     #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
     enum Location {
         One,
@@ -568,6 +582,11 @@ mod zkc {
         Committed(usize),
     }
 
+    /// A circuit value, expressed as a linear combination of locations.
+    ///
+    /// `Location` is a single location with weight one, and `Constant` is a
+    /// multiple of the constant `1` column. `General` holds arbitrary
+    /// weighted sums, keyed by location so that duplicates merge.
     #[derive(Clone)]
     enum LinComb<F> {
         Location(Location),
@@ -576,6 +595,10 @@ mod zkc {
     }
 
     impl<F: Ring> LinComb<F> {
+        /// Multiply two combinations, if at least one of them is a constant.
+        ///
+        /// Returns `None` otherwise, in which case the product needs a
+        /// multiplication gate.
         fn mul(&self, other: &Self) -> Option<Self> {
             let (constant, other) = match (self, other) {
                 (Self::Constant(c), other) => (c.clone(), other),
@@ -620,6 +643,7 @@ mod zkc {
             Self::General(Map::try_from(merged).expect("merged locations should be unique"))
         }
 
+        /// Iterate over the `(weight, location)` terms of this combination.
         fn iter(&self) -> impl Iterator<Item = (Cow<'_, F>, Location)> {
             let (single, general) = match self {
                 Self::Location(loc) => (Some((Cow::Owned(F::one()), *loc)), None),
@@ -634,6 +658,8 @@ mod zkc {
             )
         }
 
+        /// The witness index, if this combination is a single witness not
+        /// yet pinned to a column.
         const fn witness(&self) -> Option<usize> {
             match self {
                 Self::Location(Location::Witness(w)) => Some(*w),
@@ -642,14 +668,32 @@ mod zkc {
         }
     }
 
+    /// State for converting a `zk::Circuit` into a bulletproofs circuit.
+    ///
+    /// `circuit` performs the verifier-side conversion, and
+    /// `circuit_and_witness` the prover-side one. Both run the same
+    /// conversion, so they produce the same circuit.
     pub struct ZKCConverter<F> {
+        /// Scratch stack of indices waiting to be linearized.
         linearize_queue: Vec<zk::CircuitIdx>,
+        /// The linear combination computed for each visited index.
         linearize_cache: BTreeMap<zk::CircuitIdx, LinComb<F>>,
+        /// The assertions of the source circuit.
         assertions: Vec<(zk::CircuitIdx, zk::CircuitIdx)>,
+        /// Assertions pinning a value to a specific location, used to bind
+        /// gate wires and committed values.
         extra_assertions: Vec<(zk::CircuitIdx, Location)>,
+        /// The location assigned to each witness.
         witness_locations: BTreeMap<usize, Location>,
+        /// The indices to commit, in caller order.
         committed_indices: Vec<zk::CircuitIdx>,
+        /// The committed slot for each committed index (the first slot, if
+        /// the index is repeated).
         committed_positions: BTreeMap<zk::CircuitIdx, usize>,
+        /// One entry per multiplication gate: the indices whose values feed
+        /// the left and right wires, and the index whose value is the
+        /// output wire. Padding gates holding leftover witnesses leave the
+        /// right wire, and then the output, unset.
         internal_vars: Vec<(
             zk::CircuitIdx,
             Option<zk::CircuitIdx>,
@@ -658,6 +702,8 @@ mod zkc {
     }
 
     impl<F: Field + Random> ZKCConverter<F> {
+        /// Create a converter committing the values at `committed_indices`,
+        /// in order.
         pub fn new(committed_indices: Vec<zk::CircuitIdx>) -> Self {
             let mut committed_positions = BTreeMap::new();
             for (i, &idx) in committed_indices.iter().enumerate() {
@@ -678,11 +724,15 @@ mod zkc {
             }
         }
 
+        /// Convert a circuit without an assignment (verifier mode).
         pub fn circuit(mut self, zkc: zk::Circuit<F>) -> super::Circuit<F> {
             self.populate(&zkc);
             self.reckon_circuit()
         }
 
+        /// Convert a circuit and its assignment (prover mode).
+        ///
+        /// Without a `blinding_rng`, the blinding factors are zero.
         pub fn circuit_and_witness(
             mut self,
             blinding_rng: Option<&mut impl CryptoRngCore>,
@@ -732,6 +782,7 @@ mod zkc {
             (self.reckon_circuit(), witness)
         }
 
+        /// Linearize every assertion and assign every witness a location.
         fn populate(&mut self, zkc: &zk::Circuit<F>) {
             for &(l, r) in &zkc.assertions {
                 self.assertions.push((l, r));
@@ -769,6 +820,7 @@ mod zkc {
             }
         }
 
+        /// Resolve a location to its column in the weight matrix.
         fn location_to_col(&self, loc: Location) -> usize {
             fn inner<F>(this: &ZKCConverter<F>, loc: Location, no_witness: bool) -> usize {
                 match loc {
@@ -794,6 +846,11 @@ mod zkc {
             inner(self, loc, false)
         }
 
+        /// Build the bulletproofs circuit from the accumulated state.
+        ///
+        /// Each assertion contributes a row applying the left side's
+        /// combination positively and the right side's negatively, so the
+        /// row reads `l - r = 0`.
         fn reckon_circuit(&self) -> super::Circuit<F> {
             let mut weights = super::SparseMatrix::default();
             for (row, (l, r)) in self
@@ -839,6 +896,8 @@ mod zkc {
             }
         }
 
+        /// Assign `loc` to `witness` unless it already has a non-provisional
+        /// location, returning the location in effect.
         fn assign_witness_location(&mut self, witness: usize, loc: Location) -> Location {
             *self
                 .witness_locations
@@ -851,6 +910,11 @@ mod zkc {
                 .or_insert(loc)
         }
 
+        /// Compute and cache the linear combination for `i` and everything
+        /// it depends on.
+        ///
+        /// Uses an explicit work stack rather than recursion, so deep
+        /// circuits cannot overflow the call stack.
         fn linearize(&mut self, zkc: &zk::Circuit<F>, i: zk::CircuitIdx) {
             self.linearize_queue.clear();
             self.linearize_queue.push(i);
@@ -930,6 +994,12 @@ mod zkc {
 ///
 /// Committed values keep the order of `committed_indices`. A duplicate index
 /// produces a separate commitment to the same value, constrained to match.
+/// Every index must name a witness allocated by the circuit; other indices
+/// are unsupported, and may panic or leave a commitment unconstrained.
+///
+/// `committed_indices` must match what the prover passed to
+/// [`zkc_to_circuit_and_witness`], otherwise the resulting [`Circuit`] will
+/// not match the prover's and proofs against it will fail.
 pub fn zkc_to_circuit<F: Field + Random>(
     zkc: crate::zk::circuit::Circuit<F>,
     committed_indices: &[crate::zk::circuit::CircuitIdx],
@@ -940,10 +1010,12 @@ pub fn zkc_to_circuit<F: Field + Random>(
 /// Convert a ZK circuit and witness assignment into a bulletproofs circuit and
 /// witness.
 ///
-/// `committed_indices` names the witness slots that should become
+/// `committed_indices` names the witness positions that should become
 /// bulletproofs committed values, in the order they should appear as
 /// committed values. A duplicate index produces a separate commitment to the
-/// same value, constrained to match.
+/// same value, constrained to match. Every index must name a witness
+/// allocated by the circuit; other indices are unsupported, and may panic
+/// or leave a commitment unconstrained.
 pub fn zkc_to_circuit_and_witness<F: Field + Random>(
     blinding_rng: Option<&mut impl CryptoRngCore>,
     zkc: crate::zk::circuit::ValuedCircuit<F>,

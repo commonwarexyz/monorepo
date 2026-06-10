@@ -1,6 +1,6 @@
 #[cfg(feature = "std")]
 pub mod bulletproofs;
-#[allow(dead_code)]
+#[cfg(feature = "std")]
 pub mod circuit;
 #[cfg(feature = "std")]
 pub mod pedersen_to_plain;
