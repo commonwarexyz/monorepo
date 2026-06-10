@@ -616,7 +616,7 @@ where
 
                 // Cache notarization by round.
                 self.cache
-                    .put_notarization(round, digest, notarization.clone())
+                    .put_notarization(round, digest, notarization)
                     .await;
 
                 // A notarization alone is not enough to fetch missing proposal
@@ -1820,19 +1820,15 @@ where
         }
     }
 
-    /// Looks for a block in cache and finalized storage by inner digest, returning
-    /// only blocks that match `predicate`.
-    async fn find_block_in_storage_matching(
+    /// Looks for a block in cache and finalized storage by full consensus commitment.
+    async fn find_block_in_storage_by_commitment(
         &self,
-        digest: <V::Block as Digestible>::Digest,
-        mut predicate: impl FnMut(&V::Block) -> bool,
+        commitment: V::Commitment,
     ) -> Option<V::Block> {
+        let digest = V::commitment_to_inner(commitment);
         if let Some(block) = self
             .cache
-            .find_block_matching(digest, |stored| {
-                let block = stored.clone().into();
-                predicate(&block)
-            })
+            .find_block_matching(digest, |stored| V::stored_commitment(stored) == commitment)
             .await
         {
             return Some(block.into());
@@ -1840,8 +1836,7 @@ where
 
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
             Ok(Some(stored)) => {
-                let block = stored.into();
-                predicate(&block).then_some(block)
+                (V::stored_commitment(&stored) == commitment).then(|| stored.into())
             }
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
@@ -1875,10 +1870,7 @@ where
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
-        self.find_block_in_storage_matching(V::commitment_to_inner(commitment), |block| {
-            V::commitment(block) == commitment
-        })
-        .await
+        self.find_block_in_storage_by_commitment(commitment).await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
@@ -1953,10 +1945,16 @@ where
             };
 
             // Attempt to repair the gap backwards from the end of the gap, using
-            // blocks from our local storage.
-            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
+            // blocks from our local storage. The walkback only needs each
+            // block's height and parent linkage.
+            let Some(cursor) = self.get_finalized_block(gap_end).await else {
                 panic!("gapped block missing that should exist: {gap_end}");
             };
+            let (mut height, mut parent_digest, mut parent_commitment) = (
+                cursor.height(),
+                cursor.parent(),
+                V::parent_commitment(&cursor),
+            );
 
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
@@ -1964,33 +1962,25 @@ where
             let gap_start = gap_start.map(Height::next).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
-            while cursor.height() > gap_start {
-                let parent_digest = cursor.parent();
-                let parent_commitment = V::parent_commitment(&cursor);
+            while height > gap_start {
                 if let Some(block) = self
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
                 {
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
+                    let next = (block.height(), block.parent(), V::parent_commitment(&block));
                     wrote |= self
-                        .store_finalization(
-                            block.height(),
-                            parent_digest,
-                            block.clone(),
-                            finalization,
-                            application,
-                        )
+                        .store_finalization(next.0, parent_digest, block, finalization, application)
                         .await;
-                    debug!(height = %block.height(), "repaired block");
-                    cursor = block;
+                    debug!(height = %next.0, "repaired block");
+                    (height, parent_digest, parent_commitment) = next;
                 } else {
                     // Request the next missing commitment.
                     //
                     // SAFETY: Finalized blocks are archived only after the
                     // parent relationship needed for walkback has been
                     // validated by marshal.
-                    let parent_height = cursor
-                        .height()
+                    let parent_height = height
                         .previous()
                         .expect("cursor above gap start has a parent");
                     self.floor
