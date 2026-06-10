@@ -1117,10 +1117,8 @@ mod tests {
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }.as_ptr() as usize, base_addr);
         // SAFETY: owner is unique and live.
-        assert_eq!(
-            unsafe { owner.usable_capacity() },
-            expected_header - base_addr
-        );
+        let usable = unsafe { owner.usable_capacity() };
+        assert_eq!(usable, expected_header - base_addr);
         // SAFETY: the adopted region below the header is writable; verify the
         // payload survived adoption.
         let payload = unsafe { std::slice::from_raw_parts(ptr.as_ptr(), len) };

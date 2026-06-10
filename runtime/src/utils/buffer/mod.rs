@@ -67,7 +67,8 @@ mod tests {
 
     impl crate::Blob for BlockingReadBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
@@ -198,7 +199,8 @@ mod tests {
 
     impl crate::Blob for SyncTrackingBlob {
         async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::default()).await
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
         }
 
         async fn read_at_buf(
