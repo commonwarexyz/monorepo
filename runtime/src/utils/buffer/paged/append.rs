@@ -611,9 +611,6 @@ impl<B: Blob> Append<B> {
         offsets: &[u64],
         item_size: usize,
     ) -> Result<usize, Error> {
-        if offsets.is_empty() {
-            return Ok(0);
-        }
         assert_eq!(
             buf.len(),
             offsets
@@ -626,6 +623,9 @@ impl<B: Blob> Append<B> {
             offsets.windows(2).all(|w| w[0] < w[1]),
             "offsets must be strictly increasing"
         );
+        if offsets.is_empty() {
+            return Ok(0);
+        }
 
         let last_end = offsets[offsets.len() - 1]
             .checked_add(item_size as u64)

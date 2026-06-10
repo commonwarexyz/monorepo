@@ -51,6 +51,19 @@ pub struct Index<T: Translator, V: Send + Sync> {
 }
 
 impl<T: Translator, V: Send + Sync> Index<T, V> {
+    /// Translate a key without probing.
+    pub(super) fn translate(&self, key: &[u8]) -> T::Key {
+        self.translator.transform(key)
+    }
+
+    /// Returns an iterator over all values associated with an already-translated key.
+    pub(super) fn get_translated<'a>(&'a self, key: T::Key) -> impl Iterator<Item = &'a V> + 'a
+    where
+        V: 'a,
+    {
+        self.map.get(&key).into_iter().flat_map(iter_chain)
+    }
+
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -166,8 +179,8 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
             .map(|(key_idx, key)| (self.translator.transform(key.as_ref()), key_idx))
             .collect();
         order.sort_unstable();
-        for (_, key_idx) in order {
-            for value in self.get(keys[key_idx].as_ref()) {
+        for (translated, key_idx) in order {
+            for value in self.get_translated(translated) {
                 visit(key_idx, value);
             }
         }
@@ -181,8 +194,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     where
         V: 'a,
     {
-        let k = self.translator.transform(key);
-        self.map.get(&k).into_iter().flat_map(iter_chain)
+        self.get_translated(self.translator.transform(key))
     }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {

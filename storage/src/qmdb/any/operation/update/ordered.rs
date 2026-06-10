@@ -42,6 +42,8 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type Key = K;
     type Value = V::Value;
     type ValueEncoding = V;
+    const CACHES_READS: bool = false;
+
     fn key(&self) -> &K {
         &self.key
     }

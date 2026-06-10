@@ -247,49 +247,31 @@ impl CacheRef {
         original_len - buf.len()
     }
 
-    /// Read multiple disjoint byte ranges from the page cache, amortizing lock acquisition.
+    /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
     ///
     /// Each element of `ranges` is `(dest_slice, logical_offset)`. Fully-cached ranges have
     /// their data written to the destination slice and are removed from `ranges`. Entries left
     /// in `ranges` correspond to cache misses that the caller must read from the underlying
     /// blob.
-    ///
-    /// Ranges are probed in fixed-size windows with the lock re-acquired per window, bounding
-    /// how long any one batch holds the cache lock: the lock is write-preferring, so a long
-    /// uninterrupted hold would stall a queued writer and every reader behind it.
     pub(super) fn read_cached_many(&self, blob_id: u64, ranges: &mut Vec<(&mut [u8], u64)>) {
-        const WINDOW: usize = 1024;
-        let len = ranges.len();
-        let mut kept = 0;
-        let mut start = 0;
-        while start < len {
-            let end = (start + WINDOW).min(len);
-            let page_cache = self.cache.read();
-            for i in start..end {
-                let (buf, logical_offset) = &mut ranges[i];
-                let mut remaining = buf.len();
-                let mut offset = *logical_offset;
-                let mut dst = 0;
-                while remaining > 0 {
-                    let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
-                    if count == 0 {
-                        break;
-                    }
-                    offset += count as u64;
-                    dst += count;
-                    remaining -= count;
+        let page_cache = self.cache.read();
+        ranges.retain_mut(|(buf, logical_offset)| {
+            let mut remaining = buf.len();
+            let mut offset = *logical_offset;
+            let mut dst = 0;
+            while remaining > 0 {
+                let count = page_cache.read_at(blob_id, &mut buf[dst..], offset);
+                if count == 0 {
+                    break;
                 }
-
-                // Compact cache misses to the front, preserving order; fully-cached
-                // entries are dropped by the final truncate
-                if remaining > 0 {
-                    ranges.swap(kept, i);
-                    kept += 1;
-                }
+                offset += count as u64;
+                dst += count;
+                remaining -= count;
             }
-            start = end;
-        }
-        ranges.truncate(kept);
+
+            // Keep cache misses in `ranges`; drop fully-cached entries.
+            remaining > 0
+        });
     }
 
     /// Read the specified bytes, preferentially from the page cache. Bytes not found in the cache
@@ -1357,52 +1339,5 @@ mod tests {
         assert!(buf2 == page2);
         // Missed page's buffer should be untouched (still zeroed).
         assert!(buf1.iter().all(|b| *b == 0));
-    }
-
-    #[test_traced]
-    fn test_read_cached_many_window_boundaries() {
-        // Exercise the windowed probe (WINDOW = 1024) with hits and misses mixed
-        // across multiple windows: hits must be served and miss compaction must
-        // preserve order regardless of which window an entry falls in.
-        const TOTAL: usize = 2500;
-        let pool = test_pool();
-        let cache_ref = CacheRef::new(pool, PAGE_SIZE, NZUsize!(4096));
-        let blob_id = cache_ref.next_id();
-
-        // Cache even pages; odd pages miss.
-        {
-            let mut cache = cache_ref.cache.write();
-            for page in (0..TOTAL).step_by(2) {
-                let data = vec![(page % 251) as u8; PAGE_SIZE.get() as usize];
-                cache.cache(blob_id, &data, page as u64);
-            }
-        }
-
-        let mut bufs: Vec<Vec<u8>> = vec![vec![0u8; PAGE_SIZE_U64 as usize]; TOTAL];
-        let mut ranges: Vec<(&mut [u8], u64)> = bufs
-            .iter_mut()
-            .enumerate()
-            .map(|(page, buf)| (buf.as_mut_slice(), page as u64 * PAGE_SIZE_U64))
-            .collect();
-
-        cache_ref.read_cached_many(blob_id, &mut ranges);
-
-        // Odd pages remain as misses, in their original order.
-        let expected: Vec<u64> = (0..TOTAL as u64)
-            .filter(|p| p % 2 == 1)
-            .map(|p| p * PAGE_SIZE_U64)
-            .collect();
-        let actual: Vec<u64> = ranges.iter().map(|(_, offset)| *offset).collect();
-        assert_eq!(actual, expected);
-        drop(ranges);
-
-        // Even pages were filled from cache; odd pages untouched.
-        for (page, buf) in bufs.iter().enumerate() {
-            if page % 2 == 0 {
-                assert!(buf.iter().all(|b| *b == (page % 251) as u8));
-            } else {
-                assert!(buf.iter().all(|b| *b == 0));
-            }
-        }
     }
 }

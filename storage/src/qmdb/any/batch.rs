@@ -186,10 +186,10 @@ where
     base: Base<F, H::Digest, U, S>,
 
     /// Committed-DB locations cached by this batch's reads (`get`/`get_many`), keyed by the
-    /// key they matched. Consumed by unordered `merkleize`: when a mutation key is present
-    /// here, `merkleize` reuses the location and skips the redundant journal read. Ordered
-    /// `merkleize` ignores this cache: its op generation needs the read operation's value and
-    /// next key, and re-reading them costs more in cache upkeep than it saves.
+    /// key they matched. Populated only when `U::CACHES_READS` and consumed by `merkleize`:
+    /// when a mutation key is present here, `merkleize` reuses the location and skips the
+    /// redundant journal read. Ordered batches cache nothing: their op generation needs each
+    /// read operation's value and next key, so merkleize re-reads ops regardless.
     ///
     /// Only committed-snapshot resolutions are cached. A cached location doubles as the
     /// key's previous committed location (`base_old_loc`), which holds because a
@@ -923,8 +923,8 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. Each unique read resolved from the committed DB is cached on the batch for reuse
-    /// at merkleize.
+    /// keys. When the update kind caches reads, each unique read resolved from the committed
+    /// DB is cached on the batch for reuse at merkleize.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -980,11 +980,15 @@ where
 
         if !db_keys.is_empty() {
             let db_results = db.get_many_with_locations(&db_keys).await?;
-            let mut resolved = self.resolved.lock();
-            resolved.reserve(db_keys.len());
+            let mut resolved = U::CACHES_READS.then(|| self.resolved.lock());
+            if let Some(resolved) = resolved.as_deref_mut() {
+                resolved.reserve(db_keys.len());
+            }
             for (slot, result) in db_indices.into_iter().zip(db_results) {
                 results[slot] = result.map(|(value, loc)| {
-                    resolved.insert((*keys[slot]).clone(), loc);
+                    if let Some(resolved) = resolved.as_deref_mut() {
+                        resolved.insert((*keys[slot]).clone(), loc);
+                    }
                     value
                 });
             }
@@ -1206,8 +1210,8 @@ where
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// Locations cached by this batch's reads are ignored: ordered op generation needs each
-    /// read operation's value and next key for linkage, and re-reading them through the
+    /// Reads on ordered batches cache nothing (`CACHES_READS` is false): op generation needs
+    /// each read operation's value and next key for linkage, and re-reading them through the
     /// journal's page cache is cheaper than caching the payloads at read time.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(

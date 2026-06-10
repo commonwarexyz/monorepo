@@ -233,13 +233,8 @@ where
             .collect())
     }
 
-    /// Batch read multiple keys, returning per key the value and the committed location it was
-    /// read from (or `None` for absent keys).
-    ///
-    /// Identical resolution to [`Self::get_many`] but additionally returns the snapshot
-    /// location, letting batch reads cache it for reuse at merkleize.
-    ///
-    /// Results are returned in the same order as the input keys.
+    /// Like [`Self::get_many`] but additionally returns the committed location each value was
+    /// read from.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn get_many_with_locations(
         &self,

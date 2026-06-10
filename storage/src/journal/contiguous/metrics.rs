@@ -217,12 +217,11 @@ impl<E: RuntimeMetrics + Clock> FixedMetrics<E> {
         let context = Arc::new(context);
         let hits = context.as_ref().counter(
             "cache_hits",
-            "Number of fixed items served without a blob read (tip buffer or page cache)",
+            "Number of fixed items served without a blob read",
         );
         let misses = context.as_ref().counter(
             "cache_misses",
-            "Number of fixed items requiring a blob read, including pruned or out-of-range \
-             try_read_sync probes that returned None",
+            "Number of fixed items requiring a blob read",
         );
         let calls = context
             .as_ref()

@@ -41,6 +41,7 @@ use std::{
 };
 
 type Digest = <Sha256 as Hasher>::Digest;
+const CHUNK_SIZE: usize = 32;
 type AnyDb = commonware_storage::qmdb::any::unordered::fixed::Db<
     mmb::Family,
     Context,
@@ -58,7 +59,6 @@ type AnyMerkleized = std::sync::Arc<
         Rayon,
     >,
 >;
-const CHUNK_SIZE: usize = 32;
 type CurrentDb = commonware_storage::qmdb::current::unordered::fixed::Db<
     mmb::Family,
     Context,
@@ -134,7 +134,6 @@ type AnyVarMerkleized = std::sync::Arc<
 >;
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
-// 512MB page cache, the production validator config (active window fully warm).
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
