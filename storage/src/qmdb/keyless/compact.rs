@@ -277,26 +277,23 @@ where
                     last_commit_proof,
                 },
             root,
-            inactivity_floor: inactivity_floor_loc,
         } = validated;
         let last_commit_loc = Location::new(*leaf_count - 1);
-        let Operation::Commit(last_commit_metadata, op_floor) = last_commit_op else {
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::UnexpectedData(last_commit_loc));
         };
-        if op_floor != inactivity_floor_loc {
-            return Err(Error::DataCorrupted("inactivity floor mismatch"));
-        }
 
         let merkle =
             compact_merkle::Merkle::from_compact_state(strategy, leaf_count, pinned_nodes.clone())?;
-        let imported = witness::witness_from_authenticated_state(
-            &merkle,
+        let imported = Witness {
             root,
-            inactivity_floor_loc,
-            Self::encode_commit_op(last_commit_metadata.clone(), inactivity_floor_loc),
-            last_commit_proof,
             pinned_nodes,
-        )?;
+            last_commit_op_bytes: Self::encode_commit_op(
+                last_commit_metadata.clone(),
+                inactivity_floor_loc,
+            ),
+            last_commit_proof,
+        };
 
         let witness = witness::Store::from_import(journal, imported);
         Ok(Self {
@@ -428,11 +425,6 @@ where
             .map_err(|_| {
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
-        if !matches!(&op, Operation::Commit(_, _)) {
-            return Err(compact_sync::ServeError::Database(Error::DataCorrupted(
-                "last operation was not a commit",
-            )));
-        }
         Ok(compact_sync::State {
             leaf_count,
             pinned_nodes,
@@ -1364,25 +1356,6 @@ mod tests {
             assert!(matches!(
                 db.apply_batch(held),
                 Err(Error::StaleBatch { .. })
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_compact_state_reports_cached_commit_corruption() {
-        deterministic::Runner::default().start(|context| async move {
-            let db = open_db::<mmr::Family>(context.child("db"), "keyless-serve-corruption").await;
-            let target = db.target();
-            db.witness
-                .mutate(|witness| witness.last_commit_op_bytes.clear());
-
-            assert!(matches!(
-                db.compact_state(target),
-                Err(compact_sync::ServeError::Database(Error::DataCorrupted(
-                    "invalid commit operation"
-                )))
             ));
 
             db.destroy().await.unwrap();

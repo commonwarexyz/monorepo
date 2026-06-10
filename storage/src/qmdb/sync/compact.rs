@@ -172,28 +172,12 @@ pub struct State<F: Family, Op, D: Digest> {
 }
 
 /// Compact state that has been validated against a target root.
-///
-/// This carries the original compact state plus the values derived while validating it. Compact
-/// database constructors still build their storage-backed Merkle state and witness cache, but they
-/// should use these values instead of re-deriving them from peer-provided state.
 #[derive(Clone, Debug)]
 pub struct ValidatedState<F: Family, Op, D: Digest> {
     /// The compact state fetched from a peer after validation.
     pub state: State<F, Op, D>,
     /// The target root that `state` was validated against.
     pub root: D,
-    /// The inactivity floor derived from the final commit operation.
-    pub inactivity_floor: Location<F>,
-}
-
-impl<F: Family, Op, D: Digest> ValidatedState<F, Op, D> {
-    const fn new(state: State<F, Op, D>, root: D, inactivity_floor: Location<F>) -> Self {
-        Self {
-            state,
-            root,
-            inactivity_floor,
-        }
-    }
 }
 
 impl<F: Family, Op, D: Digest> Write for State<F, Op, D>
@@ -212,7 +196,7 @@ where
 pub struct FetchResult<F: Family, Op, D: Digest> {
     /// The fetched compact state.
     pub state: State<F, Op, D>,
-    /// Callback used to report whether downstream accepted the state.
+    /// Callback used to report whether downstream validated the state.
     pub callback: Option<oneshot::Sender<bool>>,
 }
 
@@ -523,11 +507,10 @@ where
         });
     }
 
-    Ok(ValidatedState::new(
+    Ok(ValidatedState {
         state,
-        target.root,
-        inactivity_floor_loc,
-    ))
+        root: target.root,
+    })
 }
 
 async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(

@@ -1768,12 +1768,9 @@ mod compact_variable_mmr {
             let fetched = sync::compact::Resolver::get_compact_state(&source, target_b.clone())
                 .await
                 .unwrap();
-            let state = fetched.state;
-            let inactivity_floor = state.last_commit_op.has_floor().unwrap();
             let validated = sync::compact::ValidatedState {
-                state,
+                state: fetched.state,
                 root: target_b.root,
-                inactivity_floor,
             };
             let imported = <ClientDb as sync::compact::Database>::from_validated_state(
                 context.child("import"),

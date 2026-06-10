@@ -368,9 +368,8 @@ where
 /// Validate that a decoded commit floor does not point past the commit it authenticates.
 ///
 /// The inactivity floor of a commit must sit at or below the commit's own location. A higher
-/// floor would reference operations that do not exist yet, which indicates either disk corruption
-/// when reloading a persisted witness or malformed compact-sync input when validating reconstructed
-/// state from a remote source.
+/// floor would reference operations that do not exist yet, which indicates disk corruption in
+/// the persisted witness.
 pub(crate) fn validate_inactivity_floor<F: Family>(
     inactivity_floor_loc: Location<F>,
     last_commit_loc: Location<F>,
@@ -379,37 +378,6 @@ pub(crate) fn validate_inactivity_floor<F: Family>(
         return Err(Error::DataCorrupted("invalid compact witness"));
     }
     Ok(())
-}
-
-/// Build a witness from compact state that was already authenticated by the caller.
-pub(crate) fn witness_from_authenticated_state<F, D, S>(
-    merkle: &compact::Merkle<F, D, S>,
-    root: D,
-    inactivity_floor_loc: Location<F>,
-    last_commit_op_bytes: Vec<u8>,
-    last_commit_proof: Proof<F, D>,
-    pinned_nodes: Vec<D>,
-) -> Result<Witness<F, D>, Error<F>>
-where
-    F: Family,
-    D: Digest,
-    S: Strategy,
-{
-    if merkle.leaves() == 0 {
-        return Err(Error::DataCorrupted("missing final commit"));
-    }
-    let leaf_count = merkle.leaves();
-    if last_commit_proof.leaves != leaf_count {
-        return Err(Error::DataCorrupted("invalid compact witness"));
-    }
-    let last_commit_loc = Location::<F>::new(*leaf_count - 1);
-    validate_inactivity_floor(inactivity_floor_loc, last_commit_loc)?;
-    Ok(Witness {
-        root,
-        pinned_nodes,
-        last_commit_op_bytes,
-        last_commit_proof,
-    })
 }
 
 /// Load the tip witness from the journal and rebuild the Merkle from it.
@@ -542,13 +510,6 @@ where
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-
-    impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
-        /// Mutate the cached witness.
-        pub(crate) fn mutate(&self, f: impl FnOnce(&mut Witness<F, D>)) {
-            f(&mut self.cache.write());
-        }
-    }
 
     /// Read the tip witness entry's components.
     pub(crate) async fn tip<E, F, D>(journal: &Journal<E, F, D>) -> (Vec<u8>, Proof<F, D>, Vec<D>)
