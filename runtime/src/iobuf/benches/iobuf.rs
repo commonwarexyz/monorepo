@@ -25,7 +25,7 @@ macro_rules! bench_sizes {
         $(
             let vec = payload($size);
             let bytes = Bytes::from(vec.clone());
-            let iobuf_bytes = IoBuf::from_bytes(bytes.clone());
+            let iobuf_bytes = IoBuf::from(bytes.clone());
             let iobuf_aligned = {
                 let mut buffer = IoBufMut::with_alignment(vec.len(), NonZeroUsize::new(1).unwrap());
                 buffer.put_slice(&vec);
