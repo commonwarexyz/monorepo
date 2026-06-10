@@ -17,9 +17,10 @@
 //! # Blob Semantics
 //!
 //! [Append] owns the physical page layout, read cache, and durability bookkeeping for the wrapped
-//! [Blob]. Cloned [Append] handles share that state and are safe to use concurrently. Raw [Blob]
-//! handles cloned before wrapping operate on physical bytes, including checksum records, rather
-//! than [Append]'s logical view, and they do not observe buffered data until it is flushed.
+//! [Blob]. Cloned [Append] handles share that state; reads may run concurrently with anything,
+//! but mutable operations (append, resize) must be serialized by the caller. Raw [Blob] handles
+//! cloned before wrapping operate on physical bytes, including checksum records, rather than
+//! [Append]'s logical view, and they do not observe buffered data until it is flushed.
 //!
 //! Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while an
 //! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
@@ -325,11 +326,6 @@ impl<B: Blob> Append<B> {
     /// flush would), and the remaining sub-page suffix is buffered.
     ///
     /// Like [Self::append], the write is not durable until [Self::sync] is called.
-    ///
-    /// # Warning
-    ///
-    /// Concurrent mutable operations (other appends, resize) are not supported while a `buf`
-    /// too large to buffer is being written and may panic.
     pub async fn append_owned(&self, buf: IoBuf) -> Result<(), Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buf_guard = self.buffer.write().await;
