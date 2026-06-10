@@ -7,8 +7,8 @@
 //! `(leaf_count, pinned_nodes)` snapshot has the same root and the same future append
 //! behavior as the original.
 //!
-//! Nodes created by appends are retained only until a prune or reset; after that they are no
-//! longer readable.
+//! Nodes created by appends are retained only until the structure is pruned to its frontier or
+//! reset to a snapshot; after that they are no longer readable.
 
 use crate::merkle::{
     batch,

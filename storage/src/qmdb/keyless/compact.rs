@@ -538,7 +538,17 @@ where
 
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
     /// below the boundary may survive.
-    pub async fn prune(&self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
+    ///
+    /// Pruning is irreversible and bounds how far back [`Self::rewind`] can reach: a pruned
+    /// commit is no longer a valid rewind target. The current commit's witness always survives,
+    /// so a boundary at or beyond the tip prunes everything except the tip. The prune is made
+    /// durable before this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a compact-sync import has not yet been persisted by [`Self::sync`]. Any error
+    /// is fatal for this handle: drop it and reopen from storage.
+    pub async fn prune(&mut self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.witness.prune(pruning_boundary).await
     }
 
@@ -1163,6 +1173,54 @@ mod tests {
                 db.rewind(Location::new(*db.size() + 100)).await,
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
             ));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_between_commits() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "keyless-rewind-between").await;
+            let floor = db.inactivity_floor_loc();
+
+            // A multi-op commit jumps the committed size from 1 (bootstrap) to 4.
+            db.apply_batch(
+                db.new_batch()
+                    .append(U64::new(1))
+                    .append(U64::new(2))
+                    .merkleize(&db, Some(U64::new(11)), floor),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let root_a = db.root();
+            let size_a = db.size();
+            assert_eq!(size_a, Location::new(4));
+
+            // A second commit moves the size to 6.
+            db.apply_batch(db.new_batch().append(U64::new(3)).merkleize(
+                &db,
+                Some(U64::new(22)),
+                floor,
+            ))
+            .unwrap();
+            db.sync().await.unwrap();
+            let root_b = db.root();
+
+            // Targets inside a commit's span match no entry, even though entries exist on
+            // both sides.
+            for target in [2u64, 3, 5] {
+                assert!(matches!(
+                    db.rewind(Location::new(target)).await,
+                    Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
+                ));
+            }
+            assert_eq!(db.root(), root_b);
+
+            // The exact commit boundary remains a valid target.
+            db.rewind(size_a).await.unwrap();
+            assert_eq!(db.root(), root_a);
+            assert_eq!(db.get_metadata(), Some(U64::new(11)));
             db.destroy().await.unwrap();
         });
     }
