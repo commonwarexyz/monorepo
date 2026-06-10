@@ -119,7 +119,8 @@ pub struct Db<
     pub(crate) active_keys: usize,
 
     /// Activity bitmap over committed operations. Rebuilt from the journal on init; never
-    /// persisted. A hint for floor-raise scans; merkleization re-verifies via `is_active_at`.
+    /// persisted. A hint for floor-raise scans; merkleization re-verifies each candidate
+    /// against the batch diff, ancestor diffs, and snapshot in the floor-raise loop.
     /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
     /// tree leaves and proofs.
     ///
@@ -225,6 +226,20 @@ where
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
+        let results = self.get_many_with_locations(keys).await?;
+        Ok(results
+            .into_iter()
+            .map(|result| result.map(|(value, _)| value))
+            .collect())
+    }
+
+    /// Like [`Self::get_many`] but additionally returns the committed location each value was
+    /// read from.
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn get_many_with_locations(
+        &self,
+        keys: &[&U::Key],
+    ) -> Result<Vec<Option<(U::Value, Location<F>)>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -236,13 +251,10 @@ where
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        let mut results: Vec<Option<U::Value>> = vec![None; keys.len()];
+        let mut results: Vec<Option<(U::Value, Location<F>)>> = vec![None; keys.len()];
 
-        for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
-                candidates.push((key_idx, *loc));
-            }
-        }
+        self.snapshot
+            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
 
         if candidates.is_empty() {
             return Ok(results);
@@ -274,7 +286,7 @@ where
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {
-                results[key_idx] = Some(data.value().clone());
+                results[key_idx] = Some((data.value().clone(), Location::new(pos)));
             }
         }
 
