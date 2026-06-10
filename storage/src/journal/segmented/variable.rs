@@ -83,8 +83,9 @@
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::Error;
 use commonware_codec::{
+    util::at_least,
     varint::{UInt, MAX_U32_VARINT_SIZE},
-    Codec, CodecShared, EncodeSize, ReadExt, Write as CodecWrite,
+    Codec, CodecShared, EncodeSize, Read as CodecRead, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
@@ -195,6 +196,30 @@ fn decode_item<V: Codec>(item_data: impl Buf, cfg: &V::Cfg, compressed: bool) ->
         V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
     } else {
         V::decode_cfg(item_data, cfg).map_err(Error::Codec)
+    }
+}
+
+/// Decodes a varint length prefix followed by exactly that many payload bytes. Used to fuse
+/// header parsing and item decoding into a single page-cache decode on the synchronous,
+/// uncompressed read path.
+///
+/// Matches [find_item]'s varint semantics (u32 range, max 5 bytes, same overflow handling) by
+/// using the same [UInt] reader.
+struct PrefixedItem<V>(V);
+
+impl<V: CodecRead> CodecRead for PrefixedItem<V> {
+    type Cfg = V::Cfg;
+
+    fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let data_len = UInt::<u32>::read(buf)?.0 as usize;
+        at_least(buf, data_len)?;
+        let mut limited = buf.take(data_len);
+        let item = V::read_cfg(&mut limited, cfg)?;
+        let remaining = limited.remaining();
+        if remaining > 0 {
+            return Err(commonware_codec::Error::ExtraData(remaining));
+        }
+        Ok(Self(item))
     }
 }
 
@@ -722,20 +747,41 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     pub fn try_get_sync(&self, section: u64, offset: u64) -> Option<V> {
-        let mut buf = Vec::new();
-        self.try_get_sync_into(section, offset, &mut buf)
-    }
-
-    /// Get an item synchronously using caller-provided buffer.
-    pub fn try_get_sync_into(&self, section: u64, offset: u64, buf: &mut Vec<u8>) -> Option<V> {
         let blob = self.manager.get(section).ok()??;
         let remaining = blob.try_size()?.checked_sub(offset)?;
-        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
-        if header_len == 0 {
+        if remaining == 0 {
             return None;
         }
 
+        // Compressed items cannot be decoded from borrowed page slices (decompression must
+        // not run under the cache lock), so they keep the two-phase copy path.
+        if self.compression.is_some() {
+            return self.try_get_sync_compressed(blob, offset, remaining);
+        }
+
+        // Fuse the varint header parse and the item decode into a single lock acquisition,
+        // decoding in place from cached page bytes. Gathering is capped by page residency
+        // and a fixed page budget, so the large max_len keeps lock-held work bounded; items
+        // exceeding the budget simply fall back to the async path.
+        let max_len = usize::try_from(remaining).unwrap_or(usize::MAX);
+        match blob.try_decode_prefix_sync::<PrefixedItem<V>>(offset, max_len, &self.codec_config) {
+            // Decode failures on the sync path are reported as misses; the async path
+            // surfaces any real corruption.
+            Some(Ok((item, _))) => Some(item.0),
+            _ => None,
+        }
+    }
+
+    /// Synchronous read of a compressed item: copy the header and item bytes out of the cache,
+    /// then decompress and decode outside any locks.
+    fn try_get_sync_compressed(
+        &self,
+        blob: &Append<E::Blob>,
+        offset: u64,
+        remaining: u64,
+    ) -> Option<V> {
         // Read the varint header to determine item size.
+        let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
         if !blob.try_read_sync(offset, &mut header[..header_len]) {
             return None;
@@ -764,20 +810,20 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             return decode_item::<V>(
                 &header[varint_len..varint_len + data_len],
                 &self.codec_config,
-                self.compression.is_some(),
+                true,
             )
             .ok();
         }
 
         // Otherwise try reading the full item from cache.
-        buf.resize(item_len, 0);
-        if !blob.try_read_sync(offset, buf) {
+        let mut buf = vec![0u8; item_len];
+        if !blob.try_read_sync(offset, &mut buf) {
             return None;
         }
         decode_item::<V>(
             &buf[varint_len..varint_len + data_len],
             &self.codec_config,
-            self.compression.is_some(),
+            true,
         )
         .ok()
     }
@@ -879,12 +925,114 @@ mod tests {
     use super::*;
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Blob, BufMut, Runner, Storage, Supervisor as _};
-    use commonware_utils::{NZUsize, NZU16};
+    use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
     use futures::{pin_mut, StreamExt};
     use std::num::NonZeroU16;
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
+
+    // A janky page size to exercise items that span page boundaries on the sync path.
+    const JANKY_PAGE_SIZE: NonZeroU16 = NZU16!(103);
+
+    #[test_traced]
+    fn test_try_get_sync_uncompressed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A two-page cache: flushing four full pages leaves only pages 2 and 3
+            // resident (Clock evicts pages 0 and 1).
+            let cfg = Config {
+                partition: "try-get-sync".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, JANKY_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(4096),
+            };
+            let section = 1u64;
+            let mut journal = Journal::<_, FixedBytes<32>>::init(context.child("sync"), cfg)
+                .await
+                .unwrap();
+
+            // Each entry is 33 bytes (1-byte varint + 32-byte payload). Thirteen entries
+            // make 429 bytes: four full 103-byte pages plus a 17-byte partial tip.
+            let mut offsets = Vec::new();
+            let mut items = Vec::new();
+            for i in 0..13u8 {
+                let item = FixedBytes::new([i; 32]);
+                let (offset, _) = journal.append(section, &item).await.unwrap();
+                offsets.push(offset);
+                items.push(item);
+            }
+            journal.sync(section).await.unwrap();
+
+            // (a) An item fully inside a resident page (item 8 is within page 2).
+            assert_eq!(
+                journal.try_get_sync(section, offsets[8]),
+                Some(items[8].clone())
+            );
+
+            // (b) An item spanning two resident pages (item 9 crosses the page 2/3
+            // boundary at byte 309).
+            assert_eq!(
+                journal.try_get_sync(section, offsets[9]),
+                Some(items[9].clone())
+            );
+
+            // An item in an evicted page falls back to the async path.
+            assert_eq!(journal.try_get_sync(section, offsets[0]), None);
+            assert_eq!(journal.get(section, offsets[0]).await.unwrap(), items[0]);
+
+            // (c) An item whose header is resident (page 3) but whose payload extends
+            // beyond the flushed pages falls back to the async path.
+            assert_eq!(journal.try_get_sync(section, offsets[12]), None);
+            assert_eq!(journal.get(section, offsets[12]).await.unwrap(), items[12]);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_try_get_sync_compressed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // (d) With compression enabled, the sync path must still serve items via the
+            // preserved copy-and-decompress path.
+            let cfg = Config {
+                partition: "try-get-sync-zstd".into(),
+                compression: Some(3),
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, JANKY_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(4096),
+            };
+            let section = 1u64;
+            let mut journal = Journal::<_, FixedBytes<64>>::init(context.child("zstd"), cfg)
+                .await
+                .unwrap();
+
+            let mut offsets = Vec::new();
+            let mut items = Vec::new();
+            for i in 0..20u8 {
+                let item = FixedBytes::new([i; 64]);
+                let (offset, _) = journal.append(section, &item).await.unwrap();
+                offsets.push(offset);
+                items.push(item);
+            }
+            journal.sync(section).await.unwrap();
+
+            // Every flushed item must be servable synchronously (cached pages or tip).
+            let mut hits = 0;
+            for (offset, item) in offsets.iter().zip(&items) {
+                if let Some(found) = journal.try_get_sync(section, *offset) {
+                    assert_eq!(found, *item);
+                    hits += 1;
+                }
+                assert_eq!(journal.get(section, *offset).await.unwrap(), *item);
+            }
+            assert!(hits > 0, "compressed sync path should serve resident items");
+
+            journal.destroy().await.unwrap();
+        });
+    }
 
     #[test_traced]
     fn test_journal_append_and_read() {
