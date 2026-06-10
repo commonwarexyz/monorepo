@@ -1,182 +1,567 @@
-//! Backing storage for [`IoBuf`] and [`super::IoBufMut`].
+//! Allocation owners for [`super::IoBuf`] and [`super::IoBufMut`].
 //!
-//! This module contains the low-level allocation handles and the immutable and
-//! mutable view types built on top of them:
-//! - [`AlignedBuffer`] is self-contained: it carries its own [`Layout`] and
-//!   deallocates directly on drop.
-//! - [`PooledBuffer`] is the raw pooled allocation handle: it carries only a
-//!   pointer and does not know its allocation layout.
-//! - [`PooledBacking`] is the pooled ownership bundle outside the global
-//!   freelist: it pairs that handle with a [`SizeClassLease`] and slot id so the
-//!   buffer can return to its originating [`SizeClass`](super::pool::SizeClass).
+//! The public I/O buffer handles are intentionally small and direct:
 //!
-//! The allocator-facing pool logic lives in `pool.rs`. This module only deals
-//! with backing ownership and view semantics.
+//! ```text
+//! IoBuf       = ptr, len,      owner
+//! IoBufMut    = ptr, len, cap, owner
+//! ```
+//!
+//! `bytes::Buf` and `bytes::BufMut` methods read only those handle fields. They
+//! do not match on allocation kind and do not dispatch through a vtable. The
+//! allocation kind is needed only for lifecycle operations such as clone, drop,
+//! `freeze`, and `try_into_mut`, so that metadata is stored in an owner header
+//! outside the hot cursor arithmetic.
+//!
+//! Native runtime allocations place the owner header at the tail of the same
+//! allocation that stores data:
+//!
+//! ```text
+//! [ usable data bytes ............ ][ padding ][ owner header ]
+//! ^                                           ^
+//! |                                           |
+//! data/base pointer                           OwnerRef pointer
+//! ```
+//!
+//! The usable data begins at the allocation base so alignment requested for I/O
+//! is preserved. The header follows the data, after enough padding to satisfy
+//! the header alignment. A sliced or advanced handle may point into the usable
+//! region, so drop and `try_into_mut` derive the original base from the header,
+//! not from the handle's current `ptr`.
+//!
+//! `OwnerRef` is a tagged header pointer. The low tag bits are available because
+//! all headers are at least 4-byte aligned. Keeping the kind in the handle
+//! avoids loading the header just to decide whether final release should
+//! deallocate, return to the pool, or drop an external vector owner. That match
+//! is cold compared with `remaining`, `chunk`, `advance`, `remaining_mut`,
+//! `chunk_mut`, and `advance_mut`.
+//!
+//! `Vec<u8>` is the one intentionally external owner. A caller-supplied vector
+//! allocation cannot be retrofitted with a tail header, so we move it into a
+//! small `VecOwner` box and point the public handle at the vector's data. That
+//! preserves payload zero-copy conversion from `Vec<u8>` while keeping native
+//! aligned and pooled buffers allocation-resident.
 
-use super::IoBuf;
 use crate::iobuf::pool::{BufferPoolThreadCache, SizeClassLease};
-use bytes::Bytes;
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
-    mem::ManuallyDrop,
-    ops::{Bound, RangeBounds},
-    ptr::NonNull,
-    sync::Arc,
+    mem::{align_of, size_of, ManuallyDrop, MaybeUninit},
+    ptr::{addr_of_mut, NonNull},
+    sync::atomic::{fence, AtomicUsize, Ordering},
 };
 
-/// A heap allocation with explicit alignment.
+const OWNER_EMPTY: usize = 0;
+const OWNER_ALIGNED: usize = 0b01;
+const OWNER_POOLED: usize = 0b10;
+const OWNER_VEC: usize = 0b11;
+const OWNER_TAG_MASK: usize = 0b11;
+
+const _: () = assert!(align_of::<AlignedHeader>() >= 4);
+const _: () = assert!(align_of::<PooledHeader>() >= 4);
+const _: () = assert!(align_of::<VecOwner>() >= 4);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnerKind {
+    Empty,
+    Aligned,
+    Pooled,
+    Vec,
+}
+
+/// Tagged reference to an allocation owner.
 ///
-/// Owns an aligned region of memory allocated via the global allocator. This
-/// handle is self-contained: it stores the [`Layout`] needed to deallocate the
-/// region and releases the memory directly on drop.
+/// The value is either zero (`OwnerKind::Empty`) or a pointer to one of the
+/// owner headers with the low tag bits set:
 ///
-/// This is the raw storage primitive used by untracked aligned buffers.
-pub struct AlignedBuffer {
-    ptr: NonNull<u8>,
-    layout: Layout,
-}
+/// ```text
+/// raw header pointer:  0b....0000
+/// aligned owner ref:   0b....0001
+/// pooled owner ref:    0b....0010
+/// vec owner ref:       0b....0011
+/// ```
+///
+/// Empty owner refs are also used for non-empty `'static` slices. They need no
+/// lifecycle work because the payload is immortal. Code that needs to recover
+/// mutable ownership therefore checks both `owner.is_empty()` and `len == 0`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OwnerRef(usize);
 
-// SAFETY: `AlignedBuffer` represents a uniquely-owned heap allocation with no
-// aliasing safe references. Sharing only exposes raw pointers or immutable
-// slices through higher-level view types.
-unsafe impl Send for AlignedBuffer {}
-// SAFETY: see above.
-unsafe impl Sync for AlignedBuffer {}
-
-impl std::fmt::Debug for AlignedBuffer {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AlignedBuffer")
-            .field("ptr", &self.ptr)
-            .field("capacity", &self.capacity())
-            .field("alignment", &self.layout.align())
-            .finish()
-    }
-}
-
-impl AlignedBuffer {
-    /// Creates a new uninitialized aligned buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if:
-    /// - `capacity == 0`
-    /// - `alignment` is not a power of two
-    #[inline]
-    pub fn new(capacity: usize, alignment: usize) -> Self {
-        assert!(capacity > 0, "capacity must be greater than zero");
-        let layout =
-            Layout::from_size_align(capacity, alignment).expect("alignment is a power of two");
-        // SAFETY: layout is valid and non-zero sized.
-        let ptr = unsafe { alloc(layout) };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        Self { ptr, layout }
-    }
-
-    /// Creates a new zero-initialized aligned buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if:
-    /// - `capacity == 0`
-    /// - `alignment` is not a power of two
-    #[inline]
-    pub(crate) fn new_zeroed(capacity: usize, alignment: usize) -> Self {
-        assert!(capacity > 0, "capacity must be greater than zero");
-        let layout =
-            Layout::from_size_align(capacity, alignment).expect("alignment is a power of two");
-        // SAFETY: layout is valid and non-zero sized.
-        let ptr = unsafe { alloc_zeroed(layout) };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        Self { ptr, layout }
+impl OwnerRef {
+    #[inline(always)]
+    pub(crate) const fn empty() -> Self {
+        Self(OWNER_EMPTY)
     }
 
     #[inline(always)]
-    pub const fn capacity(&self) -> usize {
-        self.layout.size()
+    pub(crate) const fn is_empty(self) -> bool {
+        self.0 == OWNER_EMPTY
     }
 
     #[inline(always)]
-    pub const fn as_ptr(&self) -> *mut u8 {
-        self.ptr.as_ptr()
+    pub(crate) const fn is_pooled(self) -> bool {
+        (self.0 & OWNER_TAG_MASK) == OWNER_POOLED
+    }
+
+    /// Creates an aligned owner ref from a tail header pointer.
+    ///
+    /// # Safety
+    ///
+    /// `header` must be a valid aligned header pointer whose low tag bits are
+    /// zero and whose backing allocation remains owned by this owner ref.
+    #[inline(always)]
+    pub(crate) unsafe fn from_aligned(header: NonNull<AlignedHeader>) -> Self {
+        debug_assert_eq!(header.as_ptr() as usize & OWNER_TAG_MASK, 0);
+        Self(header.as_ptr() as usize | OWNER_ALIGNED)
+    }
+
+    /// Creates a pooled owner ref from a tail header pointer.
+    ///
+    /// # Safety
+    ///
+    /// `header` must be a valid pooled header pointer whose low tag bits are
+    /// zero and whose lease is initialized.
+    #[inline(always)]
+    pub(crate) unsafe fn from_pooled(header: NonNull<PooledHeader>) -> Self {
+        debug_assert_eq!(header.as_ptr() as usize & OWNER_TAG_MASK, 0);
+        Self(header.as_ptr() as usize | OWNER_POOLED)
+    }
+
+    /// Creates an external vector owner ref.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must come from `Box::into_raw(Box<VecOwner>)` and be uniquely
+    /// represented by this owner ref.
+    #[inline(always)]
+    unsafe fn from_vec(owner: NonNull<VecOwner>) -> Self {
+        debug_assert_eq!(owner.as_ptr() as usize & OWNER_TAG_MASK, 0);
+        Self(owner.as_ptr() as usize | OWNER_VEC)
+    }
+
+    #[inline(always)]
+    fn kind(self) -> OwnerKind {
+        match self.0 & OWNER_TAG_MASK {
+            OWNER_EMPTY => OwnerKind::Empty,
+            OWNER_ALIGNED => OwnerKind::Aligned,
+            OWNER_POOLED => OwnerKind::Pooled,
+            OWNER_VEC => OwnerKind::Vec,
+            _ => unreachable!(),
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn aligned(self) -> NonNull<AlignedHeader> {
+        debug_assert_eq!(self.kind(), OwnerKind::Aligned);
+        let ptr = (self.0 & !OWNER_TAG_MASK) as *mut AlignedHeader;
+        // SAFETY: guaranteed by the owner kind.
+        unsafe { NonNull::new_unchecked(ptr) }
+    }
+
+    #[inline(always)]
+    unsafe fn pooled(self) -> NonNull<PooledHeader> {
+        debug_assert_eq!(self.kind(), OwnerKind::Pooled);
+        let ptr = (self.0 & !OWNER_TAG_MASK) as *mut PooledHeader;
+        // SAFETY: guaranteed by the owner kind.
+        unsafe { NonNull::new_unchecked(ptr) }
+    }
+
+    #[inline(always)]
+    unsafe fn vec(self) -> NonNull<VecOwner> {
+        debug_assert_eq!(self.kind(), OwnerKind::Vec);
+        let ptr = (self.0 & !OWNER_TAG_MASK) as *mut VecOwner;
+        // SAFETY: guaranteed by the owner kind.
+        unsafe { NonNull::new_unchecked(ptr) }
+    }
+
+    /// Returns the shared refcount for a non-empty owner.
+    ///
+    /// # Safety
+    ///
+    /// `self` must not be empty.
+    #[inline(always)]
+    unsafe fn refs(self) -> &'static AtomicUsize {
+        match self.kind() {
+            OwnerKind::Empty => unreachable!("empty owners have no refcount"),
+            OwnerKind::Aligned => {
+                // SAFETY: owner kind proves the header type.
+                unsafe { &self.aligned().as_ref().refs }
+            }
+            OwnerKind::Pooled => {
+                // SAFETY: owner kind proves the header type.
+                unsafe { &self.pooled().as_ref().refs }
+            }
+            OwnerKind::Vec => {
+                // SAFETY: owner kind proves the header type.
+                unsafe { &self.vec().as_ref().refs }
+            }
+        }
+    }
+
+    /// Retains one immutable shared view.
+    ///
+    /// Mutable buffers never call this. Their owner is unique until `freeze`
+    /// hands it to an immutable `IoBuf`.
+    #[inline(always)]
+    pub(crate) unsafe fn clone_shared(self) {
+        if self.is_empty() {
+            return;
+        }
+        // SAFETY: non-empty owners have a valid refcount.
+        let old = unsafe { self.refs() }.fetch_add(1, Ordering::Relaxed);
+        debug_assert!(old >= 1);
+    }
+
+    /// Drops one immutable shared view.
+    ///
+    /// The refcount deliberately uses `1` as the reusable sentinel. Pooled
+    /// buffers sit in the pool with `refs == 1`, checked-out mutable buffers
+    /// keep `refs == 1`, and a single immutable owner has `refs == 1`. Final
+    /// drop therefore returns or deallocates without first writing zero.
+    ///
+    /// If two shared owners drop concurrently, one may observe `> 1` and then
+    /// race with another drop that reduces the count to `1`. The `old == 1`
+    /// branch handles that race by restoring the sentinel before final release.
+    #[inline(always)]
+    pub(crate) unsafe fn drop_shared(self) {
+        if self.is_empty() {
+            return;
+        }
+
+        // SAFETY: non-empty owners have a valid refcount.
+        let refs = unsafe { self.refs() };
+        if refs.load(Ordering::Acquire) == 1 {
+            // SAFETY: this is the final shared owner.
+            unsafe { self.release_unique() };
+            return;
+        }
+
+        let old = refs.fetch_sub(1, Ordering::Release);
+        debug_assert!(old >= 1);
+        if old == 1 {
+            fence(Ordering::Acquire);
+            refs.store(1, Ordering::Relaxed);
+            // SAFETY: this drop won the final-owner race.
+            unsafe { self.release_unique() };
+        }
+    }
+
+    /// Releases a uniquely-owned allocation.
+    ///
+    /// This is used by `IoBufMut::drop`, empty `freeze`, and final immutable
+    /// drop. It must not run while another handle still aliases the allocation.
+    #[inline(always)]
+    pub(crate) unsafe fn release_unique(self) {
+        let tag = self.0 & OWNER_TAG_MASK;
+        if tag == OWNER_POOLED {
+            // SAFETY: unique pooled owner with initialized lease.
+            unsafe { release_pooled(self.pooled()) };
+        } else if tag == OWNER_EMPTY {
+            // Nothing to release.
+        } else if tag == OWNER_ALIGNED {
+            // SAFETY: unique aligned owner.
+            unsafe { release_aligned(self.aligned()) };
+        } else {
+            debug_assert_eq!(tag, OWNER_VEC);
+            // SAFETY: unique external vector owner.
+            unsafe { release_vec(self.vec()) };
+        }
+    }
+
+    /// Releases a uniquely-owned mutable allocation.
+    ///
+    /// Mutable handles are expected to end in the pooled or aligned cases. Keep
+    /// those paths as direct branches and outline the empty/vector cases so LLVM
+    /// does not lower the mutable hot path as a dense owner-tag jump table.
+    ///
+    /// # Safety
+    ///
+    /// This must be called only for a uniquely-owned mutable handle.
+    #[inline(always)]
+    pub(crate) unsafe fn release_unique_mut(self) {
+        let tag = self.0 & OWNER_TAG_MASK;
+        if tag == OWNER_POOLED {
+            // SAFETY: unique pooled owner with initialized lease.
+            unsafe { release_pooled(self.pooled()) };
+        } else if tag == OWNER_ALIGNED {
+            // SAFETY: unique aligned owner.
+            unsafe { release_aligned(self.aligned()) };
+        } else {
+            // SAFETY: same precondition as this method.
+            unsafe { release_unique_mut_cold(self, tag) };
+        }
+    }
+
+    /// Returns true when this owner has exactly one immutable handle.
+    ///
+    /// Empty non-zero buffers are static and cannot become mutable.
+    #[inline(always)]
+    pub(crate) unsafe fn is_unique(self) -> bool {
+        if self.is_empty() {
+            return false;
+        }
+        // SAFETY: non-empty owners have a valid refcount.
+        unsafe { self.refs() }.load(Ordering::Acquire) == 1
+    }
+
+    /// Returns the base pointer for the usable data region.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be non-empty.
+    #[inline(always)]
+    pub(crate) unsafe fn data_base(self) -> NonNull<u8> {
+        match self.kind() {
+            OwnerKind::Empty => unreachable!("static buffers have no owner base"),
+            OwnerKind::Aligned => {
+                // SAFETY: owner kind proves the header type.
+                let header = unsafe { self.aligned() };
+                // SAFETY: header belongs to an aligned allocation.
+                unsafe { aligned_data_base(header) }
+            }
+            OwnerKind::Pooled => {
+                // SAFETY: owner kind proves the header type.
+                let header = unsafe { self.pooled() };
+                // SAFETY: header belongs to a pooled allocation.
+                unsafe { pooled_data_base(header) }
+            }
+            OwnerKind::Vec => {
+                // SAFETY: owner kind proves the header type.
+                let owner = unsafe { self.vec().as_ref() };
+                let ptr = owner.vec.as_ptr().cast_mut();
+                NonNull::new(ptr).unwrap_or_else(NonNull::dangling)
+            }
+        }
+    }
+
+    /// Returns the usable data capacity for this owner.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be non-empty.
+    #[inline(always)]
+    pub(crate) unsafe fn usable_capacity(self) -> usize {
+        match self.kind() {
+            OwnerKind::Empty => unreachable!("static buffers have no owner capacity"),
+            OwnerKind::Aligned => {
+                // SAFETY: owner kind proves the header type.
+                unsafe { self.aligned().as_ref().capacity }
+            }
+            OwnerKind::Pooled => {
+                // SAFETY: owner kind proves the header type.
+                unsafe { self.pooled().as_ref().capacity }
+            }
+            OwnerKind::Vec => {
+                // SAFETY: owner kind proves the header type.
+                unsafe { self.vec().as_ref().vec.capacity() }
+            }
+        }
+    }
+
+    /// Returns the current refcount for internal tests.
+    #[cfg(test)]
+    pub(crate) unsafe fn refcount(self) -> Option<usize> {
+        if self.is_empty() {
+            return None;
+        }
+        // SAFETY: non-empty owners have a valid refcount.
+        Some(unsafe { self.refs() }.load(Ordering::Acquire))
     }
 }
 
-impl Drop for AlignedBuffer {
-    #[inline(always)]
-    fn drop(&mut self) {
-        // SAFETY: ptr/layout came from the global allocator and are unchanged.
-        unsafe { dealloc(self.ptr.as_ptr(), self.layout) };
-    }
+/// Tail header for untracked aligned allocations.
+#[repr(C)]
+pub(crate) struct AlignedHeader {
+    refs: AtomicUsize,
+    capacity: usize,
+    layout_alignment: usize,
+}
+
+/// Tail header for pooled allocations.
+#[repr(C)]
+pub(crate) struct PooledHeader {
+    refs: AtomicUsize,
+    lease: MaybeUninit<SizeClassLease>,
+    data_base: NonNull<u8>,
+    capacity: usize,
+    slot: u32,
+}
+
+/// External owner for caller-supplied vectors.
+#[repr(C)]
+struct VecOwner {
+    refs: AtomicUsize,
+    vec: ManuallyDrop<Vec<u8>>,
 }
 
 /// A raw pooled allocation handle whose layout is stored by its size class.
 ///
-/// Unlike [`AlignedBuffer`], this handle intentionally carries only the
-/// allocation pointer. The size-class freelist stores the allocation layout, so
-/// moving pooled buffers through pooled backing values and thread-local caches
-/// does not need to move a per-buffer [`Layout`].
+/// This handle carries the allocation base pointer and its tail-header pointer.
+/// While a buffer is parked in the global freelist or a thread-local cache, its
+/// tail header has a stable refcount sentinel, data base pointer, capacity, and
+/// slot id, but its lease is not live. Checkout initializes only the lease
+/// field in place and returns an [`OwnerRef`] to that header.
 ///
-/// `PooledBuffer` does not implement [`Drop`] and does not retain its
-/// originating [`SizeClass`](super::pool::SizeClass). In normal pool use,
-/// [`PooledBacking`] owns it while it is outside the global freelist, and the
-/// size-class [`super::freelist::Freelist`] owns it while it is globally free.
-/// Only the freelist knows the layout needed to deallocate it.
-///
-/// Callers that take a `PooledBuffer` out of pool state must either return it to
-/// the same originating size class or explicitly deallocate it with the exact
-/// layout used to create it.
+/// `PooledBuffer` has no `Drop`: callers must return it to the originating
+/// freelist or deallocate it with the exact layout used for allocation.
 pub struct PooledBuffer {
     ptr: NonNull<u8>,
+    header: NonNull<PooledHeader>,
 }
 
-// SAFETY: `PooledBuffer` represents a uniquely-owned heap allocation with no
-// aliasing safe references. Sharing only exposes raw pointers or immutable
-// slices through higher-level view types.
+// SAFETY: `PooledBuffer` is a uniquely-owned raw allocation handle while it is
+// outside shared freelist state. Sharing happens only through pool structures
+// that synchronize ownership transfer.
 unsafe impl Send for PooledBuffer {}
-// SAFETY: see above.
+// SAFETY: same ownership-transfer discipline as `Send`.
 unsafe impl Sync for PooledBuffer {}
 
 impl std::fmt::Debug for PooledBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PooledBuffer")
             .field("ptr", &self.ptr)
+            .field("header", &self.header)
             .finish()
     }
 }
 
 impl PooledBuffer {
-    /// Creates a new uninitialized pooled buffer for `layout`.
+    /// Creates a new uninitialized pooled allocation for `layout`.
     ///
-    /// # Panics
-    ///
-    /// Panics if `layout` has zero size.
+    /// `layout` must be the full size-class layout, including usable bytes,
+    /// tail padding, and [`PooledHeader`].
     #[inline]
     pub fn new(layout: Layout) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
         // SAFETY: layout is valid and non-zero sized.
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        Self { ptr }
+        // SAFETY: layout is the full pooled allocation layout.
+        let header = unsafe { pooled_header_for_layout(ptr, layout) };
+        Self { ptr, header }
     }
 
-    /// Creates a new zero-initialized pooled buffer for `layout`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `layout` has zero size.
+    /// Creates a new zero-initialized pooled allocation for `layout`.
     #[inline]
     pub fn new_zeroed(layout: Layout) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
         // SAFETY: layout is valid and non-zero sized.
         let ptr = unsafe { alloc_zeroed(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        Self { ptr }
+        // SAFETY: layout is the full pooled allocation layout.
+        let header = unsafe { pooled_header_for_layout(ptr, layout) };
+        Self { ptr, header }
     }
 
-    /// Returns the allocation pointer.
+    /// Initializes invariant pooled header fields for a newly-created slot.
+    ///
+    /// This writes only fields that do not change while the buffer moves
+    /// between checked-out, thread-local, and global-free states. The lease is
+    /// intentionally left uninitialized until checkout.
+    ///
+    /// # Safety
+    ///
+    /// `layout` must be the full size-class layout used to allocate this buffer,
+    /// `slot` must be the stable slot id assigned to the allocation, and
+    /// `capacity` must be the usable data capacity for the size class.
+    #[inline(always)]
+    pub(crate) unsafe fn init_owner_header(
+        self,
+        layout: Layout,
+        slot: u32,
+        capacity: usize,
+    ) -> Self {
+        // SAFETY: the layout was used to allocate this buffer.
+        debug_assert_eq!(self.header, unsafe {
+            pooled_header_for_layout(self.ptr, layout)
+        });
+        // SAFETY: `header` is within the allocation and points at the stable
+        // pooled header location. `MaybeUninit<SizeClassLease>` is valid with
+        // uninitialized contents, so leaving `lease` unwritten is intentional.
+        unsafe {
+            addr_of_mut!((*self.header.as_ptr()).refs).write(AtomicUsize::new(1));
+            addr_of_mut!((*self.header.as_ptr()).data_base).write(self.ptr);
+            addr_of_mut!((*self.header.as_ptr()).capacity).write(capacity);
+            addr_of_mut!((*self.header.as_ptr()).slot).write(slot);
+        }
+        self
+    }
+
+    /// Returns the usable data base pointer.
     #[inline(always)]
     pub const fn as_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
+    }
+
+    /// Returns the usable data capacity for this size-class buffer.
+    ///
+    /// The capacity is initialized once when the owning freelist creates this
+    /// slot and remains stable while the buffer moves through pool states.
+    #[inline(always)]
+    pub(crate) unsafe fn capacity(&self) -> usize {
+        // SAFETY: caller guarantees the pooled header has been initialized.
+        unsafe { self.header.as_ref().capacity }
+    }
+
+    /// Returns the stable slot id for this size-class buffer.
+    ///
+    /// The slot is initialized once when the owning freelist creates this
+    /// buffer and is needed only when the buffer returns to the global
+    /// freelist.
+    #[inline(always)]
+    pub(crate) unsafe fn slot(&self) -> u32 {
+        // SAFETY: caller guarantees the pooled header has been initialized.
+        unsafe { self.header.as_ref().slot }
+    }
+
+    /// Initializes the pooled lease for a buffer leaving global state.
+    ///
+    /// # Safety
+    ///
+    /// This buffer must be checked out from the size class represented by
+    /// `lease`, and the header must not currently contain a live lease.
+    #[inline(always)]
+    pub(crate) unsafe fn init_lease(&mut self, lease: SizeClassLease) {
+        // SAFETY: header is within the allocation and properly aligned.
+        unsafe {
+            debug_assert_eq!((*self.header.as_ptr()).refs.load(Ordering::Relaxed), 1);
+            addr_of_mut!((*self.header.as_ptr()).lease).write(MaybeUninit::new(lease));
+        }
+    }
+
+    /// Returns a borrowed live lease.
+    ///
+    /// # Safety
+    ///
+    /// This pooled buffer must be checked out or parked in a thread-local cache,
+    /// so its lease field is initialized.
+    #[inline(always)]
+    pub(crate) unsafe fn lease(&self) -> &SizeClassLease {
+        // SAFETY: guaranteed by the caller.
+        unsafe { &*self.header.as_ref().lease.as_ptr() }
+    }
+
+    /// Consumes the live lease from this header.
+    ///
+    /// # Safety
+    ///
+    /// This pooled buffer must have an initialized lease, and after this call
+    /// the buffer must not be treated as checked out or locally cached until a
+    /// new lease is initialized.
+    #[inline(always)]
+    pub(crate) unsafe fn take_lease(&mut self) -> SizeClassLease {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.header.as_mut().lease.assume_init_read() }
+    }
+
+    /// Returns the owner ref for a buffer whose lease is already initialized.
+    ///
+    /// # Safety
+    ///
+    /// The lease field must be initialized.
+    #[inline(always)]
+    pub(crate) unsafe fn owner_ref(&self) -> OwnerRef {
+        // SAFETY: guaranteed by the caller.
+        unsafe { OwnerRef::from_pooled(self.header) }
     }
 
     /// Deallocates this pooled buffer.
@@ -191,1144 +576,276 @@ impl PooledBuffer {
     }
 }
 
-/// Owning allocation handle used by buffer views.
-///
-/// [`Buf`] and [`BufMut`] are generic over this trait so their view logic can
-/// stay shared while each backing decides how the allocation is described and
-/// released. Implementations must own exactly one allocation, report its full
-/// capacity, expose its base pointer, and consume themselves in
-/// [`Self::release`].
-///
-/// [`AlignedBuffer`] is self-contained and releases directly. [`PooledBacking`]
-/// owns the layoutless [`PooledBuffer`] together with the [`SizeClassLease`] and
-/// slot id needed to return that allocation to its size class.
-pub(crate) trait BufferBacking: Send + Sync + 'static {
-    /// Returns the full allocation capacity, ignoring any view cursor/offset.
-    fn capacity(&self) -> usize;
-
-    /// Returns the base allocation pointer.
-    fn as_ptr(&self) -> *mut u8;
-
-    /// Consumes the backing and releases the allocation.
-    fn release(self);
+/// Allocate an untracked aligned buffer with a tail [`AlignedHeader`].
+#[inline]
+pub(crate) fn allocate_aligned(
+    capacity: usize,
+    alignment: usize,
+    zeroed: bool,
+) -> (NonNull<u8>, OwnerRef) {
+    assert!(capacity > 0, "capacity must be greater than zero");
+    let (layout, header_offset) = aligned_layout(capacity, alignment);
+    let ptr = if zeroed {
+        // SAFETY: layout is valid and non-zero sized.
+        unsafe { alloc_zeroed(layout) }
+    } else {
+        // SAFETY: layout is valid and non-zero sized.
+        unsafe { alloc(layout) }
+    };
+    let data = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+    // SAFETY: the computed layout includes the header at `header_offset`.
+    let header = unsafe { data.as_ptr().add(header_offset).cast::<AlignedHeader>() };
+    // SAFETY: header is within the allocation and properly aligned.
+    let owner = unsafe {
+        header.write(AlignedHeader {
+            refs: AtomicUsize::new(1),
+            capacity,
+            layout_alignment: layout.align(),
+        });
+        OwnerRef::from_aligned(NonNull::new_unchecked(header))
+    };
+    (data, owner)
 }
 
-impl BufferBacking for AlignedBuffer {
-    #[inline(always)]
-    fn capacity(&self) -> usize {
-        self.capacity()
+/// Moves `vec` into an external owner and returns direct handle fields.
+#[inline]
+pub(crate) fn owner_from_vec(mut vec: Vec<u8>) -> (NonNull<u8>, usize, usize, OwnerRef) {
+    if vec.is_empty() {
+        return (NonNull::dangling(), 0, 0, OwnerRef::empty());
     }
 
-    #[inline(always)]
-    fn as_ptr(&self) -> *mut u8 {
-        self.as_ptr()
-    }
-
-    #[inline(always)]
-    fn release(self) {
-        drop(self);
-    }
+    let ptr = NonNull::new(vec.as_mut_ptr()).expect("non-empty Vec has non-null data");
+    let len = vec.len();
+    let cap = vec.capacity();
+    let owner = Box::new(VecOwner {
+        refs: AtomicUsize::new(1),
+        vec: ManuallyDrop::new(vec),
+    });
+    let owner = NonNull::new(Box::into_raw(owner)).expect("Box::into_raw returned null");
+    // SAFETY: pointer came from `Box::into_raw`.
+    let owner = unsafe { OwnerRef::from_vec(owner) };
+    (ptr, len, cap, owner)
 }
 
-/// Pooled backing storage outside the global freelist.
-///
-/// This is the ownership bundle for a pooled allocation outside the global
-/// freelist. The [`PooledBuffer`] is the raw allocation pointer, `slot`
-/// identifies that allocation within the originating size class, and
-/// [`SizeClassLease`] owns the strong size-class reference needed to keep the
-/// freelist and allocation layout alive.
-///
-/// Releasing this backing transfers the whole bundle to
-/// [`BufferPoolThreadCache`]. The thread cache may keep the buffer locally, or
-/// return it to the class-global freelist and release the lease.
-pub(crate) struct PooledBacking {
-    buffer: PooledBuffer,
-    lease: SizeClassLease,
-    slot: u32,
+/// Returns the full layout for a pooled size class.
+#[inline]
+pub(crate) fn pooled_layout(size: usize, alignment: usize) -> Layout {
+    let header_offset = pooled_header_offset(size);
+    let total = header_offset
+        .checked_add(size_of::<PooledHeader>())
+        .expect("pooled layout size overflow");
+    let layout_alignment = alignment.max(align_of::<PooledHeader>());
+    Layout::from_size_align(total, layout_alignment).expect("alignment is a power of two")
 }
 
-impl BufferBacking for PooledBacking {
-    #[inline(always)]
-    fn capacity(&self) -> usize {
-        self.lease.size()
-    }
-
-    #[inline(always)]
-    fn as_ptr(&self) -> *mut u8 {
-        self.buffer.as_ptr()
-    }
-
-    #[inline(always)]
-    fn release(self) {
-        BufferPoolThreadCache::push(self.lease, self.slot, self.buffer);
-    }
+/// Returns the full layout and header offset for an aligned allocation.
+#[inline]
+fn aligned_layout(capacity: usize, alignment: usize) -> (Layout, usize) {
+    let header_offset = aligned_header_offset(capacity);
+    let total = header_offset
+        .checked_add(size_of::<AlignedHeader>())
+        .expect("aligned layout size overflow");
+    let layout_alignment = alignment.max(align_of::<AlignedHeader>());
+    let layout = Layout::from_size_align(total, layout_alignment)
+        .expect("alignment is a power of two");
+    (layout, header_offset)
 }
 
-/// Shared allocation with backing-specific release behavior.
-///
-/// This is the single ownership point for the underlying backing allocation.
-/// Immutable views hold it behind an [`Arc`], while mutable views own it
-/// directly and may later freeze it into an immutable shared view.
-struct BufInner<B: BufferBacking> {
-    buffer: ManuallyDrop<B>,
+#[inline(always)]
+fn aligned_header_offset(capacity: usize) -> usize {
+    round_up(capacity, align_of::<AlignedHeader>())
 }
 
-impl<B: BufferBacking> BufInner<B> {
-    #[inline]
-    const fn new(buffer: B) -> Self {
-        Self {
-            buffer: ManuallyDrop::new(buffer),
-        }
-    }
-
-    #[inline]
-    fn capacity(&self) -> usize {
-        self.buffer.capacity()
-    }
+#[inline(always)]
+fn pooled_header_offset(size: usize) -> usize {
+    round_up(size, align_of::<PooledHeader>())
 }
 
-impl<B: BufferBacking> Drop for BufInner<B> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        // SAFETY: Drop is called at most once for this value.
-        let buffer = unsafe { ManuallyDrop::take(&mut self.buffer) };
-        buffer.release();
-    }
+#[inline(always)]
+unsafe fn pooled_header_for_layout(
+    ptr: NonNull<u8>,
+    layout: Layout,
+) -> NonNull<PooledHeader> {
+    let header_offset = layout
+        .size()
+        .checked_sub(size_of::<PooledHeader>())
+        .expect("pooled layout includes header");
+    // SAFETY: the size-class layout places the header at this offset.
+    let header = unsafe { ptr.as_ptr().add(header_offset).cast::<PooledHeader>() };
+    // SAFETY: pooled headers are placed within non-null allocations.
+    unsafe { NonNull::new_unchecked(header) }
 }
 
-/// Immutable, reference-counted view over fixed-capacity backing storage.
-///
-/// Cloning is cheap and shares the same underlying aligned allocation.
-///
-/// The backing type decides what happens when the final reference is dropped:
-/// untracked aligned buffers deallocate directly, while pooled buffers return
-/// the allocation to their originating size class.
-///
-/// # View Layout
-///
-/// ```text
-/// [0................offset...........offset+len...........capacity]
-///  ^                 ^                   ^                    ^
-///  |                 |                   |                    |
-///  allocation start  first readable      end of readable      allocation end
-///                    byte of this view   region for this view
-/// ```
-///
-/// Regions:
-/// - `[0..offset)`: not readable from this view
-/// - `[offset..offset+len)`: readable bytes for this view
-/// - `[offset+len..capacity)`: not readable from this view
-///
-/// # Invariants
-///
-/// - `offset <= capacity`
-/// - `offset + len <= capacity`
-///
-/// This representation allows sliced views to preserve their current readable
-/// window while still supporting `try_into_mut` when uniquely owned.
-pub(crate) struct Buf<B: BufferBacking> {
-    inner: Arc<BufInner<B>>,
-    offset: usize,
-    len: usize,
+#[inline(always)]
+fn round_up(value: usize, align: usize) -> usize {
+    debug_assert!(align.is_power_of_two());
+    value
+        .checked_add(align - 1)
+        .expect("layout size overflow")
+        & !(align - 1)
 }
 
-impl<B: BufferBacking> Buf<B> {
-    /// Returns a pointer to the first readable byte.
-    #[inline]
-    pub(crate) fn as_ptr(&self) -> *const u8 {
-        // SAFETY: offset is always within the underlying allocation.
-        unsafe { self.inner.buffer.as_ptr().add(self.offset) }
-    }
-
-    /// Returns a slice of this view (zero-copy).
-    ///
-    /// The range is resolved relative to this view's readable window
-    /// (`0..self.len`), not relative to the allocation start.
-    ///
-    /// Returns `None` for empty ranges, allowing callers to detach from the
-    /// underlying allocation.
-    pub(crate) fn slice(&self, range: impl RangeBounds<usize>) -> Option<Self> {
-        let start = match range.start_bound() {
-            Bound::Included(&n) => n,
-            Bound::Excluded(&n) => n.checked_add(1).expect("range start overflow"),
-            Bound::Unbounded => 0,
-        };
-        let end = match range.end_bound() {
-            Bound::Included(&n) => n.checked_add(1).expect("range end overflow"),
-            Bound::Excluded(&n) => n,
-            Bound::Unbounded => self.len,
-        };
-        assert!(start <= end, "slice start must be <= end");
-        assert!(end <= self.len, "slice out of bounds");
-
-        if start == end {
-            return None;
-        }
-
-        Some(Self {
-            inner: Arc::clone(&self.inner),
-            offset: self.offset + start,
-            len: end - start,
-        })
-    }
-
-    /// Splits the buffer into two at the given index.
-    ///
-    /// Afterwards `self` contains bytes `[at, len)`, and the returned buffer
-    /// contains bytes `[0, at)`.
-    ///
-    /// This is an `O(1)` zero-copy operation.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `at > len`.
-    #[inline]
-    pub(crate) fn split_to(&mut self, at: usize) -> Self {
-        assert!(
-            at <= self.len,
-            "split_to out of bounds: {:?} <= {:?}",
-            at,
-            self.len,
-        );
-
-        let prefix = Self {
-            inner: Arc::clone(&self.inner),
-            offset: self.offset,
-            len: at,
-        };
-
-        self.offset += at;
-        self.len -= at;
-        prefix
-    }
-
-    /// Try to recover mutable ownership without copying.
-    ///
-    /// This succeeds only when this is the sole remaining reference to the
-    /// underlying allocation (`Arc` strong count is 1).
-    ///
-    /// On success, the returned mutable buffer preserves the readable bytes and
-    /// mutable capacity from this view's current offset to the end of the
-    /// allocation. This means uniquely-owned sliced views can also be recovered
-    /// as mutable buffers while keeping the same readable window.
-    ///
-    /// On failure, returns `self` unchanged.
-    pub(crate) fn try_into_mut(self) -> Result<BufMut<B>, Self> {
-        let Self { inner, offset, len } = self;
-        match Arc::try_unwrap(inner) {
-            Ok(inner) => Ok(BufMut {
-                inner: ManuallyDrop::new(inner),
-                cursor: offset,
-                len: offset.checked_add(len).expect("slice end overflow"),
-            }),
-            Err(inner) => Err(Self { inner, offset, len }),
-        }
-    }
-
-    /// Converts this view into [`Bytes`] without copying.
-    ///
-    /// Empty views return detached [`Bytes::new`] so the underlying allocation
-    /// is not retained by an empty owner.
-    pub(crate) fn into_bytes(self) -> Bytes {
-        if self.len == 0 {
-            return Bytes::new();
-        }
-        Bytes::from_owner(self)
-    }
-}
-
-impl<B: BufferBacking> AsRef<[u8]> for Buf<B> {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: offset/len are always bounded within the underlying allocation.
-        unsafe { std::slice::from_raw_parts(self.inner.buffer.as_ptr().add(self.offset), self.len) }
-    }
-}
-
-impl<B: BufferBacking> Clone for Buf<B> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: Arc::clone(&self.inner),
-            offset: self.offset,
-            len: self.len,
-        }
-    }
-}
-
-impl<B: BufferBacking> bytes::Buf for Buf<B> {
-    #[inline]
-    fn remaining(&self) -> usize {
-        self.len
-    }
-
-    #[inline]
-    fn chunk(&self) -> &[u8] {
-        self.as_ref()
-    }
-
-    #[inline]
-    fn advance(&mut self, cnt: usize) {
-        assert!(cnt <= self.len, "cannot advance past end of buffer");
-        self.offset += cnt;
-        self.len -= cnt;
-    }
-
-    #[inline]
-    fn copy_to_bytes(&mut self, len: usize) -> Bytes {
-        assert!(len <= self.len, "copy_to_bytes out of bounds");
-        if len == 0 {
-            return Bytes::new();
-        }
-        let slice = Self {
-            inner: Arc::clone(&self.inner),
-            offset: self.offset,
-            len,
-        };
-        self.advance(len);
-        slice.into_bytes()
-    }
-}
-
-/// Mutable fixed-capacity buffer view.
+/// Returns the original data base for an aligned header.
 ///
-/// When dropped, the underlying buffer is released according to `B`: untracked
-/// aligned buffers deallocate directly, while pooled buffers return to the
-/// pool.
+/// # Safety
 ///
-/// # Buffer Layout
-///
-/// ```text
-/// [0................cursor..............len.............raw_capacity]
-///  ^                 ^                   ^                 ^
-///  |                 |                   |                 |
-///  allocation start  read position       write position    allocation end
-///                    (consumed prefix)   (initialized)
-///
-/// Regions:
-/// - [0..cursor]:        consumed (via [`bytes::Buf::advance`]), no longer accessible
-/// - [cursor..len]:      readable bytes (as_ref returns this slice)
-/// - [len..raw_capacity): uninitialized, writable via [`bytes::BufMut`]
-/// ```
-///
-/// # Invariants
-///
-/// - `cursor <= len <= raw_capacity`
-/// - Bytes in `0..len` have been initialized (safe to read)
-/// - Bytes in `len..raw_capacity` are uninitialized (write-only via [`bytes::BufMut`])
-///
-/// # Computed Values
-///
-/// - `len()` = readable bytes = `self.len - cursor`
-/// - `capacity()` = view capacity = `raw_capacity - cursor` (shrinks after advance)
-/// - `remaining_mut()` = writable bytes = `raw_capacity - self.len`
-///
-/// This matches [`bytes::BytesMut`] semantics.
-///
-/// # Fixed Capacity
-///
-/// Unlike [`bytes::BytesMut`], aligned buffers have fixed capacity and do not
-/// grow automatically. Calling [`bytes::BufMut::put_slice`] or other
-/// [`bytes::BufMut`] methods that would exceed capacity will panic (per the
-/// [`bytes::BufMut`] trait contract).
-pub(crate) struct BufMut<B: BufferBacking> {
-    inner: ManuallyDrop<BufInner<B>>,
-    /// Read cursor position (for `Buf` trait).
-    cursor: usize,
-    /// Number of bytes written (initialized).
-    len: usize,
+/// `header` must point to a live [`AlignedHeader`] in a native aligned
+/// allocation.
+#[inline(always)]
+unsafe fn aligned_data_base(header: NonNull<AlignedHeader>) -> NonNull<u8> {
+    // SAFETY: guaranteed by the caller.
+    let header_ref = unsafe { header.as_ref() };
+    let header_offset = aligned_header_offset(header_ref.capacity);
+    // SAFETY: the header was placed exactly `header_offset` bytes after base.
+    let base = unsafe { header.as_ptr().cast::<u8>().sub(header_offset) };
+    // SAFETY: allocation bases are non-null.
+    unsafe { NonNull::new_unchecked(base) }
 }
 
-impl<B: BufferBacking> BufMut<B> {
-    /// Capacity of the underlying allocation (ignoring cursor).
-    #[inline]
-    fn raw_capacity(&self) -> usize {
-        self.inner.capacity()
-    }
-
-    /// Converts this mutable buffer into a shared immutable view.
-    ///
-    /// Wraps `self` in [`ManuallyDrop`] to suppress its `Drop` impl, then
-    /// moves the inner state into an `Arc`-backed [`Buf`]. The resulting
-    /// view covers only the current readable window (`cursor..len`).
-    fn into_shared(self) -> Buf<B> {
-        let mut me = ManuallyDrop::new(self);
-        // SAFETY: `me` is wrapped in `ManuallyDrop`, so its `Drop` impl will not run.
-        let inner = unsafe { ManuallyDrop::take(&mut me.inner) };
-        Buf {
-            inner: Arc::new(inner),
-            offset: me.cursor,
-            len: me.len - me.cursor,
-        }
-    }
-
-    /// Returns the number of readable bytes remaining in the buffer.
-    ///
-    /// This is `len - cursor`, matching [`bytes::BytesMut`] semantics.
-    #[inline]
-    pub const fn len(&self) -> usize {
-        self.len - self.cursor
-    }
-
-    /// Returns true if no readable bytes remain.
-    #[inline]
-    pub const fn is_empty(&self) -> bool {
-        self.cursor == self.len
-    }
-
-    /// Returns the number of bytes the buffer can hold without reallocating.
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.inner.capacity() - self.cursor
-    }
-
-    /// Returns an unsafe mutable pointer to the buffer's data.
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut u8 {
-        // SAFETY: cursor is always <= raw capacity.
-        unsafe { self.inner.buffer.as_ptr().add(self.cursor) }
-    }
-
-    /// Sets the length of the buffer (view-relative).
-    ///
-    /// This will explicitly set the size of the buffer without actually
-    /// modifying the data, so it is up to the caller to ensure that the data
-    /// has been initialized.
-    ///
-    /// The `len` parameter is relative to the current view (after any `advance`
-    /// calls), matching [`bytes::BytesMut::set_len`] semantics.
-    ///
-    /// # Safety
-    ///
-    /// Caller must ensure:
-    /// - All bytes in the range `[cursor, cursor + len)` are initialized
-    /// - `len <= capacity()` (where capacity is view-relative)
-    #[inline]
-    pub const unsafe fn set_len(&mut self, len: usize) {
-        self.len = self.cursor + len;
-    }
-
-    /// Clears the buffer, removing all data. Existing capacity is preserved.
-    #[inline]
-    pub const fn clear(&mut self) {
-        self.len = self.cursor;
-    }
-
-    /// Truncates the buffer to at most `len` readable bytes.
-    ///
-    /// If `len` is greater than the current readable length, this has no effect.
-    /// This operates on readable bytes (after cursor), matching
-    /// [`bytes::BytesMut::truncate`] semantics for buffers that have been advanced.
-    #[inline]
-    pub const fn truncate(&mut self, len: usize) {
-        if len < self.len() {
-            self.len = self.cursor + len;
-        }
-    }
-
-    /// Converts the current readable window into [`Bytes`] without copying.
-    ///
-    /// Empty buffers return detached [`Bytes::new`] so aligned memory is not
-    /// retained by an empty owner.
-    pub fn into_bytes(self) -> Bytes {
-        if self.is_empty() {
-            return Bytes::new();
-        }
-        Bytes::from_owner(self.into_shared())
-    }
-}
-
-impl<B: BufferBacking> AsRef<[u8]> for BufMut<B> {
-    #[inline]
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: bytes from cursor..len have been initialized.
-        unsafe {
-            std::slice::from_raw_parts(self.inner.buffer.as_ptr().add(self.cursor), self.len())
-        }
-    }
-}
-
-impl<B: BufferBacking> AsMut<[u8]> for BufMut<B> {
-    #[inline]
-    fn as_mut(&mut self) -> &mut [u8] {
-        let len = self.len();
-        // SAFETY: bytes from cursor..len have been initialized.
-        unsafe { std::slice::from_raw_parts_mut(self.inner.buffer.as_ptr().add(self.cursor), len) }
-    }
-}
-
-impl<B: BufferBacking> Drop for BufMut<B> {
-    #[inline(always)]
-    fn drop(&mut self) {
-        // SAFETY: Drop is only called once. freeze() wraps self in ManuallyDrop
-        // to prevent this Drop impl from running after ownership is transferred.
-        unsafe { ManuallyDrop::drop(&mut self.inner) };
-    }
-}
-
-impl<B: BufferBacking> bytes::Buf for BufMut<B> {
-    #[inline]
-    fn remaining(&self) -> usize {
-        self.len - self.cursor
-    }
-
-    #[inline]
-    fn chunk(&self) -> &[u8] {
-        self.as_ref()
-    }
-
-    #[inline]
-    fn advance(&mut self, cnt: usize) {
-        let remaining = self.len - self.cursor;
-        assert!(cnt <= remaining, "cannot advance past end of buffer");
-        self.cursor += cnt;
-    }
-}
-
-// SAFETY: `BufMut` exposes the uninitialized tail `[len..raw_capacity)` and
-// only advances within the underlying allocation bounds.
-unsafe impl<B: BufferBacking> bytes::BufMut for BufMut<B> {
-    #[inline]
-    fn remaining_mut(&self) -> usize {
-        self.raw_capacity() - self.len
-    }
-
-    #[inline]
-    unsafe fn advance_mut(&mut self, cnt: usize) {
-        assert!(
-            cnt <= self.remaining_mut(),
-            "cannot advance past end of buffer"
-        );
-        self.len += cnt;
-    }
-
-    #[inline]
-    fn chunk_mut(&mut self) -> &mut bytes::buf::UninitSlice {
-        let raw_cap = self.raw_capacity();
-        let len = self.len;
-        // SAFETY: We have exclusive access and the slice is within raw capacity.
-        unsafe {
-            let ptr = self.inner.buffer.as_ptr().add(len);
-            bytes::buf::UninitSlice::from_raw_parts_mut(ptr, raw_cap - len)
-        }
-    }
-}
-
-/// Immutable, reference-counted view over an untracked aligned allocation.
+/// Returns the original data base for a pooled header.
 ///
-/// The final reference deallocates the underlying aligned buffer directly.
-pub(crate) type AlignedBuf = Buf<AlignedBuffer>;
-
-/// Immutable, reference-counted view over a pooled allocation.
+/// # Safety
 ///
-/// The final reference releases its [`PooledBacking`], returning the allocation
-/// to its originating [`SizeClass`](super::pool::SizeClass). See [`Buf`] for
-/// the shared immutable view layout and invariants.
-pub(crate) type PooledBuf = Buf<PooledBacking>;
+/// `header` must point to a live [`PooledHeader`].
+#[inline(always)]
+unsafe fn pooled_data_base(header: NonNull<PooledHeader>) -> NonNull<u8> {
+    // SAFETY: guaranteed by the caller.
+    unsafe { header.as_ref().data_base }
+}
 
-/// Mutable view over an untracked aligned allocation.
+/// Releases a unique aligned owner.
 ///
-/// When dropped, the underlying aligned allocation is deallocated directly.
-/// See [`BufMut`] for the shared mutable layout and invariants.
-pub(crate) type AlignedBufMut = BufMut<AlignedBuffer>;
-
-/// Mutable view over a pooled allocation.
+/// # Safety
 ///
-/// When dropped, this releases its [`PooledBacking`], returning the allocation
-/// to its originating [`SizeClass`](super::pool::SizeClass). See [`BufMut`] for
-/// the shared mutable layout and invariants.
-pub(crate) type PooledBufMut = BufMut<PooledBacking>;
-
-impl std::fmt::Debug for Buf<AlignedBuffer> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AlignedBuf")
-            .field("offset", &self.offset)
-            .field("len", &self.len)
-            .field("capacity", &self.inner.capacity())
-            .finish()
-    }
+/// No other handle may reference this allocation.
+#[inline(always)]
+unsafe fn release_aligned(header: NonNull<AlignedHeader>) {
+    // SAFETY: guaranteed by the caller.
+    let header_ref = unsafe { header.as_ref() };
+    debug_assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
+    let header_offset = aligned_header_offset(header_ref.capacity);
+    let total = header_offset + size_of::<AlignedHeader>();
+    let layout = Layout::from_size_align(total, header_ref.layout_alignment)
+        .expect("stored layout is valid");
+    // SAFETY: this is the original allocation base and layout.
+    let base = unsafe { header.as_ptr().cast::<u8>().sub(header_offset) };
+    // SAFETY: base/layout came from the global allocator.
+    unsafe { dealloc(base, layout) };
 }
 
-impl std::fmt::Debug for Buf<PooledBacking> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PooledBuf")
-            .field("offset", &self.offset)
-            .field("len", &self.len)
-            .field("capacity", &self.inner.capacity())
-            .finish()
-    }
+/// Releases a unique pooled owner.
+///
+/// # Safety
+///
+/// No other handle may reference this allocation and the pooled lease must be
+/// initialized.
+#[inline(always)]
+unsafe fn release_pooled(header: NonNull<PooledHeader>) {
+    // SAFETY: guaranteed by the caller.
+    let header_ref = unsafe { header.as_ref() };
+    debug_assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
+    let data_base = header_ref.data_base;
+    let buffer = PooledBuffer {
+        ptr: data_base,
+        header,
+    };
+    BufferPoolThreadCache::push(buffer);
 }
 
-impl std::fmt::Debug for BufMut<AlignedBuffer> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AlignedBufMut")
-            .field("cursor", &self.cursor)
-            .field("len", &self.len)
-            .field("capacity", &self.capacity())
-            .finish()
+/// Releases mutable owners that are not expected in the allocation/drop hot path.
+///
+/// # Safety
+///
+/// No other handle may reference this allocation. `tag` must be `owner`'s low
+/// owner tag bits.
+#[cold]
+#[inline(never)]
+unsafe fn release_unique_mut_cold(owner: OwnerRef, tag: usize) {
+    if tag == OWNER_EMPTY {
+        return;
     }
+    debug_assert_eq!(tag, OWNER_VEC);
+    // SAFETY: non-empty non-pooled non-aligned mutable owners are external
+    // vector owners.
+    unsafe { release_vec(owner.vec()) };
 }
 
-impl BufMut<AlignedBuffer> {
-    #[inline]
-    pub(crate) const fn new(buffer: AlignedBuffer) -> Self {
-        Self {
-            inner: ManuallyDrop::new(BufInner::new(buffer)),
-            cursor: 0,
-            len: 0,
-        }
-    }
-
-    pub(crate) fn into_aligned(self) -> AlignedBuf {
-        self.into_shared()
-    }
-
-    pub fn freeze(self) -> IoBuf {
-        IoBuf::from_aligned(self.into_aligned())
-    }
-}
-
-impl std::fmt::Debug for BufMut<PooledBacking> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PooledBufMut")
-            .field("cursor", &self.cursor)
-            .field("len", &self.len)
-            .field("capacity", &self.capacity())
-            .finish()
-    }
-}
-
-impl BufMut<PooledBacking> {
-    #[inline]
-    pub(crate) const fn new(buffer: PooledBuffer, lease: SizeClassLease, slot: u32) -> Self {
-        Self {
-            inner: ManuallyDrop::new(BufInner::new(PooledBacking {
-                buffer,
-                lease,
-                slot,
-            })),
-            cursor: 0,
-            len: 0,
-        }
-    }
-
-    /// Convert into an immutable pooled view over the current readable window.
-    pub(crate) fn into_pooled(self) -> PooledBuf {
-        self.into_shared()
-    }
-
-    /// Freezes the buffer into an immutable [`IoBuf`].
-    ///
-    /// Only the readable portion (`cursor..len`) is included in the result.
-    /// The underlying buffer will be returned to the pool when all references
-    /// to the [`IoBuf`] (including slices) are dropped.
-    pub fn freeze(self) -> IoBuf {
-        IoBuf::from_pooled(self.into_pooled())
-    }
+/// Releases a unique external vector owner.
+///
+/// # Safety
+///
+/// `owner` must come from `Box::into_raw` and no other handle may reference it.
+#[inline(always)]
+unsafe fn release_vec(owner: NonNull<VecOwner>) {
+    // SAFETY: the owner was allocated with `Box::into_raw`.
+    let owner = unsafe { Box::from_raw(owner.as_ptr()) };
+    let VecOwner { refs: _, vec } = *owner;
+    drop(ManuallyDrop::into_inner(vec));
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        iobuf::{
-            cache_line_size, page_size, pool::BufferPoolThreadCacheConfig, BufferPool,
-            BufferPoolConfig,
-        },
-        telemetry::metrics::Registry,
-    };
-    use bytes::{Buf, BufMut, Bytes, BytesMut};
-    use commonware_utils::{NZUsize, NZU32};
-    use std::ops::Bound;
-
-    fn test_pool(config: BufferPoolConfig) -> BufferPool {
-        let mut registry = Registry::default();
-        BufferPool::new(config, &mut registry)
-    }
-
-    fn test_config(min_size: usize, max_size: usize, max_per_class: u32) -> BufferPoolConfig {
-        BufferPoolConfig {
-            pool_min_size: 0,
-            min_size: NZUsize!(min_size),
-            max_size: NZUsize!(max_size),
-            max_per_class: NZU32!(max_per_class),
-            parallelism: NZUsize!(1),
-            thread_cache_config: BufferPoolThreadCacheConfig::Enabled(None),
-            prefill: false,
-            alignment: NZUsize!(page_size()),
-        }
-    }
+    use crate::iobuf::{cache_line_size, page_size};
+    use commonware_utils::NZUsize;
 
     #[test]
-    fn test_aligned_buffer() {
-        // Page-aligned allocation should report correct capacity and alignment.
+    fn test_aligned_layout_places_tail_header_after_data() {
         let page = page_size();
-        let buf = AlignedBuffer::new(4096, page);
-        assert_eq!(buf.capacity(), 4096);
-        assert!((buf.as_ptr() as usize).is_multiple_of(page));
+        let (data, owner) = allocate_aligned(4096, page, false);
+        assert!((data.as_ptr() as usize).is_multiple_of(page));
 
-        // Cache-line-aligned allocation should also satisfy its alignment.
-        let cache_line = cache_line_size();
-        let buf2 = AlignedBuffer::new(4096, cache_line);
-        assert_eq!(buf2.capacity(), 4096);
-        assert!((buf2.as_ptr() as usize).is_multiple_of(cache_line));
+        // SAFETY: owner was just allocated and is live.
+        let header = unsafe { owner.aligned() };
+        assert!((header.as_ptr() as usize).is_multiple_of(align_of::<AlignedHeader>()));
+        assert!(header.as_ptr() as usize >= data.as_ptr() as usize + 4096);
+        // SAFETY: owner is unique and must be released by this test.
+        unsafe { owner.release_unique() };
     }
 
     #[test]
-    #[should_panic(expected = "capacity must be greater than zero")]
-    fn test_aligned_buffer_zero_capacity_panics() {
-        let _ = AlignedBuffer::new(0, page_size());
+    fn test_aligned_zeroed_only_exposes_usable_region() {
+        let (data, owner) = allocate_aligned(64, cache_line_size(), true);
+        // SAFETY: data points at a zeroed usable region of length 64.
+        let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
+        assert_eq!(bytes, &[0u8; 64]);
+        // SAFETY: owner is unique and must be released by this test.
+        unsafe { owner.release_unique() };
     }
 
     #[test]
-    #[should_panic(expected = "capacity must be greater than zero")]
-    fn test_aligned_buffer_zeroed_zero_capacity_panics() {
-        let _ = AlignedBuffer::new_zeroed(0, page_size());
+    fn test_vec_owner_refcount() {
+        let (_, len, cap, owner) = owner_from_vec(vec![1u8, 2, 3]);
+        assert_eq!(len, 3);
+        assert!(cap >= 3);
+        // SAFETY: owner is live.
+        assert_eq!(unsafe { owner.refcount() }, Some(1));
+        // SAFETY: owner is live.
+        unsafe { owner.clone_shared() };
+        // SAFETY: owner is live.
+        assert_eq!(unsafe { owner.refcount() }, Some(2));
+        // SAFETY: owner is live.
+        unsafe { owner.drop_shared() };
+        // SAFETY: owner is live after one shared drop.
+        assert_eq!(unsafe { owner.refcount() }, Some(1));
+        // SAFETY: final drop releases the owner.
+        unsafe { owner.drop_shared() };
     }
 
     #[test]
-    fn test_untracked_aligned_debug_and_view_paths() {
-        let page = page_size();
-
-        // Cover debug formatting for the raw aligned owner.
-        let buffer = AlignedBuffer::new(16, page);
-        let buffer_debug = format!("{buffer:?}");
-        assert!(buffer_debug.contains("AlignedBuffer"));
-        assert!(buffer_debug.contains("capacity"));
-
-        // Exercise the mutable aligned wrapper through Buf/BufMut-style access.
-        let mut aligned_mut = AlignedBufMut::new(buffer);
-        let aligned_mut_debug = format!("{aligned_mut:?}");
-        assert!(aligned_mut_debug.contains("AlignedBufMut"));
-        assert!(aligned_mut.is_empty());
-
-        aligned_mut.put_slice(b"abcdefgh");
-        assert_eq!(aligned_mut.as_mut(), b"abcdefgh");
-        assert_eq!(Buf::remaining(&aligned_mut), 8);
-        assert_eq!(Buf::chunk(&aligned_mut), b"abcdefgh");
-
-        Buf::advance(&mut aligned_mut, 2);
-        assert_eq!(aligned_mut.as_mut_ptr() as usize % page, 2);
-        assert_eq!(Buf::chunk(&aligned_mut), b"cdefgh");
-
-        let prefix = Buf::copy_to_bytes(&mut aligned_mut, 2);
-        assert_eq!(prefix.as_ref(), b"cd");
-        assert_eq!(Buf::chunk(&aligned_mut), b"efgh");
-
-        aligned_mut.clear();
-        assert!(aligned_mut.is_empty());
-        aligned_mut.put_slice(b"wxyz");
-
-        // Empty aligned owners should detach into empty Bytes cleanly.
-        let empty_bytes = AlignedBufMut::new(AlignedBuffer::new(8, page)).into_bytes();
-        assert!(empty_bytes.is_empty());
-        let empty_bytes = AlignedBufMut::new(AlignedBuffer::new(8, page))
-            .into_aligned()
-            .into_bytes();
-        assert!(empty_bytes.is_empty());
-
-        // Non-empty mutable owners should hand their readable window to Bytes
-        // without copying.
-        let mut bytes_mut_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
-        bytes_mut_source.put_slice(b"data");
-        let owned_bytes = bytes_mut_source.into_bytes();
-        assert_eq!(owned_bytes.as_ref(), b"data");
-
-        // Cover immutable debug/view/slice paths on the aligned wrapper.
-        let mut aligned = aligned_mut.into_aligned();
-        let aligned_debug = format!("{aligned:?}");
-        assert!(aligned_debug.contains("AlignedBuf"));
-        assert_eq!(aligned.as_ptr(), aligned.as_ref().as_ptr());
-        assert_eq!(aligned.as_ref(), b"wxyz");
-        assert_eq!(aligned.slice(..2).unwrap().as_ref(), b"wx");
-        assert_eq!(aligned.slice(..=2).unwrap().as_ref(), b"wxy");
-        assert_eq!(aligned.slice(1..).unwrap().as_ref(), b"xyz");
-        assert_eq!(aligned.slice(1..=2).unwrap().as_ref(), b"xy");
-        assert_eq!(
-            aligned
-                .slice((Bound::Included(1), Bound::Excluded(3)))
-                .unwrap()
-                .as_ref(),
-            b"xy"
-        );
-
-        let mut split = aligned.clone();
-        let split_prefix = split.split_to(2);
-        assert_eq!(split_prefix.as_ref(), b"wx");
-        assert_eq!(split.as_ref(), b"yz");
-
-        let head = Buf::copy_to_bytes(&mut aligned, 1);
-        assert_eq!(head.as_ref(), b"w");
-        let tail = Buf::copy_to_bytes(&mut aligned, 3);
-        assert_eq!(tail.as_ref(), b"xyz");
-        assert_eq!(Buf::remaining(&aligned), 0);
-
-        // Unique aligned owners can recover mutability without copying.
-        let mut unique_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
-        unique_source.put_slice(b"qrst");
-        let unique = unique_source.into_aligned();
-        let recovered = unique
-            .try_into_mut()
-            .expect("unique aligned buffer should recover mutability");
-        assert_eq!(recovered.as_ref(), b"qrst");
-
-        // Shared aligned owners must refuse the mutable conversion.
-        let mut shared_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
-        shared_source.put_slice(b"uvwx");
-        let shared = shared_source.into_aligned();
-        let _clone = shared.clone();
-        assert!(shared.try_into_mut().is_err());
-
-        // Fully draining a unique aligned owner should hand back owned Bytes.
-        let mut bytes_source = AlignedBufMut::new(AlignedBuffer::new(8, page));
-        bytes_source.put_slice(b"lmno");
-        let owned_bytes = bytes_source.into_aligned().into_bytes();
-        assert_eq!(owned_bytes.as_ref(), b"lmno");
+    fn test_empty_vec_has_no_owner() {
+        let (_, len, cap, owner) = owner_from_vec(Vec::new());
+        assert_eq!(len, 0);
+        assert_eq!(cap, 0);
+        assert!(owner.is_empty());
     }
 
     #[test]
-    fn test_pooled_buf_mut_freeze() {
-        // Freeze a pooled mutable buffer and verify content is preserved in the
-        // resulting immutable view, including slices.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 2));
-
-        // Write data into a pooled buffer.
-        let mut buf = pool.try_alloc(11).unwrap();
-        buf.put_slice(&[0u8; 11]);
-        assert_eq!(buf.len(), 11);
-        buf.as_mut()[..5].copy_from_slice(&[1, 2, 3, 4, 5]);
-
-        // Freeze preserves the content.
-        let iobuf = buf.freeze();
-        assert_eq!(iobuf.len(), 11);
-        assert_eq!(&iobuf.as_ref()[..5], &[1, 2, 3, 4, 5]);
-
-        // Slicing the frozen buffer works.
-        let slice = iobuf.slice(0..5);
-        assert_eq!(slice.len(), 5);
-        let slice = iobuf.slice(1..=4);
-        assert_eq!(slice.as_ref(), &[2, 3, 4, 5]);
-    }
-
-    #[test]
-    #[should_panic(expected = "range start overflow")]
-    fn test_pooled_slice_excluded_start_overflow() {
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 1));
-
-        let pooled = pool.try_alloc(page).unwrap().freeze();
-        let _ = pooled.slice((Bound::Excluded(usize::MAX), Bound::<usize>::Unbounded));
-    }
-
-    #[test]
-    fn test_bytes_parity_iobuf_buf_trait() {
-        // Verify pooled IoBuf matches Bytes semantics for Buf trait methods.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 10));
-
-        let data: Vec<u8> = (0..100u8).collect();
-
-        let mut pooled_mut = pool.try_alloc(data.len()).unwrap();
-        pooled_mut.put_slice(&data);
-        let mut pooled = pooled_mut.freeze();
-        let mut bytes = Bytes::from(data);
-
-        // remaining() + chunk()
-        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
-        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
-
-        // advance()
-        Buf::advance(&mut bytes, 13);
-        Buf::advance(&mut pooled, 13);
-        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
-        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
-
-        // copy_to_bytes(0)
-        let bytes_zero = Buf::copy_to_bytes(&mut bytes, 0);
-        let pooled_zero = Buf::copy_to_bytes(&mut pooled, 0);
-        assert_eq!(bytes_zero, pooled_zero);
-        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
-        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
-
-        // copy_to_bytes(n)
-        let bytes_mid = Buf::copy_to_bytes(&mut bytes, 17);
-        let pooled_mid = Buf::copy_to_bytes(&mut pooled, 17);
-        assert_eq!(bytes_mid, pooled_mid);
-        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
-        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
-
-        // copy_to_bytes(remaining)
-        let remaining = Buf::remaining(&bytes);
-        let bytes_rest = Buf::copy_to_bytes(&mut bytes, remaining);
-        let pooled_rest = Buf::copy_to_bytes(&mut pooled, remaining);
-        assert_eq!(bytes_rest, pooled_rest);
-        assert_eq!(Buf::remaining(&bytes), 0);
-        assert_eq!(Buf::remaining(&pooled), 0);
-        assert!(!Buf::has_remaining(&bytes));
-        assert!(!Buf::has_remaining(&pooled));
-    }
-
-    #[test]
-    fn test_bytes_parity_iobuf_slice() {
-        // Verify pooled IoBuf slice behavior matches Bytes for content semantics.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 10));
-
-        let data: Vec<u8> = (0..32u8).collect();
-        let mut pooled_mut = pool.try_alloc(data.len()).unwrap();
-        pooled_mut.put_slice(&data);
-        let pooled = pooled_mut.freeze();
-        let bytes = Bytes::from(data);
-
-        assert_eq!(pooled.slice(..5).as_ref(), bytes.slice(..5).as_ref());
-        assert_eq!(pooled.slice(6..).as_ref(), bytes.slice(6..).as_ref());
-        assert_eq!(pooled.slice(3..8).as_ref(), bytes.slice(3..8).as_ref());
-        assert_eq!(pooled.slice(..=7).as_ref(), bytes.slice(..=7).as_ref());
-        assert_eq!(pooled.slice(10..10).as_ref(), bytes.slice(10..10).as_ref());
-    }
-
-    #[test]
-    fn test_bytes_parity_iobuf_split_to() {
-        // Verify pooled IoBuf split_to matches Bytes split_to semantics.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 1));
-
-        let mut pooled_mut = pool.try_alloc(8).unwrap();
-        pooled_mut.put_slice(b"abcdefgh");
-        let mut pooled = pooled_mut.freeze();
-        let mut bytes = Bytes::from_static(b"abcdefgh");
-
-        // split_to(0)
-        assert_eq!(pooled.split_to(0).as_ref(), bytes.split_to(0).as_ref());
-        assert_eq!(pooled.as_ref(), bytes.as_ref());
-
-        // split_to(n)
-        assert_eq!(pooled.split_to(3).as_ref(), bytes.split_to(3).as_ref());
-        assert_eq!(pooled.as_ref(), bytes.as_ref());
-
-        // split_to(remaining)
-        let remaining = bytes.remaining();
-        assert_eq!(
-            pooled.split_to(remaining).as_ref(),
-            bytes.split_to(remaining).as_ref()
-        );
-        assert_eq!(pooled.as_ref(), bytes.as_ref());
-    }
-
-    #[test]
-    #[should_panic(expected = "split_to out of bounds")]
-    fn test_iobuf_split_to_out_of_bounds() {
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 1));
-
-        let mut pooled_mut = pool.try_alloc(3).unwrap();
-        pooled_mut.put_slice(b"abc");
-        let mut pooled = pooled_mut.freeze();
-        let _ = pooled.split_to(4);
-    }
-
-    #[test]
-    fn test_bytesmut_parity_buf_trait() {
-        // Verify PooledBufMut matches BytesMut semantics for Buf trait.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 10));
-
-        let mut bytes = BytesMut::with_capacity(100);
-        bytes.put_slice(&[0xAAu8; 50]);
-
-        let mut pooled = pool.try_alloc(100).unwrap();
-        pooled.put_slice(&[0xAAu8; 50]);
-
-        // remaining()
-        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
-        // chunk()
-        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
-
-        // advance()
-        Buf::advance(&mut bytes, 10);
-        Buf::advance(&mut pooled, 10);
-        assert_eq!(Buf::remaining(&bytes), Buf::remaining(&pooled));
-        assert_eq!(Buf::chunk(&bytes), Buf::chunk(&pooled));
-
-        // advance to end
-        let remaining = Buf::remaining(&bytes);
-        Buf::advance(&mut bytes, remaining);
-        Buf::advance(&mut pooled, remaining);
-        assert_eq!(Buf::remaining(&bytes), 0);
-        assert_eq!(Buf::remaining(&pooled), 0);
-        assert!(!Buf::has_remaining(&bytes));
-        assert!(!Buf::has_remaining(&pooled));
-    }
-
-    #[test]
-    fn test_bytesmut_parity_bufmut_trait() {
-        // Verify PooledBufMut matches BytesMut semantics for BufMut trait.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 10));
-
-        let mut bytes = BytesMut::with_capacity(100);
-        let mut pooled = pool.try_alloc(100).unwrap();
-
-        // remaining_mut()
-        assert!(bytes::BufMut::remaining_mut(&bytes) >= 100);
-        assert!(bytes::BufMut::remaining_mut(&pooled) >= 100);
-
-        // put_slice()
-        bytes::BufMut::put_slice(&mut bytes, b"hello");
-        bytes::BufMut::put_slice(&mut pooled, b"hello");
-        assert_eq!(bytes.as_ref(), pooled.as_ref());
-
-        // put_u8()
-        bytes::BufMut::put_u8(&mut bytes, 0x42);
-        bytes::BufMut::put_u8(&mut pooled, 0x42);
-        assert_eq!(bytes.as_ref(), pooled.as_ref());
-
-        // chunk_mut() - verify we can write to it
-        let bytes_chunk = bytes::BufMut::chunk_mut(&mut bytes);
-        let pooled_chunk = bytes::BufMut::chunk_mut(&mut pooled);
-        assert!(bytes_chunk.len() > 0);
-        assert!(pooled_chunk.len() > 0);
-    }
-
-    #[test]
-    fn test_bytesmut_parity_after_advance_paths() {
-        // Verify PooledBufMut matches BytesMut after advance for truncate,
-        // clear, set_len, and put operations.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page * 4, 10));
-
-        // truncate after advance
-        {
-            let mut bytes = BytesMut::with_capacity(100);
-            bytes.put_slice(&[0xAAu8; 50]);
-            Buf::advance(&mut bytes, 10);
-            let mut pooled = pool.try_alloc(100).unwrap();
-            pooled.put_slice(&[0xAAu8; 50]);
-            Buf::advance(&mut pooled, 10);
-            bytes.truncate(20);
-            pooled.truncate(20);
-            assert_eq!(bytes.as_ref(), pooled.as_ref());
-        }
-
-        // clear after advance
-        {
-            let mut bytes = BytesMut::with_capacity(100);
-            bytes.put_slice(&[0xAAu8; 50]);
-            Buf::advance(&mut bytes, 10);
-            let mut pooled = pool.try_alloc(100).unwrap();
-            pooled.put_slice(&[0xAAu8; 50]);
-            Buf::advance(&mut pooled, 10);
-            bytes.clear();
-            pooled.clear();
-            assert_eq!(bytes.len(), 0);
-            assert_eq!(pooled.len(), 0);
-        }
-
-        // capacity/set_len/clear semantics after advance
-        {
-            let mut bytes = BytesMut::with_capacity(page);
-            bytes.resize(50, 0xBB);
-            Buf::advance(&mut bytes, 20);
-            let mut pooled = pool.try_alloc(page).unwrap();
-            pooled.put_slice(&[0xBB; 50]);
-            Buf::advance(&mut pooled, 20);
-            assert_eq!(bytes.capacity(), pooled.capacity());
-            // SAFETY: shrink readable window to initialized region.
-            unsafe {
-                bytes.set_len(25);
-                pooled.set_len(25);
-            }
-            assert_eq!(bytes.as_ref(), pooled.as_ref());
-            let bytes_cap = bytes.capacity();
-            let pooled_cap = pooled.capacity();
-            bytes.clear();
-            pooled.clear();
-            assert_eq!(bytes.capacity(), bytes_cap);
-            assert_eq!(pooled.capacity(), pooled_cap);
-        }
-
-        // put after advance + truncate-beyond-len no-op
-        {
-            let mut bytes = BytesMut::with_capacity(100);
-            bytes.resize(30, 0xAA);
-            Buf::advance(&mut bytes, 10);
-            bytes.put_slice(&[0xBB; 10]);
-            bytes.truncate(100);
-
-            let mut pooled = pool.try_alloc(100).unwrap();
-            pooled.put_slice(&[0xAA; 30]);
-            Buf::advance(&mut pooled, 10);
-            pooled.put_slice(&[0xBB; 10]);
-            pooled.truncate(100);
-            assert_eq!(bytes.as_ref(), pooled.as_ref());
-        }
-    }
-
-    #[test]
-    fn test_alloc_and_freeze_view_paths() {
-        // Allocation edge cases and freeze behavior after advance/clear.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 10));
-
-        // Zero-capacity request should round up to the minimum size class.
-        let buf = pool.try_alloc(0).expect("zero capacity should succeed");
-        assert_eq!(buf.capacity(), page);
-        assert_eq!(buf.len(), 0);
-
-        let buf = pool.try_alloc(page).expect("exact max size should succeed");
-        assert_eq!(buf.capacity(), page);
-
-        // Freeze after full advance -> empty.
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0x42; 100]);
-        Buf::advance(&mut buf, 100);
-        assert!(buf.freeze().is_empty());
-
-        // Freeze after partial advance -> suffix view.
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xAA; 50]);
-        Buf::advance(&mut buf, 20);
-        let frozen = buf.freeze();
-        assert_eq!(frozen.len(), 30);
-        assert_eq!(frozen.as_ref(), &[0xAA; 30]);
-
-        // Clear then freeze -> empty.
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0xAA; 50]);
-        buf.clear();
-        let frozen = buf.freeze();
-        assert!(frozen.is_empty());
-    }
-
-    #[test]
-    fn test_interleaved_advance_and_write() {
-        // Writing after advancing should append beyond the initialized tail,
-        // with the read cursor keeping both old and new data visible.
-        let page = page_size();
-        let pool = test_pool(test_config(page, page, 10));
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(b"hello");
-        Buf::advance(&mut buf, 2);
-        buf.put_slice(b"world");
-        assert_eq!(buf.as_ref(), b"lloworld");
-    }
-
-    #[test]
-    fn test_alignment_after_advance() {
-        // Advancing breaks base-pointer alignment, which is expected.
-        let page = page_size();
-        let pool = test_pool(BufferPoolConfig::for_storage().with_alignment(NZUsize!(page)));
-
-        let mut buf = pool.try_alloc(100).unwrap();
-        buf.put_slice(&[0; 100]);
-
-        // Initially aligned
-        assert_eq!(buf.as_mut_ptr() as usize % page, 0);
-
-        // After advance, alignment may be broken
-        Buf::advance(&mut buf, 7);
-        // Pointer is now at offset 7, not page-aligned
-        assert_ne!(buf.as_mut_ptr() as usize % page, 0);
+    fn test_pooled_layout_includes_header() {
+        let size = 1024;
+        let layout = pooled_layout(size, NZUsize!(64).get());
+        assert!(layout.size() >= size + size_of::<PooledHeader>());
+        assert!(layout.align() >= align_of::<PooledHeader>());
+        assert!(layout.align() >= 64);
     }
 }
