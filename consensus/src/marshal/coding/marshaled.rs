@@ -115,7 +115,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    sync::AsyncMutex,
+    sync::TracedAsyncMutex,
 };
 use rand::Rng;
 use std::sync::Arc;
@@ -163,7 +163,7 @@ where
     S: Strategy,
     ES: Epocher,
 {
-    context: Arc<AsyncMutex<E>>,
+    context: Arc<TracedAsyncMutex<E>>,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as Verifier>::PublicKey>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as Verifier>::PublicKey>,
@@ -276,7 +276,7 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
-            context: Arc::new(AsyncMutex::new(context)),
+            context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
             application,
             marshal,
             shards,

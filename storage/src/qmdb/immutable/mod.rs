@@ -447,6 +447,17 @@ where
     /// Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a
     /// commit op, either because the caller passed a non-commit-boundary `op_count` or
     /// because pruning removed the commit that would have governed `op_count`.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.immutable.db.historical_proof",
+        level = "info",
+        skip_all,
+        fields(
+            op_count = *op_count,
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
     pub async fn historical_proof(
         &self,
         op_count: Location<F>,

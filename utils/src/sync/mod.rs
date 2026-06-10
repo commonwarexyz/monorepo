@@ -9,7 +9,8 @@
 //! Use async locks only when you must hold a lock guard across an `.await` point:
 //! - [AsyncMutex]
 //! - [AsyncRwLock]
-//! - [TracedAsyncRwLock] when lock acquisitions should be recorded as tracing spans.
+//! - [TracedAsyncMutex] and [TracedAsyncRwLock] for coordination-point locks whose
+//!   acquisition wait should be attributable in traces.
 //! - [UpgradableAsyncRwLock] when you need to read first and then conditionally upgrade to write
 //!   without allowing another writer to slip in between.
 //!
@@ -31,10 +32,35 @@ pub use tokio::sync::{
     RwLockReadGuard as AsyncRwLockReadGuard, RwLockWriteGuard as AsyncRwLockWriteGuard,
 };
 
+/// A Tokio-based async mutex whose acquisitions are recorded as tracing spans.
+///
+/// Each lock is identified by a static name, recorded as the `lock` field on the
+/// `utils.mutex.lock` span so wait time is attributable to a specific lock.
+pub struct TracedAsyncMutex<T> {
+    name: &'static str,
+    inner: tokio::sync::Mutex<T>,
+}
+
+impl<T> TracedAsyncMutex<T> {
+    /// Create a new mutex wrapping `value`, identified by `name` in traces.
+    pub fn new(name: &'static str, value: T) -> Self {
+        Self {
+            name,
+            inner: tokio::sync::Mutex::new(value),
+        }
+    }
+
+    /// Acquire the mutex, recording lock-wait time.
+    #[tracing::instrument(name = "utils.mutex.lock", level = "info", skip_all, fields(lock = self.name))]
+    pub async fn lock(&self) -> AsyncMutexGuard<'_, T> {
+        self.inner.lock().await
+    }
+}
+
 /// A Tokio-based async rwlock whose acquisitions are recorded as tracing spans.
 ///
 /// Each lock is identified by a static name, recorded as the `lock` field on the
-/// `utils.lock.read` and `utils.lock.write` spans so wait time is attributable to a
+/// `utils.rwlock.read` and `utils.rwlock.write` spans so wait time is attributable to a
 /// specific lock.
 pub struct TracedAsyncRwLock<T> {
     name: &'static str,
@@ -51,13 +77,13 @@ impl<T> TracedAsyncRwLock<T> {
     }
 
     /// Acquire a shared read guard, recording lock-wait time.
-    #[tracing::instrument(name = "utils.lock.read", level = "info", skip_all, fields(lock = self.name))]
+    #[tracing::instrument(name = "utils.rwlock.read", level = "info", skip_all, fields(lock = self.name))]
     pub async fn read(&self) -> AsyncRwLockReadGuard<'_, T> {
         self.inner.read().await
     }
 
     /// Acquire an exclusive write guard, recording lock-wait time.
-    #[tracing::instrument(name = "utils.lock.write", level = "info", skip_all, fields(lock = self.name))]
+    #[tracing::instrument(name = "utils.rwlock.write", level = "info", skip_all, fields(lock = self.name))]
     pub async fn write(&self) -> AsyncRwLockWriteGuard<'_, T> {
         self.inner.write().await
     }
@@ -192,8 +218,21 @@ impl<T> Deref for UpgradableAsyncRwLockUpgradableReadGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AsyncRwLock, TracedAsyncRwLock, UpgradableAsyncRwLock};
+    use super::{AsyncRwLock, TracedAsyncMutex, TracedAsyncRwLock, UpgradableAsyncRwLock};
     use futures::{pin_mut, FutureExt};
+
+    #[test]
+    fn test_traced_async_mutex() {
+        futures::executor::block_on(async {
+            let lock = TracedAsyncMutex::new("test", 100u64);
+
+            let mut guard = lock.lock().await;
+            *guard += 1;
+            drop(guard);
+
+            assert_eq!(*lock.lock().await, 101);
+        });
+    }
 
     #[test]
     fn test_traced_async_rwlock() {
