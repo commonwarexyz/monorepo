@@ -610,7 +610,21 @@ impl SizeClassHandle {
         prefill: bool,
     ) -> Self {
         let layout = pooled_layout(size, alignment);
-        let freelist = Freelist::with_usable_size(max, parallelism, size, layout, prefill);
+        // The routing fields are cached in every buffer's pooled header, where
+        // they are stored as u32. Truncation would route returned buffers into
+        // the wrong thread-local cache, so refuse to construct instead.
+        let header_class_id = u32::try_from(class_id).expect("class_id must fit in u32");
+        let header_cache_capacity =
+            u32::try_from(thread_cache_capacity).expect("thread_cache_capacity must fit in u32");
+        let freelist = Freelist::with_usable_size(
+            max,
+            parallelism,
+            size,
+            layout,
+            prefill,
+            header_class_id,
+            header_cache_capacity,
+        );
         let class = SizeClass {
             class_id,
             size,
@@ -1173,14 +1187,18 @@ impl BufferPoolThreadCache {
     /// proves that initialization is safe. During thread-local teardown,
     /// checked TLS access can fail, in that case the buffer falls back to the
     /// global freelist.
+    ///
+    /// Cache routing reads `class_id` and `thread_cache_capacity` from the
+    /// pooled header (a line the release path has already loaded) instead of
+    /// dereferencing the class object, keeping the dependent-load chain on the
+    /// return fast path one level shorter.
     #[inline(always)]
     pub(super) fn push(buffer: PooledBuffer) {
-        // SAFETY: pooled buffers returned from checked-out state carry a live
-        // lease in their header.
-        let lease = unsafe { buffer.lease() };
-        let class = lease.class();
-        let class_id = class.class_id;
-        let thread_cache_capacity = class.thread_cache_capacity;
+        // SAFETY: pooled buffers returned from checked-out state have
+        // initialized stable header fields.
+        let class_id = unsafe { buffer.class_id() } as usize;
+        // SAFETY: as above.
+        let thread_cache_capacity = unsafe { buffer.thread_cache_capacity() };
         if thread_cache_capacity == 0 {
             TlsSizeClassCacheEntry { buffer }.return_global();
             return;
@@ -1212,12 +1230,11 @@ impl BufferPoolThreadCache {
     /// only contains the initialized-cache lookup and local push.
     #[inline(never)]
     fn push_slow(buffer: PooledBuffer) {
-        // SAFETY: pooled buffers returned from checked-out state carry a live
-        // lease in their header.
-        let lease = unsafe { buffer.lease() };
-        let class = lease.class();
-        let class_id = class.class_id;
-        let thread_cache_capacity = class.thread_cache_capacity;
+        // SAFETY: pooled buffers returned from checked-out state have
+        // initialized stable header fields.
+        let class_id = unsafe { buffer.class_id() } as usize;
+        // SAFETY: as above.
+        let thread_cache_capacity = unsafe { buffer.thread_cache_capacity() } as usize;
         // Returning a pooled buffer can happen from arbitrary Drop code,
         // including during thread-local destruction. If the local cache is
         // unavailable, fall back to the global freelist instead of panicking.
