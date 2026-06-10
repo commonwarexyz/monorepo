@@ -45,20 +45,8 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 /// of a given key during ordered merkleization.
 type PrevCandidates<K, F, V> = Vec<(K, (V, Location<F>))>;
 
-/// Committed-DB resolutions cached by a batch's reads, keyed by the resolved key and carrying
-/// the location they were read from and its value.
-type ResolvedReads<F, U> =
-    AHashMap<<U as update::Update>::Key, (Location<F>, <U as update::Update>::Cached)>;
-
-/// Updates pulled out of `mutations` because a read already resolved them:
-/// `(key, new value, old location, old value, old next key)`.
-type CachedOrdered<F, K, V> = Vec<(
-    K,
-    <V as ValueEncoding>::Value,
-    Location<F>,
-    <V as ValueEncoding>::Value,
-    K,
-)>;
+/// Committed-DB locations cached by a batch's reads, keyed by the resolved key.
+type ResolvedReads<F, U> = AHashMap<<U as update::Update>::Key, Location<F>>;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
@@ -197,10 +185,11 @@ where
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 
-    /// Committed-DB resolutions cached by this batch's reads (`get`/`get_many`), keyed by the
-    /// key they matched and carrying the location they were read from and its value. Consumed
-    /// by `merkleize`: when a mutation key is present here, `merkleize` reuses the resolution
-    /// and skips the redundant journal read.
+    /// Committed-DB locations cached by this batch's reads (`get`/`get_many`), keyed by the
+    /// key they matched. Consumed by unordered `merkleize`: when a mutation key is present
+    /// here, `merkleize` reuses the location and skips the redundant journal read. Ordered
+    /// `merkleize` ignores this cache: its op generation needs the read operation's value and
+    /// next key, and re-reading them costs more in cache upkeep than it saves.
     ///
     /// Only committed-snapshot resolutions are cached. A cached location doubles as the
     /// key's committed provenance (`base_old_loc`), which holds because a committed-resolved
@@ -939,8 +928,8 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. Committed-DB operations resolved by the read are cached on the batch and
-    /// consumed by `merkleize`, which skips re-reading those keys. Keys answered by pending
+    /// keys. Committed-DB locations resolved by the read are cached on the batch; unordered
+    /// `merkleize` consumes them to skip re-reading those keys. Keys answered by pending
     /// mutations or ancestor diffs cache nothing (merkleize re-resolves them in memory).
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
@@ -1000,8 +989,8 @@ where
             let mut resolved = self.resolved.lock();
             resolved.reserve(db_keys.len());
             for (slot, result) in db_indices.into_iter().zip(db_results) {
-                results[slot] = result.map(|(value, loc, cached)| {
-                    resolved.insert((*keys[slot]).clone(), (loc, cached));
+                results[slot] = result.map(|(value, loc)| {
+                    resolved.insert((*keys[slot]).clone(), loc);
                     value
                 });
             }
@@ -1074,7 +1063,7 @@ where
         // below, exactly where the read path would have emitted them.
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(resolved.len());
-        for (key, (loc, ())) in resolved {
+        for (key, loc) in resolved {
             if let Some(mutation) = mutations.remove(&key) {
                 cached.push((key, loc, mutation));
             }
@@ -1223,11 +1212,9 @@ where
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// Consumes the operations cached by this batch's reads: keys loaded via `get`/`get_many`
-    /// before being updated skip the journal re-read their resolution would otherwise require.
-    /// Only the cached keys' own reads are skipped; collision siblings surfaced by their
-    /// committed bucket walks are still read for linkage. Deleted keys are always re-read for
-    /// predecessor linkage.
+    /// Locations cached by this batch's reads are ignored: ordered op generation needs each
+    /// read operation's value and next key for linkage, and re-reading them through the
+    /// journal's page cache is cheaper than caching the payloads at read time.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb::any::batch::merkleize",
@@ -1271,39 +1258,10 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let resolved = core::mem::take(&mut *self.resolved.lock());
         let (mut mutations, m) = self.into_parts();
 
-        // Resolve existing keys. The gather must see every mutation key, including those whose
-        // reads were cached: a cached key's committed bucket walk surfaces collision
-        // siblings, and the committed location of a key deleted by a pending ancestor and
-        // re-written by this batch is only readable through such a sibling's walk.
+        // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
-
-        // Pull updates whose committed operation this batch's reads already resolved, and drop
-        // exactly their own locations from the read set. The cached operation supplies the
-        // linkage candidates the read would have produced; sibling locations surfaced by the
-        // bucket walk are still read. Deletes stay on the read path: a deleted key's own-bucket
-        // read also discovers same-bucket predecessors for the linkage rewrite below.
-        let mut cached: CachedOrdered<F, K, V> = Vec::with_capacity(resolved.len());
-        let mut cached_locs: Vec<Location<F>> = Vec::with_capacity(resolved.len());
-        for (key, (loc, (old_value, old_next_key))) in resolved {
-            match mutations.remove(&key) {
-                Some(Some(new_value)) => {
-                    cached_locs.push(loc);
-                    cached.push((key, new_value, loc, old_value, old_next_key));
-                }
-                Some(None) => {
-                    mutations.insert(key, None);
-                }
-                None => {}
-            }
-        }
-        cached_locs.sort_unstable();
-        let locations: Vec<Location<F>> = locations
-            .into_iter()
-            .filter(|loc| cached_locs.binary_search(loc).is_err())
-            .collect();
         let reader = db.log.reader().await;
 
         // Classify mutations into deleted, created, updated. `next_candidates` and
@@ -1345,13 +1303,6 @@ where
             } else {
                 deleted.push((key, old_loc));
             }
-        }
-
-        // Emit the contributions the skipped reads would have produced.
-        for (key, new_value, old_loc, old_value, old_next_key) in cached {
-            next_candidates.push(old_next_key);
-            prev_candidates.push((key.clone(), (old_value, old_loc)));
-            updated.push((key, new_value, old_loc));
         }
 
         deleted.sort_by(|a, b| a.0.cmp(&b.0));

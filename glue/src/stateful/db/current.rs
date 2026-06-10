@@ -189,8 +189,7 @@ where
 
     /// Read multiple values by key, falling back to committed state.
     ///
-    /// Returns results in the same order as the input keys. Each unique read is cached on the
-    /// batch for reuse at merkleize, so memory grows with the number of unique keys read.
+    /// Returns results in the same order as the input keys.
     pub async fn get_many(&self, keys: &[&K]) -> Result<Vec<Option<V::Value>>, Error<F>> {
         let db = self.db.read().await;
         self.batch.get_many(keys, &*db).await

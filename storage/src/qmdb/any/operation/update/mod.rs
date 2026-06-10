@@ -23,12 +23,6 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// The value encoding (fixed or variable).
     type ValueEncoding: ValueEncoding<Value = Self::Value>;
 
-    /// Data cached from a committed-DB read for reuse at merkleize, alongside the location.
-    type Cached: Clone + Send + Sync;
-
-    /// Extract the cached payload from a read operation.
-    fn cached(&self) -> Self::Cached;
-
     /// The updated key.
     fn key(&self) -> &Self::Key;
 

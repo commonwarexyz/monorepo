@@ -229,22 +229,22 @@ where
         let results = self.get_many_with_locations(keys).await?;
         Ok(results
             .into_iter()
-            .map(|result| result.map(|(value, _, _)| value))
+            .map(|result| result.map(|(value, _)| value))
             .collect())
     }
 
-    /// Batch read multiple keys, returning per key the value, the committed location it was
-    /// read from, and the variant's cached payload (or `None` for absent keys).
+    /// Batch read multiple keys, returning per key the value and the committed location it was
+    /// read from (or `None` for absent keys).
     ///
     /// Identical resolution to [`Self::get_many`] but additionally returns the snapshot
-    /// location and cached payload, letting batch reads cache them for reuse at merkleize.
+    /// location, letting batch reads cache it for reuse at merkleize.
     ///
     /// Results are returned in the same order as the input keys.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn get_many_with_locations(
         &self,
         keys: &[&U::Key],
-    ) -> Result<Vec<Option<(U::Value, Location<F>, U::Cached)>>, crate::qmdb::Error<F>> {
+    ) -> Result<Vec<Option<(U::Value, Location<F>)>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -256,7 +256,7 @@ where
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        let mut results: Vec<Option<(U::Value, Location<F>, U::Cached)>> = vec![None; keys.len()];
+        let mut results: Vec<Option<(U::Value, Location<F>)>> = vec![None; keys.len()];
 
         self.snapshot
             .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
@@ -291,7 +291,7 @@ where
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {
-                results[key_idx] = Some((data.value().clone(), Location::new(pos), data.cached()));
+                results[key_idx] = Some((data.value().clone(), Location::new(pos)));
             }
         }
 

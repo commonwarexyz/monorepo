@@ -386,7 +386,7 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys. Committed-DB operations resolved by
+    /// Returns results in the same order as the input keys. Committed-DB locations resolved by
     /// the read are cached on the batch and consumed by [`merkleize`](Self::merkleize), which
     /// skips re-reading those keys.
     pub async fn get_many<E, C, I>(
@@ -453,9 +453,7 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys. Committed-DB operations resolved by
-    /// the read are cached on the batch and consumed by [`merkleize`](Self::merkleize), which
-    /// skips re-reading those keys.
+    /// Returns results in the same order as the input keys.
     pub async fn get_many<E, C, I>(
         &self,
         keys: &[&K],

@@ -229,8 +229,8 @@ macro_rules! run_pipeline {
             };
 
             // Timed: load all touched keys, write them, merkleize, read root. Reads cache
-            // resolved locations on the batch, so merkleize skips re-reading those keys. Load
-            // and writes must share one batch for that caching to apply.
+            // resolved locations on the batch (consumed by unordered merkleize); load and
+            // writes must share one batch for that caching to apply.
             let start = Instant::now();
             let mut b = new_batch();
             let values = b.get_many(&keys, &db).await.unwrap();
