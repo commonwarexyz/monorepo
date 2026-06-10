@@ -442,7 +442,7 @@ impl EngineDefinition for MultiDbEngine {
             translator: TwoCap,
         };
         // One witness entry per section so the periodic prune actually drops entries
-        // (pruning is section-aligned and never drops a partial section).
+        // (pruning is section-aligned).
         let db_config_b = immutable::fixed::CompactConfig {
             strategy: Sequential,
             witness: VariableLogConfig {
@@ -658,8 +658,7 @@ impl EngineDefinition for MultiDbEngine {
         );
 
         // Observe the oldest operation the full QMDB still retains, to assert pruning ran.
-        // The compact db keeps no operation history to observe; its pruning is exercised
-        // through the same prune targets but verified at the storage level.
+        // The compact db keeps no operation history to observe.
         let prune_observer = stateful_mailbox.clone();
         let oldest_retained: OldestRetained = Arc::new(move || {
             let mailbox = prune_observer.clone();

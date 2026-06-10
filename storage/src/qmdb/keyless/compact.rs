@@ -539,10 +539,8 @@ where
     /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
     /// below the boundary may survive.
     ///
-    /// Pruning is irreversible and bounds how far back [`Self::rewind`] can reach: a pruned
-    /// commit is no longer a valid rewind target. The current commit's witness always survives,
-    /// so a boundary at or beyond the tip prunes everything except the tip. The prune is made
-    /// durable before this method returns.
+    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness
+    /// always survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
