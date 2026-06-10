@@ -92,9 +92,7 @@ use commonware_cryptography::Digest;
 use commonware_parallel::{Sequential, Strategy};
 use core::{hash::BuildHasherDefault, ops::Range};
 
-/// Overwritten node digests keyed by position. Uses `ahash` (fast on integer keys) with
-/// [BuildHasherDefault] (no per-construction RNG sampling). Iteration order is not observed
-/// by any consumer.
+/// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, BuildHasherDefault<AHasher>>;
 
 /// Push a dirty node position into its height bucket, growing the outer Vec as needed.
