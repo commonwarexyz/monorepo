@@ -395,9 +395,8 @@ where
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
-                    self.apply_floor_anchor(&block, &mut buffer, &mut application, &mut resolver)
+                    self.ingest(&block, &mut buffer, &mut application, &mut resolver)
                         .await;
-                    self.block_subscriptions.notify(&block);
                 },
                 Err(key) => {
                     match key {
@@ -577,7 +576,7 @@ where
                 // to make progress).
                 self.cache_verified(round, block.digest(), block.clone())
                     .await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                self.ingest(&block, buffer, application, resolver)
                     .await;
 
                 // Retain the block in memory so the subsequent `Forward` can
@@ -594,7 +593,7 @@ where
                 // to make progress).
                 self.cache_verified(round, block.digest(), block.clone())
                     .await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                self.ingest(&block, buffer, application, resolver)
                     .await;
                 ack.expect("durable ack present").send_lossy(());
             }
@@ -604,7 +603,7 @@ where
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
                 self.cache_block(round, block.digest(), block.clone()).await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                self.ingest(&block, buffer, application, resolver)
                     .await;
                 ack.expect("durable ack present").send_lossy(());
             }
@@ -623,7 +622,7 @@ where
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     self.cache_block(round, digest, block.clone()).await;
-                    self.apply_floor_anchor(&block, buffer, application, resolver)
+                    self.ingest(&block, buffer, application, resolver)
                         .await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
@@ -644,7 +643,7 @@ where
                     // The anchor path stores the floor block and finalization,
                     // advances floors, prunes below them, and resumes dispatch.
                     if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
+                        .ingest(&block, buffer, application, resolver)
                         .await
                     {
                         return;
@@ -1035,7 +1034,7 @@ where
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor.await_anchor(finalization);
             assert!(
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                self.ingest(&block, buffer, application, resolver)
                     .await
             );
             return;
@@ -1055,14 +1054,19 @@ where
             .ignore();
     }
 
-    /// Applies a block if it satisfies the current floor transition.
-    async fn apply_floor_anchor<Buf: Buffer<V>>(
+    /// Notifies subscribers of a validated block and applies it to any
+    /// pending floor transition.
+    ///
+    /// Returns true if the block was consumed as the floor anchor.
+    async fn ingest<Buf: Buffer<V>>(
         &mut self,
         block: &V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
+        self.block_subscriptions.notify(block);
+
         let commitment = V::commitment(block);
         if !self.floor.matches_pending_anchor(commitment) {
             return false;
@@ -1126,7 +1130,6 @@ where
         )
         .expect("failed to store floor anchor");
         self.sync_finalized().await;
-        self.block_subscriptions.notify(&block);
 
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
@@ -1200,17 +1203,12 @@ where
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
                 if self
-                    .apply_floor_anchor(&block, buffer, application, resolver)
+                    .ingest(&block, buffer, application, resolver)
                     .await
                 {
                     response.send_lossy(true);
                     return false;
                 }
-
-                // The commitment validates the peer response. Annotations are
-                // local context attached to the request and do not affect peer
-                // validity.
-                self.block_subscriptions.notify(&block);
 
                 // The peer-visible request only says "give me this block".
                 // Local annotations explain why the block was requested and
@@ -1448,7 +1446,7 @@ where
                     // The floor-anchor path fully handles this finalization
                     // and moves the lower bound past it.
                     if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
+                        .ingest(&block, buffer, application, resolver)
                         .await
                     {
                         continue;
@@ -1483,7 +1481,7 @@ where
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.
                     if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
+                        .ingest(&block, buffer, application, resolver)
                         .await
                     {
                         continue;
@@ -1614,7 +1612,6 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
     ) {
-        self.block_subscriptions.notify(&block);
         self.cache.put_verified(round, digest, block.into()).await;
     }
 
@@ -1635,7 +1632,6 @@ where
         digest: <V::Block as Digestible>::Digest,
         block: V::Block,
     ) {
-        self.block_subscriptions.notify(&block);
         self.cache.put_block(round, digest, block.into()).await;
     }
 
@@ -1744,7 +1740,6 @@ where
             );
             return false;
         }
-        self.block_subscriptions.notify(&block);
 
         // Convert block to storage format
         let stored: V::StoredBlock = block.into();
