@@ -51,6 +51,12 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 # aws-lc-rs provides optimized P-256 verification and handshake cipher on x86_64 and aarch64.
 aws-lc-rs.workspace = true
 
+[target.'cfg(all(target_arch = "aarch64", not(target_env = "msvc")))'.dependencies]
+# On x86 the sha2 crate compiles in its hardware backend (SHA-NI) by default and selects it at
+# runtime. On aarch64 the hardware backend is gated behind the "asm" feature; without it every
+# SHA-256 runs in software. The "asm" backend does not build on MSVC.
+sha2 = { workspace = true, features = ["asm"] }
+
 [target.'cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies.chacha20poly1305]
 workspace = true
 default-features = false
