@@ -52,11 +52,9 @@ pub trait Variant: Clone + Send + Sync + 'static {
 
     /// Computes the consensus commitment for a stored block.
     ///
-    /// Variants with a stored representation that carries enough commitment
-    /// information should override this to avoid reconstructing a working block.
-    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment {
-        Self::commitment(&block.clone().into())
-    }
+    /// The stored representation carries enough information to derive the
+    /// commitment without reconstructing a working block.
+    fn stored_commitment(block: &Self::StoredBlock) -> Self::Commitment;
 
     /// Extracts the block digest from a consensus commitment.
     ///
