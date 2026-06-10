@@ -94,10 +94,11 @@ use crate::{
     translator::Translator,
     Context,
 };
+use ahash::AHashSet;
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher as CHasher;
 use commonware_parallel::Strategy;
-use std::{collections::HashSet, num::NonZeroU64, ops::Range, sync::Arc};
+use std::{num::NonZeroU64, ops::Range, sync::Arc};
 use tracing::warn;
 
 /// Metrics for Immutable QMDBs.
@@ -699,10 +700,29 @@ where
 
         // Apply snapshot inserts. Child first (child wins via `seen`), then
         // uncommitted ancestor batches.
+        //
+        // `seen` is only consulted when at least one ancestor diff will be applied, so it is
+        // skipped entirely otherwise.
         let bounds = self.journal.reader().await.bounds();
-        let mut seen = HashSet::new();
+        let track_shadow = batch.bounds.ancestors.iter().any(|a| a.end > db_size);
+        let seen_cap = if track_shadow {
+            batch.diff.len()
+                + batch
+                    .bounds
+                    .ancestors
+                    .iter()
+                    .zip(&batch.ancestor_diffs)
+                    .filter(|(a, _)| a.end > db_size)
+                    .map(|(_, d)| d.len())
+                    .sum::<usize>()
+        } else {
+            0
+        };
+        let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         for (key, entry) in batch.diff.iter() {
-            seen.insert(key.clone());
+            if track_shadow {
+                seen.insert(key);
+            }
             self.snapshot
                 .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
         }
@@ -711,7 +731,7 @@ where
                 continue;
             }
             for (key, entry) in ancestor_diff.iter() {
-                if seen.insert(key.clone()) {
+                if seen.insert(key) {
                     self.snapshot
                         .insert_and_retain(key, entry.loc, |v| *v >= bounds.start);
                 }
