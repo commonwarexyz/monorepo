@@ -554,7 +554,7 @@ pub fn r1cs_to_circuit_and_witness<F: Ring + Random>(
 mod zkc {
     use crate::zk::circuit as zk;
     use commonware_math::algebra::{Field, Random, Ring};
-    use commonware_utils::ordered::{Map, Set};
+    use commonware_utils::ordered::Map;
     use rand_core::CryptoRngCore;
     use std::{borrow::Cow, collections::BTreeMap};
 
@@ -648,7 +648,8 @@ mod zkc {
         assertions: Vec<(zk::CircuitIdx, zk::CircuitIdx)>,
         extra_assertions: Vec<(zk::CircuitIdx, Location)>,
         witness_locations: BTreeMap<usize, Location>,
-        committed_indices: Set<zk::CircuitIdx>,
+        committed_indices: Vec<zk::CircuitIdx>,
+        committed_positions: BTreeMap<zk::CircuitIdx, usize>,
         internal_vars: Vec<(
             zk::CircuitIdx,
             Option<zk::CircuitIdx>,
@@ -657,7 +658,14 @@ mod zkc {
     }
 
     impl<F: Field + Random> ZKCConverter<F> {
-        pub fn new(committed_indices: Set<zk::CircuitIdx>) -> Self {
+        pub fn new(committed_indices: Vec<zk::CircuitIdx>) -> Self {
+            let mut committed_positions = BTreeMap::new();
+            for (i, &idx) in committed_indices.iter().enumerate() {
+                // Duplicates keep the first position, so every occurrence of
+                // the index resolves to the same column, and the extra
+                // assertions constrain the remaining slots to match it.
+                committed_positions.entry(idx).or_insert(i);
+            }
             Self {
                 linearize_queue: Vec::new(),
                 linearize_cache: BTreeMap::new(),
@@ -665,6 +673,7 @@ mod zkc {
                 extra_assertions: Vec::new(),
                 witness_locations: BTreeMap::new(),
                 committed_indices,
+                committed_positions,
                 internal_vars: Default::default(),
             }
         }
@@ -753,7 +762,7 @@ mod zkc {
             // Add extra assertions for each committed index, linearizing so
             // that committed values not referenced by any assertion still
             // resolve to a location.
-            let committed: Vec<_> = self.committed_indices.iter().copied().collect();
+            let committed = self.committed_indices.clone();
             for (i, c_pos) in committed.into_iter().enumerate() {
                 self.linearize(zkc, c_pos);
                 self.extra_assertions.push((c_pos, Location::Committed(i)));
@@ -856,9 +865,9 @@ mod zkc {
                     this @ zk::CircuitIdx::Witness(i) => {
                         let i_usize = i as usize;
                         let w_loc = self
-                            .committed_indices
-                            .position(&this)
-                            .map_or(Location::Witness(i_usize), Location::Committed);
+                            .committed_positions
+                            .get(&this)
+                            .map_or(Location::Witness(i_usize), |&i| Location::Committed(i));
                         let loc = self.assign_witness_location(i_usize, w_loc);
                         LinComb::Location(loc)
                     }
@@ -918,25 +927,29 @@ mod zkc {
 
 /// Convert a ZK circuit into a bulletproofs circuit, treating the witness
 /// positions named by `committed_indices` as committed values.
+///
+/// Committed values keep the order of `committed_indices`. A duplicate index
+/// produces a separate commitment to the same value, constrained to match.
 pub fn zkc_to_circuit<F: Field + Random>(
     zkc: crate::zk::circuit::Circuit<F>,
     committed_indices: &[crate::zk::circuit::CircuitIdx],
 ) -> Circuit<F> {
-    zkc::ZKCConverter::new(Set::from_iter_dedup(committed_indices.iter().copied())).circuit(zkc)
+    zkc::ZKCConverter::new(committed_indices.to_vec()).circuit(zkc)
 }
 
 /// Convert a ZK circuit and witness assignment into a bulletproofs circuit and
 /// witness.
 ///
 /// `committed_indices` names the witness slots that should become
-/// bulletproofs committed values.
+/// bulletproofs committed values, in the order they should appear as
+/// committed values. A duplicate index produces a separate commitment to the
+/// same value, constrained to match.
 pub fn zkc_to_circuit_and_witness<F: Field + Random>(
     blinding_rng: Option<&mut impl CryptoRngCore>,
     zkc: crate::zk::circuit::ValuedCircuit<F>,
     committed_indices: &[crate::zk::circuit::CircuitIdx],
 ) -> (Circuit<F>, Witness<F>) {
-    zkc::ZKCConverter::new(Set::from_iter_dedup(committed_indices.iter().copied()))
-        .circuit_and_witness(blinding_rng, zkc)
+    zkc::ZKCConverter::new(committed_indices.to_vec()).circuit_and_witness(blinding_rng, zkc)
 }
 
 /// Generators used by the circuit proof system.
@@ -2190,6 +2203,30 @@ mod test {
             let plan = u.arbitrary::<zk::fuzz::Plan>()?;
             fuzz::assert_zkc_conversion_preserves_satisfaction(&plan, u)
         });
+    }
+
+    #[test]
+    fn test_zkc_conversion_preserves_committed_order() {
+        let valued = zk::build_with_values(|ctx| {
+            let a = zk::Var::witness(ctx, |_| F::from(1u64));
+            let b = zk::Var::witness(ctx, |_| F::from(2u64));
+            let c = a * &b;
+            c.assert_eq(&zk::Var::constant(ctx, F::from(2u64)));
+        });
+        let (circuit, witness) = super::zkc_to_circuit_and_witness(
+            Some(&mut test_rng()),
+            valued,
+            &[
+                zk::CircuitIdx::Witness(1),
+                zk::CircuitIdx::Witness(0),
+                zk::CircuitIdx::Witness(1),
+            ],
+        );
+        assert!(witness.is_satisfied(&circuit));
+        assert_eq!(
+            witness.values,
+            vec![F::from(2u64), F::from(1u64), F::from(2u64)]
+        );
     }
 
     #[test]
