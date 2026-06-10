@@ -40,8 +40,7 @@
 //! * Cancel `t_l`
 //! * If the container's parent `c_parent` is finalized (or both notarized and certified) at `v_parent`
 //!   and we have required nullifications covering the skipped views between `v_parent` and `v`
-//!   (a nullification covers the rest of its term),
-//!   verify `c` and broadcast `notarize(c,v)`
+//!   (a nullification covers the rest of its term), verify `c` and broadcast `notarize(c,v)`
 //!     * If verification of `c` fails, immediately broadcast `nullify(v)`
 //!
 //! Upon receiving `2f+1` `notarize(c,v)`:

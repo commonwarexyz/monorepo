@@ -226,8 +226,9 @@ where
         term_length: NonZeroU64,
     ) -> RandomElector<bls12381_threshold_vrf::Scheme<P, V>> {
         assert!(!participants.is_empty(), "no participants");
-        assert!(
-            term_length.get() == 1,
+        assert_eq!(
+            term_length.get(),
+            1,
             "random elector does not support stable leaders (term_length > 1)"
         );
         RandomElector {
