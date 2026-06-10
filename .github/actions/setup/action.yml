@@ -25,7 +25,7 @@ inputs:
     required: false
     default: ""
   additional-cache-key:
-    description: "An additional cache key that is added alongside the automatic `job`-based cache key."
+    description: "An additional cache key appended to the workflow-name prefix and automatic job-based cache key."
     required: false
     default: ""
   rust-cache-enabled:
@@ -83,6 +83,7 @@ runs:
         components: ${{ inputs.components }}
         targets: ${{ inputs.targets }}
     - name: Normalize cache key
+      if: inputs.rust-cache-enabled == 'true'
       id: cache-key
       shell: bash
       env:
@@ -96,6 +97,7 @@ runs:
         key="$(printf '%s' "$key" | LC_ALL=C tr -c 'A-Za-z0-9._-' '-')"
         echo "key=${key}" >> "$GITHUB_OUTPUT"
     - name: Configure rust cache workspace
+      if: inputs.rust-cache-enabled == 'true'
       id: rust-cache-workspace
       shell: bash
       run: |
