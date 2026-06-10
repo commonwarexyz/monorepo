@@ -1252,7 +1252,9 @@ where
     ///
     /// Consumes the operations retained by this batch's reads: keys loaded via `get`/`get_many`
     /// before being updated skip the journal re-read their resolution would otherwise require.
-    /// Deleted keys are always re-read for predecessor linkage.
+    /// Only the retained keys' own reads are skipped; collision siblings surfaced by their
+    /// committed bucket walks are still read for linkage. Deleted keys are always re-read for
+    /// predecessor linkage.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb::any::batch::merkleize",
@@ -1299,15 +1301,24 @@ where
         let resolved = core::mem::take(&mut *self.resolved.lock());
         let (mut mutations, m) = self.into_parts();
 
-        // Pull updates whose committed operation this batch's reads already resolved. They
-        // skip the journal re-read; the retained operation supplies the linkage candidates the
-        // read would have produced. Deletes stay on the read path: a deleted key's own-bucket
+        // Resolve existing keys. The gather must see every mutation key, including those whose
+        // reads were retained: a retained key's committed bucket walk surfaces collision
+        // siblings, and the committed location of a key deleted by a pending ancestor and
+        // re-written by this batch is only readable through such a sibling's walk.
+        let locations = m.gather_existing_locations(&mutations, db, true);
+
+        // Pull updates whose committed operation this batch's reads already resolved, and drop
+        // exactly their own locations from the read set. The retained operation supplies the
+        // linkage candidates the read would have produced; sibling locations surfaced by the
+        // bucket walk are still read. Deletes stay on the read path: a deleted key's own-bucket
         // read also discovers same-bucket predecessors for the linkage rewrite below.
         let mut retained: RetainedOrdered<F, K, V> = Vec::with_capacity(resolved.len());
+        let mut retained_locs: Vec<Location<F>> = Vec::with_capacity(resolved.len());
         for (key, (loc, (old_value, old_next_key))) in resolved {
             match mutations.remove(&key) {
                 Some(Some(new_value)) => {
-                    retained.push((key, new_value, loc, old_value, old_next_key))
+                    retained_locs.push(loc);
+                    retained.push((key, new_value, loc, old_value, old_next_key));
                 }
                 Some(None) => {
                     mutations.insert(key, None);
@@ -1315,9 +1326,11 @@ where
                 None => {}
             }
         }
-
-        // Resolve existing keys.
-        let locations = m.gather_existing_locations(&mutations, db, true);
+        retained_locs.sort_unstable();
+        let locations: Vec<Location<F>> = locations
+            .into_iter()
+            .filter(|loc| retained_locs.binary_search(loc).is_err())
+            .collect();
         let reader = db.log.reader().await;
 
         // Classify mutations into deleted, created, updated. `next_candidates` and

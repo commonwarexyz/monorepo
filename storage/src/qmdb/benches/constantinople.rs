@@ -7,9 +7,10 @@
 //! parity check: any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- [db] [depth] [iters] [keys] [updates]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates]
 //!
-//! - db: "any" or "current" (default any)
+//! - db: "any" or "current" (required; without it the harness no-ops so blanket
+//!   `cargo bench --benches` invocations skip it)
 //! - depth: number of pending ancestor batches under the timed batch
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
@@ -203,7 +204,15 @@ macro_rules! run_pipeline {
 
 fn main() {
     let raw: Vec<String> = std::env::args().filter(|a| a != "--bench").collect();
-    let db_kind = raw.get(1).cloned().unwrap_or_else(|| "any".into());
+    // Run only when explicitly given a db argument. Blanket harness invocations (no positional
+    // args, or libtest flags like `--list` or `--output-format bencher` from the benchmark CI)
+    // must no-op so `cargo bench --benches` does not seed a million keys or panic on the flags.
+    let Some(db_kind) = raw.get(1).cloned() else {
+        return;
+    };
+    if db_kind.starts_with("--") {
+        return;
+    }
     let args = Args {
         depth: raw.get(2).and_then(|s| s.parse().ok()).unwrap_or(0),
         iters: raw.get(3).and_then(|s| s.parse().ok()).unwrap_or(15),
