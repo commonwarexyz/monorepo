@@ -894,9 +894,10 @@ spawned whom, so it cannot describe that relationship.
   in span names.
 - The operation segment matches the instrumented function's name.
 - A variant that qualifies the type an operation runs on sits with the type's path
-  segment (e.g. `qmdb.any.unordered.batch.merkleize`). A variant that qualifies how an
-  operation runs precedes the operation, keeping the operation as the final segment
-  (e.g. `embedded.certify`, `from_db.new`).
+  segment (e.g. `qmdb.any.unordered.batch.merkleize`). A variant of an operation follows
+  it, using the operation's span name as a prefix so variants group under their
+  instrumented parent (e.g. `marshal.coding.certify.embedded` under
+  `marshal.coding.certify`, `new.from_db`).
 - The name should identify the crate/component and the operation, not the call site.
 - Spans are viewed stand-alone (in search results, span lists, and metrics), so every name
   must be fully descriptive on its own. Unlike runtime context labels

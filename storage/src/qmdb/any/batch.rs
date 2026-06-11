@@ -1673,7 +1673,7 @@ where
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
     #[tracing::instrument(
-        name = "qmdb.any.batch.from_batch.new",
+        name = "qmdb.any.batch.new.from_batch",
         level = "debug",
         skip_all,
         fields(
@@ -1792,7 +1792,7 @@ where
 {
     /// Create a new speculative batch of operations with this database as its parent.
     #[tracing::instrument(
-        name = "qmdb.any.batch.from_db.new",
+        name = "qmdb.any.batch.new.from_db",
         level = "debug",
         skip_all,
         fields(
