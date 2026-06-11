@@ -42,12 +42,6 @@ mod syncing;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Opens the dequeue-side child of a mailbox request's span, separating queue
-/// wait from processing time in traces.
-fn process_span(parent: &tracing::Span) -> tracing::Span {
-    tracing::info_span!(parent: parent, "stateful.actor.process")
-}
-
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {

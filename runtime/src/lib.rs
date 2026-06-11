@@ -403,7 +403,6 @@ stability_scope!(BETA {
         fn encode(&self) -> String;
     }
 
-
     /// A direct (non-keyed) rate limiter using the provided [governor::clock::Clock] `C`.
     ///
     /// This is a convenience type alias for creating single-entity rate limiters.

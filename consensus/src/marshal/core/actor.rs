@@ -880,7 +880,7 @@ where
     }
 
     /// Handle a produce request from a remote peer.
-    #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = ?key))]
+    #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
         key: ResolverRequestFor<V>,

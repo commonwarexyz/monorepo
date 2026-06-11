@@ -3,7 +3,6 @@ use crate::stateful::{
         core::{
             keep_resolvers_alive,
             mailbox::{ErasedAncestorStream, Message},
-            process_span,
             processing::Processing,
         },
         metrics::Metrics as StatefulMetrics,
@@ -34,7 +33,7 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::{num::NonZeroUsize, sync::Arc};
-use tracing::{debug, error, Instrument as _, Span};
+use tracing::{debug, error, info_span, Instrument as _, Span};
 
 /// Verify request buffered while state sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
@@ -157,7 +156,7 @@ where
                     ancestry,
                     response,
                 } => {
-                    let process = process_span(&span);
+                    let process = info_span!(parent: &span, "stateful.actor.hold_verify");
                     self.held_verify_requests
                         .retain(|request| !request.response.is_closed());
                     self.held_verify_requests.push(HeldVerify {
@@ -178,7 +177,7 @@ where
                     block,
                     acknowledgement,
                 } => {
-                    let process = process_span(&span);
+                    let process = info_span!(parent: &span, "stateful.actor.sync_finalized");
                     let handoff = self
                         .process_finalized(block, acknowledgement)
                         .instrument(process)
@@ -303,7 +302,7 @@ where
         }
 
         for request in self.held_verify_requests.drain(..) {
-            let process = process_span(&request.span);
+            let process = info_span!(parent: &request.span, "stateful.actor.replay_verify");
             processor
                 .verify(
                     self.context.as_present(),

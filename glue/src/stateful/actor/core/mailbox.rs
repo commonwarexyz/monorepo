@@ -20,9 +20,6 @@ use tracing::{info_span, Span};
 /// Type alias for an ancestor stream sent through the actor mailbox.
 pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = B> + Send>>;
 
-/// Name of the span carried with every mailbox request.
-const MAILBOX_SPAN: &str = "stateful.mailbox";
-
 /// Messages processed by the actor loop.
 pub(crate) enum Message<E, A>
 where
@@ -213,8 +210,7 @@ where
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
-            MAILBOX_SPAN,
-            operation = "propose",
+            "stateful.mailbox.propose",
             epoch = %context.1.epoch(),
             view = %context.1.view()
         );
@@ -236,8 +232,7 @@ where
         // of the application based on the availabilitiy of the actor.
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
-            MAILBOX_SPAN,
-            operation = "verify",
+            "stateful.mailbox.verify",
             epoch = %context.1.epoch(),
             view = %context.1.view()
         );
@@ -266,8 +261,7 @@ where
             Update::Block(block, acknowledgement) => {
                 let context = block.context();
                 let span = info_span!(
-                    MAILBOX_SPAN,
-                    operation = "finalized",
+                    "stateful.mailbox.finalized",
                     epoch = %context.epoch(),
                     view = %context.view(),
                     digest = %block.digest()
