@@ -33,7 +33,7 @@ pub mod unordered;
 /// - Insertion via `insert()` to add new values.
 /// - Deletion via `delete()` to remove values.
 ///
-/// # Safety
+/// # Usage
 ///
 /// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
 /// - Once `next()` returns `None`, only `insert()` can be called.
@@ -1355,6 +1355,62 @@ mod tests {
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
                 run_index_insert_and_retain_dead_insert(&mut index);
+            }
+        });
+    }
+
+    /// Exercises `insert_and_retain` on single-value (collision-free) keys, covering each
+    /// combination of retaining the existing and new values.
+    fn run_index_insert_and_retain_single_value<I: Unordered<Value = u64>>(index: &mut I) {
+        // Retain both: the new value joins the chain after the existing one.
+        index.insert(b"both", 1u64);
+        index.insert_and_retain(b"both", 2u64, |_| true);
+        assert_eq!(index.get(b"both").copied().collect::<Vec<_>>(), vec![1, 2]);
+
+        // Retain the existing value, drop the new one: a no-op.
+        index.insert(b"keep", 1u64);
+        index.insert_and_retain(b"keep", 2u64, |v| *v == 1);
+        assert_eq!(index.get(b"keep").copied().collect::<Vec<_>>(), vec![1]);
+
+        // Drop both: the key is removed.
+        index.insert(b"drop", 1u64);
+        index.insert_and_retain(b"drop", 2u64, |_| false);
+        assert!(index.get(b"drop").next().is_none());
+
+        assert_eq!(index.keys(), 2); // "both" and "keep" remain
+        assert_eq!(index.items(), 3); // both -> [1, 2], keep -> [1]
+        assert_eq!(index.pruned(), 1); // the dropped "drop" value
+    }
+
+    #[test_traced]
+    fn test_hash_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_retain_single_value(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_insert_and_retain_single_value(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_partitioned_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.child("unordered"));
+                run_index_insert_and_retain_single_value(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context.child("ordered"));
+                run_index_insert_and_retain_single_value(&mut index);
             }
         });
     }
