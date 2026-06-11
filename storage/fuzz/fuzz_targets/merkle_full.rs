@@ -10,7 +10,7 @@ use commonware_storage::merkle::{
     full::Config, hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error,
     Family as MerkleFamily, Location, LocationRangeExt as _, Position,
 };
-use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
+use commonware_utils::{non_empty_range, FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -61,13 +61,14 @@ enum Operation {
 
 #[derive(Debug)]
 struct FuzzInput {
-    seed: u64,
+    raw_bytes: Vec<u8>,
     operations: Vec<Operation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        let seed = u.arbitrary()?;
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
         let num_ops = u.int_in_range(1..=MAX_OPERATIONS)?;
         let mut operations = Vec::with_capacity(num_ops);
 
@@ -75,7 +76,10 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(u.arbitrary()?);
         }
 
-        Ok(FuzzInput { seed, operations })
+        Ok(FuzzInput {
+            raw_bytes,
+            operations,
+        })
     }
 }
 
@@ -111,7 +115,9 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     type Merkle<F, E, D> = commonware_storage::merkle::full::Merkle<F, E, D, Sequential>;
     type SyncConfig<F, D> = commonware_storage::merkle::full::SyncConfig<F, D, Sequential>;
 
-    let runner = deterministic::Runner::seeded(input.seed);
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| {
         let operations = input.operations.clone();

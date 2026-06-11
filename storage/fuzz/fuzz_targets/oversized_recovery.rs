@@ -15,7 +15,7 @@ use commonware_storage::journal::{
     segmented::oversized::{Config, Oversized, Record},
     Error as JournalError,
 };
-use commonware_utils::{NZUsize, NZU16};
+use commonware_utils::{FuzzRng, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -157,6 +157,7 @@ struct FuzzInput {
     corruptions: Vec<CorruptionType>,
     /// Whether to sync before corruption
     sync_before_corrupt: bool,
+    raw_bytes: Vec<u8>,
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
@@ -182,7 +183,8 @@ fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
 }
 
 fn fuzz(input: FuzzInput) {
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
         let cfg = test_cfg(&context);

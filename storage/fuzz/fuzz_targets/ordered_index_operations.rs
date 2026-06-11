@@ -6,6 +6,7 @@ use commonware_storage::{
     index::{ordered::Index, Cursor as _, Unordered as _},
     translator::TwoCap,
 };
+use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -67,10 +68,12 @@ enum IndexOperation {
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     operations: Vec<IndexOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 fn fuzz(input: FuzzInput) {
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let runner = deterministic::Runner::new(cfg);
     runner.start(|context| async move {
         let mut index = Index::new(context.child("storage"), TwoCap);
 

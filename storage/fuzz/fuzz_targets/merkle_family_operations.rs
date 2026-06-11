@@ -7,6 +7,7 @@ use commonware_storage::merkle::{
     hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error, Family as MerkleFamily,
     Location, Position,
 };
+use commonware_utils::FuzzRng;
 use core::any::type_name;
 use libfuzzer_sys::fuzz_target;
 
@@ -24,6 +25,7 @@ enum MerkleOperation {
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     operations: Vec<MerkleOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 fn add<F: MerkleFamily>(
@@ -125,15 +127,17 @@ fn limit(data: &[u8]) -> &[u8] {
     }
 }
 
-fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
-    let runner = deterministic::Runner::default();
+fn fuzz_family<F: MerkleFamily>(input: &FuzzInput) {
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|_context| async move {
         let hasher = Standard::<Sha256>::new(ForwardFold);
         let mut merkle = Mem::<F, Digest>::new();
         let mut reference = ReferenceMerkle::<F>::new();
 
-        for (op_idx, op) in operations.iter().enumerate() {
+        for (op_idx, op) in input.operations.iter().enumerate() {
             match op {
                 MerkleOperation::Add { data } => {
                     let limited = limit(data);
@@ -318,8 +322,8 @@ fn fuzz_family<F: MerkleFamily>(operations: &[MerkleOperation]) {
 }
 
 fn fuzz(input: FuzzInput) {
-    fuzz_family::<mmr::Family>(&input.operations);
-    fuzz_family::<mmb::Family>(&input.operations);
+    fuzz_family::<mmr::Family>(&input);
+    fuzz_family::<mmb::Family>(&input);
 }
 
 fuzz_target!(|input: FuzzInput| {

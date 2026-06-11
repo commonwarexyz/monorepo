@@ -51,7 +51,7 @@ use commonware_storage::journal::{
     },
     Error,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU64};
 use futures::StreamExt;
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -181,6 +181,7 @@ struct FuzzInput {
     /// Operations to execute, split into one `ops` list per cycle at each `Crash` marker.
     #[arbitrary(with = bounded_operations)]
     operations: Vec<JournalOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 /// Journal config plus fault-injection rates, shared by every cycle.
@@ -840,7 +841,9 @@ where
 
     // First cycle starts from a fresh runtime and recovers an empty journal, so the expectation is
     // empty too.
-    let runner = deterministic::Runner::new(deterministic::Config::default().with_seed(input.seed));
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
     let (mut expected, mut checkpoint) = run_cycle::<J>(
         runner,
         Expected::default(),

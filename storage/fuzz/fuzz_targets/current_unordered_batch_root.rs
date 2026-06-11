@@ -12,7 +12,7 @@ use commonware_storage::{
     qmdb::current::{unordered::fixed::Db as CurrentDb, FixedConfig as Config},
     translator::OneCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -50,6 +50,7 @@ struct FuzzInput {
     initial: Vec<SeededWrite>,
     parent: Vec<Mutation>,
     child: Vec<Mutation>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -72,6 +73,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             initial,
             parent,
             child,
+            raw_bytes: u.bytes(u.len())?.to_vec(),
         })
     }
 }
@@ -111,7 +113,9 @@ fn value_from_bytes(bytes: [u8; 32]) -> Value {
 }
 
 fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
-    let runner = deterministic::Runner::default();
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {

@@ -15,7 +15,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use std::num::{NonZeroU16, NonZeroU64};
@@ -65,6 +65,7 @@ enum ImmutableOperation {
 struct FuzzInput {
     seed: u64,
     operations: Vec<ImmutableOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -77,7 +78,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             operations.push(u.arbitrary()?);
         }
 
-        Ok(FuzzInput { seed, operations })
+        let raw_bytes = u.bytes(u.len())?.to_vec();
+        Ok(FuzzInput {
+            seed,
+            operations,
+            raw_bytes,
+        })
     }
 }
 
@@ -139,7 +145,9 @@ fn assign_pending_locations<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
-    let runner = deterministic::Runner::seeded(input.seed);
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| {
         let operations = input.operations.clone();

@@ -17,7 +17,7 @@ use commonware_storage::{
     },
     translator::EightCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -55,6 +55,7 @@ enum QmdbOperation {
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     operations: Vec<QmdbOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(111);
@@ -84,7 +85,8 @@ async fn commit_pending<F: MerkleFamily>(
 }
 
 fn fuzz_family<F: MerkleFamily>(data: &FuzzInput, suffix: &str) {
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(data.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| {
         let operations = data.operations.clone();

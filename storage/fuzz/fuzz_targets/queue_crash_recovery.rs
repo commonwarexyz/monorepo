@@ -11,6 +11,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::queue::{Config, Queue};
+use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -92,6 +93,7 @@ struct FuzzInput {
     write_failure_rate: f64,
     /// Sequence of operations to execute.
     operations: Vec<QueueOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 /// Tracking state for verifying recovery.
@@ -453,7 +455,7 @@ fn fuzz(input: FuzzInput) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_section = NonZeroU64::new(input.items_per_section).unwrap();
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
-    let cfg = deterministic::Config::default().with_seed(input.seed);
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
     let partition_name = format!("queue-crash-recovery-{}", input.seed);
     let operations = input.operations.clone();
     let sync_failure_rate = input.sync_failure_rate;

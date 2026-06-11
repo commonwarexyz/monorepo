@@ -13,7 +13,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -69,6 +69,7 @@ const MAX_INITIAL_WRITES: u16 = 320;
 struct FuzzInput {
     initial_writes: u16,
     operations: Vec<CurrentOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -81,6 +82,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         Ok(FuzzInput {
             initial_writes,
             operations,
+            raw_bytes: u.bytes(u.len())?.to_vec(),
         })
     }
 }
@@ -119,7 +121,8 @@ async fn commit_pending<F: Graftable>(
 }
 
 fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(data.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     let suffix = suffix.to_string();
     let initial_writes = data.initial_writes;

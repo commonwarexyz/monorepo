@@ -13,7 +13,7 @@ use commonware_storage::merkle::{
     full::Config, hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold,
     Family as MerkleFamily, Location,
 };
-use commonware_utils::NZU64;
+use commonware_utils::{FuzzRng, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -85,6 +85,7 @@ struct FuzzInput {
     write_failure_rate: f64,
     /// Sequence of operations to execute.
     operations: Vec<MerkleOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 fn merkle_config(
@@ -225,7 +226,8 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
     let page_cache_size = NonZeroUsize::new(input.page_cache_size).unwrap();
     let items_per_blob = input.items_per_blob;
     let write_buffer = NonZeroUsize::new(input.write_buffer).unwrap();
-    let cfg = deterministic::Config::default().with_seed(input.seed);
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
     let partition_suffix = format!("crash-{suffix}-{}", input.seed);
     let runner = deterministic::Runner::new(cfg);
     let operations = input.operations.clone();

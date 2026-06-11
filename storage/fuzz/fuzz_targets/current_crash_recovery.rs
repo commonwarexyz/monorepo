@@ -23,7 +23,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -89,6 +89,7 @@ struct FuzzInput {
     #[arbitrary(with = bounded_nonzero_rate)]
     write_failure_rate: f64,
     operations: Vec<CurrentOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 fn make_config(
@@ -196,7 +197,8 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, suffix_base: &str) {
     let operations = input.operations.clone();
     let suffix = format!("{suffix_base}_{}", input.seed);
 
-    let cfg = deterministic::Config::default().with_seed(input.seed);
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
     let runner = deterministic::Runner::new(cfg);
 
     // Phase 1: Execute operations with fault injection until crash.

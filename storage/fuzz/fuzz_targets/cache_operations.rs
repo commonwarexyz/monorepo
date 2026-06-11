@@ -2,12 +2,11 @@
 
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::cache::{Cache, Config};
-use commonware_utils::{NZUsize, NZU64};
+use commonware_utils::{FuzzRng, NZUsize, NZU64};
 use libfuzzer_sys::{
     arbitrary::{Arbitrary, Unstructured},
     fuzz_target,
 };
-use rand::{rngs::StdRng, SeedableRng};
 use std::{collections::BTreeMap, num::NonZeroU16};
 
 const MAX_OPERATIONS: usize = 50;
@@ -51,14 +50,15 @@ struct CacheConfig {
 
 #[derive(Clone, Debug)]
 struct FuzzInput {
-    seed: u64,
+    raw_bytes: Vec<u8>,
     config: CacheConfig,
     operations: Vec<Operation>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self, libfuzzer_sys::arbitrary::Error> {
-        let seed = u64::arbitrary(u)?;
+        let raw_len = u.len().min(8);
+        let raw_bytes = u.bytes(raw_len)?.to_vec();
 
         let items_per_blob =
             (u16::arbitrary(u)? as u64 % MAX_ITEMS_PER_BLOB).max(MIN_ITEMS_PER_BLOB);
@@ -118,7 +118,7 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         }
 
         Ok(FuzzInput {
-            seed,
+            raw_bytes,
             config,
             operations,
         })
@@ -126,9 +126,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 }
 
 fn fuzz(input: FuzzInput) {
-    let _rng = StdRng::seed_from_u64(input.seed);
-
-    let executor = deterministic::Runner::seeded(input.seed);
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let executor = deterministic::Runner::new(cfg);
     executor.start(|context| async move {
         let cfg = Config {
             partition: "fuzz-cache".into(),
