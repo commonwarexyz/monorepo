@@ -426,7 +426,11 @@ where
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
-                let span = info_span!(parent: message.span(), "marshal.actor.process");
+                let span = info_span!(
+                    parent: message.span(),
+                    "marshal.actor.process",
+                    operation = message.name(),
+                );
                 self.handle_mailbox_message(
                     message,
                     &mut resolver,

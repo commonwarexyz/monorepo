@@ -294,6 +294,29 @@ impl<S: Scheme, V: Variant> Message<S, V> {
         }
     }
 
+    /// Returns the operation name of this message.
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::GetInfo { .. } => "get_info",
+            Self::GetBlock { .. } => "get_block",
+            Self::GetFinalization { .. } => "get_finalization",
+            Self::GetProcessedHeight { .. } => "get_processed_height",
+            Self::HintFinalized { .. } => "hint_finalized",
+            Self::SubscribeByDigest { .. } => "subscribe_by_digest",
+            Self::SubscribeByCommitment { .. } => "subscribe_by_commitment",
+            Self::HintNotarized { .. } => "hint_notarized",
+            Self::GetVerified { .. } => "get_verified",
+            Self::Forward { .. } => "forward",
+            Self::Proposed { .. } => "proposed",
+            Self::Verified { .. } => "verified",
+            Self::Certified { .. } => "certified",
+            Self::SetFloor { .. } => "set_floor",
+            Self::Prune { .. } => "prune",
+            Self::Notarization { .. } => "notarization",
+            Self::Finalization { .. } => "finalization",
+        }
+    }
+
     fn stale(&self, current: Option<Height>) -> bool {
         match self {
             // Height-targeted reads below the floor can never be served
