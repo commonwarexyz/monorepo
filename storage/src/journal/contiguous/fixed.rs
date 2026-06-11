@@ -323,8 +323,6 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         }
         self.metrics.record_cache_misses(1);
 
-        // Only misses are timed: hits complete below the histogram's resolution and the clock
-        // reads would dominate their cost.
         let _timer = self.metrics.read_timer();
         let item = self.guard.read(pos, self.items_per_blob).await?;
         self.metrics.items_read.inc();

@@ -289,8 +289,6 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
             return Ok(item);
         }
 
-        // Only misses are timed: hits complete below the histogram's resolution and the clock
-        // reads would dominate their cost.
         let _timer = self.metrics.read_timer();
         let item = self
             .guard
