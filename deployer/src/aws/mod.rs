@@ -25,6 +25,7 @@
 //!               |    - Pyroscope                    |
 //!               |    - Tempo                        |
 //!               |    - Grafana                      |
+//!               |    - Tracer                       |
 //!               |  - Security Group                 |
 //!               |    - All: Deployer IP             |
 //!               |    - 3100: Binary VPCs            |
@@ -61,6 +62,7 @@
 //!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Tempo**: Listens at `:4318`, storing traces in `/var/lib/tempo`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
+//!     * **Tracer**: Hosted at `:8080` (as a Docker container), rendering multi-instance trace flamegraphs from the local Tempo.
 //! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
 //!     * Binary instance traffic to Loki (TCP 3100) and Tempo (TCP 4318).

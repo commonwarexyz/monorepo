@@ -837,12 +837,13 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         loki_service_url,
         pyroscope_service_url,
         tempo_service_url,
+        tracer_service_url,
         monitoring_node_exporter_service_url,
         promtail_service_url,
         logrotate_conf_url,
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
-    ]: [String; 14] = try_join_all([
+    ]: [String; 15] = try_join_all([
         cache_and_presign(&s3_client, &bucket_name, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
@@ -852,6 +853,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         cache_and_presign(&s3_client, &bucket_name, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
+        cache_and_presign(&s3_client, &bucket_name, &tracer_service_s3_key(), UploadSource::Static(TRACER_SERVICE.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
@@ -1111,6 +1113,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         pyroscope_service: pyroscope_service_url,
         tempo_service: tempo_service_url,
         node_exporter_service: monitoring_node_exporter_service_url.clone(),
+        tracer_service: tracer_service_url,
     };
 
     // Prepare binary instance configuration futures
@@ -1211,6 +1214,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             poll_service_active(private_key, &monitoring_ip, "loki").await?;
             poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
             poll_service_active(private_key, &monitoring_ip, "tempo").await?;
+            poll_service_active(private_key, &monitoring_ip, "tracer").await?;
             poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
