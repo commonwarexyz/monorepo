@@ -2,8 +2,9 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::get_page_from_blob;
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf};
 use ahash::AHashMap;
+use bytes::BufMut;
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
 use std::{
@@ -103,7 +104,7 @@ impl Drop for PageFetchGuard {
 /// reference bit to false along the way.
 struct Cache {
     /// The page cache index, with a key composed of (blob id, page number), that maps each cached
-    /// page to the index of its slot in `entries` and `slots`.
+    /// page to the index of its slot in `entries`.
     ///
     /// # Invariants
     ///
@@ -112,17 +113,12 @@ struct Cache {
     /// a stale key that is no longer present in `index`.)
     index: AHashMap<(u64, u64), usize>,
 
-    /// Metadata for each cache slot.
+    /// The cache slots, each holding one immutable logical page.
     ///
     /// Every entry reachable via `index` has a matching key here. Slots that were invalidated by
     /// [Self::invalidate_from] retain their stale key but are unreachable from `index` and will
     /// be reclaimed by the Clock evictor on the next sweep.
     entries: Vec<CacheEntry>,
-
-    /// Per-slot page buffers allocated from the pool.
-    ///
-    /// `slots[i]` stores one logical page for `entries[i]`.
-    slots: Vec<IoBufMut>,
 
     /// Size of each page in bytes.
     page_size: usize,
@@ -138,7 +134,7 @@ struct Cache {
     page_fetches: AHashMap<(u64, u64), PageFetchEntry>,
 }
 
-/// Metadata for a single cache entry (page data stored in per-slot buffers).
+/// A single cache slot: one immutable page and its replacement metadata.
 struct CacheEntry {
     /// The cache key which is composed of the blob id and page number of the page.
     ///
@@ -151,6 +147,11 @@ struct CacheEntry {
 
     /// A bit indicating whether this page was recently referenced.
     referenced: AtomicBool,
+
+    /// The page bytes. Pages are immutable once cached: replacement swaps in a new buffer, so a
+    /// reader holding a clone keeps the bytes it observed regardless of later evictions or
+    /// updates.
+    page: IoBuf,
 }
 
 /// A reference to a page cache that can be shared across threads via cloning, along with the page
@@ -179,15 +180,15 @@ pub struct CacheRef {
 impl CacheRef {
     /// Create a shared page-cache handle backed by `pool`.
     ///
-    /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
-    /// Initialization eagerly allocates and zeroes all cache slots from `pool`.
+    /// The cache stores at most `capacity` pages, each exactly `page_size` bytes. Page buffers
+    /// are allocated from `pool` as pages are cached.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size_u64 = page_size.get() as u64;
 
         Self {
             page_size: page_size_u64,
             next_id: Arc::new(AtomicU64::new(0)),
-            cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
+            cache: Arc::new(RwLock::new(Cache::new(page_size, capacity))),
             pool,
         }
     }
@@ -355,6 +356,7 @@ impl CacheRef {
                     // work. get_page_from_blob handles CRC validation and returns only logical bytes.
                     let blob = blob.clone();
                     let cache = Arc::clone(&self.cache);
+                    let pool = self.pool.clone();
                     let page_size = self.page_size;
                     let future = async move {
                         let result = fetch_cacheable_page(&blob, page_num, page_size).await;
@@ -362,14 +364,24 @@ impl CacheRef {
                             error!(page_num, ?err, "Page fetch failed");
                         }
 
+                        // Re-copy the page into an exactly page-sized pooled buffer before
+                        // taking the lock: the fetched buffer is a view of the physical page
+                        // (logical bytes plus checksum record), so caching it directly would pin
+                        // the larger physical allocation for the page's cache lifetime.
+                        let frozen = result.as_ref().ok().map(|page| {
+                            let mut buf = pool.alloc(page.len());
+                            buf.put_slice(page.as_ref());
+                            buf.freeze()
+                        });
+
                         // This shared future still owns `page_fetches[key]`. As long as at least
                         // one waiter remains armed, that entry pins this generation in place, so a
                         // replacement fetch for the same page cannot be inserted before we cache
                         // the successful result below. Only when every waiter cancels can the last
                         // guard remove the entry and let a later reader start a new generation.
                         let mut cache = cache.write();
-                        if let Ok(page) = &result {
-                            cache.cache(blob_id, page.as_ref(), page_num);
+                        if let Some(frozen) = frozen {
+                            cache.insert(blob_id, frozen, page_num);
                         }
                         let _ = cache.page_fetches.remove(&key);
                         result
@@ -414,23 +426,29 @@ impl CacheRef {
     ///
     /// # Panics
     ///
-    /// - Panics if `offset` is not page aligned.
-    /// - If the buffer is not the size of a page.
+    /// Panics if `offset` is not page aligned.
     pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
-        {
-            // Write lock the page cache.
-            let page_size = self.page_size as usize;
-            let mut page_cache = self.cache.write();
-            while buf.len() >= page_size {
-                page_cache.cache(blob_id, &buf[..page_size], page_num);
-                buf = &buf[page_size..];
-                page_num = match page_num.checked_add(1) {
-                    Some(next) => next,
-                    None => break,
-                };
-            }
+
+        // Copy each page into its own exactly page-sized pooled buffer before taking the write
+        // lock, so the lock is held only for the (cheap) handle insertions.
+        let page_size = self.page_size as usize;
+        let mut pages = Vec::with_capacity(buf.len() / page_size);
+        while buf.len() >= page_size {
+            let mut page = self.pool.alloc(page_size);
+            page.put_slice(&buf[..page_size]);
+            pages.push(page.freeze());
+            buf = &buf[page_size..];
+        }
+
+        let mut page_cache = self.cache.write();
+        for page in pages {
+            page_cache.insert(blob_id, page, page_num);
+            page_num = match page_num.checked_add(1) {
+                Some(next) => next,
+                None => break,
+            };
         }
 
         buf.len()
@@ -445,39 +463,19 @@ impl CacheRef {
 }
 
 impl Cache {
-    /// Return a new empty page cache with an initial next-blob id of 0, and a max cache capacity
-    /// of `capacity` pages, each of size `page_size` bytes.
-    pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
+    /// Return a new empty page cache with a max cache capacity of `capacity` pages, each of size
+    /// `page_size` bytes.
+    pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
         let capacity = capacity.get();
-        let mut slots = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            let slot = pool.alloc_zeroed(page_size);
-            slots.push(slot);
-        }
         Self {
             index: AHashMap::new(),
             entries: Vec::with_capacity(capacity),
-            slots,
             page_size,
             clock: 0,
             capacity,
             page_fetches: AHashMap::new(),
         }
-    }
-
-    /// Returns a slice to the page data for the given slot index.
-    #[inline]
-    fn page_slice(&self, slot: usize) -> &[u8] {
-        assert!(slot < self.capacity);
-        self.slots[slot].as_ref()
-    }
-
-    /// Returns a mutable slice to the page data for the given slot index.
-    #[inline]
-    fn page_slice_mut(&mut self, slot: usize) -> &mut [u8] {
-        assert!(slot < self.capacity);
-        self.slots[slot].as_mut()
     }
 
     /// Convert an offset into the number of the page it belongs to and the offset within that page.
@@ -500,7 +498,7 @@ impl Cache {
         assert_eq!(entry.key, (blob_id, page_num));
         entry.referenced.store(true, Ordering::Relaxed);
 
-        let page = self.page_slice(slot);
+        let page = entry.page.as_ref();
         let bytes_to_copy = std::cmp::min(buf.len(), self.page_size - offset_in_page as usize);
         buf[..bytes_to_copy].copy_from_slice(
             &page[offset_in_page as usize..offset_in_page as usize + bytes_to_copy],
@@ -509,23 +507,22 @@ impl Cache {
         bytes_to_copy
     }
 
-    /// Put the given `page` into the page cache.
-    fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
+    /// Put the given `page` into the page cache. `page` must be exactly one page of logical
+    /// bytes.
+    fn insert(&mut self, blob_id: u64, page: IoBuf, page_num: u64) {
         assert_eq!(page.len(), self.page_size);
         let key = (blob_id, page_num);
 
         // Check for existing entry (update case)
         if let Some(&slot) = self.index.get(&key) {
             // This case can result when a blob is truncated across a page boundary, and later grows
-            // back to (beyond) its original size. It will also become expected behavior once we
-            // allow cached pages to be writable.
+            // back to (beyond) its original size. Pages are immutable, so the slot swaps in the
+            // new buffer; readers holding a clone of the old page keep the bytes they observed.
             debug!(blob_id, page_num, "updating duplicate page");
-
-            // Update the stale data with the new page.
-            let entry = &self.entries[slot];
+            let entry = &mut self.entries[slot];
             assert_eq!(entry.key, key);
             entry.referenced.store(true, Ordering::Relaxed);
-            self.page_slice_mut(slot).copy_from_slice(page);
+            entry.page = page;
             return;
         }
 
@@ -537,8 +534,8 @@ impl Cache {
             self.entries.push(CacheEntry {
                 key,
                 referenced: AtomicBool::new(true),
+                page,
             });
-            self.page_slice_mut(slot).copy_from_slice(page);
             return;
         }
 
@@ -563,7 +560,7 @@ impl Cache {
         self.index.insert(key, slot);
         entry.key = key;
         entry.referenced.store(true, Ordering::Relaxed);
-        self.page_slice_mut(slot).copy_from_slice(page);
+        entry.page = page;
 
         // Move the clock forward.
         self.clock = (self.clock + 1) % self.entries.len();
@@ -779,30 +776,34 @@ mod tests {
         }
     }
 
+    /// Build an immutable page filled with `byte`.
+    fn test_page(byte: u8) -> IoBuf {
+        IoBuf::from(vec![byte; PAGE_SIZE.get() as usize])
+    }
+
     #[test_traced]
     fn test_cache_basic() {
-        let pool = test_pool();
-        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(10));
+        let mut cache: Cache = Cache::new(PAGE_SIZE, NZUsize!(10));
 
         // Cache stores logical-sized pages.
         let mut buf = vec![0; PAGE_SIZE.get() as usize];
         let bytes_read = cache.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, 0);
 
-        cache.cache(0, &[1; PAGE_SIZE.get() as usize], 0);
+        cache.insert(0, test_page(1), 0);
         let bytes_read = cache.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
         assert_eq!(buf, [1; PAGE_SIZE.get() as usize]);
 
         // Test replacement -- should log a duplicate page warning but still work.
-        cache.cache(0, &[2; PAGE_SIZE.get() as usize], 0);
+        cache.insert(0, test_page(2), 0);
         let bytes_read = cache.read_at(0, &mut buf, 0);
         assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
         assert_eq!(buf, [2; PAGE_SIZE.get() as usize]);
 
         // Test exceeding the cache capacity.
         for i in 0u64..11 {
-            cache.cache(0, &[i as u8; PAGE_SIZE.get() as usize], i);
+            cache.insert(0, test_page(i as u8), i);
         }
         // Page 0 should have been evicted.
         let bytes_read = cache.read_at(0, &mut buf, 0);
@@ -830,20 +831,18 @@ mod tests {
         // Regression: when the Clock evictor lands on an invalidated slot whose stale key has
         // since been re-cached at a different slot, the old index entry (pointing to the
         // live slot) must not be removed.
-        let mut registry = Registry::default();
-        let pool = BufferPool::new(BufferPoolConfig::for_storage(), &mut registry);
-        let mut cache: Cache = Cache::new(pool, PAGE_SIZE, NZUsize!(2));
+        let mut cache: Cache = Cache::new(PAGE_SIZE, NZUsize!(2));
         let blob_id = 0u64;
         let page_size = PAGE_SIZE.get() as usize;
 
         // Fill both slots, then invalidate them so both carry stale keys with referenced=false.
-        cache.cache(blob_id, &vec![0xAA; page_size], 0);
-        cache.cache(blob_id, &vec![0xBB; page_size], 1);
+        cache.insert(blob_id, test_page(0xAA), 0);
+        cache.insert(blob_id, test_page(0xBB), 1);
         cache.invalidate_from(blob_id, 0);
 
         // Re-cache page 1. Clock sits at slot 0, which is referenced=false, so the insert
         // lands at slot 0 (slot 1 still holds its stale (blob, 1) key).
-        cache.cache(blob_id, &vec![0xCC; page_size], 1);
+        cache.insert(blob_id, test_page(0xCC), 1);
         let mut buf = vec![0u8; page_size];
         assert_eq!(
             cache.read_at(blob_id, &mut buf, PAGE_SIZE_U64),
@@ -855,7 +854,7 @@ mod tests {
         // Cache a new page. Clock now advances to slot 1 (still referenced=false), evicts it.
         // With the buggy unconditional `index.remove(entry.key)` this would remove the live
         // (blob, 1) -> slot 0 mapping, orphaning slot 0.
-        cache.cache(blob_id, &vec![0xDD; page_size], 2);
+        cache.insert(blob_id, test_page(0xDD), 2);
 
         // Slot 0 must still be reachable via its live index entry.
         let mut buf = vec![0u8; page_size];
@@ -1262,11 +1261,8 @@ mod tests {
         let page1 = vec![0xBB; PAGE_SIZE.get() as usize];
 
         // Populate two pages with distinct data.
-        {
-            let mut cache = cache_ref.cache.write();
-            cache.cache(blob_id, &page0, 0);
-            cache.cache(blob_id, &page1, 1);
-        }
+        cache_ref.cache(blob_id, &page0, 0);
+        cache_ref.cache(blob_id, &page1, PAGE_SIZE_U64);
 
         let mut buf0 = vec![0u8; PAGE_SIZE_U64 as usize];
         let mut buf1 = vec![0u8; PAGE_SIZE_U64 as usize];
@@ -1310,12 +1306,9 @@ mod tests {
 
         let page0 = vec![0x11; PAGE_SIZE.get() as usize];
         let page2 = vec![0x33; PAGE_SIZE.get() as usize];
-        {
-            let mut cache = cache_ref.cache.write();
-            cache.cache(blob_id, &page0, 0);
-            // page 1 deliberately not cached
-            cache.cache(blob_id, &page2, 2);
-        }
+        cache_ref.cache(blob_id, &page0, 0);
+        // page 1 deliberately not cached
+        cache_ref.cache(blob_id, &page2, PAGE_SIZE_U64 * 2);
 
         let mut buf0 = vec![0u8; PAGE_SIZE_U64 as usize];
         let mut buf1 = vec![0u8; PAGE_SIZE_U64 as usize];

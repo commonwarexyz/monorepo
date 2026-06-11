@@ -1776,7 +1776,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            // One pooled slot backs the page cache and one backs the mutable tip.
+            // The page cache allocates lazily, so before sync the mutable tip is the only
+            // occupant of the pool: one probe allocation fits, a second does not.
+            let probe = pool.try_alloc(BUFFER_SIZE).unwrap();
             assert!(
                 matches!(
                     pool.try_alloc(BUFFER_SIZE),
@@ -1784,10 +1786,12 @@ mod tests {
                 ),
                 "full-page tip should occupy the remaining pooled slot before sync"
             );
+            drop(probe);
 
             append.sync().await.unwrap();
 
-            // After a full drain, the tip should no longer pin that slot.
+            // After a full drain the tip no longer pins a slot. The flushed page was published
+            // to the page cache (one slot), so exactly one slot must remain free.
             assert!(
                 pool.try_alloc(BUFFER_SIZE).is_ok(),
                 "sync should release pooled backing when no partial tail remains"
