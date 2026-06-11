@@ -4,7 +4,7 @@
 
 use crate::{
     index::{
-        storage::{insert_front, iter_chain, Cursor as CursorImpl, IndexEntry, Record},
+        storage::{push_displaced, Cursor as CursorImpl, IndexEntry, Overflow, Values},
         Cursor as CursorTrait, Unordered,
     },
     translator::Translator,
@@ -24,8 +24,8 @@ use std::collections::{
 const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
-impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Record<V>> {
-    fn get_mut(&mut self) -> &mut Record<V> {
+impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
+    fn get_mut(&mut self) -> &mut V {
         self.get_mut()
     }
     fn remove(self) {
@@ -34,13 +34,18 @@ impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, Reco
 }
 
 /// A [crate::index::Cursor] over the values associated with a translated key.
-pub type Cursor<'a, K, V> = CursorImpl<'a, V, OccupiedEntry<'a, K, Record<V>>>;
+pub type Cursor<'a, K, V> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>>;
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
+///
+/// Each translated key maps directly to its most recently inserted value; conflicting values (from
+/// key collisions or repeated insertions) are stored in a separate overflow map so the common
+/// (collision-free) case stays as compact as possible.
 pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
-    map: HashMap<T::Key, Record<V>, T>,
+    map: HashMap<T::Key, V, T>,
+    overflow: Overflow<T::Key, V>,
 
     keys: Gauge,
     items: Gauge,
@@ -49,13 +54,10 @@ pub struct Index<T: Translator, V: Send + Sync> {
 
 impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new entry in the index.
-    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, Record<V>>, v: V) {
+    fn create(keys: &Gauge, items: &Gauge, vacant: VacantEntry<'_, T::Key, V>, v: V) {
         keys.inc();
         items.inc();
-        vacant.insert(Record {
-            value: v,
-            next: None,
-        });
+        vacant.insert(v);
     }
 
     /// Create a new index with the given translator and metrics registry.
@@ -63,6 +65,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
         Self {
             translator: translator.clone(),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
+            overflow: Overflow::new(),
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
@@ -88,7 +91,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         V: 'a,
     {
         let k = self.translator.transform(key);
-        self.map.get(&k).into_iter().flat_map(iter_chain)
+        Values::new(self.map.get(&k), &self.overflow, k)
     }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
@@ -96,6 +99,8 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
+                k,
+                &mut self.overflow,
                 &self.keys,
                 &self.items,
                 &self.pruned,
@@ -109,6 +114,8 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
+                k,
+                &mut self.overflow,
                 &self.keys,
                 &self.items,
                 &self.pruned,
@@ -124,7 +131,10 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                insert_front(entry.get_mut(), v);
+                // The newest value is stored inline; the displaced value joins the end of the
+                // overflow chain.
+                let old = std::mem::replace(entry.get_mut(), v);
+                push_displaced(&mut self.overflow, k, old);
                 self.items.inc();
             }
             Entry::Vacant(entry) => {
@@ -137,8 +147,14 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(entry) => {
-                let mut cursor =
-                    Cursor::<'_, T::Key, V>::new(entry, &self.keys, &self.items, &self.pruned);
+                let mut cursor = Cursor::<'_, T::Key, V>::new(
+                    entry,
+                    k,
+                    &mut self.overflow,
+                    &self.keys,
+                    &self.items,
+                    &self.pruned,
+                );
 
                 // Drop anything that should not be retained.
                 cursor.retain(&should_retain);
@@ -159,15 +175,16 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
 
     fn remove(&mut self, key: &[u8]) {
         let k = self.translator.transform(key);
-        if let Some(mut record) = self.map.remove(&k) {
+        if self.map.remove(&k).is_some() {
             // To ensure metrics are accurate, account for all conflicting values in the chain.
             self.keys.dec();
             self.items.dec();
             self.pruned.inc();
-            while let Some(next) = record.next.take() {
-                self.items.dec();
-                self.pruned.inc();
-                record = *next;
+            if !self.overflow.is_empty() {
+                for _ in self.overflow.remove(&k).into_iter().flatten() {
+                    self.items.dec();
+                    self.pruned.inc();
+                }
             }
         }
     }
@@ -185,18 +202,5 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     #[cfg(test)]
     fn pruned(&self) -> usize {
         self.pruned.get() as usize
-    }
-}
-
-impl<T: Translator, V: Send + Sync> Drop for Index<T, V> {
-    /// To avoid stack overflow on keys with many collisions, we implement an iterative drop (in
-    /// lieu of Rust's default recursive drop).
-    fn drop(&mut self) {
-        for (_, mut record) in self.map.drain() {
-            let mut next = record.next.take();
-            while let Some(mut record) = next {
-                next = record.next.take();
-            }
-        }
     }
 }

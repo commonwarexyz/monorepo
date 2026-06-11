@@ -25,7 +25,7 @@ pub mod unordered;
 /// A mutable iterator over the values associated with a translated key, allowing in-place
 /// modifications.
 ///
-/// The [Cursor] provides a way to traverse and modify the linked list of values associated with a
+/// The [Cursor] provides a way to traverse and modify the chain of values associated with a
 /// translated key by an index while maintaining its structure. It supports:
 ///
 /// - Iteration via `next()` to access values.
@@ -37,7 +37,7 @@ pub mod unordered;
 ///
 /// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
 /// - Once `next()` returns `None`, only `insert()` can be called.
-/// - The cursor mutates the linked list in place. If the sole element is deleted, dropping the
+/// - The cursor mutates the chain of values in place. If the sole element is deleted, dropping the
 ///   cursor removes the map entry.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_retain()`, or
@@ -53,7 +53,7 @@ pub trait Cursor: Send + Sync {
     /// If after `insert()`, the next active item is the item after the inserted item. If after
     /// `delete()`, the next active item is the item after the deleted item.
     ///
-    /// Advances through cursor states and adjusts for deletions. Returns `None` when the list is
+    /// Advances through cursor states and adjusts for deletions. Returns `None` when the chain is
     /// exhausted. It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> Option<&Self::Value>;
@@ -61,7 +61,7 @@ pub trait Cursor: Send + Sync {
     /// Inserts a new value at the current position.
     fn insert(&mut self, value: Self::Value);
 
-    /// Deletes the current value, adjusting the list structure.
+    /// Deletes the current value, adjusting the chain structure.
     fn delete(&mut self);
 
     /// Updates the value at the current position in the iteration.
