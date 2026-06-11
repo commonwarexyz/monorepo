@@ -1259,7 +1259,7 @@ mod test {
             mode: Mode::Dkg,
             crash: Some(Crash::Random {
                 // Keep crash frequency above timeout retry so restarted validators can retry nullify.
-                frequency: Duration::from_millis(4_000),
+                frequency: Duration::from_secs(4),
                 downtime: Duration::from_millis(500),
                 count: 3,
             }),

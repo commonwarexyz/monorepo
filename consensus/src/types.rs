@@ -325,9 +325,6 @@ impl View {
     ///
     /// When `term_length` is 1, every view is its own term (no grouping).
     pub const fn term_start(self, term_length: TermLength) -> Self {
-        if term_length.is_one() {
-            return self;
-        }
         let term_length = term_length.get();
         let Self(view) = self;
         if view == 0 {
@@ -551,12 +548,6 @@ impl TermLength {
     /// Returns the number of views per term.
     pub const fn get(self) -> u64 {
         self.0.get()
-    }
-
-    /// Returns true when the term length is one, meaning every view is its own
-    /// term and stable leaders are disabled.
-    pub const fn is_one(self) -> bool {
-        self.0.get() == 1
     }
 }
 

@@ -343,10 +343,8 @@ fn spawn_honest_validator<
     ResolverReceiver,
 >(
     context: deterministic::Context,
-    (oracle, participants): (
-        &Oracle<Ed25519PublicKey, deterministic::Context>,
-        &[Ed25519PublicKey],
-    ),
+    oracle: &Oracle<Ed25519PublicKey, deterministic::Context>,
+    participants: &[Ed25519PublicKey],
     term_length: TermLength,
     scheme: P::Scheme,
     validator: Ed25519PublicKey,
@@ -455,7 +453,8 @@ fn run<P: simplex::Simplex>(input: FuzzInput) {
                 .with_attribute("public_key", &validator);
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
-                (&oracle, &participants),
+                &oracle,
+                &participants,
                 input.term_length,
                 schemes[i].clone(),
                 validator.clone(),
@@ -696,7 +695,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 .expect("validator should be registered");
             let reporter = spawn_honest_validator::<P, _, _, _, _, _, _>(
                 ctx,
-                (&oracle, participants.as_ref()),
+                &oracle,
+                participants.as_ref(),
                 input.term_length,
                 schemes[idx].clone(),
                 validator.clone(),

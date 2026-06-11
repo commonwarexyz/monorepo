@@ -15,6 +15,8 @@ use commonware_cryptography::{
 use rand_core::CryptoRngCore;
 use std::collections::{HashMap, HashSet};
 
+// Intentionally restates View::covers: the fuzz oracle stays independent of
+// the production predicate so a bug in covers cannot hide from the fuzzer.
 fn nullification_conflicts(
     nullified_view: u64,
     finalized_view: u64,

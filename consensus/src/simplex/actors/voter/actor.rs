@@ -1217,14 +1217,14 @@ impl<
 
                     // If we skip a view, we don't worry about forwarding our latest certified proposal
                     // because the network has already moved on
-                    let forwardable_proposal = current_view
+                    let certified_proposal = current_view
                         .previous()
-                        .and_then(|view| self.state.forwardable_proposal(view));
+                        .and_then(|view| self.state.certified_proposal(view));
 
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
                     let (span, finalized) = self.state.batcher_context(current_view);
-                    batcher.update(span, current_view, leader, finalized, forwardable_proposal);
+                    batcher.update(span, current_view, leader, finalized, certified_proposal);
                 }
             },
         }

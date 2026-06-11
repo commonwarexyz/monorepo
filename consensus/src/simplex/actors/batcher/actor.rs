@@ -8,7 +8,7 @@ use crate::{
         types::{Activity, Certificate, Proposal, Vote},
         Plan,
     },
-    types::{Epoch, Participant, Round as Rnd, TermLength, View, ViewDelta},
+    types::{Epoch, Participant, Round as Rnd, TermLength, View},
     Epochable, Relay, Reporter, Viewable,
 };
 use commonware_actor::mailbox;
@@ -318,7 +318,7 @@ where
                         current: new_current,
                         leader,
                         finalized: new_finalized,
-                        forwardable_proposal,
+                        certified_proposal,
                     } => {
                         let process = process_span(span.clone());
                         let _guard = process.entered();
@@ -346,13 +346,10 @@ where
 
                         let has_forwardable_proposal =
                             me.is_some_and(|me| round.has_forwardable_proposal(me));
-                        // The guards in Self::leader_nullified are unnecessary here:
-                        // current was just rebuilt (not timed out, leader set).
-                        let nullified_by_leader = round.has_nullify(leader);
 
                         // If the leader nullified this view or has not been active
                         // recently, tell the voter to reduce the leader timeout to now
-                        let timeout_reason = match nullified_by_leader {
+                        let timeout_reason = match Self::leader_nullified(&current, &work) {
                             // Leader already buffered a nullify for this now-current view
                             // (allowed because we accept votes up to `current+1`)
                             true => Some(TimeoutReason::LeaderNullify),
@@ -371,7 +368,7 @@ where
                         }
 
                         // Forward the proposal, if enabled and we have something to forward
-                        if let Some((proposal, round)) = forwardable_proposal
+                        if let Some((proposal, round)) = certified_proposal
                             .filter(|_| self.forwarding.is_enabled())
                             .and_then(|proposal| {
                                 work.get(&proposal.view()).map(|round| (proposal, round))

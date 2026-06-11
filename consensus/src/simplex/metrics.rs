@@ -29,6 +29,7 @@ impl TimeoutReason {
     /// metric series share the same string.
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Retry => "Retry",
             Self::Inactivity => "Inactivity",
             Self::LeaderNullify => "LeaderNullify",
             Self::LeaderTimeout => "LeaderTimeout",
@@ -37,6 +38,7 @@ impl TimeoutReason {
             Self::IgnoredProposal => "IgnoredProposal",
             Self::InvalidProposal => "InvalidProposal",
             Self::FailedCertification => "FailedCertification",
+            Self::FinalizationTimeout => "FinalizationTimeout",
         }
     }
 }

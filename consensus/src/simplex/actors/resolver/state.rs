@@ -1,5 +1,5 @@
 use crate::{
-    simplex::types::{Certificate, Notarization, Nullification},
+    simplex::types::{Certificate, Notarization},
     types::{TermLength, View},
     Viewable,
 };
@@ -38,8 +38,6 @@ pub(crate) enum Effect {
         /// Why the fetch is needed.
         reason: FetchReason,
     },
-    /// Drop all subscribers for this view.
-    Remove(View),
     /// Retain only subscribers outside this inclusive view range.
     RetainOutside { start: View, end: View },
     /// Retain only views above this floor.
@@ -56,7 +54,7 @@ pub struct State<S: Scheme, D: Digest> {
     /// Notarizations pending certification (possible floors).
     notarizations: BTreeMap<View, Notarization<S, D>>,
     /// Nullifications that cover any view greater than the floor.
-    nullifications: BTreeMap<View, Nullification<S>>,
+    nullifications: BTreeMap<View, Certificate<S, D>>,
     /// Window of requests to send to the resolver.
     fetch_concurrent: usize,
     /// Number of views in each leader term.
@@ -103,7 +101,8 @@ impl<S: Scheme, D: Digest> State<S, D> {
             Certificate::Nullification(nullification) => {
                 let view = nullification.view();
                 if self.encounter_nullification(view) {
-                    self.nullifications.insert(view, nullification);
+                    self.nullifications
+                        .insert(view, Certificate::Nullification(nullification));
                     effects.push(Effect::RetainOutside {
                         start: view,
                         end: view.term_end(self.term_length),
@@ -173,23 +172,23 @@ impl<S: Scheme, D: Digest> State<S, D> {
 
     /// Get the best certificate for a given view (or the floor
     /// if the view is below the floor).
-    pub fn get(&self, view: View) -> Option<Certificate<S, D>> {
+    pub fn get(&self, view: View) -> Option<&Certificate<S, D>> {
+        // If view is <= floor, return the floor
         if let Some(floor) = &self.floor {
             if view <= floor.view() {
-                return Some(floor.clone());
+                return Some(floor);
             }
         }
 
         // Otherwise, return the nullification covering the view if it exists.
         self.covering_nullification(view)
-            .map(|n| Certificate::Nullification(n.clone()))
     }
 
     /// Returns the stored nullification covering `view`, if any.
     ///
     /// Since a nullification covers the rest of its term, it may be keyed at
     /// an earlier view in `view`'s term.
-    fn covering_nullification(&self, view: View) -> Option<&Nullification<S>> {
+    fn covering_nullification(&self, view: View) -> Option<&Certificate<S, D>> {
         let term_start = view.term_start(self.term_length);
         self.nullifications
             .range(term_start..=view)
@@ -365,9 +364,6 @@ mod tests {
                 Effect::Fetch { view, .. } => {
                     outstanding.insert(view);
                 }
-                Effect::Remove(view) => {
-                    outstanding.remove(&view);
-                }
                 Effect::RetainOutside { start, end } => {
                     outstanding.retain(|view| *view < start || *view > end);
                 }
@@ -378,7 +374,7 @@ mod tests {
         }
     }
 
-    fn outstanding(views: &BTreeSet<View>) -> Vec<u64> {
+    fn outstanding_views(views: &BTreeSet<View>) -> Vec<u64> {
         views.iter().map(|view| view.get()).collect()
     }
 
@@ -394,9 +390,9 @@ mod tests {
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
-        assert_eq!(outstanding(&outstanding), vec![1, 2]);
+        assert_eq!(outstanding_views(&outstanding), vec![1, 2]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
         let effects = state.handle(Certificate::Nullification(nullification_v2.clone()), None);
@@ -404,9 +400,9 @@ mod tests {
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
-        assert_eq!(outstanding(&outstanding), vec![1, 3]);
+        assert_eq!(outstanding_views(&outstanding), vec![1, 3]);
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         let effects = state.handle(Certificate::Nullification(nullification_v1.clone()), None);
@@ -414,9 +410,9 @@ mod tests {
         apply_effects(&mut outstanding, &effects);
         assert_eq!(state.current_view, View::new(4));
         assert!(
-            matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == nullification_v1)
+            matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == &nullification_v1)
         );
-        assert_eq!(outstanding(&outstanding), vec![3]);
+        assert_eq!(outstanding_views(&outstanding), vec![3]);
     }
 
     #[test]
@@ -438,17 +434,17 @@ mod tests {
             ]
         );
         apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding(&outstanding), vec![1, 6, 11]);
+        assert_eq!(outstanding_views(&outstanding), vec![1, 6, 11]);
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         let effects = state.handle(Certificate::Nullification(nullification_v1), None);
         apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding(&outstanding), vec![6, 11]);
+        assert_eq!(outstanding_views(&outstanding), vec![6, 11]);
 
         let nullification_v6 = build_nullification(&schemes, &verifier, View::new(6));
         let effects = state.handle(Certificate::Nullification(nullification_v6), None);
         apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding(&outstanding), vec![11]);
+        assert_eq!(outstanding_views(&outstanding), vec![11]);
     }
 
     #[test]
@@ -461,10 +457,10 @@ mod tests {
         state.handle(Certificate::Nullification(nullification_v2.clone()), None);
 
         assert!(
-            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(2)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
         assert!(
-            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
         assert!(state.get(View::new(6)).is_none());
 
@@ -472,7 +468,7 @@ mod tests {
         state.handle(Certificate::Finalization(finalization_v3), None);
         assert_eq!(state.nullifications.len(), 1);
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
 
         let finalization_v5 = build_finalization(&schemes, &verifier, View::new(5));
@@ -494,7 +490,7 @@ mod tests {
         let nullification_v6 = build_nullification(&schemes, &verifier, View::new(6));
         let effects = state.handle(Certificate::Nullification(nullification_v6), None);
         apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding(&outstanding), vec![4]);
+        assert_eq!(outstanding_views(&outstanding), vec![4]);
 
         let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
         let effects = state.handle(Certificate::Nullification(nullification_v2.clone()), None);
@@ -502,10 +498,10 @@ mod tests {
 
         assert!(outstanding.is_empty());
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
         assert!(
-            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == nullification_v2)
+            matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
     }
 
@@ -522,14 +518,14 @@ mod tests {
             apply_effects(&mut outstanding, &effects);
         }
         assert_eq!(state.current_view, View::new(6));
-        assert_eq!(outstanding(&outstanding), vec![1, 2, 3]);
+        assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
         let notarization = build_notarization(&schemes, &verifier, View::new(6));
         let effects = state.handle(Certificate::Notarization(notarization), None);
         apply_effects(&mut outstanding, &effects);
         assert!(state.floor.is_none());
         assert_eq!(state.nullifications.len(), 3);
-        assert_eq!(outstanding(&outstanding), vec![1, 2, 3]);
+        assert_eq!(outstanding_views(&outstanding), vec![1, 2, 3]);
 
         let finalization = build_finalization(&schemes, &verifier, View::new(6));
         let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
@@ -552,30 +548,36 @@ mod tests {
         let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
         assert_eq!(effects, vec![Effect::RetainAbove(View::new(3))]);
         assert!(
-            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
         assert!(
-            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
 
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
         let effects = state.handle(Certificate::Nullification(nullification_v4.clone()), None);
         assert_eq!(effects, vec![retain_outside(4, 4)]);
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
         assert!(
-            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
         let effects = state.handle(Certificate::Nullification(nullification_v1), None);
         assert!(effects.is_empty());
         assert!(
-            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == finalization)
+            matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
         assert!(
-            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == nullification_v4)
+            matches!(state.get(View::new(2)), Some(Certificate::Finalization(f)) if f == &finalization)
+        );
+        assert!(
+            matches!(state.get(View::new(3)), Some(Certificate::Finalization(f)) if f == &finalization)
+        );
+        assert!(
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
     }
 
@@ -659,7 +661,7 @@ mod tests {
         let nullification_v14 = build_nullification(&schemes, &verifier, View::new(14));
         let effects = state.handle(Certificate::Nullification(nullification_v14), None);
         apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding(&outstanding), vec![1]);
+        assert_eq!(outstanding_views(&outstanding), vec![1]);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
         let effects = state.handle(
@@ -667,7 +669,7 @@ mod tests {
             Some(View::new(1)),
         );
         apply_effects(&mut outstanding, &effects);
-        assert_eq!(outstanding(&outstanding), vec![1]);
+        assert_eq!(outstanding_views(&outstanding), vec![1]);
 
         let effects = state.handle_certified(View::new(5), true);
         apply_effects(&mut outstanding, &effects);
@@ -676,7 +678,7 @@ mod tests {
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
         assert_eq!(state.current_view, View::new(14));
-        assert_eq!(outstanding(&outstanding), vec![6]);
+        assert_eq!(outstanding_views(&outstanding), vec![6]);
     }
 
     #[test]

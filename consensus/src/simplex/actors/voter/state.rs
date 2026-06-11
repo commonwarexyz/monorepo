@@ -369,8 +369,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         if matches!(round_timeout.1, TimeoutReason::Retry) {
             return round_timeout;
         }
+        // The finalization anchor only overrides a round timeout that has not
+        // itself expired: when both are due, the round's reason (e.g. a latched
+        // LeaderNullify or InvalidProposal) is the more diagnostic label for
+        // the nullify metric.
         self.next_finalization_timeout()
-            .filter(|&deadline| deadline <= round_timeout.0)
+            .filter(|&deadline| deadline <= round_timeout.0 && now < round_timeout.0)
             .map(|deadline| (deadline, TimeoutReason::FinalizationTimeout))
             .unwrap_or(round_timeout)
     }
@@ -617,8 +621,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         self.views.get(&view).and_then(|round| round.finalization())
     }
 
-    /// Returns the proposal for `view` if it is eligible for forwarding.
-    pub fn forwardable_proposal(&self, view: View) -> Option<Proposal<D>> {
+    /// Returns the certified (or finalized) proposal for `view`, if any,
+    /// for forwarding to peers.
+    pub fn certified_proposal(&self, view: View) -> Option<Proposal<D>> {
         let round = self.views.get(&view)?;
         if round.finalization().is_some() || round.is_certified() {
             return round.proposal().cloned();
@@ -1076,8 +1081,7 @@ mod tests {
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: NZU64!(1),
-                    term_stop_notarize_on_nullify: false,
+                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(30),
                 },
             );
@@ -1554,6 +1558,7 @@ mod tests {
             context.sleep(Duration::from_millis(1500)).await;
             assert!(state.certified(View::new(2), true).is_some());
             assert_eq!(state.current_view(), View::new(3));
+            let v3_certification_deadline = context.current() + Duration::from_secs(2);
 
             let proposal_v3 = Proposal::new(
                 Rnd::new(Epoch::new(33), View::new(3)),
@@ -1571,9 +1576,14 @@ mod tests {
             );
 
             context.sleep(Duration::from_secs(2)).await;
+            // Once the round's own timeout has also expired, its reason takes
+            // precedence over the older anchor (more diagnostic for metrics).
             assert_eq!(
                 state.next_timeout(),
-                (oldest_deadline, TimeoutReason::FinalizationTimeout,)
+                (
+                    v3_certification_deadline,
+                    TimeoutReason::CertificationTimeout,
+                )
             );
         });
     }
@@ -1802,6 +1812,37 @@ mod tests {
                 Some(entered + finalization_timeout),
                 "jumped-over views must not disable the finalization timeout"
             );
+        });
+    }
+
+    #[test]
+    fn expired_latch_keeps_reason_over_expired_anchor() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
+            let cfg = Config {
+                scheme: schemes[0].clone(),
+                elector: <RoundRobin>::default(),
+                epoch: Epoch::new(9),
+                activity_timeout: ViewDelta::new(10),
+                leader_timeout: Duration::from_secs(1),
+                certification_timeout: Duration::from_secs(2),
+                timeout_retry: Duration::from_secs(10),
+                term_length: TermLength::new(NZU64!(3)),
+                finalization_timeout: Duration::from_secs(4),
+            };
+            let mut state = State::new(context.child("state"), cfg);
+            state.set_genesis(test_genesis());
+
+            // Let the term's finalization deadline expire, then latch an
+            // event-driven timeout: the latched reason must not be relabeled
+            // as FinalizationTimeout by the older expired anchor.
+            context.sleep(Duration::from_secs(5)).await;
+            let view = state.current_view();
+            state.trigger_timeout(view, TimeoutReason::LeaderNullify);
+            let (_, reason) = state.next_timeout();
+            assert_eq!(reason, TimeoutReason::LeaderNullify);
         });
     }
 

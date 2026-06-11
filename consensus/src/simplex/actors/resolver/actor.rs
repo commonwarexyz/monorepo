@@ -180,10 +180,6 @@ impl<
                     cause,
                     reason,
                 } => self.fetch(resolver, view, cause, reason),
-                Effect::Remove(view) => {
-                    let key = U64::from(view);
-                    let _ = resolver.retain(move |candidate, _| *candidate != key);
-                }
                 Effect::RetainOutside { start, end } => {
                     let start = U64::from(start);
                     let end = U64::from(end);
@@ -393,7 +389,6 @@ mod tests {
     };
     use commonware_macros::test_async;
     use commonware_parallel::Sequential;
-    use commonware_resolver::Resolver;
     use commonware_runtime::{deterministic, Runner};
     use commonware_utils::{NZUsize, NZU64};
 
@@ -411,35 +406,6 @@ mod tests {
         type PublicKey = PublicKey;
 
         fn block(&mut self, _peer: Self::PublicKey) -> Feedback {
-            Feedback::Ok
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct NoopResolver;
-
-    impl Resolver for NoopResolver {
-        type Key = U64;
-        type Subscriber = ();
-
-        fn fetch<F>(&mut self, _key: F) -> Feedback
-        where
-            F: Into<commonware_resolver::Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn fetch_all<F>(&mut self, _keys: Vec<F>) -> Feedback
-        where
-            F: Into<commonware_resolver::Fetch<Self::Key, Self::Subscriber>> + Send,
-        {
-            Feedback::Ok
-        }
-
-        fn retain(
-            &mut self,
-            _predicate: impl Fn(&Self::Key, &Self::Subscriber) -> bool + Send + 'static,
-        ) -> Feedback {
             Feedback::Ok
         }
     }
@@ -582,9 +548,7 @@ mod tests {
             } = ed25519::fixture(&mut context, NAMESPACE, 4);
             let mut actor = build_actor(context, verifier.clone());
             let notarization = build_notarization(&schemes, &verifier, EPOCH, View::new(7));
-            actor
-                .state
-                .handle_certified(View::new(7), false, &mut NoopResolver);
+            actor.state.handle_certified(View::new(7), false);
 
             let validated = actor.validate(
                 View::new(7),

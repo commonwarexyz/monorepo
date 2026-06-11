@@ -792,7 +792,7 @@ mod tests {
 
     /// Test that constructing a notarization does not forward immediately, but
     /// entering the next view with an explicit forwardable proposal does.
-    fn forward_emitted_on_view_advance_with_forwardable_proposal<S, F>(mut fixture: F)
+    fn forward_emitted_on_view_advance_with_certified_proposal<S, F>(mut fixture: F)
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
@@ -949,27 +949,27 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_forward_emitted_on_view_advance_with_forwardable_proposal() {
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+    fn test_forward_emitted_on_view_advance_with_certified_proposal() {
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_vrf::fixture::<MinPk, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_vrf::fixture::<MinSig, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_std::fixture::<MinPk, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_threshold_std::fixture::<MinSig, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_multisig::fixture::<MinPk, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(
+        forward_emitted_on_view_advance_with_certified_proposal(
             bls12381_multisig::fixture::<MinSig, _>,
         );
-        forward_emitted_on_view_advance_with_forwardable_proposal(ed25519::fixture);
-        forward_emitted_on_view_advance_with_forwardable_proposal(secp256r1::fixture);
+        forward_emitted_on_view_advance_with_certified_proposal(ed25519::fixture);
+        forward_emitted_on_view_advance_with_certified_proposal(secp256r1::fixture);
     }
 
     /// Test that `SilentLeader` forwards only to the newly entered leader, and
@@ -2912,7 +2912,7 @@ mod tests {
 
             let leader = Participant::new(1);
             let view = View::new(1);
-            batcher_mailbox.update(view, leader, View::zero(), None);
+            batcher_mailbox.update(Span::none(), view, leader, View::zero(), None);
             expect_no_timeout(&mut context, &mut voter_receiver).await;
 
             let self_vote = Nullify::sign::<Sha256Digest>(&schemes[0], Round::new(epoch, view))
@@ -2932,7 +2932,7 @@ mod tests {
             context.sleep(Duration::from_millis(50)).await;
 
             let next_view = view.next();
-            batcher_mailbox.update(next_view, leader, View::zero(), None);
+            batcher_mailbox.update(Span::none(), next_view, leader, View::zero(), None);
             expect_timeout(
                 &mut context,
                 &mut voter_receiver,
@@ -3054,7 +3054,7 @@ mod tests {
             batcher.start(voter_mailbox, vote_receiver, certificate_receiver);
 
             let current = View::new(1);
-            batcher_mailbox.update(current, leader, View::zero(), None);
+            batcher_mailbox.update(Span::none(), current, leader, View::zero(), None);
             expect_no_timeout(&mut context, &mut voter_receiver).await;
 
             let next = current.next();
@@ -3074,7 +3074,7 @@ mod tests {
 
             select! {
                 message = voter_receiver.recv() => match message {
-                    Some(voter::Message::Proposal(p)) if p.view() == next => {
+                    Some(voter::Message::Proposal { proposal, .. }) if proposal.view() == next => {
                         panic!("unexpected proposal before current+1 leader context exists");
                     }
                     Some(_) => {}
@@ -3102,16 +3102,23 @@ mod tests {
             }
             context.sleep(Duration::from_millis(20)).await;
 
-            batcher_mailbox.update(next, leader, View::zero(), None);
+            batcher_mailbox.update(Span::none(), next, leader, View::zero(), None);
 
             loop {
                 select! {
                     message = voter_receiver.recv() => match message {
-                        Some(voter::Message::Timeout(view, TimeoutReason::Inactivity)) if view == next => {
+                        Some(voter::Message::Timeout {
+                            round,
+                            reason: TimeoutReason::Inactivity,
+                            ..
+                        }) if round.view() == next => {
                             panic!("inactivity timeout reached voter before buffered proposal");
                         }
-                        Some(voter::Message::Proposal(p)) if p.view() == next => {
-                            assert_eq!(p.payload, proposal.payload);
+                        Some(voter::Message::Proposal {
+                            proposal: received,
+                            ..
+                        }) if received.view() == next => {
+                            assert_eq!(received.payload, proposal.payload);
                             break;
                         }
                         Some(_) => {}

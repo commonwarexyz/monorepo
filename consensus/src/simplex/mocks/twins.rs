@@ -169,12 +169,7 @@ impl Scenario {
         term_length: TermLength,
         participants: &[P],
     ) -> (Vec<P>, Vec<P>) {
-        let idx = term_index(view, term_length);
-        self.partitions_at(idx, participants)
-    }
-
-    fn partitions_at<P: Clone>(&self, idx: usize, participants: &[P]) -> (Vec<P>, Vec<P>) {
-        if let Some(round) = self.rounds.get(idx) {
+        if let Some(round) = self.rounds.get(term_index(view, term_length)) {
             return round.partitions(participants);
         }
         (participants.to_vec(), participants.to_vec())
@@ -198,12 +193,7 @@ impl Scenario {
         sender: &P,
         participants: &[P],
     ) -> SplitTarget {
-        let idx = term_index(view, term_length);
-        self.route_at(idx, sender, participants)
-    }
-
-    fn route_at<P: PartialEq>(&self, idx: usize, sender: &P, participants: &[P]) -> SplitTarget {
-        if let Some(round) = self.rounds.get(idx) {
+        if let Some(round) = self.rounds.get(term_index(view, term_length)) {
             return round.route(sender, participants);
         }
         // After attack rounds, both halves see everyone.
