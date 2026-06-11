@@ -52,9 +52,9 @@ pub struct Round<S: Scheme, D: Digest> {
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
     finalization_deadline: Option<SystemTime>,
-    timeout_retry: Option<SystemTime>,
+    retry_deadline: Option<SystemTime>,
     // First explicit timeout latched for this round (see latch_timeout).
-    // Unlike timeout_retry, this is first-wins and never moves.
+    // Unlike retry_deadline, this is first-wins and never moves.
     latched_timeout: Option<(SystemTime, TimeoutReason)>,
 
     // Certificates received from batcher (constructed or from network).
@@ -82,7 +82,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             leader_deadline: None,
             certification_deadline: None,
             finalization_deadline: None,
-            timeout_retry: None,
+            retry_deadline: None,
             latched_timeout: None,
             notarization: None,
             broadcast_notarize: false,
@@ -327,6 +327,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.proposal.proposal()
     }
 
+    /// Arms the round's deadlines when its view is entered.
+    ///
+    /// Rounds created for bookkeeping (views never entered) deliberately have
+    /// no deadlines; the finalization anchor in `State` relies on this to
+    /// skip them.
     pub const fn set_deadlines(
         &mut self,
         leader_deadline: SystemTime,
@@ -338,31 +343,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.finalization_deadline = Some(finalization_deadline);
     }
 
-    /// Overrides the timeout retry deadline, allowing callers to reschedule retries deterministically.
-    pub const fn set_timeout_retry(&mut self, when: Option<SystemTime>) {
-        self.timeout_retry = when;
-    }
-
     /// Latches the first explicit timeout for this round, pinning the moment it
     /// expired. Later latches preserve the original deadline and reason, and
     /// latching is ignored once a nullify broadcast began (retry cadence
     /// governs the round from then on).
     ///
     /// A latched timeout makes [`Self::next_timeout`] fire immediately (and
-    /// stably across polls) without touching any deadline: in particular, the
-    /// finalization deadline anchors term-level stall protection and must not
-    /// be reset by a per-view timeout.
+    /// stably across polls, carrying the latched reason) without touching any
+    /// deadline: in particular, the finalization deadline anchors term-level
+    /// stall protection and must not be reset by a per-view timeout.
     pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
         if self.latched_timeout.is_none() && !self.broadcast_nullify {
             self.latched_timeout = Some((now, reason));
-        }
-    }
-
-    /// Returns the latched explicit timeout reason, if any.
-    pub const fn timeout_reason(&self) -> Option<TimeoutReason> {
-        match self.latched_timeout {
-            Some((_, reason)) => Some(reason),
-            None => None,
         }
     }
 
@@ -379,7 +371,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let retry = replace(&mut self.broadcast_nullify, true);
         self.leader_deadline = None;
         self.certification_deadline = None;
-        self.set_timeout_retry(None);
+        self.retry_deadline = None;
         Some(retry)
     }
 
@@ -387,17 +379,20 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn next_timeout(
         &mut self,
         now: SystemTime,
-        retry: Duration,
+        retry_interval: Duration,
     ) -> Option<(SystemTime, TimeoutReason)> {
         if self.broadcast_finalize || self.finalization().is_some() {
             return None;
         }
         if self.broadcast_nullify {
-            if let Some(deadline) = self.timeout_retry {
+            if let Some(deadline) = self.retry_deadline {
                 return Some((deadline, TimeoutReason::Retry));
             }
-            let next = now + retry;
-            self.timeout_retry = Some(next);
+            // Lazily schedule the next retry on first poll after a nullify
+            // broadcast (this also covers rounds restored from replay, which
+            // arrive with no schedule).
+            let next = now + retry_interval;
+            self.retry_deadline = Some(next);
             return Some((next, TimeoutReason::Retry));
         }
         if let Some(latched) = self.latched_timeout {

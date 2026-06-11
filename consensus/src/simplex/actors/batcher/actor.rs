@@ -686,8 +686,9 @@ where
                     }
                 }
 
-                // Drop any rounds that are below the highest finalized view.
-                work = work.split_off(&finalized);
+                // Drop any rounds at or below the highest finalized view (votes
+                // for those views are no longer accepted).
+                work = work.split_off(&finalized.next());
             },
         }
     }

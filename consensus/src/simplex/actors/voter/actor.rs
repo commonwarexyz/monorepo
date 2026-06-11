@@ -204,7 +204,7 @@ impl<
         Some(elapsed.as_secs_f64())
     }
 
-    /// Drops views and journal entries that are below their retention floors.
+    /// Drops views and journal entries that are below the activity floor.
     async fn prune_views(&mut self) {
         let removed = self.state.prune();
         if removed.is_empty() {
@@ -217,14 +217,14 @@ impl<
                 "pruned view"
             );
         }
-        let retention_floor = self.state.retention_floor();
+        let min_active = self.state.min_active();
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .prune(retention_floor.get())
+                .prune(min_active.get())
                 .instrument(info_span!(
                     "simplex.voter.journal.prune",
                     epoch = self.state.epoch().traced(),
-                    min = retention_floor.traced()
+                    min = min_active.traced()
                 ))
                 .await
                 .expect("unable to prune journal");
@@ -370,8 +370,11 @@ impl<
         self.broadcast_vote(vote_sender, Vote::Nullify(nullify));
     }
 
-    /// Handle a timeout.
-    async fn timeout<Sp: Sender, Sr: Sender>(
+    /// Handles a fired timeout for the current view: broadcasts a nullify
+    /// vote (persisting and syncing it on the first attempt) and, on retries,
+    /// rebroadcasts the best entry certificate to help lagging peers enter
+    /// the view.
+    async fn handle_timeout<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
@@ -379,13 +382,13 @@ impl<
         reason: TimeoutReason,
     ) {
         let view = self.state.current_view();
-        if reason != TimeoutReason::Retry {
-            self.state.trigger_timeout(view, reason);
-        }
 
         // Attempt to broadcast a nullify vote for the current view (as many times as required
         // until we exit the view)
-        let Some(retry) = self.try_broadcast_nullify(batcher, vote_sender, view).await else {
+        let Some(retry) = self
+            .try_broadcast_nullify(batcher, vote_sender, view, reason)
+            .await
+        else {
             return;
         };
 
@@ -555,11 +558,12 @@ impl<
         batcher: &mut batcher::Mailbox<S, D>,
         vote_sender: &mut WrappedSender<Sp, Vote<S, D>>,
         view: View,
+        reason: TimeoutReason,
     ) -> Option<bool> {
-        let (was_retry, nullify) = self.state.construct_nullify(view)?;
-        self.broadcast_nullify(batcher, vote_sender, was_retry, nullify)
+        let (is_retry, nullify) = self.state.construct_nullify(view, reason)?;
+        self.broadcast_nullify(batcher, vote_sender, is_retry, nullify)
             .await;
-        Some(was_retry)
+        Some(is_retry)
     }
 
     /// Broadcast a nullification certificate if the round provides a candidate.
@@ -951,6 +955,12 @@ impl<
             pin_mut!(stream);
             while let Some(artifact) = stream.next().await {
                 let (_, _, _, artifact) = artifact.expect("unable to replay journal");
+                // Dropping our own nullify votes at or below the floor is safe
+                // for the same-term finalize gate: the floor finalization
+                // covers any such vote (it lies between the vote and any later
+                // same-term view), so the gate would treat it as healed anyway.
+                // If the gate ever stops keying off last_finalized, this skip
+                // must be revisited.
                 if artifact.view() <= replay_floor {
                     continue;
                 }
@@ -1088,7 +1098,7 @@ impl<
                 let certify_wait = certify_pool.next_completed();
 
                 // Wait for a timeout to fire or for a message to arrive
-                let (timeout, timeout_reason) = self.state.next_timeout();
+                let (deadline, reason) = self.state.next_timeout();
                 let start = self.state.current_view();
                 let mut resolved = Resolved::None;
                 let view;
@@ -1096,7 +1106,7 @@ impl<
             on_stopped => {
                 debug!("context shutdown, stopping voter");
             },
-            _ = self.context.sleep_until(timeout) => {
+            _ = self.context.sleep_until(deadline) => {
                 // Process the timeout
                 let current_view = self.state.current_view();
                 let span = info_span!(
@@ -1105,11 +1115,11 @@ impl<
                     epoch = self.state.epoch().traced(),
                     view = current_view.traced()
                 );
-                self.timeout(
+                self.handle_timeout(
                     &mut batcher,
                     &mut vote_sender,
                     &mut certificate_sender,
-                    timeout_reason,
+                    reason,
                 )
                     .instrument(span)
                     .await;

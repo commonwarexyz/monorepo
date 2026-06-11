@@ -222,13 +222,6 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         min_active(self.activity_timeout, self.last_finalized)
     }
 
-    /// Returns the lowest view whose journaled evidence may still affect progress or safety.
-    pub fn retention_floor(&self) -> View {
-        let first_unfinalized = self.last_finalized.next();
-        self.min_active()
-            .min(first_unfinalized.term_start(self.term_length))
-    }
-
     /// Returns whether a vote for `pending` is still relevant for progress.
     pub fn is_interesting_vote(&self, pending: View) -> bool {
         interesting(
@@ -345,56 +338,55 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             return round_timeout;
         }
         self.next_finalization_timeout()
-            .filter(|(deadline, _)| *deadline <= round_timeout.0)
+            .filter(|&deadline| deadline <= round_timeout.0)
+            .map(|deadline| (deadline, TimeoutReason::FinalizationTimeout))
             .unwrap_or(round_timeout)
     }
 
-    fn next_finalization_timeout(&mut self) -> Option<(SystemTime, TimeoutReason)> {
+    fn next_finalization_timeout(&mut self) -> Option<SystemTime> {
         let term_start = self.view.term_start(self.term_length);
         let unfinalized_view = self.last_finalized.next().max(term_start);
         // The oldest unfinalized view may never have been entered (e.g., we
-        // jumped past it by certifying a future notarization), in which case
-        // it has no deadline. Anchor on the oldest entered, unfinalized view
-        // in the current term instead.
-        //
-        // Views are entered in order, so a round at or below the current view
-        // without a deadline can never acquire one: `finalization_anchor`
-        // advances monotonically past such rounds (and the scan always
-        // terminates by the current view's round, which was entered), keeping
-        // this amortized constant time.
+        // jumped past it by certifying a future notarization), and a skipped
+        // round never acquires a deadline (views are entered in order), so we
+        // anchor on the oldest entered, unfinalized view in the current term.
+        // `finalization_anchor` advances monotonically past skipped rounds,
+        // keeping the scan amortized constant time (it always terminates by
+        // the current view's round, which was entered).
         let start = self.finalization_anchor.max(unfinalized_view);
         let (anchor, deadline) = self
             .views
             .range(start..=self.view)
             .find_map(|(view, round)| round.finalization_deadline().map(|d| (*view, d)))?;
         self.finalization_anchor = anchor;
-        Some((deadline, TimeoutReason::FinalizationTimeout))
+        Some(deadline)
     }
 
     /// Constructs a nullify vote for the current view, if eligible.
     ///
+    /// `reason` labels why the view timed out (as returned by
+    /// [`Self::next_timeout`]) and is only used for metrics; retries are
+    /// always recorded as [`TimeoutReason::Retry`].
+    ///
     /// Returns `Some((is_retry, nullify))` where `is_retry` is true when this is not the first
     /// nullify emission for `view`. Returns `None` if `view` is not the current view or if we
     /// have already broadcast a finalize vote for this view.
-    pub fn construct_nullify(&mut self, view: View) -> Option<(bool, Nullify<S>)> {
+    pub fn construct_nullify(
+        &mut self,
+        view: View,
+        reason: TimeoutReason,
+    ) -> Option<(bool, Nullify<S>)> {
         if view != self.view {
             return None;
         }
-        let (is_retry, reason, leader) = {
+        let (is_retry, leader) = {
             let round = self.create_round(view);
-            let is_retry = round.construct_nullify()?;
-            let reason = if is_retry {
-                TimeoutReason::Retry
-            } else {
-                round.timeout_reason().unwrap_or_else(|| {
-                    if round.proposal().is_some() {
-                        TimeoutReason::CertificationTimeout
-                    } else {
-                        TimeoutReason::LeaderTimeout
-                    }
-                })
-            };
-            (is_retry, reason, round.leader())
+            (round.construct_nullify()?, round.leader())
+        };
+        let reason = if is_retry {
+            TimeoutReason::Retry
+        } else {
+            reason
         };
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         self.nullify_views.insert(view);
@@ -657,8 +649,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// retry schedule.
     ///
     /// This only latches the first timeout for the view (see
-    /// [`Round::latch_timeout`]). Metrics are emitted when the first timeout
-    /// nullify vote is constructed.
+    /// [`Round::latch_timeout`]); the latched reason is delivered back through
+    /// [`Self::next_timeout`] when the timeout fires.
     pub fn trigger_timeout(&mut self, view: View, reason: TimeoutReason) {
         if view != self.view {
             return;
@@ -823,17 +815,19 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     }
 
     /// Drops tracked rounds below the activity horizon and stale safety-evidence indexes.
+    ///
+    /// The activity horizon retains all safety evidence that can still matter:
+    /// gate-relevant nullify votes are above `last_finalized` (votes at or
+    /// below it are healed by the covering finalization), and same-term vote
+    /// safety guarantees no current-term nullification exists at or below
+    /// `last_finalized`, so both sets only hold load-bearing entries above
+    /// `min_active`.
     pub fn prune(&mut self) -> Vec<View> {
         let min = self.min_active();
         let kept = self.views.split_off(&min);
         let removed = replace(&mut self.views, kept).into_keys().collect();
-
-        // A nullification can cover the rest of its term, and a local nullify
-        // blocks finalization in the same term. Use the same floor as journal
-        // pruning so restart preserves the safety evidence we keep in memory.
-        let retain_from = self.retention_floor();
-        self.nullification_views = self.nullification_views.split_off(&retain_from);
-        self.nullify_views = self.nullify_views.split_off(&retain_from);
+        self.nullification_views = self.nullification_views.split_off(&min);
+        self.nullify_views = self.nullify_views.split_off(&min);
 
         // Update metrics
         let _ = self.tracked_views.try_set(self.views.len());
@@ -1239,7 +1233,7 @@ mod tests {
 
             // Timeout-mode nullify: first emission should not be marked as retry.
             let (was_retry, _) = state
-                .construct_nullify(state.current_view())
+                .construct_nullify(state.current_view(), TimeoutReason::LeaderTimeout)
                 .expect("first timeout nullify should exist");
             assert!(!was_retry, "first timeout is not a retry");
 
@@ -1270,7 +1264,7 @@ mod tests {
 
             // Timeout-mode nullify: second emission should be marked as retry.
             let (was_retry, _) = state
-                .construct_nullify(state.current_view())
+                .construct_nullify(state.current_view(), TimeoutReason::Retry)
                 .expect("retry timeout nullify should exist");
             assert!(was_retry, "subsequent timeout should be treated as retry");
 
@@ -1312,7 +1306,7 @@ mod tests {
 
             let view = state.current_view();
             let (was_retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, TimeoutReason::LeaderTimeout)
                 .expect("first timeout nullify should exist");
             assert!(!was_retry, "first timeout should not be marked as retry");
 
@@ -1345,7 +1339,7 @@ mod tests {
     }
 
     #[test]
-    fn nullify_without_reason_reuses_first_recorded_reason() {
+    fn nullify_records_reason_from_next_timeout() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
             let namespace = b"ns".to_vec();
@@ -1368,10 +1362,14 @@ mod tests {
             let mut state = State::new(context.child("state"), cfg);
             state.set_genesis(test_genesis());
 
+            // The latched reason is delivered through next_timeout (mirroring
+            // the actor) and recorded by the nullify metric.
             let view = state.current_view();
             state.trigger_timeout(view, TimeoutReason::MissingProposal);
+            let (_, reason) = state.next_timeout();
+            assert_eq!(reason, TimeoutReason::MissingProposal);
             let (was_retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, reason)
                 .expect("first timeout nullify should exist");
             assert!(!was_retry);
 
@@ -1382,8 +1380,12 @@ mod tests {
             assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
             assert_eq!(state.timeouts.get_or_create(&leader_timeout).get(), 0);
 
+            // Retries are governed by the retry cadence regardless of the
+            // reason passed.
+            let (_, reason) = state.next_timeout();
+            assert_eq!(reason, TimeoutReason::Retry);
             let (was_retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, reason)
                 .expect("retry timeout nullify should exist");
             assert!(was_retry);
             assert_eq!(state.timeouts.get_or_create(&missing).get(), 1);
@@ -1651,7 +1653,7 @@ mod tests {
 
             let view_2 = state.current_view();
             let (was_retry, _) = state
-                .construct_nullify(view_2)
+                .construct_nullify(view_2, TimeoutReason::FinalizationTimeout)
                 .expect("same-term timeout should nullify current view");
             assert!(!was_retry);
 
@@ -1694,7 +1696,7 @@ mod tests {
             // nullify vote is constructed.
             state.trigger_timeout(view_1, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
-                .construct_nullify(view_1)
+                .construct_nullify(view_1, TimeoutReason::LeaderTimeout)
                 .expect("first timeout nullify should exist");
             assert!(!was_retry);
 
@@ -1770,10 +1772,7 @@ mod tests {
             // disabling itself because view 6 has no deadline.
             assert_eq!(
                 state.next_finalization_timeout(),
-                Some((
-                    entered + finalization_timeout,
-                    TimeoutReason::FinalizationTimeout
-                )),
+                Some(entered + finalization_timeout),
                 "jumped-over views must not disable the finalization timeout"
             );
         });
@@ -1866,7 +1865,7 @@ mod tests {
                 "current view should be expired after timeout is triggered"
             );
             let (was_retry, _) = state
-                .construct_nullify(view_1)
+                .construct_nullify(view_1, TimeoutReason::LeaderTimeout)
                 .expect("first timeout nullify should exist");
             assert!(!was_retry);
             let retry_deadline = state.next_timeout();
@@ -1952,7 +1951,7 @@ mod tests {
 
             // First emitted nullify should record the metric.
             let (was_retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, TimeoutReason::LeaderNullify)
                 .expect("first timeout nullify should exist");
             assert!(!was_retry);
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
@@ -1960,7 +1959,7 @@ mod tests {
             // Retries are classified separately from the original timeout reason.
             state.trigger_timeout(view, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, TimeoutReason::Retry)
                 .expect("retry timeout nullify should exist");
             assert!(was_retry);
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
@@ -1996,7 +1995,9 @@ mod tests {
             let next = current.next();
 
             // Non-current views are not eligible.
-            assert!(state.construct_nullify(next).is_none());
+            assert!(state
+                .construct_nullify(next, TimeoutReason::LeaderTimeout)
+                .is_none());
 
             // Observe a nullification for current view, which advances us to the next view.
             let current_round = Rnd::new(Epoch::new(4), current);
@@ -2013,15 +2014,17 @@ mod tests {
             assert_eq!(state.current_view(), next);
 
             // Past views remain ineligible even if they have a nullification certificate.
-            assert!(state.construct_nullify(current).is_none());
+            assert!(state
+                .construct_nullify(current, TimeoutReason::LeaderTimeout)
+                .is_none());
 
             // Timeout path on current view: first attempt then retry.
             let (was_retry, _) = state
-                .construct_nullify(next)
+                .construct_nullify(next, TimeoutReason::LeaderTimeout)
                 .expect("first timeout nullify for current view should be emitted");
             assert!(!was_retry);
             let (was_retry, _) = state
-                .construct_nullify(next)
+                .construct_nullify(next, TimeoutReason::Retry)
                 .expect("retry timeout nullify for current view should be emitted");
             assert!(was_retry);
         });
@@ -3670,7 +3673,7 @@ mod tests {
 
             // Timeout path emits a first-attempt nullify.
             let (retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, TimeoutReason::LeaderTimeout)
                 .expect("timeout nullify should exist");
             assert!(!retry);
 
@@ -3869,7 +3872,7 @@ mod tests {
 
             // Emit a timeout nullify vote for view 1.
             let (was_retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, TimeoutReason::LeaderTimeout)
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 
@@ -3960,7 +3963,7 @@ mod tests {
 
             let view = state.current_view();
             let (was_retry, _) = state
-                .construct_nullify(view)
+                .construct_nullify(view, TimeoutReason::LeaderTimeout)
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 
@@ -4100,7 +4103,7 @@ mod tests {
             state.set_genesis(test_genesis());
 
             let (was_retry, nullify) = state
-                .construct_nullify(View::new(1))
+                .construct_nullify(View::new(1), TimeoutReason::LeaderTimeout)
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
             let nullify_artifact = Artifact::Nullify(nullify);
@@ -4122,7 +4125,6 @@ mod tests {
             state.add_finalization(finalization.clone());
             assert_eq!(state.last_finalized(), finalized_view);
             assert_eq!(state.min_active(), View::new(8));
-            assert_eq!(state.retention_floor(), View::new(1));
 
             let removed = state.prune();
             assert!(removed.contains(&View::new(1)));
@@ -4191,29 +4193,6 @@ mod tests {
     }
 
     #[test]
-    fn retention_floor_tracks_first_unfinalized_term() {
-        let runtime = deterministic::Runner::default();
-        runtime.start(|mut context| async move {
-            let (_, mut state) = setup_state(&mut context, 4, 1, 2, 20);
-
-            // First unfinalized view remains in term [1, 20], so same-term
-            // safety evidence from that term must remain durable.
-            state.last_finalized = View::new(10);
-            assert_eq!(state.retention_floor(), View::new(1));
-
-            // Once the term is fully finalized, only the activity horizon keeps
-            // recent evidence from the finalized term.
-            state.last_finalized = View::new(20);
-            assert_eq!(state.retention_floor(), View::new(18));
-
-            // If the first unfinalized view is inside a term, retain from that
-            // term start even when the activity horizon is higher.
-            state.last_finalized = View::new(25);
-            assert_eq!(state.retention_floor(), View::new(21));
-        });
-    }
-
-    #[test]
     fn term_safety_allows_finalize_in_new_term_after_nullify() {
         let runtime = deterministic::Runner::default();
         runtime.start(|mut context| async move {
@@ -4238,7 +4217,7 @@ mod tests {
             // Vote to nullify in term [1,3], activating the term safety lock.
             let view1 = View::new(1);
             let (was_retry, _) = state
-                .construct_nullify(view1)
+                .construct_nullify(view1, TimeoutReason::LeaderTimeout)
                 .expect("timeout nullify should exist");
             assert!(!was_retry);
 

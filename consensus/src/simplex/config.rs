@@ -163,10 +163,8 @@ where
     /// stuck in a view.
     pub timeout_retry: Duration,
 
-    /// Number of views behind the finalized tip to track for recent activity.
-    ///
-    /// Durable safety evidence may be retained longer when stable-leader terms
-    /// require it for same-term vote safety or skipped-view validation.
+    /// Number of views behind the finalized tip to track (in memory and in the
+    /// journal) for recent activity.
     pub activity_timeout: ViewDelta,
 
     /// Move to nullify immediately if the selected leader has been inactive
