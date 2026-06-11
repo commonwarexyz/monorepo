@@ -28,7 +28,6 @@ use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write
 use commonware_cryptography::{crc32, Crc32};
 
 mod append;
-mod buf;
 mod cache;
 mod read;
 

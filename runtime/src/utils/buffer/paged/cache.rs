@@ -1,10 +1,10 @@
 //! A page cache for caching _logical_ pages of [Blob] data in memory. The cache is unaware of the
 //! physical page format used by the blob, which is left to the blob implementation.
 
-use super::{buf::PagedBuf, get_page_from_blob};
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf};
+use super::get_page_from_blob;
+use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufs};
 use ahash::AHashMap;
-use bytes::BufMut;
+use bytes::{Buf as _, BufMut};
 use commonware_codec::Read as CodecRead;
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
@@ -19,6 +19,10 @@ use std::{
     },
 };
 use tracing::{debug, error, trace};
+
+/// Maximum number of page slices gathered for a single decode. Bounds the work done under the
+/// cache read lock and keeps the common gather within [IoBufs]' inline segment representation.
+const MAX_GATHER_PAGES: usize = 8;
 
 /// Number of offsets decoded per page-cache read-lock acquisition in
 /// [CacheRef::decode_cached_exact_many], bounding lock hold time.
@@ -299,18 +303,19 @@ impl CacheRef {
             Err(_) => {}
         }
 
-        let mut buf = self.cache.read().gather(blob_id, offset, max_len);
-        if buf.len() == in_page {
+        let (mut bufs, truncated) = self.cache.read().gather(blob_id, offset, max_len);
+        let gathered = bufs.remaining();
+        if gathered == in_page {
             // No bytes beyond the already-tried page are resident, so the failure above was
             // (possibly) an artifact of missing data.
             return CachedDecode::Missing;
         }
-        match T::read_cfg(&mut buf, cfg) {
-            Ok(value) => CachedDecode::Decoded(value, buf.consumed()),
+        match T::read_cfg(&mut bufs, cfg) {
+            Ok(value) => CachedDecode::Decoded(value, gathered - bufs.remaining()),
             // A failure against a truncated view may be an artifact of missing data; the
             // caller's async fallback re-reads authoritative bytes and surfaces real
             // corruption.
-            Err(_) if buf.truncated() => CachedDecode::Missing,
+            Err(_) if truncated => CachedDecode::Missing,
             Err(err) => CachedDecode::Invalid(err),
         }
     }
@@ -346,16 +351,16 @@ impl CacheRef {
         }
 
         // The encoding spans pages: gather and decode the multi-slice view.
-        let mut buf = self.cache.read().gather(blob_id, offset, len);
-        let truncated = buf.truncated();
-        match T::read_cfg(&mut buf, cfg) {
-            Ok(value) if buf.consumed() == len => CachedDecode::Decoded(value, len),
+        let (mut bufs, truncated) = self.cache.read().gather(blob_id, offset, len);
+        let gathered = bufs.remaining();
+        match T::read_cfg(&mut bufs, cfg) {
+            Ok(value) if gathered - bufs.remaining() == len => CachedDecode::Decoded(value, len),
             // A short decode against a truncated gather may be an artifact of missing data
             // (the decoder may have consumed a prefix that happens to parse standalone).
             Ok(_) if truncated => CachedDecode::Missing,
-            Ok(_) => {
-                CachedDecode::Invalid(commonware_codec::Error::ExtraData(len - buf.consumed()))
-            }
+            Ok(_) => CachedDecode::Invalid(commonware_codec::Error::ExtraData(
+                len - (gathered - bufs.remaining()),
+            )),
             Err(_) if truncated => CachedDecode::Missing,
             Err(err) => CachedDecode::Invalid(err),
         }
@@ -659,8 +664,8 @@ impl Cache {
 
     /// Gather the resident contiguous prefix of `[offset, offset + max_len)` for `blob_id` as
     /// refcounted page slices, marking every touched page as referenced. Stops at the first
-    /// non-resident page, at the [super::buf::MAX_GATHER_PAGES] cap, or at `max_len`; the
-    /// returned buffer's `truncated` flag is set in the first two cases.
+    /// non-resident page, at the [MAX_GATHER_PAGES] cap, or at `max_len`; the returned bool is
+    /// true (truncated) in the first two cases.
     ///
     /// The slices are refcounted views of the cached pages, so the returned buffer remains valid
     /// after the cache lock is released; a concurrent eviction or replacement leaves the bytes
@@ -679,38 +684,36 @@ impl Cache {
     /// against synchronous decodes (between a blob truncation and the cache invalidation a
     /// decode could otherwise serve pre-resize bytes; the journal wrappers hold exclusive
     /// access during rewinds).
-    fn gather(&self, blob_id: u64, offset: u64, max_len: usize) -> PagedBuf {
-        let mut buf = PagedBuf::new();
+    fn gather(&self, blob_id: u64, offset: u64, max_len: usize) -> (IoBufs, bool) {
+        let mut bufs = IoBufs::default();
         if max_len == 0 {
-            return buf;
+            return (bufs, false);
         }
         let (mut page_num, offset_in_page) = Self::offset_to_page(self.page_size as u64, offset);
         let mut start = offset_in_page as usize;
         let mut gathered = 0;
+        let mut pages = 0;
         loop {
+            if pages == MAX_GATHER_PAGES {
+                return (bufs, true);
+            }
             let Some(&slot) = self.index.get(&(blob_id, page_num)) else {
-                buf.set_truncated();
-                return buf;
+                return (bufs, true);
             };
             let entry = &self.entries[slot];
             entry.referenced.store(true, Ordering::Relaxed);
 
             let end = self.page_size.min(start.saturating_add(max_len - gathered));
-            if !buf.push(entry.page.slice(start..end)) {
-                buf.set_truncated();
-                return buf;
-            }
+            bufs.append(entry.page.slice(start..end));
+            pages += 1;
             gathered += end - start;
             if gathered == max_len {
-                return buf;
+                return (bufs, false);
             }
             start = 0;
             page_num = match page_num.checked_add(1) {
                 Some(next) => next,
-                None => {
-                    buf.set_truncated();
-                    return buf;
-                }
+                None => return (bufs, true),
             };
         }
     }
@@ -760,16 +763,16 @@ impl Cache {
         }
 
         // The encoding spans pages: gather and decode the multi-slice view.
-        let mut buf = self.gather(blob_id, offset, len);
-        let truncated = buf.truncated();
-        match T::read_cfg(&mut buf, cfg) {
-            Ok(value) if buf.consumed() == len => CachedDecode::Decoded(value, len),
+        let (mut bufs, truncated) = self.gather(blob_id, offset, len);
+        let gathered = bufs.remaining();
+        match T::read_cfg(&mut bufs, cfg) {
+            Ok(value) if gathered - bufs.remaining() == len => CachedDecode::Decoded(value, len),
             // A short decode against a truncated gather may be an artifact of missing data
             // (the decoder may have consumed a prefix that happens to parse standalone).
             Ok(_) if truncated => CachedDecode::Missing,
-            Ok(_) => {
-                CachedDecode::Invalid(commonware_codec::Error::ExtraData(len - buf.consumed()))
-            }
+            Ok(_) => CachedDecode::Invalid(commonware_codec::Error::ExtraData(
+                len - (gathered - bufs.remaining()),
+            )),
             Err(_) if truncated => CachedDecode::Missing,
             Err(err) => CachedDecode::Invalid(err),
         }
@@ -879,10 +882,7 @@ async fn fetch_cacheable_page(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::{buf::MAX_GATHER_PAGES, Checksum},
-        *,
-    };
+    use super::{super::Checksum, *};
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
         BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
@@ -1643,6 +1643,34 @@ mod tests {
                 assert_eq!(consumed, 8);
             }
             _ => panic!("expected decode spanning pages to succeed"),
+        }
+    }
+
+    #[test_traced]
+    fn test_decode_cached_spanning_four_pages() {
+        // An item spanning four resident pages decodes through the gathered multi-slice view
+        // (more than three slices, exercising the heap-backed segment representation).
+        const ITEM_SIZE: usize = 2 * PAGE_SIZE.get() as usize + 16;
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        for page in 0..4u64 {
+            cache_ref.cache(
+                blob_id,
+                &patterned_page((page * PAGE_SIZE_U64) as usize),
+                page * PAGE_SIZE_U64,
+            );
+        }
+
+        let offset = PAGE_SIZE_U64 - 8;
+        match cache_ref.decode_cached_exact::<[u8; ITEM_SIZE]>(blob_id, offset, ITEM_SIZE, &()) {
+            CachedDecode::Decoded(value, consumed) => {
+                let expected: Vec<u8> = (offset as usize..offset as usize + ITEM_SIZE)
+                    .map(|i| i as u8)
+                    .collect();
+                assert_eq!(&value[..], &expected[..]);
+                assert_eq!(consumed, ITEM_SIZE);
+            }
+            _ => panic!("expected decode spanning four pages to succeed"),
         }
     }
 
