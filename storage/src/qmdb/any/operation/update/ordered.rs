@@ -42,7 +42,13 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type Key = K;
     type Value = V::Value;
     type ValueEncoding = V;
-    const CACHES_READS: bool = false;
+    const CACHES_READS: bool = true;
+
+    type Cached = (V::Value, K);
+
+    fn cached(&self) -> (V::Value, K) {
+        (self.value.clone(), self.next_key.clone())
+    }
 
     fn key(&self) -> &K {
         &self.key

@@ -26,6 +26,12 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// Whether batch reads cache resolved committed locations for merkleize to consume.
     const CACHES_READS: bool;
 
+    /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
+    type Cached: Send + Sync;
+
+    /// Build the cached payload from a resolved update.
+    fn cached(&self) -> Self::Cached;
+
     /// The updated key.
     fn key(&self) -> &Self::Key;
 

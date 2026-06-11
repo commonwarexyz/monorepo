@@ -42,8 +42,10 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 /// of a given key during ordered merkleization.
 type PrevCandidates<K, F, V> = Vec<(K, (V, Location<F>))>;
 
-/// Committed-DB locations cached by a batch's reads, keyed by the resolved key.
-type ResolvedReads<F, U> = AHashMap<<U as update::Update>::Key, Location<F>>;
+/// Committed-DB locations (plus the update kind's cached payload) cached by a batch's reads,
+/// keyed by the resolved key.
+type ResolvedReads<F, U> =
+    AHashMap<<U as update::Update>::Key, (Location<F>, <U as update::Update>::Cached)>;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
@@ -182,11 +184,11 @@ where
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 
-    /// Committed-DB locations cached by this batch's reads (`get`/`get_many`), keyed by the
-    /// key they matched. Populated only when `U::CACHES_READS` and consumed by `merkleize`:
-    /// when a mutation key is present here, `merkleize` reuses the location and skips the
-    /// redundant journal read. Ordered batches cache nothing: their op generation needs each
-    /// read operation's value and next key, so merkleize re-reads ops regardless.
+    /// Committed-DB locations (plus the update kind's cached payload) cached by this batch's
+    /// reads (`get`/`get_many`), keyed by the key they matched. Populated only when
+    /// `U::CACHES_READS` and consumed by `merkleize`: when a mutation key is present here,
+    /// `merkleize` reuses the location (and, for ordered, the old value and next key) and
+    /// skips the redundant index probe and journal read.
     ///
     /// Only committed-snapshot resolutions are cached. A cached location doubles as the
     /// key's previous committed location (`base_old_loc`), which holds because a
@@ -976,15 +978,20 @@ where
         }
 
         if !db_keys.is_empty() {
-            let db_results = db.get_many_with_locations(&db_keys).await?;
+            let db_results = if U::CACHES_READS {
+                db.get_many_with_locations::<true>(&db_keys).await?
+            } else {
+                db.get_many_with_locations::<false>(&db_keys).await?
+            };
             let mut resolved = U::CACHES_READS.then(|| self.resolved.lock());
             if let Some(resolved) = resolved.as_deref_mut() {
                 resolved.reserve(db_keys.len());
             }
             for (slot, result) in db_indices.into_iter().zip(db_results) {
-                results[slot] = result.map(|(value, loc)| {
+                results[slot] = result.map(|(value, loc, cached)| {
                     if let Some(resolved) = resolved.as_deref_mut() {
-                        resolved.insert((*keys[slot]).clone(), loc);
+                        let cached = cached.expect("cached payload requested for caching reads");
+                        resolved.insert((*keys[slot]).clone(), (loc, cached));
                     }
                     value
                 });
@@ -1058,7 +1065,7 @@ where
         // below, exactly where the read path would have emitted them.
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(resolved.len());
-        for (key, loc) in resolved {
+        for (key, (loc, ())) in resolved {
             if let Some(mutation) = mutations.remove(&key) {
                 cached.push((key, loc, mutation));
             }
@@ -1207,9 +1214,11 @@ where
 {
     /// Resolve mutations into operations, merkleize, and return an `Arc<MerkleizedBatch>`.
     ///
-    /// Reads on ordered batches cache nothing (`CACHES_READS` is false): op generation needs
-    /// each read operation's value and next key for linkage, and re-reading them through the
-    /// journal's page cache is cheaper than caching the payloads at read time.
+    /// Consumes the payloads cached by this batch's reads: keys loaded via `get`/`get_many`
+    /// before being updated skip the index probe and journal re-read their resolution would
+    /// otherwise require (the cached old value and next key feed op generation directly).
+    /// Deletes never consume the cache: a deleted key's own-bucket scan doubles as same-bucket
+    /// predecessor discovery.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb::any::batch::merkleize",
@@ -1253,7 +1262,24 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
+        let resolved = core::mem::take(&mut *self.resolved.lock());
         let (mut mutations, m) = self.into_parts();
+
+        // Pull update mutations whose committed op this batch's reads already resolved: they
+        // skip the index probe and journal re-read, and their old op's payload feeds the
+        // candidate sets directly. Deletes never consume the cache because a deleted key's
+        // own-bucket scan doubles as same-bucket predecessor discovery.
+        let mut cached: Vec<(K, V::Value, Location<F>, V::Value, K)> =
+            Vec::with_capacity(resolved.len());
+        for (key, (loc, (old_value, old_next))) in resolved {
+            if matches!(mutations.get(&key), Some(Some(_))) {
+                let value = mutations
+                    .remove(&key)
+                    .flatten()
+                    .expect("mutation presence checked above");
+                cached.push((key, value, loc, old_value, old_next));
+            }
+        }
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
@@ -1298,6 +1324,14 @@ where
             } else {
                 deleted.push((key, old_loc));
             }
+        }
+
+        // Merge cache-resolved updates: their old op's next_key and (key, value, loc) feed the
+        // candidate sets exactly as the skipped journal read would have.
+        for (key, value, loc, old_value, old_next) in cached {
+            next_candidates.push(old_next);
+            prev_candidates.push((key.clone(), (old_value, loc)));
+            updated.push((key, value, loc));
         }
 
         deleted.sort_by(|a, b| a.0.cmp(&b.0));
