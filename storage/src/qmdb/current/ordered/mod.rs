@@ -151,7 +151,7 @@ pub mod tests {
     use super::{db, ExclusionProof};
     use crate::{
         index::ordered::Index,
-        journal::{contiguous::Mutable, Error as JournalError},
+        journal::contiguous::Mutable,
         merkle::{Graftable, Location, Proof},
         mmb,
         qmdb::{
@@ -170,7 +170,6 @@ pub mod tests {
             Error,
         },
         translator::OneCap,
-        Persistable,
     };
     use commonware_codec::{Codec, Decode as _, Encode as _, EncodeSize as _};
     use commonware_cryptography::{sha256::Digest, Digest as _, Hasher as _, Sha256};
@@ -301,7 +300,7 @@ pub mod tests {
         mut open_db: Fn,
     ) where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
@@ -464,7 +463,7 @@ pub mod tests {
     pub(super) fn test_range_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
@@ -541,7 +540,7 @@ pub mod tests {
     pub(super) fn test_key_value_proof<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
@@ -624,7 +623,7 @@ pub mod tests {
     pub(super) fn test_proving_repeated_updates<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
@@ -678,7 +677,7 @@ pub mod tests {
     pub(super) fn test_exclusion_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable + PartialEq,
-        C: Mutable<Item = Operation<F, Digest, V>> + Persistable<Error = JournalError> + 'static,
+        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + PartialEq + core::fmt::Debug + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,

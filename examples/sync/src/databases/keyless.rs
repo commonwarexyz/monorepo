@@ -163,7 +163,7 @@ impl<E> super::CompactSyncable for Database<E>
 where
     E: Storage + Clock + Metrics,
 {
-    async fn current_target(&self) -> compact::Target<Self::Family, Key> {
+    async fn target(&self) -> compact::Target<Self::Family, Key> {
         compact::Target::new(self.root(), self.bounds().await.end)
     }
 }

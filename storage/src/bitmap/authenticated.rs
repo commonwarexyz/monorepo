@@ -24,6 +24,7 @@ use crate::{
     metadata::{Config as MConfig, Metadata},
     Context,
 };
+use ahash::AHashSet;
 use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
@@ -31,7 +32,6 @@ use commonware_utils::{
     bitmap::{BitMap as UtilsBitMap, Prunable as PrunableBitMap},
     sequence::prefixed_u64::U64,
 };
-use std::collections::HashSet;
 use tracing::{debug, error, warn};
 
 /// Returns a root digest that incorporates bits not yet part of the MMR because they
@@ -76,7 +76,7 @@ pub struct Unmerkleized {
     /// Each dirty chunk is identified by its absolute index, including pruned chunks.
     ///
     /// Invariant: Indices are always in the range [pruned_chunks, authenticated_len).
-    dirty_chunks: HashSet<usize>,
+    dirty_chunks: AHashSet<usize>,
 }
 
 impl private::Sealed for Unmerkleized {}
@@ -511,7 +511,7 @@ impl<E: Context, D: Digest, const N: usize, S: Strategy> MerkleizedBitMap<E, D, 
             mmr: self.mmr,
             strategy: self.strategy,
             state: Unmerkleized {
-                dirty_chunks: HashSet::new(),
+                dirty_chunks: AHashSet::new(),
             },
             metadata: self.metadata,
         }

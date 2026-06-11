@@ -249,7 +249,7 @@ where
 
     let target = {
         let database = state.database.read().await;
-        database.current_target().await
+        database.target().await
     };
     let response = wire::GetCompactTargetResponse::<Key> {
         request_id: request.request_id,
@@ -590,7 +590,7 @@ where
     );
     database.add_operations(initial_ops).await?;
 
-    let target = database.current_target().await;
+    let target = database.target().await;
     let root = target.root;
     info!(
         leaf_count = ?target.leaf_count,

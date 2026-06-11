@@ -3,10 +3,11 @@
 
 use super::get_page_from_blob;
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
+use ahash::AHashMap;
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::hash_map::Entry,
     future::Future,
     num::{NonZeroU16, NonZeroUsize},
     pin::Pin,
@@ -109,7 +110,7 @@ struct Cache {
     /// Each `index` entry maps to exactly one `entries` slot, and that entry always has a
     /// matching key. (The converse is not true: after [Self::invalidate_from] a slot may retain
     /// a stale key that is no longer present in `index`.)
-    index: HashMap<(u64, u64), usize>,
+    index: AHashMap<(u64, u64), usize>,
 
     /// Metadata for each cache slot.
     ///
@@ -134,7 +135,7 @@ struct Cache {
 
     /// A map of currently executing page fetches to ensure only one task at a time is trying to
     /// fetch a specific page.
-    page_fetches: HashMap<(u64, u64), PageFetchEntry>,
+    page_fetches: AHashMap<(u64, u64), PageFetchEntry>,
 }
 
 /// Metadata for a single cache entry (page data stored in per-slot buffers).
@@ -455,13 +456,13 @@ impl Cache {
             slots.push(slot);
         }
         Self {
-            index: HashMap::new(),
+            index: AHashMap::new(),
             entries: Vec::with_capacity(capacity),
             slots,
             page_size,
             clock: 0,
             capacity,
-            page_fetches: HashMap::new(),
+            page_fetches: AHashMap::new(),
         }
     }
 
