@@ -736,6 +736,42 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             return None;
         }
 
+        // Fast path: parse and decode the frame directly from the cached page (or tip buffer)
+        // bytes, with no scratch buffer. `Some(answer)` from the closure is a final result;
+        // `None` means the frame straddles the end of the slice and must be assembled through
+        // the scratch path below.
+        let compressed = self.compression.is_some();
+        let fast = blob.try_read_sync_with(offset, |bytes| {
+            // When the slice ends before the blob's data does, a parse that runs out of bytes
+            // may just be straddling a page boundary rather than hitting real end-of-data.
+            let truncated = (bytes.len() as u64) < remaining;
+            let mut cursor = Cursor::new(bytes);
+            match find_item(&mut cursor, offset) {
+                Ok((
+                    _,
+                    ItemInfo::Complete {
+                        varint_len,
+                        data_len,
+                    },
+                )) => Some(
+                    decode_item::<V>(
+                        &bytes[varint_len..varint_len + data_len],
+                        &self.codec_config,
+                        compressed,
+                    )
+                    .ok(),
+                ),
+                Ok((_, ItemInfo::Incomplete { .. })) | Err(_) if truncated => None,
+                // The slice reaches the end of the blob's data, so the item is genuinely
+                // incomplete or corrupt.
+                Ok((_, ItemInfo::Incomplete { .. })) | Err(_) => Some(None),
+            }
+        })?;
+        if let Some(answer) = fast {
+            return answer;
+        }
+        // The frame straddles the slice end; assemble it through the scratch path below.
+
         // Read the varint header to determine item size.
         let mut header = [0u8; MAX_U32_VARINT_SIZE];
         if !blob.try_read_sync(offset, &mut header[..header_len]) {

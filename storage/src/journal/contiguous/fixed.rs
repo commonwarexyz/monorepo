@@ -254,19 +254,14 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 
     /// Read an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
     fn try_read_sync(&self, pos: u64, items_per_blob: u64) -> Option<A> {
-        let mut buf = vec![0u8; SegmentedJournal::<E, A>::CHUNK_SIZE];
-        self.try_read_sync_into(pos, items_per_blob, &mut buf)
-    }
-
-    /// Read an item synchronously using caller-provided buffer.
-    fn try_read_sync_into(&self, pos: u64, items_per_blob: u64, buf: &mut [u8]) -> Option<A> {
         if pos >= self.size || pos < self.pruning_boundary {
             return None;
         }
+
         let section = pos / items_per_blob;
-        let pos_in_section =
-            pos - first_in_section(self.pruning_boundary, section, items_per_blob).ok()?;
-        self.journal.try_get_sync_into(section, pos_in_section, buf)
+        let first_position =
+            first_in_section(self.pruning_boundary, section, items_per_blob).ok()?;
+        self.journal.try_get_sync(section, pos - first_position)
     }
 }
 

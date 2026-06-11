@@ -248,6 +248,19 @@ impl CacheRef {
         original_len - buf.len()
     }
 
+    /// Return the cached page `page_num` of `blob_id`, if present.
+    ///
+    /// The returned buffer is a refcounted clone, so the caller can read it after the cache
+    /// lock is released; a concurrent eviction or replacement leaves the bytes untouched.
+    pub(super) fn cached_page(&self, blob_id: u64, page_num: u64) -> Option<IoBuf> {
+        let cache = self.cache.read();
+        let &slot = cache.index.get(&(blob_id, page_num))?;
+        let entry = &cache.entries[slot];
+        assert_eq!(entry.key, (blob_id, page_num));
+        entry.referenced.store(true, Ordering::Relaxed);
+        Some(entry.page.clone())
+    }
+
     /// Read multiple disjoint byte ranges from the page cache in a single lock acquisition.
     ///
     /// Each element of `ranges` is `(dest_slice, logical_offset)`. Fully-cached ranges have

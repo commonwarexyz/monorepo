@@ -554,6 +554,32 @@ impl<B: Blob> Append<B> {
         true
     }
 
+    /// Pass the contiguous bytes starting at `offset` to `f` if they can be obtained
+    /// synchronously (e.g. without I/O), returning `None` otherwise.
+    ///
+    /// The slice given to `f` never crosses a page boundary (when served from the page cache)
+    /// or the end of buffered data (when served from the tip buffer), so it may be shorter
+    /// than the caller needs; callers requiring more bytes must fall back to a copying read
+    /// like [Self::try_read_sync]. Bytes served from the page cache are retained by a
+    /// refcounted handle, so `f` runs after the cache lock is released.
+    ///
+    /// Like [Self::try_read_sync], the page cache is consulted before the tip buffer.
+    pub fn try_read_sync_with<R>(&self, offset: u64, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
+        // Fast path: clone the page containing `offset` out of the page cache.
+        let (page_num, offset_in_page) = self.cache_ref.offset_to_page(offset);
+        if let Some(page) = self.cache_ref.cached_page(self.id, page_num) {
+            return Some(f(&page.as_ref()[offset_in_page as usize..]));
+        }
+
+        // Tip path: serve from buffered bytes under the (non-blocking) buffer read lock.
+        let buffer = self.buffer.try_read().ok()?;
+        if offset < buffer.offset || offset >= buffer.size() {
+            return None;
+        }
+        let start = (offset - buffer.offset) as usize;
+        Some(f(&buffer.as_ref()[start..]))
+    }
+
     /// Read exactly `len` immutable bytes starting at `offset`.
     pub async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         // Read into a temporary contiguous buffer and copy back to preserve structure.
