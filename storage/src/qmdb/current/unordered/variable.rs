@@ -119,7 +119,7 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::deterministic;
+    use commonware_runtime::{deterministic, BufferPooler};
 
     /// A type alias for the concrete [Db] type used in these unit tests.
     type CurrentTest = Db<
@@ -135,7 +135,7 @@ mod test {
 
     /// Return a [Db] database initialized with a variable config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = variable_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = variable_config::<TwoCap>(&partition_prefix, context.storage_buffer_pool());
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

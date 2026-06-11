@@ -912,7 +912,7 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        deterministic, BufferPooler, ContextCell, Runner as _, Supervisor as _,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
@@ -1528,7 +1528,9 @@ mod tests {
         prefix: &str,
         context: &deterministic::Context,
     ) -> any::FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = context
+            .storage_buffer_pool()
+            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         any::FixedConfig {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{prefix}_mmr_journal"),

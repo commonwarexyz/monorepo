@@ -85,7 +85,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Consumer, Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Quota, Runner, Supervisor as _,
+        deterministic, BufferPooler, Clock, Metrics, Quota, Runner, Supervisor as _,
     };
     use commonware_storage::{
         archive::{immutable, prunable, Archive as _},
@@ -373,7 +373,9 @@ mod tests {
         blocks: &[B],
         finalizations: &[(Height, Finalization<S, D>)],
     ) {
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = context
+            .storage_buffer_pool()
+            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         let replay_buffer = NonZeroUsize::new(1024).unwrap();
         let write_buffer = NonZeroUsize::new(1024).unwrap();
         let items_per_section = NonZeroU64::new(10).unwrap();
@@ -514,7 +516,9 @@ mod tests {
             .await
             .expect("failed to sync cache metadata");
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = context
+            .storage_buffer_pool()
+            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
             prunable::Archive::init(
                 context.child("seed_notarized"),
@@ -1229,7 +1233,9 @@ mod tests {
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
 
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
@@ -3230,7 +3236,9 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
         let finalizations_by_height = immutable::Archive::init(
@@ -5747,7 +5755,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let page_cache = context
+                .storage_buffer_pool()
+                .page_cache(NZU16!(1024), NZUsize!(10));
             let partition_prefix = "stale-finalized-test".to_string();
             let config = Config {
                 provider: EmptyProvider,

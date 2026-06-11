@@ -2156,7 +2156,7 @@ mod tests {
     };
     use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_runtime::{deterministic, BufferPooler, Runner as _};
     use commonware_utils::test_rng;
     use rand::Rng;
 
@@ -2631,7 +2631,8 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("mixed-ancestor-overlaps", &context);
+            let config =
+                fixed_db_config::<OneCap>("mixed-ancestor-overlaps", context.storage_buffer_pool());
             let mut db = TestDb::init(context, config).await.unwrap();
 
             let key_update = Sha256::hash(b"update-through-all-layers");
@@ -2725,7 +2726,10 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("read-locations-all-sources", &context);
+            let config = fixed_db_config::<OneCap>(
+                "read-locations-all-sources",
+                context.storage_buffer_pool(),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             let key_db = colliding_digest(0x30, 0);
@@ -2812,7 +2816,10 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("batch-collision-regression", &context);
+            let config = fixed_db_config::<OneCap>(
+                "batch-collision-regression",
+                context.storage_buffer_pool(),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -2894,7 +2901,7 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", &context);
+            let config = fixed_db_config::<OneCap>("ordered-batch-collision-regression", context.storage_buffer_pool());
             let mut db = TestDb::init(context, config).await.unwrap();
             let key_a = colliding_digest(0xAA, 1);
             let key_b = colliding_digest(0xAA, 0);
@@ -2973,7 +2980,8 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("seq-commit-basic", &context);
+            let config =
+                fixed_db_config::<OneCap>("seq-commit-basic", context.storage_buffer_pool());
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key.
@@ -3042,7 +3050,8 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("seq-commit-base-old-loc", &context);
+            let config =
+                fixed_db_config::<OneCap>("seq-commit-base-old-loc", context.storage_buffer_pool());
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed an initial key so we have an existing entry.
@@ -3116,7 +3125,8 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("fork-after-commit", &context);
+            let config =
+                fixed_db_config::<OneCap>("fork-after-commit", context.storage_buffer_pool());
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Seed.
@@ -3197,7 +3207,7 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("ff-cross", &context);
+            let config = fixed_db_config::<OneCap>("ff-cross", context.storage_buffer_pool());
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Grandparent: 2 keys.
@@ -3266,7 +3276,10 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("recreate-deleted-collision", &context);
+            let config = fixed_db_config::<OneCap>(
+                "recreate-deleted-collision",
+                context.storage_buffer_pool(),
+            );
             let mut db = TestDb::init(context, config).await.unwrap();
 
             // Two colliding keys: K0 (suffix 0) and K6 (suffix 6).
@@ -3339,7 +3352,7 @@ mod tests {
                 Sequential,
             >;
 
-            let config = fixed_db_config::<OneCap>("get-many-basic", &context);
+            let config = fixed_db_config::<OneCap>("get-many-basic", context.storage_buffer_pool());
             let mut db = TestDb::init(context, config).await.unwrap();
 
             let key_db = colliding_digest(0x40, 0);

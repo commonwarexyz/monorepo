@@ -1,9 +1,7 @@
 //! Benchmark read performance at random offsets.
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE, PAGE_SIZE_USIZE};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
-};
+use commonware_runtime::{deterministic, tokio, BufferPooler, Runner, Storage};
 use commonware_utils::NZUsize;
 use criterion::Criterion;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -26,7 +24,9 @@ where
 
                 let executor = R::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let cache_ref = ctx
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, NZUsize!(CACHE_SIZE));
 
                     // Setup: populate the blob
                     let append = create_append(&ctx, &name, cache_ref.clone()).await;

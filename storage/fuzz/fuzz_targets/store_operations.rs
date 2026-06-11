@@ -2,9 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     qmdb::store::db::{Config, Db},
@@ -95,7 +93,7 @@ const PAGE_CACHE_SIZE: usize = 8;
 
 fn test_config(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     Config {
         log: VConfig {
@@ -104,7 +102,7 @@ fn test_config(
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             items_per_section: NZU64!(7),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: pool.page_cache(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,
     }
@@ -114,7 +112,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_config("store-fuzz-test", &context);
+        let cfg = test_config("store-fuzz-test", context.storage_buffer_pool());
         let mut db = StoreDb::init(context.child("storage"), cfg)
             .await
             .expect("Failed to init db");
@@ -180,7 +178,7 @@ fn fuzz(input: FuzzInput) {
                     pending.clear();
                     drop(db);
 
-                    let cfg = test_config("store-fuzz-test", &context);
+                    let cfg = test_config("store-fuzz-test", context.storage_buffer_pool());
                     db = StoreDb::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,

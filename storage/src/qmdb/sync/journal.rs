@@ -164,19 +164,18 @@ mod tests {
     use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob, BufferPooler, Runner, Storage,
-        Supervisor as _,
+        deterministic, Blob, BufferPool, BufferPooler, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
 
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type F = crate::merkle::mmr::Family;
 
-    fn test_cfg(pooler: &impl BufferPooler) -> fixed::Config {
+    fn test_cfg(pool: &BufferPool) -> fixed::Config {
         fixed::Config {
             partition: "sync-journal-test".into(),
             items_per_blob: NZU64!(5),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
+            page_cache: pool.page_cache(NZU16!(44), NZUsize!(3)),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -185,7 +184,7 @@ mod tests {
     fn test_sync_journal_new_recovers_from_stale_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg(context.storage_buffer_pool());
 
             // Create a journal at pruning_boundary=9 (mid-section in section 1).
             let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
@@ -225,7 +224,7 @@ mod tests {
     fn test_sync_journal_new_stale_empty_position_beyond_range_end() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context);
+            let cfg = test_cfg(context.storage_buffer_pool());
 
             // Create a journal at pruning_boundary=30, well beyond our intended range end.
             let journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 30)

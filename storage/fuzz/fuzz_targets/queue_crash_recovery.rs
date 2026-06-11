@@ -9,7 +9,7 @@
 //! - Queue state is consistent after recovery
 
 use arbitrary::{Arbitrary, Result, Unstructured};
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::queue::{Config, Queue};
 use libfuzzer_sys::fuzz_target;
 use std::{
@@ -470,7 +470,9 @@ fn fuzz(input: FuzzInput) {
                 items_per_section,
                 compression: None,
                 codec_config: ((0usize..).into(), ()),
-                page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+                page_cache: ctx
+                    .storage_buffer_pool()
+                    .page_cache(page_size, page_cache_size),
                 write_buffer,
             };
 
@@ -502,7 +504,9 @@ fn fuzz(input: FuzzInput) {
             items_per_section,
             compression: None,
             codec_config: ((0usize..).into(), ()),
-            page_cache: CacheRef::from_pooler(&ctx, page_size, page_cache_size),
+            page_cache: ctx
+                .storage_buffer_pool()
+                .page_cache(page_size, page_cache_size),
             write_buffer,
         };
 

@@ -35,7 +35,7 @@ use commonware_p2p::{
 };
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Clock, IoBuf, Runner, Spawner, Supervisor as _,
+    deterministic, BufferPooler, Clock, IoBuf, Runner, Spawner, Supervisor as _,
 };
 use commonware_utils::{channel::mpsc::Receiver, FuzzRng, NZUsize, NZU16};
 use futures::future::join_all;
@@ -401,7 +401,9 @@ where
         fetch_concurrent: NZUsize!(1),
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
-        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: context
+            .storage_buffer_pool()
+            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         strategy: Sequential,
         forwarding: ForwardingPolicy::Disabled,
     };
@@ -645,7 +647,9 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 fetch_concurrent: NZUsize!(1),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&primary_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: primary_context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
                 forwarding: ForwardingPolicy::Disabled,
             };

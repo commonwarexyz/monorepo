@@ -42,7 +42,7 @@
 //! guarantees the success path is covered on every input; the raw value still tests rejection.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::journal::{
     contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -279,7 +279,7 @@ impl Expected {
 trait FuzzJournal: Sized {
     type Config;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config;
+    fn config(partition: &str, pool: &BufferPool, params: &Params) -> Self::Config;
 
     fn init(
         ctx: deterministic::Context,
@@ -323,15 +323,11 @@ async fn collect_replay<R: Reader<Item = Item>>(
 impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     type Config = FixedConfig;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
+    fn config(partition: &str, pool: &BufferPool, params: &Params) -> Self::Config {
         FixedConfig {
             partition: partition.into(),
             items_per_blob: NZU64!(params.items_per_section),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                pooler,
-                params.page_size,
-                params.page_cache_size,
-            ),
+            page_cache: pool.page_cache(params.page_size, params.page_cache_size),
             write_buffer: params.write_buffer,
         }
     }
@@ -394,17 +390,13 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     type Config = VariableConfig<()>;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
+    fn config(partition: &str, pool: &BufferPool, params: &Params) -> Self::Config {
         VariableConfig {
             partition: partition.into(),
             items_per_section: NZU64!(params.items_per_section),
             compression: None,
             codec_config: (),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                pooler,
-                params.page_size,
-                params.page_cache_size,
-            ),
+            page_cache: pool.page_cache(params.page_size, params.page_cache_size),
             write_buffer: params.write_buffer,
         }
     }
@@ -789,7 +781,7 @@ where
     runner.start_and_recover(move |ctx| async move {
         // Recover with faults disabled to obtain clean ground truth.
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
-        let cfg = J::config(&partition, &ctx, &params);
+        let cfg = J::config(&partition, ctx.storage_buffer_pool(), &params);
         let mut journal = J::init(ctx.child("journal"), cfg)
             .await
             .expect("recovery should succeed without panic");
@@ -866,7 +858,7 @@ where
         *ctx.storage_fault_config().write() = deterministic::FaultConfig::default();
         let mut journal = J::init(
             ctx.child("journal_final"),
-            J::config(&partition, &ctx, &params),
+            J::config(&partition, ctx.storage_buffer_pool(), &params),
         )
         .await
         .expect("final recovery should succeed");
@@ -889,7 +881,7 @@ where
         // Reopen and confirm the synced sentinel survived the restart.
         let journal = J::init(
             ctx.child("journal_final_verify"),
-            J::config(&partition, &ctx, &params),
+            J::config(&partition, ctx.storage_buffer_pool(), &params),
         )
         .await
         .expect("final reopen should succeed");

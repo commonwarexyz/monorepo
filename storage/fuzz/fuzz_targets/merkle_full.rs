@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::merkle::{
     full::Config, hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error,
     Family as MerkleFamily, Location, LocationRangeExt as _, Position,
@@ -79,14 +77,14 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Sequential> {
+fn test_config(partition_suffix: &str, pool: &BufferPool) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: pool.page_cache(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
     }
 }
 
@@ -121,7 +119,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             let mut merkle = Merkle::<F, _, _>::init(
                 context.child("storage"),
                 &hasher,
-                test_config(suffix, &context),
+                test_config(suffix, context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -333,7 +331,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         merkle = Merkle::<F, _, _>::init(
                             context.child("merkle").with_attribute("instance", restarts),
                             &hasher,
-                            test_config(suffix, &context),
+                            test_config(suffix, context.storage_buffer_pool()),
                         )
                         .await
                         .unwrap();
@@ -361,7 +359,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                         let sync_suffix = format!("{suffix}-sync");
                         let sync_config =
                             SyncConfig::<F, <Sha256 as commonware_cryptography::Hasher>::Digest> {
-                                config: test_config(&sync_suffix, &context),
+                                config: test_config(&sync_suffix, context.storage_buffer_pool()),
                                 range: non_empty_range!(lower_bound_loc, upper_bound_loc),
                                 pinned_nodes: None,
                             };

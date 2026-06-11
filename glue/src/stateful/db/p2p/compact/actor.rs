@@ -428,11 +428,9 @@ mod tests {
             items_per_section: commonware_utils::NZU64!(64),
             compression: None,
             codec_config: (),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                &context,
-                commonware_utils::NZU16!(1024),
-                NZUsize!(64),
-            ),
+            page_cache: context
+                .storage_buffer_pool()
+                .page_cache(commonware_utils::NZU16!(1024), NZUsize!(64)),
             write_buffer: NZUsize!(1024),
         };
         TestDb::init(

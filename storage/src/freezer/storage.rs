@@ -11,7 +11,7 @@ use commonware_runtime::{
     buffer,
     iobuf::EncodeExt,
     telemetry::metrics::{Counter, MetricsExt as _},
-    Blob, Buf, BufMut, BufferPooler, IoBuf,
+    Blob, Buf, BufMut, BufferPool, BufferPooler, IoBuf,
 };
 use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
@@ -593,7 +593,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Write a table entry to the appropriate slot based on epoch.
     async fn update_head(
-        pooler: &impl BufferPooler,
+        pool: &BufferPool,
         table: &E::Blob,
         table_index: u32,
         entry1: &Entry,
@@ -608,10 +608,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Write the new entry
         table
-            .write_at(
-                table_offset + start,
-                update.encode_with_pool_mut(pooler.storage_buffer_pool()),
-            )
+            .write_at(table_offset + start, update.encode_with_pool_mut(pool))
             .await
             .map_err(Error::Runtime)
     }
@@ -876,7 +873,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         self.modified_sections.insert(self.current_section);
         let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
         Self::update_head(
-            &self.context,
+            self.context.storage_buffer_pool(),
             &self.table,
             table_index,
             &entry1,
@@ -901,7 +898,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 let new_table_index = self.table_size + table_index;
                 let new_entry = Entry::new(self.next_epoch, self.current_section, position, added);
                 Self::update_head(
-                    &self.context,
+                    self.context.storage_buffer_pool(),
                     &self.table,
                     new_table_index,
                     &entry1,
@@ -1180,8 +1177,7 @@ mod tests {
     use commonware_codec::DecodeExt;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, deterministic::Context, Runner, Storage,
-        Supervisor as _,
+        deterministic, deterministic::Context, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{
         sequence::{FixedBytes, U64},
@@ -1218,7 +1214,9 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),
@@ -1273,7 +1271,9 @@ mod tests {
             let cfg = super::super::Config {
                 key_partition: "test-key-index".into(),
                 key_write_buffer: NZUsize!(1024),
-                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(NZU16!(1024), NZUsize!(10)),
                 value_partition: "test-value-journal".into(),
                 value_compression: None,
                 value_write_buffer: NZUsize!(1024),

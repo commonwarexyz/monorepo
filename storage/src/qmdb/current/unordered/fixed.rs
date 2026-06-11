@@ -112,7 +112,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Metrics, Runner as _, Supervisor as _};
+    use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _};
     use commonware_utils::test_rng_seeded;
     use rand::RngCore as _;
     use std::collections::HashMap;
@@ -131,7 +131,7 @@ pub mod test {
 
     /// Return a [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = fixed_config::<TwoCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<TwoCap>(&partition_prefix, context.storage_buffer_pool());
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

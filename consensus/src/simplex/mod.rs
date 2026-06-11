@@ -453,8 +453,8 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, telemetry::metrics::count_running_tasks, Clock,
-        IoBuf, Metrics as _, Quota, Runner, Spawner, Supervisor as _,
+        deterministic, telemetry::metrics::count_running_tasks, BufferPooler, Clock, IoBuf,
+        Metrics as _, Quota, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{ordered::Set, sync::Mutex, test_rng, Faults, N3f1, NZUsize, NZU16};
     use engine::Engine;
@@ -879,7 +879,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1116,11 +1118,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(
-                        &validator_context,
-                        PAGE_SIZE,
-                        PAGE_CACHE_SIZE,
-                    ),
+                    page_cache: validator_context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(validator_context.child("engine"), cfg);
@@ -1223,7 +1223,9 @@ mod tests {
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&joiner_context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: joiner_context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(joiner_context.child("engine"), cfg);
@@ -1358,7 +1360,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1520,7 +1524,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1673,7 +1679,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -1849,7 +1857,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -1971,7 +1981,9 @@ mod tests {
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -2100,7 +2112,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2327,7 +2341,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2487,7 +2503,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2680,7 +2698,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -2868,7 +2888,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3064,7 +3086,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -3233,7 +3257,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3398,7 +3424,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -3585,7 +3613,9 @@ mod tests {
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -3707,7 +3737,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -3861,7 +3893,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -3955,7 +3989,9 @@ mod tests {
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -4108,7 +4144,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4254,7 +4292,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4417,7 +4457,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);
@@ -4546,7 +4588,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -4669,7 +4713,9 @@ mod tests {
                 fetch_concurrent: NZUsize!(4),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 forwarding: ForwardingPolicy::Disabled,
             };
             let engine = Engine::new(context.child("engine"), cfg);
@@ -4845,7 +4891,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -5182,7 +5230,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(
@@ -5388,7 +5438,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -5534,7 +5586,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -5636,7 +5690,9 @@ mod tests {
                     fetch_concurrent: NZUsize!(4),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     forwarding: ForwardingPolicy::Disabled,
                 };
                 let engine = Engine::new(context.child("engine"), cfg);
@@ -6021,7 +6077,9 @@ mod tests {
                             fetch_concurrent: NZUsize!(4),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
-                            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                            page_cache: context
+                                .storage_buffer_pool()
+                                .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                             forwarding: ForwardingPolicy::Disabled,
                         };
                         let engine = Engine::new(context.child("engine"), cfg);
@@ -6091,7 +6149,9 @@ mod tests {
                         fetch_concurrent: NZUsize!(4),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
-                        page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                        page_cache: context
+                            .storage_buffer_pool()
+                            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                         forwarding: ForwardingPolicy::Disabled,
                     };
                     let engine = Engine::new(context.child("engine"), cfg);

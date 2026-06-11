@@ -1473,7 +1473,8 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Storage, Supervisor as _,
+        Blob, BufferPool, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Storage,
+        Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::{pin_mut, StreamExt};
@@ -1487,11 +1488,11 @@ mod tests {
         Sha256::hash(&value.to_be_bytes())
     }
 
-    fn test_cfg(pooler: &impl BufferPooler, items_per_blob: NonZeroU64) -> Config {
+    fn test_cfg(pool: &BufferPool, items_per_blob: NonZeroU64) -> Config {
         Config {
             partition: "test-partition".into(),
             items_per_blob,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(2048),
         }
     }
@@ -1504,7 +1505,7 @@ mod tests {
     fn test_fixed_init_marks_suffix_past_recovery_watermark_dirty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let mut cfg = test_cfg(&context, NZU64!(10));
+            let mut cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             cfg.partition = "init-adopted-fixed".into();
 
             let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
@@ -1550,7 +1551,7 @@ mod tests {
     fn test_fixed_journal_init_conflicting_partitions() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let legacy_partition = cfg.partition.clone();
             let blobs_partition = blob_partition(&cfg);
 
@@ -1581,7 +1582,7 @@ mod tests {
     fn test_fixed_journal_init_prefers_legacy_partition() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let legacy_partition = cfg.partition.clone();
             let blobs_partition = blob_partition(&cfg);
 
@@ -1613,7 +1614,7 @@ mod tests {
     fn test_fixed_journal_init_defaults_to_blobs_partition() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let legacy_partition = cfg.partition.clone();
             let blobs_partition = blob_partition(&cfg);
 
@@ -1639,7 +1640,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1655,7 +1656,7 @@ mod tests {
             journal.sync().await.expect("Failed to sync journal");
             drop(journal);
 
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
                 .expect("failed to re-initialize journal");
@@ -1786,7 +1787,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10000);
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
+            let cfg = test_cfg(context.storage_buffer_pool(), ITEMS_PER_BLOB);
             let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1820,7 +1821,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
+            let cfg = test_cfg(context.storage_buffer_pool(), ITEMS_PER_BLOB);
             let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -1928,7 +1929,7 @@ mod tests {
     fn test_fixed_journal_replay_with_missing_historical_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -1962,7 +1963,7 @@ mod tests {
         // Start the test within the executor
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 7 items per blob.
-            let cfg = test_cfg(&context, ITEMS_PER_BLOB);
+            let cfg = test_cfg(context.storage_buffer_pool(), ITEMS_PER_BLOB);
             let journal = Journal::init(context.child("storage"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2020,7 +2021,7 @@ mod tests {
     fn test_fixed_journal_rejects_corrupted_tail_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(3));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(3));
             let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -2052,7 +2053,7 @@ mod tests {
     fn test_fixed_journal_crash_during_recovery_repair() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -2117,7 +2118,7 @@ mod tests {
     fn test_fixed_journal_recover_accepts_clean_short_tail() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let segmented_cfg = SegmentedConfig {
                 partition: blob_partition(&cfg),
                 page_cache: cfg.page_cache.clone(),
@@ -2150,7 +2151,7 @@ mod tests {
     fn test_fixed_journal_recover_accepts_clean_empty_tail() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let segmented_cfg = SegmentedConfig {
                 partition: blob_partition(&cfg),
                 page_cache: cfg.page_cache.clone(),
@@ -2181,7 +2182,7 @@ mod tests {
     fn test_fixed_journal_recover_fallback_truncates_after_short_oldest_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -2235,7 +2236,7 @@ mod tests {
     fn test_fixed_journal_stale_pruning_metadata_preserves_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -2298,7 +2299,7 @@ mod tests {
     fn test_fixed_journal_stale_pruning_metadata_without_watermark_walks_lengths() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -2355,7 +2356,7 @@ mod tests {
     fn test_fixed_journal_pruning_metadata_ahead_of_blobs_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 3)
                     .await
@@ -2396,7 +2397,7 @@ mod tests {
     fn test_fixed_journal_pruning_metadata_with_no_blobs_is_corruption() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -2425,7 +2426,7 @@ mod tests {
     fn test_fixed_journal_legacy_recovery_installs_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2475,7 +2476,7 @@ mod tests {
     fn test_fixed_journal_legacy_upgrade_marks_recovered_sections_dirty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -2517,7 +2518,7 @@ mod tests {
     fn test_fixed_journal_update_metadata_watermark_before_clear_lowers_only() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let meta_cfg = MetadataConfig {
                 partition: format!("{}-metadata", cfg.partition),
                 codec_config: (),
@@ -2554,7 +2555,7 @@ mod tests {
     fn test_fixed_journal_prune_to_blob_boundary_removes_pruning_metadata() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -2597,7 +2598,7 @@ mod tests {
     fn test_fixed_journal_recover_rejects_overlong_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2636,7 +2637,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 10 items per blob.
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2684,7 +2685,7 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Initialize the journal, allowing a max of 2 items per blob.
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let journal = Journal::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2739,7 +2740,7 @@ mod tests {
             drop(journal);
 
             // Repeat with a different blob size (3 items per blob)
-            let mut cfg = test_cfg(&context, NZU64!(3));
+            let mut cfg = test_cfg(context.storage_buffer_pool(), NZU64!(3));
             cfg.partition = "test-partition-2".into();
             let journal = Journal::init(context.child("second"), cfg.clone())
                 .await
@@ -2787,7 +2788,7 @@ mod tests {
     fn test_fixed_journal_rewind_commit_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2824,7 +2825,7 @@ mod tests {
     fn test_fixed_journal_rewind_persists_lower_watermark() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2865,7 +2866,7 @@ mod tests {
     fn test_fixed_journal_recover_after_watermark_lowered_before_rewind() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2903,7 +2904,7 @@ mod tests {
     fn test_fixed_journal_rewind_append_commit_reopen() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -2950,7 +2951,7 @@ mod tests {
     fn test_fixed_recovery_handles_multiple_empty_data_tail_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(1));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(1));
             let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
@@ -2995,7 +2996,7 @@ mod tests {
     fn test_fixed_recovery_handles_empty_data_with_no_durable_items() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(1));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(1));
             let journal = Journal::<_, Digest>::init(context.child("journal"), cfg.clone())
                 .await
                 .unwrap();
@@ -3043,7 +3044,7 @@ mod tests {
     fn test_fixed_recovery_partial_sync_loop_keeps_contiguous_prefix() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -3109,7 +3110,7 @@ mod tests {
     fn test_fixed_recovery_rolls_back_durable_section_after_gap() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -3180,7 +3181,7 @@ mod tests {
     fn test_fixed_recovery_empty_oldest_section_orphaned_newer_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
 
             // Durably persist sections 0 and 1 (positions 0..20).
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
@@ -3219,7 +3220,9 @@ mod tests {
             let cfg = Config {
                 partition: "single-item-per-blob".into(),
                 items_per_blob: NZU64!(1),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(2048),
             };
 
@@ -3424,7 +3427,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_zero() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 0)
                     .await
@@ -3448,7 +3451,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_section_boundary() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Initialize at position 10 (exactly at section 2 boundary with items_per_blob=5)
             let journal =
@@ -3479,7 +3482,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_mid_section() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Initialize at position 7 (middle of section 1 with items_per_blob=5)
             let journal =
@@ -3512,7 +3515,7 @@ mod tests {
     fn test_fixed_journal_append_many_after_mid_section_start() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(100));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(100));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 150)
                     .await
@@ -3554,7 +3557,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Initialize at position 15
             let journal =
@@ -3601,7 +3604,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_persistence_without_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Initialize at position 15
             let journal =
@@ -3638,7 +3641,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_large_offset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Initialize at a large position (position 1000)
             let journal =
@@ -3663,7 +3666,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_prune_and_append() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Initialize at position 20
             let journal =
@@ -3702,7 +3705,7 @@ mod tests {
     fn test_fixed_journal_clear_to_size() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal = Journal::init(context.child("journal"), cfg.clone())
                 .await
                 .expect("failed to initialize journal");
@@ -3765,7 +3768,7 @@ mod tests {
         // Old meta = None (aligned), new boundary = aligned.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -3792,7 +3795,7 @@ mod tests {
         // and finds a short non-tail section, violating the legacy rollover-sync invariant.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -3819,7 +3822,7 @@ mod tests {
         // Old meta = Some(mid), new boundary = mid-section (same value).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -3844,7 +3847,7 @@ mod tests {
         // Old meta = Some(mid), new boundary = aligned.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
                     .await
@@ -3874,7 +3877,7 @@ mod tests {
         // should not move the boundary backwards.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             // init_at_size(7) sets pruning_boundary = 7 (mid-section in section 1)
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 7)
@@ -3897,7 +3900,7 @@ mod tests {
         // where pruning_boundary is mid-section, then we append across multiple sections.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Initialize at position 7 (mid-section with items_per_blob=5)
             // Section 1 (positions 5-9) begins mid-section: only positions 7, 8, 9 have data
@@ -3965,7 +3968,7 @@ mod tests {
         // Test that rewind returns error when trying to rewind before bounds.start
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("storage"), cfg.clone(), 10)
@@ -3998,7 +4001,7 @@ mod tests {
     fn test_fixed_journal_init_at_size_crash_scenarios() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Setup: Create a journal with some data and mid-section metadata
             let journal =
@@ -4074,7 +4077,7 @@ mod tests {
     fn test_fixed_journal_clear_to_size_crash_scenarios() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             // Setup: Init at 12 (Section 2, offset 2)
             // Metadata = 12
@@ -4120,7 +4123,7 @@ mod tests {
     fn test_fixed_journal_clear_to_size_crash_after_intent_before_blobs() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
                 .unwrap();
@@ -4155,7 +4158,7 @@ mod tests {
     fn test_fixed_journal_clear_to_size_crash_after_mid_section_intent_with_old_blobs_present() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal =
                 Journal::<_, Digest>::init_at_size(context.child("first"), cfg.clone(), 10)
                     .await
@@ -4202,7 +4205,7 @@ mod tests {
         // Watermark beyond the recovered size with an aligned pruning boundary.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -4230,7 +4233,7 @@ mod tests {
         // Same as above but the watermark is multiple sections past the empty tail.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(5));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(5));
 
             let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
                 .await
@@ -4257,7 +4260,7 @@ mod tests {
     fn test_read_many_empty() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal = Journal::<_, Digest>::init(context.child("j"), cfg)
                 .await
                 .unwrap();
@@ -4274,7 +4277,7 @@ mod tests {
         // All positions within one blob.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..5u64 {
@@ -4294,7 +4297,7 @@ mod tests {
         // Positions spanning multiple blobs (items_per_blob=3).
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(3));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(3));
             let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
@@ -4315,7 +4318,7 @@ mod tests {
         // Read from positions that survive pruning.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(3));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(3));
             let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..9u64 {
@@ -4343,7 +4346,7 @@ mod tests {
     fn test_read_many_out_of_range() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(10));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(10));
             let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..3u64 {
@@ -4363,7 +4366,7 @@ mod tests {
         // Verify batch read matches individual reads across blobs.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(4));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(4));
             let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..20u64 {
@@ -4393,7 +4396,7 @@ mod tests {
         // exact hit/miss accounting over a mixed cached/uncached batch.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(8));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(8));
             let journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..50u64 {
@@ -4459,7 +4462,7 @@ mod tests {
     fn test_fixed_journal_metrics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
+            let cfg = test_cfg(context.storage_buffer_pool(), NZU64!(2));
             let journal = Journal::<_, Digest>::init(context.child("fixed_metrics"), cfg.clone())
                 .await
                 .unwrap();

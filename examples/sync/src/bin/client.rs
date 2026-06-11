@@ -186,7 +186,7 @@ where
         context,
         config,
         |context, config, resolver, initial_target, update_receiver, iteration| async move {
-            let db_config = any::create_config(&context);
+            let db_config = any::create_config(context.storage_buffer_pool());
             let sync_config =
                 sync::engine::Config::<any::Database<_>, Resolver<any::Operation, Key>> {
                     context,
@@ -227,7 +227,7 @@ where
         context,
         config,
         |context, config, resolver, initial_target, update_receiver, iteration| async move {
-            let db_config = current::create_config(&context);
+            let db_config = current::create_config(context.storage_buffer_pool());
             let sync_config =
                 sync::engine::Config::<current::Database<_>, Resolver<current::Operation, Key>> {
                     context,
@@ -266,7 +266,7 @@ where
         context,
         config,
         |context, config, resolver, initial_target, update_receiver, iteration| async move {
-            let db_config = immutable::create_config(&context);
+            let db_config = immutable::create_config(context.storage_buffer_pool());
             let sync_config = sync::engine::Config::<
                 immutable::Database<_>,
                 Resolver<immutable::Operation, Key>,
@@ -306,7 +306,7 @@ where
         context,
         config,
         |context, config, resolver, initial_target, update_receiver, iteration| async move {
-            let db_config = keyless::create_config(&context);
+            let db_config = keyless::create_config(context.storage_buffer_pool());
             let sync_config =
                 sync::engine::Config::<keyless::Database<_>, Resolver<keyless::Operation, Key>> {
                     context,
@@ -396,7 +396,7 @@ where
     run_compact_sync::<immutable_compact::Database<_>, immutable_compact::Operation, _, _>(
         context,
         config,
-        |ctx| immutable_compact::create_config(ctx),
+        |ctx| immutable_compact::create_config(ctx.storage_buffer_pool()),
         "Immutable compact",
     )
     .await
@@ -412,7 +412,7 @@ where
     run_compact_sync::<keyless_compact::Database<_>, keyless_compact::Operation, _, _>(
         context,
         config,
-        |ctx| keyless_compact::create_config(ctx),
+        |ctx| keyless_compact::create_config(ctx.storage_buffer_pool()),
         "Keyless compact",
     )
     .await

@@ -12,6 +12,7 @@
 //! use commonware_cryptography::{blake3::Digest, Digest as _};
 //! use commonware_math::algebra::Random;
 //! use commonware_runtime::{
+//!     BufferPooler,
 //!     buffer::paged::CacheRef, deterministic::Runner, Metrics, Runner as _, Supervisor as _,
 //! };
 //!
@@ -28,7 +29,7 @@
 //!             compression: None,
 //!             codec_config: ((), ()),
 //!             items_per_section: NZU64!(4),
-//!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!             page_cache: ctx.storage_buffer_pool().page_cache(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
 //!     };
@@ -504,7 +505,7 @@ mod test {
     };
     use commonware_macros::test_traced;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -522,7 +523,9 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
         };

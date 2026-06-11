@@ -319,7 +319,8 @@ mod tests {
     use commonware_cryptography::{certificate::ConstantProvider, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, ContextCell, Runner as _, Supervisor as _,
+        buffer::paged::CacheRef, deterministic, BufferPooler, ContextCell, Runner as _,
+        Supervisor as _,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -402,7 +403,9 @@ mod tests {
     ) -> commonware_consensus::marshal::core::Mailbox<TestScheme, TestVariant> {
         let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
         let provider = ConstantProvider::new(fixture.schemes[0].clone());
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let page_cache = context
+            .storage_buffer_pool()
+            .page_cache(NZU16!(1024), NZUsize!(8));
         let finalizations_by_height = immutable::Archive::init(
             context.child("finalizations_by_height"),
             archive_config(page_cache.clone(), "syncing-finalizations"),

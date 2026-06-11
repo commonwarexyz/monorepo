@@ -700,7 +700,7 @@ async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = any::create_config(&context);
+    let db_config = any::create_config(context.storage_buffer_pool());
     let database = any::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -711,7 +711,7 @@ async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::e
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = current::create_config(&context);
+    let db_config = current::create_config(context.storage_buffer_pool());
     let database = current::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -722,7 +722,7 @@ async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std:
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = immutable::create_config(&context);
+    let db_config = immutable::create_config(context.storage_buffer_pool());
     let database = immutable::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -736,7 +736,7 @@ async fn run_immutable_full_source<E>(
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = immutable::create_config(&context);
+    let db_config = immutable::create_config(context.storage_buffer_pool());
     let database = immutable::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await
@@ -747,7 +747,7 @@ async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::e
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = keyless::create_config(&context);
+    let db_config = keyless::create_config(context.storage_buffer_pool());
     let database = keyless::Database::init(context.child("database"), db_config).await?;
 
     run_helper(context, config, database).await
@@ -761,7 +761,7 @@ async fn run_keyless_full_source<E>(
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = keyless::create_config(&context);
+    let db_config = keyless::create_config(context.storage_buffer_pool());
     let database = keyless::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await
@@ -775,7 +775,7 @@ async fn run_immutable_compact<E>(
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = immutable_compact::create_config(&context);
+    let db_config = immutable_compact::create_config(context.storage_buffer_pool());
     let database = immutable_compact::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await
@@ -789,7 +789,7 @@ async fn run_keyless_compact<E>(
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
 {
-    let db_config = keyless_compact::create_config(&context);
+    let db_config = keyless_compact::create_config(context.storage_buffer_pool());
     let database = keyless_compact::Database::init(context.child("database"), db_config).await?;
 
     run_compact_helper(context, config, database).await

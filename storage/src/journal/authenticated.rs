@@ -849,9 +849,8 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPool, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -895,24 +894,24 @@ mod tests {
     }
 
     /// Create Merkle configuration for tests.
-    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+    fn merkle_config(suffix: &str, pool: &BufferPool) -> MerkleConfig<Sequential> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create journal configuration for tests.
-    fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+    fn journal_config(suffix: &str, pool: &BufferPool) -> JConfig {
         JConfig {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -921,8 +920,8 @@ mod tests {
         context: Context,
         suffix: &str,
     ) -> TestJournal<F> {
-        let merkle_cfg = merkle_config(suffix, &context);
-        let journal_cfg = journal_config(suffix, &context);
+        let merkle_cfg = merkle_config(suffix, context.storage_buffer_pool());
+        let journal_cfg = journal_config(suffix, context.storage_buffer_pool());
         TestJournal::<F>::new(
             context,
             merkle_cfg,
@@ -937,8 +936,8 @@ mod tests {
     #[test]
     fn test_batches_inherit_journal_bagging() {
         deterministic::Runner::default().start(|context| async move {
-            let merkle_cfg = merkle_config("batch-bagging", &context);
-            let journal_cfg = journal_config("batch-bagging", &context);
+            let merkle_cfg = merkle_config("batch-bagging", context.storage_buffer_pool());
+            let journal_cfg = journal_config("batch-bagging", context.storage_buffer_pool());
             let journal = TestJournal::<mmr::Family>::new(
                 context,
                 merkle_cfg,
@@ -1004,14 +1003,16 @@ mod tests {
         let merkle = Merkle::<F, _, Digest, Sequential>::init(
             context.child("mmr"),
             &hasher,
-            merkle_config(suffix, &context),
+            merkle_config(suffix, context.storage_buffer_pool()),
         )
         .await
         .unwrap();
-        let journal =
-            ContiguousJournal::init(context.child("journal"), journal_config(suffix, &context))
-                .await
-                .unwrap();
+        let journal = ContiguousJournal::init(
+            context.child("journal"),
+            journal_config(suffix, context.storage_buffer_pool()),
+        )
+        .await
+        .unwrap();
         (merkle, journal, hasher)
     }
 
@@ -1208,7 +1209,7 @@ mod tests {
         {
             let mut journal = ContiguousJournal::init(
                 context.child("rewind_match"),
-                journal_config("rewind-match", &context),
+                journal_config("rewind-match", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1239,7 +1240,7 @@ mod tests {
         {
             let mut journal = ContiguousJournal::init(
                 context.child("rewind_multiple"),
-                journal_config("rewind-multiple", &context),
+                journal_config("rewind-multiple", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1273,7 +1274,7 @@ mod tests {
         {
             let mut journal = ContiguousJournal::init(
                 context.child("rewind_no_match"),
-                journal_config("rewind-no-match", &context),
+                journal_config("rewind-no-match", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1293,7 +1294,7 @@ mod tests {
         {
             let mut journal = ContiguousJournal::init(
                 context.child("rewind_with_pruning"),
-                journal_config("rewind-with-pruning", &context),
+                journal_config("rewind-with-pruning", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1333,7 +1334,7 @@ mod tests {
         {
             let mut journal = ContiguousJournal::init(
                 context.child("rewind_no_match_pruned"),
-                journal_config("rewind-no-match-pruned", &context),
+                journal_config("rewind-no-match-pruned", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1371,7 +1372,7 @@ mod tests {
         {
             let mut journal = ContiguousJournal::init(
                 context.child("rewind_empty"),
-                journal_config("rewind-empty", &context),
+                journal_config("rewind-empty", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1387,8 +1388,8 @@ mod tests {
 
         // Test 7: Position based authenticated journal rewind.
         {
-            let merkle_cfg = merkle_config("rewind", &context);
-            let journal_cfg = journal_config("rewind", &context);
+            let merkle_cfg = merkle_config("rewind", context.storage_buffer_pool());
+            let journal_cfg = journal_config("rewind", context.storage_buffer_pool());
             let mut journal = TestJournal::<F>::new(
                 context,
                 merkle_cfg,

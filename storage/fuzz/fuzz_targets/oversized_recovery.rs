@@ -8,8 +8,8 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_codec::{FixedSize, Read, ReadExt, Write};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, Blob as _, Buf, BufMut, BufferPooler,
-    Error as RuntimeError, Runner, Storage as _, Supervisor as _,
+    deterministic, Blob as _, Buf, BufMut, BufferPool, BufferPooler, Error as RuntimeError, Runner,
+    Storage as _, Supervisor as _,
 };
 use commonware_storage::journal::{
     segmented::oversized::{Config, Oversized, Record},
@@ -169,11 +169,11 @@ fn overlaps_existing_blob(offset: u64, write_len: usize, blob_size: u64) -> bool
     offset < blob_size && end > offset
 }
 
-fn test_cfg(pooler: &impl BufferPooler) -> Config<()> {
+fn test_cfg(pool: &BufferPool) -> Config<()> {
     Config {
         index_partition: INDEX_PARTITION.into(),
         value_partition: VALUE_PARTITION.into(),
-        index_page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        index_page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         index_write_buffer: NZUsize!(512),
         value_write_buffer: NZUsize!(512),
         compression: None,
@@ -185,7 +185,7 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
 
     runner.start(|context| async move {
-        let cfg = test_cfg(&context);
+        let cfg = test_cfg(context.storage_buffer_pool());
 
         // Phase 1: Create valid data
         let mut oversized: Oversized<_, TestEntry, TestValue> =

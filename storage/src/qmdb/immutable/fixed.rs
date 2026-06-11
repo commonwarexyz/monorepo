@@ -86,7 +86,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Metrics, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
@@ -95,8 +95,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn config(suffix: &str, pool: &BufferPool) -> Config<TwoCap, Sequential> {
+        let page_cache = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -119,7 +119,7 @@ mod tests {
     async fn open_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = config("partition", &context);
+        let cfg = config("partition", context.storage_buffer_pool());
         Db::init(context, cfg).await.unwrap()
     }
 
@@ -133,7 +133,9 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
@@ -227,11 +229,8 @@ mod tests {
         is_send(db.rewind(loc));
     }
 
-    fn small_sections_config(
-        suffix: &str,
-        pooler: &impl BufferPooler,
-    ) -> Config<TwoCap, Sequential> {
-        let mut cfg = config(suffix, pooler);
+    fn small_sections_config(suffix: &str, pool: &BufferPool) -> Config<TwoCap, Sequential> {
+        let mut cfg = config(suffix, pool);
         cfg.log.items_per_blob = NZU64!(1);
         cfg
     }
@@ -239,7 +238,7 @@ mod tests {
     async fn open_small_sections_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = small_sections_config("partition", &context);
+        let cfg = small_sections_config("partition", context.storage_buffer_pool());
         Db::init(context, cfg).await.unwrap()
     }
 

@@ -461,7 +461,7 @@ mod tests {
     use commonware_cryptography::Sha256;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -477,8 +477,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str, pool: &BufferPool) -> fixed::Config<Sequential> {
+        let page_cache = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         storage_keyless::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn managed_db_finalize_commits_fixed_keyless_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-keyless-managed-db", &context);
+            let config = fixed_config("stateful-keyless-managed-db", context.storage_buffer_pool());
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Arc::new(AsyncRwLock::new(db));
 
@@ -553,7 +553,10 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_replay_range() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("stateful-keyless-matches-sync-target", &context);
+            let config = fixed_config(
+                "stateful-keyless-matches-sync-target",
+                context.storage_buffer_pool(),
+            );
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Arc::new(AsyncRwLock::new(db));
 

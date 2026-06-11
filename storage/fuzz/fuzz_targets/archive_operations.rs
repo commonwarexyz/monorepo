@@ -1,7 +1,7 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::{
     archive::{
         prunable::{Archive, Config},
@@ -50,9 +50,7 @@ fn fuzz(data: FuzzInput) {
         let cfg = Config {
             translator: EightCap,
             key_partition: "test-key".into(),
-            key_page_cache: CacheRef::from_pooler(
-                &context,
-                PAGE_SIZE,
+            key_page_cache: context.storage_buffer_pool().page_cache(PAGE_SIZE,
                 PAGE_CACHE_SIZE,
             ),
             value_partition: "test-value".into(),

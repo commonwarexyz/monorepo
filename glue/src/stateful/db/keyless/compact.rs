@@ -505,8 +505,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Spawner as _,
-        Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Runner as _, Spawner as _, Supervisor as _,
     };
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedJournalConfig,
@@ -555,7 +554,7 @@ mod tests {
         }
     }
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::CompactConfig<Sequential> {
+    fn fixed_config(suffix: &str, pool: &BufferPool) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
@@ -563,7 +562,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11)),
+                page_cache: pool.page_cache(NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
@@ -572,9 +571,9 @@ mod tests {
 
     fn full_fixed_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        pool: &BufferPool,
     ) -> storage_keyless::fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
+        let page_cache = pool.page_cache(NZU16!(101), NZUsize!(11));
         storage_keyless::fixed::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("stateful-keyless-full-journal-{suffix}"),
@@ -622,7 +621,7 @@ mod tests {
     #[test]
     fn managed_db_finalize_commits_fixed_keyless_unjournaled_batches() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("managed-db", &context);
+            let config = fixed_config("managed-db", context.storage_buffer_pool());
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Arc::new(AsyncRwLock::new(db));
 
@@ -656,7 +655,7 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_leaf_count() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("matches-sync-target", &context);
+            let config = fixed_config("matches-sync-target", context.storage_buffer_pool());
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
             let db = Arc::new(AsyncRwLock::new(db));
 
@@ -692,10 +691,12 @@ mod tests {
     #[test]
     fn state_sync_fetches_fixed_keyless_compact_state() {
         deterministic::Runner::default().start(|context| async move {
-            let mut source =
-                FixedDb::init(context.child("source"), fixed_config("source", &context))
-                    .await
-                    .unwrap();
+            let mut source = FixedDb::init(
+                context.child("source"),
+                fixed_config("source", context.storage_buffer_pool()),
+            )
+            .await
+            .unwrap();
             let floor = source.inactivity_floor_loc();
             let batch =
                 source
@@ -709,7 +710,7 @@ mod tests {
             let (_update_tx, update_rx) = mpsc::channel(1);
             let synced = <FixedDb as StateSyncDb<_, Arc<FixedDb>>>::sync_db(
                 context.child("target"),
-                fixed_config("target", &context),
+                fixed_config("target", context.storage_buffer_pool()),
                 Arc::new(source),
                 target.clone(),
                 update_rx,
@@ -730,7 +731,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let mut source = FullFixedDb::init(
                 context.child("source"),
-                full_fixed_config("source", &context),
+                full_fixed_config("source", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -766,7 +767,7 @@ mod tests {
             let (reached_tx, mut reached_rx) = mpsc::channel(1);
             let synced = <FixedDb as StateSyncDb<_, Arc<FullFixedDb>>>::sync_db(
                 context.child("target"),
-                fixed_config("target", &context),
+                fixed_config("target", context.storage_buffer_pool()),
                 Arc::new(source),
                 first_target,
                 update_rx,
@@ -788,7 +789,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let mut source = FixedDb::init(
                 context.child("source"),
-                fixed_config("supersede-source", &context),
+                fixed_config("supersede-source", context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -824,7 +825,7 @@ mod tests {
             let sync_handle = context.child("sync").spawn(move |context| async move {
                 <FixedDb as StateSyncDb<_, _>>::sync_db(
                     context.child("target"),
-                    fixed_config("supersede-target", &context),
+                    fixed_config("supersede-target", context.storage_buffer_pool()),
                     resolver,
                     stale_target,
                     update_rx,
@@ -858,7 +859,7 @@ mod tests {
     #[test]
     fn managed_db_rewinds_fixed_keyless_unjournaled_multiple_commit_ranges() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("rewind", &context);
+            let config = fixed_config("rewind", context.storage_buffer_pool());
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 
             let floor = db.inactivity_floor_loc();
@@ -898,7 +899,7 @@ mod tests {
     fn managed_db_prune_bounds_fixed_keyless_unjournaled_rewind_history() {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
-            let mut config = fixed_config("prune", &context);
+            let mut config = fixed_config("prune", context.storage_buffer_pool());
             config.witness.items_per_section = NZU64!(1);
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 

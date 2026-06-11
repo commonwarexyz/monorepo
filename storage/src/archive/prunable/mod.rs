@@ -130,7 +130,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{BufferPooler, Spawner, Runner, deterministic};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     translator::FourCap,
@@ -147,7 +147,7 @@
 //!     let cfg = Config {
 //!         translator: FourCap,
 //!         key_partition: "demo-index".into(),
-//!         key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         key_page_cache: context.storage_buffer_pool().page_cache(NZU16!(1024), NZUsize!(10)),
 //!         value_partition: "demo-value".into(),
 //!         compression: Some(3),
 //!         codec_config: (),
@@ -223,7 +223,8 @@ mod tests {
     use commonware_codec::{DecodeExt, Error as CodecError};
     use commonware_macros::{test_group, test_traced};
     use commonware_runtime::{
-        deterministic, telemetry::metrics::has_metric_value, Metrics as _, Runner, Supervisor as _,
+        deterministic, telemetry::metrics::has_metric_value, BufferPooler, Metrics as _, Runner,
+        Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
     use rand::Rng;
@@ -252,7 +253,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: Some(3),
@@ -283,7 +286,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -319,7 +324,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -384,7 +391,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -443,7 +452,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -531,7 +542,9 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -594,7 +607,9 @@ mod tests {
             let cfg = Config {
                 translator: TwoCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -702,7 +717,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -753,7 +770,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,
@@ -790,7 +809,9 @@ mod tests {
             let cfg = Config {
                 translator: FourCap,
                 key_partition: "test-index".into(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 value_partition: "test-value".into(),
                 codec_config: (),
                 compression: None,

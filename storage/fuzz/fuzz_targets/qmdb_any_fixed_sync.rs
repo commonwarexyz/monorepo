@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Family as MerkleFamily},
@@ -93,8 +91,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+fn test_config(test_name: &str, pool: &BufferPool) -> Config<TwoCap, Sequential> {
+    let page_cache = pool.page_cache(PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),
@@ -130,7 +128,7 @@ where
         Op = FixedOperation<F, Key, Value>,
     >,
 {
-    let db_config = test_config(test_name, &context);
+    let db_config = test_config(test_name, context.storage_buffer_pool());
     let expected_root = target.root;
 
     let sync_config: sync::engine::Config<FixedDb<F>, R> = sync::engine::Config {
@@ -166,7 +164,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let cfg = test_config(&test_name, &context);
+        let cfg = test_config(&test_name, context.storage_buffer_pool());
         let mut db: FixedDb<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("Failed to init source db");
@@ -263,7 +261,7 @@ fn fuzz_family<F: MerkleFamily>(input: &mut FuzzInput, test_name: &str) {
                     pending_writes.clear();
                     drop(db);
 
-                    let cfg = test_config(&test_name, &context);
+                    let cfg = test_config(&test_name, context.storage_buffer_pool());
                     db = Db::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,

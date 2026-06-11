@@ -31,9 +31,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-    };
+    use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
     use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
 
@@ -44,14 +42,14 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config(pooler: &impl BufferPooler) -> Config<Sequential> {
+    fn test_config(pool: &BufferPool) -> Config<Sequential> {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -69,7 +67,7 @@ mod tests {
             let mmr = Mmr::init(
                 context.child("storage"),
                 &Standard::<Sha256>::new(ForwardFold),
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -94,7 +92,7 @@ mod tests {
             const NUM_ELEMENTS: u64 = 200;
 
             let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-            let cfg = test_config(&context);
+            let cfg = test_config(context.storage_buffer_pool());
             let mut mmr = Mmr::init(context, &hasher, cfg).await.unwrap();
 
             let mut c_hasher = Sha256::new();
@@ -224,7 +222,7 @@ mod tests {
             let mmr = Mmr::init(
                 context.child("storage"),
                 &Standard::<Sha256>::new(ForwardFold),
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -287,7 +285,7 @@ mod tests {
             let mmr = Mmr::<_, Digest, Sequential>::init(
                 context.child("init"),
                 &hasher,
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -308,7 +306,9 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             };
             let ref_mmr =
                 Mmr::<_, Digest, Sequential>::init(context.child("ref"), &hasher, ref_cfg)
@@ -331,7 +331,7 @@ mod tests {
             // init_sync with range starting beyond the existing data triggers the
             // "fresh start" path (clear_to_size).
             let sync_cfg = SyncConfig::<Digest, Sequential> {
-                config: test_config(&context),
+                config: test_config(context.storage_buffer_pool()),
                 range: non_empty_range!(Location::new(100), Location::new(200)),
                 pinned_nodes: Some(pinned),
             };

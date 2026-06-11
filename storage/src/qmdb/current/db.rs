@@ -1215,7 +1215,7 @@ mod tests {
     use commonware_codec::FixedSize;
     use commonware_cryptography::{sha256, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{deterministic, BufferPooler, Runner as _, Supervisor as _};
     use commonware_utils::bitmap::Prunable as PrunableBitMap;
 
     const N: usize = sha256::Digest::SIZE;
@@ -1418,7 +1418,7 @@ mod tests {
         executor.start(|ctx| async move {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-full", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-full", ctx.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1456,7 +1456,7 @@ mod tests {
         executor.start(|ctx| async move {
             let mut db = MmbDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-partial", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-partial", ctx.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1496,7 +1496,7 @@ mod tests {
         executor.start(|ctx| async move {
             let mut db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-pruned", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-pruned", ctx.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1533,7 +1533,7 @@ mod tests {
         executor.start(|ctx| async move {
             let db = MmrDb::init(
                 ctx.child("storage"),
-                fixed_config::<OneCap>("ops-root-witness-fresh", &ctx),
+                fixed_config::<OneCap>("ops-root-witness-fresh", ctx.storage_buffer_pool()),
             )
             .await
             .unwrap();

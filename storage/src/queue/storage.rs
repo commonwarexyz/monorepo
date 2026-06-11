@@ -363,7 +363,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Metrics as _, Runner, Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Metrics as _, Runner, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
@@ -371,13 +371,13 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
+    fn test_config(partition: &str, pool: &BufferPool) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.into(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(4096),
         }
     }
@@ -394,7 +394,7 @@ mod tests {
     fn test_basic_enqueue_dequeue() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_basic", &context);
+            let cfg = test_config("test_basic", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -442,7 +442,7 @@ mod tests {
     fn test_append_commit_batch() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_batch", &context);
+            let cfg = test_config("test_batch", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -478,7 +478,7 @@ mod tests {
     fn test_append_commit_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_batch_persist", &context);
+            let cfg = test_config("test_batch_persist", context.storage_buffer_pool());
 
             {
                 let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
@@ -509,7 +509,10 @@ mod tests {
     fn test_commit_after_sync_recovers_without_second_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_commit_after_sync_recovery", &context);
+            let cfg = test_config(
+                "test_commit_after_sync_recovery",
+                context.storage_buffer_pool(),
+            );
 
             {
                 let mut queue = Queue::<_, Vec<u8>>::init(context.child("first"), cfg.clone())
@@ -549,7 +552,7 @@ mod tests {
     fn test_sequential_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_seq_ack", &context);
+            let cfg = test_config("test_seq_ack", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -577,7 +580,7 @@ mod tests {
     fn test_out_of_order_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ooo_ack", &context);
+            let cfg = test_config("test_ooo_ack", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -618,7 +621,7 @@ mod tests {
     fn test_ack_up_to() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to", &context);
+            let cfg = test_config("test_ack_up_to", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -651,7 +654,7 @@ mod tests {
     fn test_ack_up_to_with_existing_acks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_existing", &context);
+            let cfg = test_config("test_ack_up_to_existing", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -682,7 +685,7 @@ mod tests {
     fn test_ack_up_to_coalesces_with_acked_above() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_coalesce", &context);
+            let cfg = test_config("test_ack_up_to_coalesce", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -708,7 +711,7 @@ mod tests {
     fn test_ack_up_to_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_errors", &context);
+            let cfg = test_config("test_ack_up_to_errors", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -734,7 +737,7 @@ mod tests {
     fn test_dequeue_skips_acked() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_skip_acked", &context);
+            let cfg = test_config("test_skip_acked", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -769,7 +772,7 @@ mod tests {
     fn test_ack_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_errors", &context);
+            let cfg = test_config("test_ack_errors", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -794,7 +797,7 @@ mod tests {
     fn test_prune() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_prune", &context);
+            let cfg = test_config("test_prune", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -823,7 +826,7 @@ mod tests {
     fn test_ack_across_sections() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_multi_prune", &context);
+            let cfg = test_config("test_multi_prune", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -878,7 +881,7 @@ mod tests {
         // On restart, ack_floor = pruning_boundary. Items not pruned are re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_recovery_replay", &context);
+            let cfg = test_config("test_recovery_replay", context.storage_buffer_pool());
 
             // First session: enqueue items, ack some (but not enough to prune)
             {
@@ -922,7 +925,7 @@ mod tests {
         // Items pruned before crash are not re-delivered.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_recovery_pruned", &context);
+            let cfg = test_config("test_recovery_pruned", context.storage_buffer_pool());
 
             // First session: enqueue many items, ack enough to trigger pruning
             let expected_pruning_boundary = {
@@ -978,7 +981,7 @@ mod tests {
     fn test_reset() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_reset", &context);
+            let cfg = test_config("test_reset", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -1009,7 +1012,7 @@ mod tests {
     fn test_reset_with_ack() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_reset_ack", &context);
+            let cfg = test_config("test_reset_ack", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -1047,7 +1050,7 @@ mod tests {
     fn test_empty_queue_operations() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_empty", &context);
+            let cfg = test_config("test_empty", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -1064,7 +1067,7 @@ mod tests {
     fn test_persistence() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_persist", &context);
+            let cfg = test_config("test_persist", context.storage_buffer_pool());
 
             // First session
             {
@@ -1098,7 +1101,7 @@ mod tests {
     fn test_large_queue_with_sparse_acks() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_sparse", &context);
+            let cfg = test_config("test_sparse", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -1129,7 +1132,7 @@ mod tests {
     fn test_acked_above_coalescing() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_coalesce", &context);
+            let cfg = test_config("test_coalesce", context.storage_buffer_pool());
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -1159,7 +1162,10 @@ mod tests {
     fn test_ack_up_to_past_read_pos() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test_ack_up_to_past_read_pos", &context);
+            let cfg = test_config(
+                "test_ack_up_to_past_read_pos",
+                context.storage_buffer_pool(),
+            );
             let mut queue = Queue::<_, Vec<u8>>::init(context.child("storage"), cfg)
                 .await
                 .unwrap();
@@ -1189,7 +1195,7 @@ mod tests {
     fn test_metrics() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test-metrics", &context);
+            let cfg = test_config("test-metrics", context.storage_buffer_pool());
             let ctx = context.child("test_metrics");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 
@@ -1293,7 +1299,7 @@ mod tests {
     fn test_metrics_next_updates_on_fast_forward() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_config("test-ff", &context);
+            let cfg = test_config("test-ff", context.storage_buffer_pool());
             let ctx = context.child("test_ff");
             let mut queue = Queue::<_, Vec<u8>>::init(ctx, cfg).await.unwrap();
 

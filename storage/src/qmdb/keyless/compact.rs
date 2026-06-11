@@ -568,7 +568,7 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -578,19 +578,19 @@ mod tests {
     const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn witness_config(partition: &str, pooler: &impl BufferPooler) -> variable::Config<()> {
+    fn witness_config(partition: &str, pool: &BufferPool) -> variable::Config<()> {
         variable::Config {
             partition: format!("{partition}-witness"),
             items_per_section: NZU64!(64),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
+            page_cache: pool.page_cache(WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(1024),
         }
     }
 
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
-        let witness_cfg = witness_config(partition, &context);
+        let witness_cfg = witness_config(partition, context.storage_buffer_pool());
         let merkle = crate::merkle::compact::Merkle::new(Sequential);
         Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
             .await
@@ -602,7 +602,7 @@ mod tests {
         context: deterministic::Context,
         partition: &str,
     ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
-        let cfg = witness_config(partition, &context);
+        let cfg = witness_config(partition, context.storage_buffer_pool());
         variable::Journal::init(context, cfg).await.unwrap()
     }
 
@@ -927,7 +927,7 @@ mod tests {
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
                 merkle,
                 context.child("reopen_witness"),
-                witness_config(partition, &context),
+                witness_config(partition, context.storage_buffer_pool()),
                 (),
             )
             .await;
@@ -971,7 +971,7 @@ mod tests {
             let mut reopened = TestDb::<mmr::Family>::init_from_merkle(
                 merkle,
                 context.child("reopen"),
-                witness_config(partition, &context),
+                witness_config(partition, context.storage_buffer_pool()),
                 (),
             )
             .await
@@ -990,7 +990,7 @@ mod tests {
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
                 merkle,
                 context.child("reopen2"),
-                witness_config(partition, &context),
+                witness_config(partition, context.storage_buffer_pool()),
                 (),
             )
             .await
@@ -1026,7 +1026,7 @@ mod tests {
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
                 merkle,
                 context.child("reopen_witness"),
-                witness_config(partition, &context),
+                witness_config(partition, context.storage_buffer_pool()),
                 (),
             )
             .await;
@@ -1065,7 +1065,7 @@ mod tests {
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
                 merkle,
                 context.child("reopen_witness"),
-                witness_config(partition, &context),
+                witness_config(partition, context.storage_buffer_pool()),
                 (),
             )
             .await;
@@ -1102,7 +1102,7 @@ mod tests {
             let reopened = TestDb::<mmr::Family>::init_from_merkle(
                 merkle,
                 context.child("reopen_witness"),
-                witness_config(partition, &context),
+                witness_config(partition, context.storage_buffer_pool()),
                 (),
             )
             .await;
@@ -1307,7 +1307,8 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // One entry per section so pruning takes effect at entry granularity (pruning is
             // section-aligned and never drops a partial section).
-            let mut witness_cfg = witness_config("keyless-prune-rewind", &context);
+            let mut witness_cfg =
+                witness_config("keyless-prune-rewind", context.storage_buffer_pool());
             witness_cfg.items_per_section = NZU64!(1);
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
             let mut db: TestDb<mmr::Family> =
