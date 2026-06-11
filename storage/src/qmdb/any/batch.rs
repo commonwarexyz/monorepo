@@ -39,8 +39,10 @@ type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
 /// Sorted `(key, (value, loc))` vec consulted by `find_prev_key` to find the predecessor
-/// of a given key during ordered merkleization.
-type PrevCandidates<K, F, V> = Vec<(K, (V, Location<F>))>;
+/// of a given key during ordered merkleization. The value is `None` for cache-resolved
+/// keys: the predecessor-rewrite loop only reads a value for keys outside this batch's
+/// mutations, and cache-resolved keys are always in `updated`.
+type PrevCandidates<K, F, V> = Vec<(K, (Option<V>, Location<F>))>;
 
 /// Committed-DB locations cached by a batch's reads, keyed by the resolved key.
 type ResolvedReads<F, U> =
@@ -1323,7 +1325,7 @@ where
             next_candidates.push(next_key);
 
             let mutation = mutations.remove(&key);
-            prev_candidates.push((key.clone(), (value, old_loc)));
+            prev_candidates.push((key.clone(), (Some(value), old_loc)));
 
             let Some(mutation) = mutation else {
                 // Snapshot index collision: this operation's key does not match
@@ -1339,14 +1341,13 @@ where
             }
         }
 
-        // Merge cache-resolved updates: their old op's next_key and (key, value, loc) feed the
-        // candidate sets exactly as the skipped journal read would have. The prev-candidate
-        // value uses the NEW value rather than the old one: a prev candidate's value is only
-        // consumed when the predecessor-rewrite loop emits an op for it, and that loop skips
-        // every key present in `updated`, so a cached key's prev-candidate value is never read.
+        // Merge cache-resolved updates: their old op's next_key and (key, loc) feed the
+        // candidate sets exactly as the skipped journal read would have. No prev-candidate
+        // value is stored: it is only consumed when the predecessor-rewrite loop emits an op
+        // for the key, and that loop skips every key present in `updated`.
         for (key, value, loc, old_next) in cached {
             next_candidates.push(old_next);
-            prev_candidates.push((key.clone(), (value.clone(), loc)));
+            prev_candidates.push((key.clone(), (None, loc)));
             updated.push((key, value, loc));
         }
 
@@ -1398,7 +1399,7 @@ where
                 _ => unreachable!("expected update operation"),
             };
             next_candidates.push(data.next_key);
-            prev_candidates.push((data.key, (data.value, old_loc)));
+            prev_candidates.push((data.key, (Some(data.value), old_loc)));
         }
 
         // Add ancestor-diff keys that may be predecessors or successors of this batch's mutations
@@ -1476,7 +1477,7 @@ where
             };
             next_candidates.push(key.clone());
             next_candidates.push(data.next_key);
-            prev_candidates.push((key.clone(), (value.clone(), loc)));
+            prev_candidates.push((key.clone(), (Some(value.clone()), loc)));
         }
 
         // Sort + dedup candidate sets now so find_next_key/find_prev_key can binary-search.
@@ -1604,6 +1605,9 @@ where
                     continue;
                 }
 
+                let prev_value = prev_value
+                    .as_ref()
+                    .expect("cache-resolved keys are skipped as updated");
                 let prev_new_loc = Location::new(m.base_size + ops.len() as u64);
                 let prev_next_key = find_next_key(prev_key, &next_candidates);
                 ops.push(Operation::Update(update::Ordered {
