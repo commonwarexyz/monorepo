@@ -492,7 +492,7 @@ where
             response.send_lossy(false);
             return;
         };
-        let tail = info_span!("stateful.processor.verify_tail").entered();
+        let tail = info_span!("stateful.processor.match_commitments").entered();
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
             warn!(
                 ?parent_digest,
@@ -827,7 +827,7 @@ where
 }
 
 /// Returns true when `block` is already covered by committed state.
-#[tracing::instrument(name = "stateful.processor.processed_check", level = "info", skip_all)]
+#[tracing::instrument(name = "stateful.processor.check_processed", level = "info", skip_all)]
 async fn is_already_processed<S, V, Response>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
     marshal: MarshalMailbox<S, V>,

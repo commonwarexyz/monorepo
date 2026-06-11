@@ -177,7 +177,7 @@ where
                     block,
                     acknowledgement,
                 } => {
-                    let process = info_span!(parent: &span, "stateful.actor.sync_finalized");
+                    let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
                     let handoff = self
                         .process_finalized(block, acknowledgement)
                         .instrument(process)

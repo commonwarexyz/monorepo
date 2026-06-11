@@ -685,7 +685,7 @@ where
             .child("optimistic_verify")
             .with_attribute("round", round);
         let span = info_span!(
-            "marshal.deferred.verify.task",
+            "marshal.deferred.verify.optimistic",
             round = %round,
             digest = %digest
         );
