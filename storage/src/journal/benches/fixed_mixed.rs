@@ -17,8 +17,9 @@ use std::{
 /// Partition name to use in the journal config.
 const PARTITION: &str = "test-partition-mixed";
 
-/// Number of items pre-populated for readers to read. Small enough that the whole journal stays
-/// in the page cache: the benchmark measures reader/writer interference, not I/O.
+/// Number of items pre-populated for readers to read: ~800 pages against the 10,000-page
+/// cache, so reads are cache hits and the benchmark measures reader/writer interference,
+/// not I/O.
 const INITIAL_ITEMS: u64 = 200_000;
 
 /// Number of items appended (then synced) per measured iteration.

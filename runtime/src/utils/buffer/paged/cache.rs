@@ -255,7 +255,6 @@ impl CacheRef {
         let cache = self.cache.read();
         let &slot = cache.index.get(&(blob_id, page_num))?;
         let entry = &cache.entries[slot];
-        assert_eq!(entry.key, (blob_id, page_num));
         entry.referenced.store(true, Ordering::Relaxed);
         Some(entry.page.clone())
     }
@@ -507,7 +506,6 @@ impl Cache {
             return 0;
         };
         let entry = &self.entries[slot];
-        assert_eq!(entry.key, (blob_id, page_num));
         entry.referenced.store(true, Ordering::Relaxed);
 
         let page = entry.page.as_ref();
