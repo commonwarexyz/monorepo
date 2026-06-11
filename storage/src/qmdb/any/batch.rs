@@ -185,10 +185,9 @@ where
     base: Base<F, H::Digest, U, S>,
 
     /// Committed-DB locations (plus the update kind's cached payload) cached by this batch's
-    /// reads (`get`/`get_many`), keyed by the key they matched. Populated only when
-    /// `U::CACHES_READS` and consumed by `merkleize`: when a mutation key is present here,
-    /// `merkleize` reuses the location (and, for ordered, the old value and next key) and
-    /// skips the redundant index probe and journal read.
+    /// reads (`get`/`get_many`), keyed by the key they matched. Consumed by `merkleize`: when
+    /// a mutation key is present here, `merkleize` reuses the location (and, for ordered, the
+    /// old next key) and skips the redundant index probe and journal read.
     ///
     /// Only committed-snapshot resolutions are cached. A cached location doubles as the
     /// key's previous committed location (`base_old_loc`), which holds because a
@@ -978,21 +977,13 @@ where
         }
 
         if !db_keys.is_empty() {
-            let db_results = if U::CACHES_READS {
-                db.get_many_with_locations::<true>(&db_keys).await?
-            } else {
-                db.get_many_with_locations::<false>(&db_keys).await?
-            };
-            let mut resolved = U::CACHES_READS.then(|| self.resolved.lock());
-            if let Some(resolved) = resolved.as_deref_mut() {
-                resolved.reserve(db_keys.len());
-            }
+            let db_results = db.get_many_with_locations::<true>(&db_keys).await?;
+            let mut resolved = self.resolved.lock();
+            resolved.reserve(db_keys.len());
             for (slot, result) in db_indices.into_iter().zip(db_results) {
                 results[slot] = result.map(|(value, loc, cached)| {
-                    if let Some(resolved) = resolved.as_deref_mut() {
-                        let cached = cached.expect("cached payload requested for caching reads");
-                        resolved.insert((*keys[slot]).clone(), (loc, cached));
-                    }
+                    let cached = cached.expect("cached payload requested for caching reads");
+                    resolved.insert((*keys[slot]).clone(), (loc, cached));
                     value
                 });
             }

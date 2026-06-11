@@ -23,9 +23,6 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// The value encoding (fixed or variable).
     type ValueEncoding: ValueEncoding<Value = Self::Value>;
 
-    /// Whether batch reads cache resolved committed locations for merkleize to consume.
-    const CACHES_READS: bool;
-
     /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
     type Cached: Send + Sync;
 
