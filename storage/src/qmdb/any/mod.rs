@@ -2765,7 +2765,7 @@ mod bitmap_tests {
     ///
     /// `next_candidate` returns set-bit locations within `[floor, bitmap.len)` (skipping inactive
     /// ones), then sequential candidates beyond `bitmap.len` (uncommitted ancestor ops not
-    /// tracked in the bitmap). `is_active_at` revalidation in the floor-raise loop is the only
+    /// tracked in the bitmap). The floor-raise loop's per-candidate revalidation is the only
     /// thing that prevents stale ancestor locations from being moved when a child batch
     /// supersedes the same key.
     ///
@@ -2776,7 +2776,7 @@ mod bitmap_tests {
     ///
     /// Failure modes caught:
     /// - tail-fallthrough boundary off-by-one → wrong root,
-    /// - missing `is_active_at` revalidation → parent's superseded loc gets moved → divergent
+    /// - missing floor-raise revalidation → parent's superseded loc gets moved → divergent
     ///   root,
     /// - bitmap state inconsistent with `init_from_log` → oracle reopen mismatch.
     #[test_traced]

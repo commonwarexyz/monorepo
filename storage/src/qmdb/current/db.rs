@@ -30,7 +30,7 @@ use crate::{
         operation::Operation as _,
         Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
@@ -748,7 +748,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -785,7 +785,7 @@ where
     F: merkle::Graftable,
     E: Context,
     U: Update + 'static,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -811,32 +811,6 @@ where
         self.root = batch.canonical_root;
         self.update_metrics();
         Ok(range)
-    }
-}
-
-impl<F, E, U, C, I, H, const N: usize, S> Persistable for Db<F, E, C, I, H, U, N, S>
-where
-    F: merkle::Graftable,
-    E: Context,
-    U: Update,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = JournalError>,
-    I: UnorderedIndex<Value = Location<F>>,
-    H: Hasher,
-    S: Strategy,
-    Operation<F, U>: Codec,
-{
-    type Error = Error<F>;
-
-    async fn commit(&mut self) -> Result<(), Error<F>> {
-        Self::commit(self).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error<F>> {
-        Self::sync(self).await
-    }
-
-    async fn destroy(self) -> Result<(), Error<F>> {
-        self.destroy().await
     }
 }
 

@@ -18,7 +18,6 @@ use crate::{
             Engine, Target,
         },
     },
-    Persistable,
 };
 use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;

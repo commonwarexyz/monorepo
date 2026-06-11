@@ -211,15 +211,18 @@ impl<B: Blob> Sealed<B> {
     ///
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
     /// non-overlapping, and within bounds.
+    ///
+    /// Returns the number of items fully served without a blob read (from the in-memory partial
+    /// page and the page cache). The remaining items required at least one blob read.
     pub async fn read_many_into(
         &self,
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         super::validate_read_many_into(buf.len(), offsets, item_size, self.inner.size)?;
         if offsets.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
 
         // Copy items overlapping the in-memory partial page into place and collect the rest as
@@ -232,15 +235,16 @@ impl<B: Blob> Sealed<B> {
         let mut cache_ranges =
             super::split_read_many(buf, offsets, item_size, self.partial_offset(), partial);
         if cache_ranges.is_empty() {
-            return Ok(());
+            return Ok(offsets.len());
         }
 
         // Fast path: try the page cache for all ranges in a single lock acquisition.
         self.inner
             .cache_ref
             .read_cached_many(self.inner.id, &mut cache_ranges);
+        let blob_reads = cache_ranges.len();
         if cache_ranges.is_empty() {
-            return Ok(());
+            return Ok(offsets.len());
         }
 
         // Slow path: read remaining ranges from the underlying blob, concurrently.
@@ -256,7 +260,7 @@ impl<B: Blob> Sealed<B> {
             result?;
         }
 
-        Ok(())
+        Ok(offsets.len() - blob_reads)
     }
 
     /// Returns a [Replay] for sequentially reading all logical bytes of the sealed view.
