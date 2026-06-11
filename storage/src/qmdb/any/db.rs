@@ -119,7 +119,8 @@ pub struct Db<
     pub(crate) active_keys: usize,
 
     /// Activity bitmap over committed operations. Rebuilt from the journal on init; never
-    /// persisted. A hint for floor-raise scans; merkleization re-verifies via `is_active_at`.
+    /// persisted. A hint for floor-raise scans; merkleization re-verifies each candidate
+    /// against the batch diff, ancestor diffs, and snapshot in the floor-raise loop.
     /// When wrapped by `current::Db`, this is also the bitmap that `current` reads for grafted-
     /// tree leaves and proofs.
     ///
@@ -225,6 +226,17 @@ where
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
+        self.get_many_map(keys, |data, _| data.value().clone())
+            .await
+    }
+
+    /// Like [`Self::get_many`] but maps each matched update through `map`, which also
+    /// receives the committed location the update was read from.
+    pub(crate) async fn get_many_map<T>(
+        &self,
+        keys: &[&U::Key],
+        map: impl Fn(&U, Location<F>) -> T,
+    ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -236,13 +248,10 @@ where
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        let mut results: Vec<Option<U::Value>> = vec![None; keys.len()];
+        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
 
-        for (key_idx, key) in keys.iter().enumerate() {
-            for &loc in self.snapshot.get(key) {
-                candidates.push((key_idx, *loc));
-            }
-        }
+        self.snapshot
+            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
 
         if candidates.is_empty() {
             return Ok(results);
@@ -274,7 +283,7 @@ where
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {
-                results[key_idx] = Some(data.value().clone());
+                results[key_idx] = Some(map(data, Location::new(pos)));
             }
         }
 

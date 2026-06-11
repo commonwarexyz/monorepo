@@ -490,21 +490,30 @@ pub struct Receiver<I> {
 impl<I: Stream> Receiver<I> {
     /// Receives and decrypts a message from the peer.
     ///
-    /// Receives ciphertext, allocates a buffer from the pool, copies ciphertext,
-    /// and decrypts in-place.
+    /// Receives ciphertext and decrypts it in-place when the received frame is
+    /// a single, uniquely-owned buffer. Otherwise, allocates a buffer from the
+    /// pool, copies the ciphertext, and decrypts the copy in-place.
     pub async fn recv(&mut self) -> Result<IoBufs, Error> {
-        let mut encrypted = recv_frame(
+        let encrypted = recv_frame(
             &mut self.stream,
             self.max_message_size.saturating_add(TAG_SIZE),
         )
         .await?;
-        let ciphertext_len = encrypted.len();
 
-        // Allocate buffer from pool for decryption.
-        let mut decryption_buf = self.pool.alloc(ciphertext_len);
-
-        // Copy ciphertext into buffer.
-        decryption_buf.put(&mut encrypted);
+        // Recover the received frame for in-place decryption when it is a
+        // single, uniquely-owned buffer. Otherwise, copy the ciphertext into
+        // a buffer allocated from the pool.
+        let mut decryption_buf = match encrypted
+            .try_into_single()
+            .and_then(|buf| buf.try_into_mut().map_err(IoBufs::from))
+        {
+            Ok(buf) => buf,
+            Err(mut encrypted) => {
+                let mut buf = self.pool.alloc(encrypted.len());
+                buf.put(&mut encrypted);
+                buf
+            }
+        };
 
         // Decrypt in-place, get plaintext length back.
         let plaintext_len = self.cipher.recv_in_place(decryption_buf.as_mut())?;
@@ -578,6 +587,33 @@ mod test {
         }
     }
 
+    /// Wraps a stream to return each read as a fresh, uniquely-owned pooled
+    /// buffer, mirroring the production network backends.
+    ///
+    /// Records the allocation handed out by the most recent read so tests can
+    /// assert that decryption happened in place.
+    struct PoolingStream<S> {
+        inner: S,
+        pool: BufferPool,
+        last_alloc: Arc<Mutex<Range<usize>>>,
+    }
+
+    impl<S: commonware_runtime::Stream> commonware_runtime::Stream for PoolingStream<S> {
+        async fn recv(&mut self, len: usize) -> Result<IoBufs, RuntimeError> {
+            let mut bufs = self.inner.recv(len).await?;
+            let mut buf = self.pool.alloc(len);
+            buf.put(&mut bufs);
+            let buf = buf.freeze();
+            let start = buf.as_ref().as_ptr() as usize;
+            *self.last_alloc.lock() = start..start + buf.len();
+            Ok(buf.into())
+        }
+
+        fn peek(&self, max_len: usize) -> &[u8] {
+            self.inner.peek(max_len)
+        }
+    }
+
     #[test]
     fn test_can_setup_and_send_messages() -> Result<(), Error> {
         let executor = deterministic::Runner::default();
@@ -622,6 +658,68 @@ mod test {
                 listener_sender.send(&msg[..]).await?;
                 let ack = dialer_receiver.recv().await?;
                 assert_eq!(ack.coalesce(), *msg);
+            }
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn test_recv_decrypts_unique_frame_in_place() -> Result<(), Error> {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let dialer_crypto = PrivateKey::from_seed(42);
+            let listener_crypto = PrivateKey::from_seed(24);
+
+            let (dialer_sink, listener_stream) = mocks::Channel::init();
+            let (listener_sink, dialer_stream) = mocks::Channel::init();
+
+            let last_alloc = Arc::new(Mutex::new(0..0));
+            let listener_stream = PoolingStream {
+                inner: listener_stream,
+                pool: context.network_buffer_pool().clone(),
+                last_alloc: last_alloc.clone(),
+            };
+
+            let dialer_config = transport_config(dialer_crypto);
+            let listener_config = transport_config(listener_crypto.clone());
+
+            let listener_handle = context.child("listener").spawn(move |context| async move {
+                listen(
+                    context,
+                    |_| async { true },
+                    listener_config,
+                    listener_stream,
+                    listener_sink,
+                )
+                .await
+            });
+
+            let (mut dialer_sender, _dialer_receiver) = dial(
+                context,
+                dialer_config,
+                listener_crypto.public_key(),
+                dialer_stream,
+                dialer_sink,
+            )
+            .await?;
+
+            let (_, _, mut listener_receiver) = listener_handle.await.unwrap()?;
+
+            // Send both messages before receiving so the second frame's varint
+            // is decoded from the peek buffer, exercising in-place decryption
+            // of a sliced frame in addition to a full one.
+            dialer_sender.send(&b"hello"[..]).await?;
+            dialer_sender.send(&b"world"[..]).await?;
+
+            for expected in [&b"hello"[..], &b"world"[..]] {
+                let received = listener_receiver.recv().await?;
+                let plaintext = received.as_single().expect("single buffer expected");
+                let ptr = plaintext.as_ref().as_ptr() as usize;
+                assert!(
+                    last_alloc.lock().contains(&ptr),
+                    "plaintext should reuse the received frame buffer"
+                );
+                assert_eq!(plaintext.as_ref(), expected);
             }
             Ok(())
         })

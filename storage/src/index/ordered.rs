@@ -51,6 +51,19 @@ pub struct Index<T: Translator, V: Send + Sync> {
 }
 
 impl<T: Translator, V: Send + Sync> Index<T, V> {
+    /// Translate a key without probing.
+    pub(super) fn translate(&self, key: &[u8]) -> T::Key {
+        self.translator.transform(key)
+    }
+
+    /// Returns an iterator over all values associated with an already-translated key.
+    pub(super) fn get_translated<'a>(&'a self, key: T::Key) -> impl Iterator<Item = &'a V> + 'a
+    where
+        V: 'a,
+    {
+        self.map.get(&key).into_iter().flat_map(iter_chain)
+    }
+
     /// Create a new entry in the index.
     fn create(keys: &Gauge, items: &Gauge, vacant: BTreeVacantEntry<'_, T::Key, Record<V>>, v: V) {
         keys.inc();
@@ -153,6 +166,25 @@ impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
 
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
+
+    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
+    where
+        V: 'a,
+    {
+        // Probe in translated-key order: consecutive tree descents share upper node paths,
+        // which stay cache-resident across the batch.
+        let mut order: Vec<(T::Key, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(key_idx, key)| (self.translator.transform(key.as_ref()), key_idx))
+            .collect();
+        order.sort_unstable();
+        for (translated, key_idx) in order {
+            for value in self.get_translated(translated) {
+                visit(key_idx, value);
+            }
+        }
+    }
     type Cursor<'a>
         = Cursor<'a, T::Key, V>
     where
@@ -162,8 +194,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     where
         V: 'a,
     {
-        let k = self.translator.transform(key);
-        self.map.get(&k).into_iter().flat_map(iter_chain)
+        self.get_translated(self.translator.transform(key))
     }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {

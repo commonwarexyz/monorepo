@@ -274,49 +274,60 @@ fn keyless_variable_config(
     }
 }
 
-fn compact_merkle_config(suffix: &str) -> crate::merkle::compact::Config<Sequential> {
-    crate::merkle::compact::Config {
-        partition: format!("{suffix}-compact"),
-        strategy: Sequential,
+fn compact_witness_config(
+    suffix: &str,
+    pooler: &impl BufferPooler,
+) -> crate::journal::contiguous::variable::Config<()> {
+    crate::journal::contiguous::variable::Config {
+        partition: format!("{suffix}-compact-witness"),
+        items_per_section: NZU64!(64),
+        compression: None,
+        codec_config: (),
+        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        write_buffer: NZUsize!(1024),
     }
 }
 
 fn immutable_fixed_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        strategy: Sequential,
+        witness: compact_witness_config(suffix, pooler),
         commit_codec_config: (),
     }
 }
 
 fn immutable_variable_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        strategy: Sequential,
+        witness: compact_witness_config(suffix, pooler),
         commit_codec_config: ((), ()),
     }
 }
 
 fn keyless_fixed_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> keyless::fixed::CompactConfig<Sequential> {
     keyless::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        strategy: Sequential,
+        witness: compact_witness_config(suffix, pooler),
         commit_codec_config: (),
     }
 }
 
 fn keyless_variable_compact_config(
     suffix: &str,
-    _pooler: &impl BufferPooler,
+    pooler: &impl BufferPooler,
 ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
     keyless::CompactConfig {
-        merkle: compact_merkle_config(suffix),
+        strategy: Sequential,
+        witness: compact_witness_config(suffix, pooler),
         commit_codec_config: ((0..=10000usize).into(), ()),
     }
 }
