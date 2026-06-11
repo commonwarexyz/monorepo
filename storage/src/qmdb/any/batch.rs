@@ -1047,19 +1047,28 @@ where
         C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
-        let resolved = core::mem::take(&mut *self.resolved.lock());
-        let (mut mutations, m) = self.into_parts();
+        let mut resolved = core::mem::take(&mut *self.resolved.lock());
+        let (mutations, m) = self.into_parts();
 
         // Pull mutations whose committed location this batch's reads already resolved. They
         // skip the journal re-read and are emitted at their cached location by the merge
         // below, exactly where the read path would have emitted them.
+        //
+        // The join drains `mutations` (sorted streaming) and probes `resolved` per key: a
+        // hash probe is much cheaper than the tree descent the inverse join would pay, and
+        // rebuilding the unconsumed remainder from a sorted stream is a linear bulk build.
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
-            Vec::with_capacity(resolved.len());
-        for (key, (loc, ())) in resolved {
-            if let Some(mutation) = mutations.remove(&key) {
-                cached.push((key, loc, mutation));
-            }
-        }
+            Vec::with_capacity(resolved.len().min(mutations.len()));
+        let mut mutations: BTreeMap<K, Option<V::Value>> = mutations
+            .into_iter()
+            .filter_map(|(key, mutation)| match resolved.remove(&key) {
+                Some((loc, ())) => {
+                    cached.push((key, loc, mutation));
+                    None
+                }
+                None => Some((key, mutation)),
+            })
+            .collect();
         cached.sort_unstable_by_key(|&(_, loc, _)| loc);
 
         // Resolve existing keys.
@@ -1252,24 +1261,31 @@ where
         C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
-        let resolved = core::mem::take(&mut *self.resolved.lock());
-        let (mut mutations, m) = self.into_parts();
+        let mut resolved = core::mem::take(&mut *self.resolved.lock());
+        let (mutations, m) = self.into_parts();
 
         // Pull update mutations whose committed op this batch's reads already resolved: they
         // skip the index probe and journal re-read, and their old op's next key feeds the
         // candidate sets directly. Deletes never consume the cache because a deleted key's
-        // own-bucket scan doubles as same-bucket predecessor discovery; they are reinserted
-        // (one lookup per key on the hot path instead of a get-then-remove pair).
-        let mut cached: Vec<(K, V::Value, Location<F>, K)> = Vec::with_capacity(resolved.len());
-        for (key, (loc, old_next)) in resolved {
-            match mutations.remove(&key) {
-                Some(Some(value)) => cached.push((key, value, loc, old_next)),
-                Some(None) => {
-                    mutations.insert(key, None);
+        // own-bucket scan doubles as same-bucket predecessor discovery.
+        //
+        // The join drains `mutations` (sorted streaming) and probes `resolved` per key: a
+        // hash probe is much cheaper than the tree descent the inverse join would pay, and
+        // rebuilding the unconsumed remainder from a sorted stream is a linear bulk build.
+        // As a bonus, `cached` comes out key-sorted, so the candidate sorts below see
+        // mostly-sorted input.
+        let mut cached: Vec<(K, V::Value, Location<F>, K)> =
+            Vec::with_capacity(resolved.len().min(mutations.len()));
+        let mut mutations: BTreeMap<K, Option<V::Value>> = mutations
+            .into_iter()
+            .filter_map(|(key, mutation)| match (resolved.remove(&key), mutation) {
+                (Some((loc, old_next)), Some(value)) => {
+                    cached.push((key, value, loc, old_next));
+                    None
                 }
-                None => {}
-            }
-        }
+                (_, mutation) => Some((key, mutation)),
+            })
+            .collect();
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
