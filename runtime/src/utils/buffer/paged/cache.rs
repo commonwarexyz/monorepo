@@ -566,36 +566,43 @@ impl CacheRef {
     }
 
     /// Cache the provided pages of data in the page cache, returning the remaining bytes that
-    /// didn't fill a whole page. `offset` must be page aligned.
+    /// were not cached: the trailing partial page, plus any full pages whose page number would
+    /// overflow `u64`. `offset` must be page aligned.
+    ///
+    /// The pages are copied into their own pooled buffers before the write lock is taken, so
+    /// the lock is held only for the handle insertions; the copies transiently duplicate (at
+    /// most) the caller's input until eviction reclaims them.
     ///
     /// # Panics
     ///
     /// Panics if `offset` is not page aligned.
-    pub fn cache(&self, blob_id: u64, mut buf: &[u8], offset: u64) -> usize {
+    pub fn cache(&self, blob_id: u64, buf: &[u8], offset: u64) -> usize {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
 
+        // Cap the prepared pages to the representable page-number range so every prepared
+        // page is inserted and the remainder accounting below stays exact.
+        let page_size = self.page_size as usize;
+        let full_pages = buf.len() / page_size;
+        let representable = (u64::MAX as u128) - (page_num as u128) + 1;
+        let insertable = (full_pages as u128).min(representable) as usize;
+
         // Copy each page into its own exactly page-sized pooled buffer before taking the
         // write lock, so the lock is held only for the handle insertions.
-        let page_size = self.page_size as usize;
-        let mut pages = Vec::with_capacity(buf.len() / page_size);
-        while buf.len() >= page_size {
+        let mut pages = Vec::with_capacity(insertable);
+        for i in 0..insertable {
             let mut page = self.pool.alloc(page_size);
-            page.put_slice(&buf[..page_size]);
+            page.put_slice(&buf[i * page_size..(i + 1) * page_size]);
             pages.push(page.freeze());
-            buf = &buf[page_size..];
         }
 
         let mut page_cache = self.cache.write();
         for page in pages {
             page_cache.insert(blob_id, page, page_num);
-            page_num = match page_num.checked_add(1) {
-                Some(next) => next,
-                None => break,
-            };
+            page_num = page_num.wrapping_add(1);
         }
 
-        buf.len()
+        buf.len() - insertable * page_size
     }
 
     /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Used after a blob is
@@ -1218,6 +1225,26 @@ mod tests {
             assert_eq!(bytes_read, PAGE_SIZE.get() as usize);
             assert!(buf.iter().all(|b| *b == 42));
         });
+    }
+
+    #[test_traced]
+    fn test_cache_max_page_overflow_remainder() {
+        // Page numbers are offsets divided by the page size, so the page number itself can
+        // only saturate when the page size is one byte. Caching two such pages starting at
+        // the final page number can only insert the first; the second page's bytes must be
+        // reported back as uncached remainder.
+        let cache_ref = CacheRef::new(test_pool(), NZU16!(1), NZUsize!(4));
+        let blob_id = cache_ref.next_id();
+
+        let data = [42u8, 43u8];
+        let remaining = cache_ref.cache(blob_id, &data, u64::MAX);
+        assert_eq!(remaining, 1);
+
+        // The first page is cached; reading it back returns its byte.
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u8>(blob_id, u64::MAX, 1, &()),
+            CachedDecode::Decoded(42, 1)
+        ));
     }
 
     #[test_traced]

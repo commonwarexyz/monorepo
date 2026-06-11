@@ -622,9 +622,10 @@ impl<B: Blob> Append<B> {
         let end = tip.len().min(start.saturating_add(max_len));
         let total = end - start;
         let mut buf = &tip[start..end];
-        // At the tip, a decode failure is indistinguishable from racing an in-flight append;
-        // let the async path (which validates sizes under proper locks) produce the
-        // authoritative result.
+        // A failure here is deliberately deferred to the async path rather than surfaced:
+        // the bytes are stable under the held guard, so the async read of the same range
+        // reproduces and reports the same error authoritatively. Sync probes of a corrupt
+        // tip range just keep missing until then.
         T::read_cfg(&mut buf, cfg)
             .ok()
             .map(|value| Ok((value, total - buf.len())))

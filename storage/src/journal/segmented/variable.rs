@@ -1001,6 +1001,66 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_try_get_sync_varint_split_across_pages() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // A payload longer than 127 bytes takes a two-byte varint. Position an entry so
+            // that varint straddles a page boundary, exercising the multi-slice gather on the
+            // fused sync decode path.
+            let cfg = Config {
+                partition: "try-get-sync-varint-split".into(),
+                compression: None,
+                codec_config: ((0..=1024usize).into(), ()),
+                page_cache: CacheRef::from_pooler(&context, JANKY_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(4096),
+            };
+            let section = 1u64;
+            let mut journal = Journal::<_, Vec<u8>>::init(context.child("split"), cfg)
+                .await
+                .unwrap();
+
+            // First entry: 99 payload bytes (1-byte varint) ends the frame at offset 100,
+            // leaving 3 bytes of page 0 (page size 103). Second entry: a 200-byte payload
+            // whose 2-byte varint occupies offsets 100..102... pad so the boundary falls
+            // mid-varint across several alignments.
+            let mut offsets = Vec::new();
+            let mut items = Vec::new();
+            for pad in [99usize, 100, 101] {
+                let item = vec![0xAA; pad];
+                let (offset, _) = journal.append(section, &item).await.unwrap();
+                offsets.push(offset);
+                items.push(item);
+                let item = vec![0xBB; 200];
+                let (offset, _) = journal.append(section, &item).await.unwrap();
+                offsets.push(offset);
+                items.push(item);
+            }
+            // Pad to full pages so everything written is flushed and cached on sync.
+            let size = journal.size(section).await.unwrap();
+            let page = JANKY_PAGE_SIZE.get() as u64;
+            let pad = (page - (size % page)) % page;
+            if pad > 0 {
+                journal
+                    .append(section, &vec![0u8; pad as usize - 1.min(pad as usize)])
+                    .await
+                    .unwrap();
+            }
+            journal.sync(section).await.unwrap();
+
+            // Every fully flushed entry must be readable through the sync path or fall back
+            // cleanly; either way the async path agrees.
+            for (offset, item) in offsets.iter().zip(&items) {
+                if let Some(found) = journal.try_get_sync(section, *offset) {
+                    assert_eq!(&found, item, "sync read mismatch at offset {offset}");
+                }
+                assert_eq!(&journal.get(section, *offset).await.unwrap(), item);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
     fn test_try_get_sync_compressed() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

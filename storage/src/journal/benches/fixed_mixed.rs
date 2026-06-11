@@ -2,7 +2,7 @@ use crate::{append_fixed_random_data, get_fixed_journal, ITEMS_PER_BLOB, ITEM_SI
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
-    Handle, Spawner as _, Supervisor as _,
+    Clock as _, Handle, Spawner as _, Supervisor as _,
 };
 use commonware_storage::journal::contiguous::Reader as _;
 use commonware_utils::sequence::FixedBytes;
@@ -10,7 +10,10 @@ use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, Rng, RngCore, SeedableRng};
 use std::{
     hint::black_box,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -55,20 +58,31 @@ fn bench_fixed_mixed(c: &mut Criterion) {
                     append_fixed_random_data(&mut journal, INITIAL_ITEMS).await;
                     let journal = Arc::new(journal);
 
-                    // Spawn the readers.
+                    // Spawn the readers. Each signals after completing its first batch so
+                    // measurement starts only once every reader is live.
+                    let started = Arc::new(AtomicUsize::new(0));
                     let mut handles = Vec::<Handle<()>>::with_capacity(readers);
                     for seed in 0..readers {
                         let journal = journal.clone();
+                        let started = started.clone();
                         handles.push(ctx.child("reader").spawn(move |_| async move {
                             let mut rng = StdRng::seed_from_u64(seed as u64);
+                            let mut batches = 0usize;
                             loop {
                                 let reader = journal.reader().await;
                                 for _ in 0..READS_PER_BATCH {
                                     let pos = rng.gen_range(0..INITIAL_ITEMS);
                                     black_box(reader.read(pos).await.expect("failed to read"));
                                 }
+                                batches += 1;
+                                if batches == 1 {
+                                    started.fetch_add(1, Ordering::SeqCst);
+                                }
                             }
                         }));
+                    }
+                    while started.load(Ordering::SeqCst) < readers {
+                        ctx.sleep(Duration::from_millis(1)).await;
                     }
 
                     // Measure append+sync throughput while the readers run.
