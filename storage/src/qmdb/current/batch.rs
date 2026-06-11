@@ -13,7 +13,7 @@ use crate::{
         self,
         any::{
             self,
-            batch::{lookup_sorted, DiffEntry},
+            batch::{DiffCursors, DiffEntry},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -117,10 +117,10 @@ impl<const N: usize> ChunkOverlay<N> {
 /// Bitmap-accelerated floor scan over a layered `BitmapBatch` chain. Skips locations where the
 /// bitmap bit is unset, avoiding I/O reads for inactive operations.
 ///
-/// Mirrors the contract on `any::batch::next_candidate`: may return only locations that are
-/// *possibly* active in `[floor, tip)`, may skip locations only when known inactive.
-/// `is_active_at` revalidates each candidate, so false positives are tolerated; false negatives
-/// are forbidden.
+/// Mirrors the contract on `any::batch::fill_candidates`: may return only locations that are
+/// *possibly* active in `[floor, tip)`, may skip locations only when known inactive. The
+/// floor-raise loop revalidates each candidate, so false positives are tolerated; false
+/// negatives are forbidden.
 ///
 /// False positives can arise two ways:
 /// - In the committed prefix, an uncommitted ancestor batch in the chain may have superseded
@@ -144,6 +144,27 @@ pub(crate) fn next_candidate<F: Graftable, B: bitmap::Readable<N>, const N: usiz
     }
     let candidate = floor.max(bitmap_len);
     (candidate < tip).then(|| Location::<F>::new(candidate))
+}
+
+/// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` over the layered
+/// `BitmapBatch` chain, returning the next `floor`. Produces the same sequence as repeatedly
+/// calling [`next_candidate`].
+pub(crate) fn fill_candidates<F: Graftable, B: bitmap::Readable<N>, const N: usize>(
+    bitmap: &B,
+    floor: Location<F>,
+    tip: u64,
+    limit: usize,
+    out: &mut Vec<Location<F>>,
+) -> Location<F> {
+    let mut scan = floor;
+    while out.len() < limit {
+        let Some(candidate) = next_candidate(bitmap, scan, tip) else {
+            break;
+        };
+        out.push(candidate);
+        scan = Location::<F>::new(*candidate + 1);
+    }
+    scan
 }
 
 /// Adapter that resolves ops MMR nodes for a batch's `compute_current_layer`.
@@ -365,7 +386,9 @@ where
 
     /// Batch read multiple keys.
     ///
-    /// Returns results in the same order as the input keys.
+    /// Returns results in the same order as the input keys. Committed-DB locations resolved by
+    /// the read are cached on the batch and consumed by [`merkleize`](Self::merkleize), which
+    /// skips re-reading those keys.
     pub async fn get_many<E, C, I>(
         &self,
         keys: &[&K],
@@ -403,8 +426,8 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip| {
-                next_candidate(&bitmap_parent, floor, tip)
+            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
             })
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
@@ -474,8 +497,8 @@ where
         } = self;
         // Use the speculative parent bitmap rather than the committed `any` bitmap.
         let inner = inner
-            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip| {
-                next_candidate(&bitmap_parent, floor, tip)
+            .merkleize_with_floor_scan(&db.any, metadata, |floor, tip, limit, out| {
+                fill_candidates(&bitmap_parent, floor, tip, limit, out)
             })
             .await?;
         compute_current_layer(inner, db, &grafted_parent, &bitmap_parent).await
@@ -513,7 +536,9 @@ where
     // 2. Inactivate previous CommitFloor.
     overlay.clear_bit(base, pruned_chunks, batch_base - 1);
 
-    // 3. Set active bits + clear superseded locations from the diff.
+    // 3. Set active bits + clear superseded locations from the diff. The diff is key-sorted,
+    // so ancestor resolution streams (one cursor per ancestor diff).
+    let mut ancestors = DiffCursors::new(ancestor_diffs.iter().map(|d| d.as_slice()));
     for (key, entry) in diff {
         // Set the active bit for this key's final location.
         if let Some(loc) = entry.loc() {
@@ -525,11 +550,8 @@ where
         // Clear the most recent superseded location. Older locations were already cleared by the
         // ancestor batch that superseded them.
         let mut prev_loc = entry.base_old_loc();
-        for ancestor_diff in ancestor_diffs {
-            if let Some(ancestor_entry) = lookup_sorted(ancestor_diff.as_slice(), key) {
-                prev_loc = ancestor_entry.loc();
-                break;
-            }
+        if let Some(ancestor_entry) = ancestors.resolve(key) {
+            prev_loc = ancestor_entry.loc();
         }
         if let Some(old) = prev_loc {
             overlay.clear_bit(base, pruned_chunks, *old);
@@ -943,7 +965,6 @@ mod trait_impls {
             BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
             UnmerkleizedBatch as UnmerkleizedBatchTrait,
         },
-        Persistable,
     };
     use std::future::Future;
 
@@ -959,8 +980,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
@@ -993,8 +1013,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
@@ -1042,8 +1061,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -1075,8 +1093,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>
-            + Persistable<Error = crate::journal::Error>,
+        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,

@@ -65,7 +65,7 @@ use crate::{
         sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
@@ -112,7 +112,7 @@ where
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<F, U>> + Persistable<Error = crate::journal::Error>,
+    J: Mutable<Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {

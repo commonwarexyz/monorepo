@@ -11,35 +11,32 @@
 //!
 //! # What compact dbs store
 //!
-//! A compact db persists two pieces of state that must always describe the same committed tip:
-//!
-//! 1. the compact Merkle frontier (persisted by [`crate::merkle::compact`]), and
-//! 2. a db-level witness for the last commit (persisted by `qmdb::compact::witness`).
-//!
-//! The witness exists because only the db layer knows how to encode and decode the typed commit
-//! operation. Without it, a compact db could recover its root and continue appending, but it could
-//! not serve compact sync to another node.
+//! A compact db's only persistent state is its witness journal (`qmdb::compact::witness`), whose
+//! entries each snapshot one committed state (commit operation, proof, and frontier pins).
+//! The in-memory compact Merkle ([`crate::merkle::compact`]) is rebuilt from the journal tip on
+//! reopen. Without the witness, a compact db could recover its root and continue appending, but
+//! it could not serve compact sync to another node.
 //!
 //! # When compact state changes
 //!
 //! The servable compact state advances only on durable persistence:
 //!
 //! - [`sync`] verifies the final commit proof and compact frontier before database construction.
-//! - [`Database::from_validated_state`] reconstructs the already-validated state in memory only.
-//! - Compact db-local commits persist the frontier and witness together during `sync`/`commit`.
-//! - `rewind` restores both the frontier and the witness from the previous slot together.
+//! - [`Database::from_validated_state`] reconstructs the already-validated state without
+//!   persisting it.
+//! - Compact db-local commits append one witness entry during `sync`.
+//! - `rewind` restores the frontier and the witness from the target journal entry.
 //!
-//! Unsynced in-memory mutations are therefore intentionally not servable: `current_target()` and
-//! compact-state responses lag behind `apply_batch()` until the next durable sync.
+//! Unsynced in-memory mutations are therefore intentionally not servable: `target()` and
+//! compact-state responses lag behind `apply_batch()` until the db's next sync.
 //!
 //! # Safety and invariants
 //!
 //! The compact path relies on these invariants:
 //!
 //! - the served commit proof must authenticate the final commit at `leaf_count - 1`,
-//! - the frontier pins and witness must move together in the same ping-pong slot,
-//! - reopen and rewind must re-verify the persisted witness against the root restored from that
-//!   slot, and
+//! - reopen and rewind must re-verify the persisted witness against the root recomputed from the
+//!   frontier rebuilt from the same journal entry, and
 //! - reconstructed state must not be persisted until the db recomputes the requested root locally.
 //!
 //! If those invariants are violated by missing or corrupted persisted data, compact db reopen fails
@@ -179,28 +176,12 @@ pub struct State<F: Family, Op, D: Digest> {
 }
 
 /// Compact state that has been validated against a target root.
-///
-/// This carries the original compact state plus the values derived while validating it. Compact
-/// database constructors still build their storage-backed Merkle state and witness cache, but they
-/// should use these values instead of re-deriving them from peer-provided state.
 #[derive(Clone, Debug)]
 pub struct ValidatedState<F: Family, Op, D: Digest> {
     /// The compact state fetched from a peer after validation.
     pub state: State<F, Op, D>,
     /// The target root that `state` was validated against.
     pub root: D,
-    /// The inactivity floor derived from the final commit operation.
-    pub inactivity_floor: Location<F>,
-}
-
-impl<F: Family, Op, D: Digest> ValidatedState<F, Op, D> {
-    const fn new(state: State<F, Op, D>, root: D, inactivity_floor: Location<F>) -> Self {
-        Self {
-            state,
-            root,
-            inactivity_floor,
-        }
-    }
 }
 
 impl<F: Family, Op, D: Digest> Write for State<F, Op, D>
@@ -219,7 +200,7 @@ where
 pub struct FetchResult<F: Family, Op, D: Digest> {
     /// The fetched compact state.
     pub state: State<F, Op, D>,
-    /// Callback used to report whether downstream accepted the state.
+    /// Callback used to report whether downstream validated the state.
     pub callback: Option<oneshot::Sender<bool>>,
 }
 
@@ -393,7 +374,7 @@ where
 /// 4. Build the compact db from that already-validated state.
 /// 5. Assert the db root still matches and persist the state.
 ///
-/// Any failure leaves the local compact db unopened or unchanged on disk.
+/// A failure before the final persist leaves on-disk state untouched.
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
@@ -529,11 +510,10 @@ where
         });
     }
 
-    Ok(ValidatedState::new(
+    Ok(ValidatedState {
         state,
-        target.root,
-        inactivity_floor_loc,
-    ))
+        root: target.root,
+    })
 }
 
 async fn fetch_state_from_full_source<F, Op, D, Current, CurrentFut, Hist, HistFut, Pins, PinsFut>(

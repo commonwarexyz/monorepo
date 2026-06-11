@@ -10,7 +10,7 @@ use crate::{
         segmented::variable,
         Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_runtime::buffer::paged::CacheRef;
@@ -23,11 +23,20 @@ use core::ops::Range;
 use futures::{future::try_join_all, stream, Stream, StreamExt as _};
 use std::{
     cmp::Ordering,
+    marker::PhantomData,
     num::{NonZeroU64, NonZeroUsize},
 };
 #[commonware_macros::stability(ALPHA)]
 use tracing::debug;
 use tracing::warn;
+
+/// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
+/// [`Journal::append_prepared`].
+pub struct PreparedAppend<V> {
+    encoded: Vec<u8>,
+    item_starts: Vec<usize>,
+    _marker: PhantomData<V>,
+}
 
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
@@ -754,31 +763,61 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     async fn append_many_inner<'a>(&'a self, items: Many<'a, V>) -> Result<u64, Error> {
-        if items.is_empty() {
-            return Err(Error::EmptyAppend);
-        }
-        let items_count = items.len();
+        self.write_encoded(self.prepare_append(items)?).await
+    }
 
-        // Encode every item into a single buffer for bulk-writing before grabbing write guard.
+    /// Encode `items` into a buffer that can be appended later with [`Self::append_prepared`].
+    ///
+    /// This lets callers serialize borrowed items synchronously, release those borrows, and
+    /// perform the append without holding unrelated locks across journal I/O.
+    pub fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
         let mut encoded = Vec::new();
-        let mut item_starts = Vec::with_capacity(items_count);
+        let mut item_starts = Vec::with_capacity(items.len());
         let mut encode = |item: &V| {
             item_starts.push(encoded.len());
             variable::Journal::<E, V>::encode_item_into(self.compression, item, &mut encoded)
         };
-        match &items {
+        match items {
             Many::Flat(items) => {
-                for item in *items {
+                for item in items {
                     encode(item)?;
                 }
             }
             Many::Nested(nested_items) => {
-                for items in *nested_items {
+                for items in nested_items {
                     for item in *items {
                         encode(item)?;
                     }
                 }
             }
+        }
+        Ok(PreparedAppend {
+            encoded,
+            item_starts,
+            _marker: PhantomData,
+        })
+    }
+
+    /// Append items encoded by [`Self::prepare_append`], returning the position of the last item
+    /// appended.
+    ///
+    /// Returns [Error::EmptyAppend] if `prepared` contains no items.
+    pub async fn append_prepared(&self, prepared: PreparedAppend<V>) -> Result<u64, Error> {
+        let _timer = self.metrics.append_prepared_timer();
+        self.metrics.append_prepared_calls.inc();
+        self.write_encoded(prepared).await
+    }
+
+    // Write pre-encoded items; shared by all append paths. Records no call metrics.
+    async fn write_encoded(&self, prepared: PreparedAppend<V>) -> Result<u64, Error> {
+        let PreparedAppend {
+            encoded,
+            item_starts,
+            ..
+        } = prepared;
+        let items_count = item_starts.len();
+        if items_count == 0 {
+            return Err(Error::EmptyAppend);
         }
 
         let _op_guard = self.op_lock.lock().await;
@@ -1340,21 +1379,17 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         Self::rewind(self, size).await
     }
-}
-
-impl<E: Context, V: CodecShared> Persistable for Journal<E, V> {
-    type Error = Error;
 
     async fn commit(&self) -> Result<(), Error> {
-        self.commit().await
+        Self::commit(self).await
     }
 
     async fn sync(&self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 

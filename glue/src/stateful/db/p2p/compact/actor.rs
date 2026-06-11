@@ -423,13 +423,23 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context) -> TestDb {
+        let witness = commonware_storage::journal::contiguous::variable::Config {
+            partition: "compact-p2p-test-witness".into(),
+            items_per_section: commonware_utils::NZU64!(64),
+            compression: None,
+            codec_config: (),
+            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
+                &context,
+                commonware_utils::NZU16!(1024),
+                NZUsize!(64),
+            ),
+            write_buffer: NZUsize!(1024),
+        };
         TestDb::init(
             context,
             keyless_fixed::CompactConfig {
-                merkle: commonware_storage::merkle::compact::Config {
-                    partition: "compact-p2p-test".into(),
-                    strategy: Sequential,
-                },
+                strategy: Sequential,
+                witness,
                 commit_codec_config: (),
             },
         )
@@ -452,7 +462,7 @@ mod tests {
         .unwrap();
         db.sync().await.unwrap();
 
-        let target = db.current_target();
+        let target = db.target();
         let fetch = compact::Resolver::get_compact_state(
             &Arc::new(TracedAsyncRwLock::new("test", db)),
             target.clone(),
@@ -567,7 +577,7 @@ mod tests {
     fn produce_serves_attached_database() {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
-            let target = db.current_target();
+            let target = db.target();
             let db = Arc::new(TracedAsyncRwLock::new("test", db));
             let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
             let request = handler::Request::from_target(target.clone());

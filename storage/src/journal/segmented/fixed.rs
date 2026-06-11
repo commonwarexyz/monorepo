@@ -188,14 +188,21 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     ///
     /// `buf` must be at least `positions.len() * CHUNK_SIZE` bytes. All positions must be
     /// strictly increasing and within the section's bounds.
+    ///
+    /// Returns the decoded items and the number served without a blob read (page cache or tip
+    /// buffer hits).
     pub async fn get_many(
         &self,
         section: u64,
         positions: &[u64],
         buf: &mut [u8],
-    ) -> Result<Vec<A>, Error> {
+    ) -> Result<(Vec<A>, usize), Error> {
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be strictly increasing"
+        );
         if positions.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), 0));
         }
         let blob = self
             .manager
@@ -210,14 +217,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             })
             .collect::<Result<_, _>>()?;
 
-        blob.read_many_into(buf, &offsets, Self::CHUNK_SIZE).await?;
+        let hits = blob.read_many_into(buf, &offsets, Self::CHUNK_SIZE).await?;
 
         let mut items = Vec::with_capacity(positions.len());
         for i in 0..positions.len() {
             let slice = &buf[i * Self::CHUNK_SIZE..(i + 1) * Self::CHUNK_SIZE];
             items.push(A::decode(slice).map_err(Error::Codec)?);
         }
-        Ok(items)
+        Ok((items, hits))
     }
 
     /// Get an item if it can be done synchronously (e.g. without I/O), returning `None` otherwise.
@@ -1432,8 +1439,9 @@ mod tests {
             assert_eq!(journal.section_len(0).await.unwrap(), 1);
 
             let mut buf = [];
-            let items = journal.get_many(0, &[], &mut buf).await.unwrap();
+            let (items, hits) = journal.get_many(0, &[], &mut buf).await.unwrap();
             assert!(items.is_empty());
+            assert_eq!(hits, 0);
 
             journal.destroy().await.unwrap();
         });
@@ -1454,7 +1462,7 @@ mod tests {
             // Read all 5 items in one call.
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let mut buf = vec![0u8; 5 * chunk];
-            let items = journal
+            let (items, _) = journal
                 .get_many(0, &[0, 1, 2, 3, 4], &mut buf)
                 .await
                 .unwrap();
@@ -1483,7 +1491,7 @@ mod tests {
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let positions = [1, 4, 7, 9];
             let mut buf = vec![0u8; positions.len() * chunk];
-            let items = journal.get_many(0, &positions, &mut buf).await.unwrap();
+            let (items, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
 
             for (i, &pos) in positions.iter().enumerate() {
                 assert_eq!(items[i], test_digest(pos));
@@ -1527,7 +1535,7 @@ mod tests {
             let chunk = Journal::<deterministic::Context, Digest>::CHUNK_SIZE;
             let positions: Vec<u64> = (0..8).collect();
             let mut buf = vec![0u8; positions.len() * chunk];
-            let batch = journal.get_many(0, &positions, &mut buf).await.unwrap();
+            let (batch, _) = journal.get_many(0, &positions, &mut buf).await.unwrap();
 
             for pos in &positions {
                 let single = journal.get(0, *pos).await.unwrap();

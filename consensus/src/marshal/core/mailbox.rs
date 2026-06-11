@@ -714,6 +714,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
     /// Digest-keyed subscriptions only support waiting locally or fetching by round.
     ///
+    /// Delivery makes no durability promise. A delivered block may not have been persisted by
+    /// marshal, so it may not be retrievable after an unclean shutdown. Consumers that need
+    /// durable height-ordered delivery should rely on application dispatch instead.
+    ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub fn subscribe_by_digest(
         &self,
@@ -740,6 +744,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// that it may never become available.
     ///
     /// The `fallback` parameter controls whether marshal also asks peers for the missing block.
+    ///
+    /// Delivery makes no durability promise. A delivered block may not have been persisted by
+    /// marshal, so it may not be retrievable after an unclean shutdown. Consumers that need
+    /// durable height-ordered delivery should rely on application dispatch instead.
     ///
     /// The oneshot receiver should be dropped to cancel the subscription.
     pub fn subscribe_by_commitment(

@@ -15,11 +15,8 @@ use commonware_cryptography::Hasher;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Clock, Metrics, Storage};
 use commonware_storage::{
-    journal::{
-        contiguous::{
-            fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
-        },
-        Error as JournalError,
+    journal::contiguous::{
+        fixed::Journal as FixedJournal, variable::Journal as VariableJournal, Mutable,
     },
     merkle::{Family, Location},
     qmdb::{
@@ -31,7 +28,6 @@ use commonware_storage::{
         sync::{self, resolver::Resolver, Target as AnySyncTarget},
         Error,
     },
-    Persistable,
 };
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock};
 use std::{ops::Deref, sync::Arc};
@@ -45,7 +41,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -61,7 +57,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -78,7 +74,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -130,7 +126,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -144,7 +140,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -161,7 +157,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -190,7 +186,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -217,7 +213,7 @@ where
     F: Family,
     E: Storage + Clock + Metrics,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, V>>,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,

@@ -75,6 +75,32 @@ impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory<T> for
 
 impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
     type Value = V;
+
+    fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
+    where
+        V: 'a,
+    {
+        // Probe in (partition, translated-key) order so consecutive probes hit the same
+        // partition and descend through shared upper tree nodes within it.
+        let mut order: Vec<(usize, T::Key, usize)> = keys
+            .iter()
+            .enumerate()
+            .map(|(key_idx, key)| {
+                let (partition, sub_key) = partition_index_and_sub_key::<P>(key.as_ref());
+                (
+                    partition,
+                    self.partitions[partition].translate(sub_key),
+                    key_idx,
+                )
+            })
+            .collect();
+        order.sort_unstable();
+        for (partition, translated, key_idx) in order {
+            for value in self.partitions[partition].get_translated(translated) {
+                visit(key_idx, value);
+            }
+        }
+    }
     type Cursor<'a>
         = <OrderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
     where

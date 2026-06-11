@@ -2,14 +2,14 @@
 
 use super::{operation::Operation, Keyless};
 use crate::{
-    journal::{authenticated, contiguous::Mutable, Error as JournalError},
+    journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
         any::value::ValueEncoding,
         batch_chain::{self, Bounds},
         Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher};
@@ -118,7 +118,7 @@ where
     pub(super) fn new<E, C>(keyless: &Keyless<F, E, V, C, H, S>, journal_size: u64) -> Self
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         Self {
             journal_batch: keyless.journal.new_batch(),
@@ -150,7 +150,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         let loc_val = *loc;
 
@@ -189,7 +189,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         if locs.is_empty() {
             return Ok(Vec::new());
@@ -257,7 +257,7 @@ where
     ) -> Arc<MerkleizedBatch<F, H::Digest, V, S>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         // Build operations: one Append per value, then Commit.
         let mut ops: Vec<Operation<F, V>> = Vec::with_capacity(self.appends.len() + 1);
@@ -329,7 +329,7 @@ where
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         let loc_val = *loc;
 
@@ -357,7 +357,7 @@ where
     where
         E: Context,
         H: Hasher<Digest = D>,
-        C: Mutable<Item = Operation<F, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, V>>,
     {
         if locs.is_empty() {
             return Ok(Vec::new());

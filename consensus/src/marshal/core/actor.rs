@@ -394,7 +394,10 @@ where
             },
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
-                Ok(block) => self.block_subscriptions.notify(&block),
+                Ok(block) => {
+                    self.ingest(&block, &mut buffer, &mut application, &mut resolver)
+                        .await;
+                },
                 Err(key) => {
                     match key {
                         SubscriptionKey::Digest(digest) => {
@@ -575,13 +578,14 @@ where
             Message::Proposed {
                 round, block, ack, ..
             } => {
+                self.ingest(&block, buffer, application, resolver).await;
+
                 // If the round has already been pruned by tip advancement,
-                // `cache_verified` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_verified(round, block.digest(), block.clone())
-                    .await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                self.cache
+                    .put_verified(round, block.digest(), block.clone().into())
                     .await;
 
                 // Retain the block in memory so the subsequent `Forward` can
@@ -594,25 +598,28 @@ where
             Message::Verified {
                 round, block, ack, ..
             } => {
+                self.ingest(&block, buffer, application, resolver).await;
+
                 // If the round has already been pruned by tip advancement,
-                // `cache_verified` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_verified(round, block.digest(), block.clone())
-                    .await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                self.cache
+                    .put_verified(round, block.digest(), block.into())
                     .await;
                 ack.expect("durable ack present").send_lossy(());
             }
             Message::Certified {
                 round, block, ack, ..
             } => {
+                self.ingest(&block, buffer, application, resolver).await;
+
                 // If the round has already been pruned by tip advancement,
-                // `cache_block` is a no-op because the round is below
+                // `put_block` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache_block(round, block.digest(), block.clone()).await;
-                self.apply_floor_anchor(&block, buffer, application, resolver)
+                self.cache
+                    .put_block(round, block.digest(), block.into())
                     .await;
                 ack.expect("durable ack present").send_lossy(());
             }
@@ -623,16 +630,15 @@ where
 
                 // Cache notarization by round.
                 self.cache
-                    .put_notarization(round, digest, notarization.clone())
+                    .put_notarization(round, digest, notarization)
                     .await;
 
                 // A notarization alone is not enough to fetch missing proposal
                 // data. If the block is not locally available, remember the
                 // certificate and wait for a later finalization/repair path.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
-                    self.cache_block(round, digest, block.clone()).await;
-                    self.apply_floor_anchor(&block, buffer, application, resolver)
-                        .await;
+                    self.ingest(&block, buffer, application, resolver).await;
+                    self.cache.put_block(round, digest, block.into()).await;
                 } else {
                     debug!(?round, "notarized block unavailable locally");
                 }
@@ -651,10 +657,7 @@ where
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
                     // The anchor path stores the floor block and finalization,
                     // advances floors, prunes below them, and resumes dispatch.
-                    if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         return;
                     }
 
@@ -1056,10 +1059,7 @@ where
 
         if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
             self.floor.await_anchor(finalization);
-            assert!(
-                self.apply_floor_anchor(&block, buffer, application, resolver)
-                    .await
-            );
+            assert!(self.ingest(&block, buffer, application, resolver).await);
             return;
         }
 
@@ -1077,25 +1077,37 @@ where
             .ignore();
     }
 
-    /// Applies a block if it satisfies the current floor transition.
-    async fn apply_floor_anchor<Buf: Buffer<V>>(
+    /// Notifies subscribers of a validated block and applies it to any
+    /// pending floor transition.
+    ///
+    /// Subscribers are notified before the block is persisted. This is not
+    /// observable while running because mailbox requests are only served
+    /// after the current `select_loop!` arm completes. After an unclean
+    /// shutdown, however, a subscriber may hold a block that marshal never
+    /// durably stored. Subscriptions make no durability promise. Durable
+    /// height-ordered delivery is provided by application dispatch, which
+    /// only sends blocks after [`Self::sync_finalized`].
+    ///
+    /// Returns true if the block was consumed as the floor anchor.
+    async fn ingest<Buf: Buffer<V>>(
         &mut self,
         block: &V::Block,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
         resolver: &mut impl Resolver<Key = ResolverRequestFor<V>, Subscriber = Annotation>,
     ) -> bool {
+        self.block_subscriptions.notify(block);
+
         let commitment = V::commitment(block);
         if !self.floor.matches_pending_anchor(commitment) {
             return false;
         }
-        let block = (*block).clone();
 
         // Floor anchors can bypass the local proposal-verification path. Check
         // the parent relationship before using a non-genesis anchor for walkback.
         let height = block.height();
         if height > Height::zero() {
-            let parent_commitment = V::parent_commitment(&block);
+            let parent_commitment = V::parent_commitment(block);
             assert!(
                 block.parent() == V::commitment_to_inner(parent_commitment),
                 "floor block parent commitment mismatch"
@@ -1133,7 +1145,7 @@ where
         try_join!(
             async {
                 self.finalized_blocks
-                    .put(block.clone().into())
+                    .put((*block).clone().into())
                     .await
                     .map_err(Box::new)?;
                 Ok::<_, BoxedError>(())
@@ -1148,7 +1160,6 @@ where
         )
         .expect("failed to store floor anchor");
         self.sync_finalized().await;
-        self.block_subscriptions.notify(&block);
 
         if height > self.tip {
             application.report(Update::Tip(round, height, digest));
@@ -1221,18 +1232,10 @@ where
                 // This block may match the pending floor request. Whether it
                 // installs or is rejected as the floor anchor, do not also
                 // process it as an ordinary block delivery.
-                if self
-                    .apply_floor_anchor(&block, buffer, application, resolver)
-                    .await
-                {
+                if self.ingest(&block, buffer, application, resolver).await {
                     response.send_lossy(true);
                     return false;
                 }
-
-                // The commitment validates the peer response. Annotations are
-                // local context attached to the request and do not affect peer
-                // validity.
-                self.block_subscriptions.notify(&block);
 
                 // The peer-visible request only says "give me this block".
                 // Local annotations explain why the block was requested and
@@ -1264,7 +1267,7 @@ where
                     {
                         if let Some(bounds) = self.epocher.containing(height) {
                             self.cache
-                                .put_certified(bounds.epoch(), height, digest, block.clone().into())
+                                .put_certified(bounds.epoch(), height, digest, block.into())
                                 .await;
                         }
                     }
@@ -1470,10 +1473,7 @@ where
 
                     // The floor-anchor path fully handles this finalization
                     // and moves the lower bound past it.
-                    if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         continue;
                     }
 
@@ -1498,17 +1498,16 @@ where
 
                     // Cache the notarization and block.
                     let height = block.height();
-                    self.cache_block(round, digest, block.clone()).await;
+                    self.cache
+                        .put_block(round, digest, block.clone().into())
+                        .await;
                     self.cache
                         .put_notarization(round, digest, notarization)
                         .await;
 
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.
-                    if self
-                        .apply_floor_anchor(&block, buffer, application, resolver)
-                        .await
-                    {
+                    if self.ingest(&block, buffer, application, resolver).await {
                         continue;
                     }
 
@@ -1526,7 +1525,7 @@ where
                             .store_finalization(
                                 height,
                                 digest,
-                                block.clone(),
+                                block,
                                 Some(finalization),
                                 application,
                             )
@@ -1630,17 +1629,6 @@ where
 
     // -------------------- Prunable Storage --------------------
 
-    /// Add a verified block to the prunable archive.
-    async fn cache_verified(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
-    ) {
-        self.block_subscriptions.notify(&block);
-        self.cache.put_verified(round, digest, block.into()).await;
-    }
-
     /// If a block previously accepted via [`Message::Proposed`] matches the
     /// supplied `(round, commitment)`, remove and return it.
     fn take_proposed(&mut self, round: Round, commitment: V::Commitment) -> Option<V::Block> {
@@ -1649,17 +1637,6 @@ where
             return None;
         }
         self.last_proposed_block.take().map(|(_, _, block)| block)
-    }
-
-    /// Add a notarized block to the prunable archive.
-    async fn cache_block(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::Block,
-    ) {
-        self.block_subscriptions.notify(&block);
-        self.cache.put_block(round, digest, block.into()).await;
     }
 
     /// Sync both finalization archives to durable storage.
@@ -1768,7 +1745,6 @@ where
             );
             return false;
         }
-        self.block_subscriptions.notify(&block);
 
         // Convert block to storage format
         let stored: V::StoredBlock = block.into();
@@ -1848,19 +1824,15 @@ where
         }
     }
 
-    /// Looks for a block in cache and finalized storage by inner digest, returning
-    /// only blocks that match `predicate`.
-    async fn find_block_in_storage_matching(
+    /// Looks for a block in cache and finalized storage by full consensus commitment.
+    async fn find_block_in_storage_by_commitment(
         &self,
-        digest: <V::Block as Digestible>::Digest,
-        mut predicate: impl FnMut(&V::Block) -> bool,
+        commitment: V::Commitment,
     ) -> Option<V::Block> {
+        let digest = V::commitment_to_inner(commitment);
         if let Some(block) = self
             .cache
-            .find_block_matching(digest, |stored| {
-                let block = stored.clone().into();
-                predicate(&block)
-            })
+            .find_block_matching(digest, |stored| V::stored_commitment(stored) == commitment)
             .await
         {
             return Some(block.into());
@@ -1868,8 +1840,7 @@ where
 
         match self.finalized_blocks.get(ArchiveID::Key(&digest)).await {
             Ok(Some(stored)) => {
-                let block = stored.into();
-                predicate(&block).then_some(block)
+                (V::stored_commitment(&stored) == commitment).then(|| stored.into())
             }
             Ok(None) => None,
             Err(e) => panic!("failed to get block: {e}"),
@@ -1903,10 +1874,7 @@ where
         if let Some(block) = buffer.find_by_commitment(commitment).await {
             return Some(block);
         }
-        self.find_block_in_storage_matching(V::commitment_to_inner(commitment), |block| {
-            V::commitment(block) == commitment
-        })
-        .await
+        self.find_block_in_storage_by_commitment(commitment).await
     }
 
     /// Attempt to repair any identified gaps in the finalized blocks archive. The total
@@ -1982,10 +1950,16 @@ where
             };
 
             // Attempt to repair the gap backwards from the end of the gap, using
-            // blocks from our local storage.
-            let Some(mut cursor) = self.get_finalized_block(gap_end).await else {
+            // blocks from our local storage. The walkback only needs each
+            // block's height and parent linkage.
+            let Some(cursor) = self.get_finalized_block(gap_end).await else {
                 panic!("gapped block missing that should exist: {gap_end}");
             };
+            let (mut height, mut parent_digest, mut parent_commitment) = (
+                cursor.height(),
+                cursor.parent(),
+                V::parent_commitment(&cursor),
+            );
 
             // Compute the lower bound of the recursive repair. `gap_start` is `Some`
             // if `start` is not in a gap. We add one to it to ensure we don't
@@ -1993,33 +1967,25 @@ where
             let gap_start = gap_start.map(Height::next).unwrap_or(start);
 
             // Iterate backwards, repairing blocks as we go.
-            while cursor.height() > gap_start {
-                let parent_digest = cursor.parent();
-                let parent_commitment = V::parent_commitment(&cursor);
+            while height > gap_start {
                 if let Some(block) = self
                     .find_block_by_commitment(buffer, parent_commitment)
                     .await
                 {
                     let finalization = self.cache.get_finalization_for(parent_digest).await;
+                    let next = (block.height(), block.parent(), V::parent_commitment(&block));
                     wrote |= self
-                        .store_finalization(
-                            block.height(),
-                            parent_digest,
-                            block.clone(),
-                            finalization,
-                            application,
-                        )
+                        .store_finalization(next.0, parent_digest, block, finalization, application)
                         .await;
-                    debug!(height = %block.height(), "repaired block");
-                    cursor = block;
+                    debug!(height = %next.0, "repaired block");
+                    (height, parent_digest, parent_commitment) = next;
                 } else {
                     // Request the next missing commitment.
                     //
                     // SAFETY: Finalized blocks are archived only after the
                     // parent relationship needed for walkback has been
                     // validated by marshal.
-                    let parent_height = cursor
-                        .height()
+                    let parent_height = height
                         .previous()
                         .expect("cursor above gap start has a parent");
                     self.floor

@@ -46,6 +46,10 @@ pub(super) struct CommonMetrics<E: Clock> {
     pub append_many_calls: Counter,
     /// Duration of append-many calls.
     append_many_duration: Timed,
+    /// Pre-encoded batch append calls.
+    pub append_prepared_calls: Counter,
+    /// Duration of pre-encoded batch append calls.
+    append_prepared_duration: Timed,
     /// Single-item read calls.
     pub read_calls: Counter,
     /// Duration of single-item read calls.
@@ -95,6 +99,15 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
             "append_many_duration",
             "Duration of append-many calls",
         );
+        let append_prepared_calls = context.as_ref().counter(
+            "append_prepared_calls",
+            "Number of pre-encoded batch append calls",
+        );
+        let append_prepared_duration = duration_histogram(
+            context.as_ref(),
+            "append_prepared_duration",
+            "Duration of pre-encoded batch append calls",
+        );
         let read_calls = context
             .as_ref()
             .counter("read_calls", "Number of single-item read calls");
@@ -137,6 +150,8 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
             append_duration: Timed::new(append_duration),
             append_many_calls,
             append_many_duration: Timed::new(append_many_duration),
+            append_prepared_calls,
+            append_prepared_duration: Timed::new(append_prepared_duration),
             read_calls,
             read_duration: Timed::new(read_duration),
             read_many_calls,
@@ -156,6 +171,10 @@ impl<E: Clock> CommonMetrics<E> {
 
     pub(super) fn append_many_timer(&self) -> ScopedTimer<E> {
         self.append_many_duration.scoped(&self.clock)
+    }
+
+    pub(super) fn append_prepared_timer(&self) -> ScopedTimer<E> {
+        self.append_prepared_duration.scoped(&self.clock)
     }
 
     pub(super) fn read_timer(&self) -> ScopedTimer<E> {
@@ -196,13 +215,13 @@ impl<E: RuntimeMetrics + Clock> FixedMetrics<E> {
     /// Create and register metrics for a fixed-size journal.
     pub(super) fn new(context: E) -> Self {
         let context = Arc::new(context);
-        let hits = context
-            .as_ref()
-            .counter("cache_hits", "Number of fixed items read synchronously");
+        let hits = context.as_ref().counter(
+            "cache_hits",
+            "Number of fixed items served without a blob read",
+        );
         let misses = context.as_ref().counter(
             "cache_misses",
-            "Number of fixed items not satisfied synchronously by read or read_many, including \
-             pruned or out-of-range try_read_sync probes that returned None",
+            "Number of fixed items requiring a blob read",
         );
         let calls = context
             .as_ref()

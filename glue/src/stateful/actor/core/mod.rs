@@ -11,10 +11,7 @@ use crate::stateful::{
         processor::Processor,
         syncer::{self, SyncPlan, SyncResult},
     },
-    db::{
-        assert_rewind_window_safety, AttachableResolverSet, DatabaseSet, StateSyncSet,
-        SyncEngineConfig,
-    },
+    db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
     Application,
 };
 use commonware_actor::mailbox::{self as actor_mailbox};
@@ -45,6 +42,11 @@ type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {
+    /// Marshal's ack window. Must match the marshal config used to construct the marshal
+    /// mailbox: pruning retains at least the last `max_pending_acks + 1` finalized blocks so
+    /// that any state a restart may need to rewind to is never pruned.
+    pub max_pending_acks: NonZeroUsize,
+
     /// Prune databases and marshal every `maintenance_interval` finalized blocks.
     ///
     /// This controls only how often pruning runs, not how much history is retained. Each prune
@@ -97,11 +99,6 @@ where
 
     /// Marshal mailbox used for startup anchoring and lazy recovery.
     pub marshal: MarshalMailbox<S, V>,
-
-    /// Marshal ack window used by the provided marshal mailbox.
-    ///
-    /// This must match the marshal config used to construct [`Self::marshal`].
-    pub max_pending_acks: NonZeroUsize,
 
     /// Capacity of the stateful actor mailbox channel.
     pub mailbox_size: NonZeroUsize,
@@ -162,9 +159,6 @@ where
     /// Sync engine tuning knobs.
     sync_config: SyncEngineConfig,
 
-    /// Marshal ack window, used to derive automatic prune retention.
-    max_pending_acks: NonZeroUsize,
-
     /// Periodic prune configuration.
     prune_config: Option<PruneConfig>,
 }
@@ -184,7 +178,6 @@ where
     /// This only wires dependencies and allocates the mailbox. The actor does
     /// not process messages until [`Stateful::start`] is called.
     pub fn init(context: E, config: Config<E, A, S, V, R>) -> (Self, Mailbox<E, A>) {
-        assert_rewind_window_safety::<E, A::Databases>(config.max_pending_acks);
         if let Some(prune_config) = config.prune_config {
             prune_config.assert_valid();
         }
@@ -201,7 +194,6 @@ where
                 plan: config.plan,
                 resolvers: config.resolvers,
                 sync_config: config.sync_config,
-                max_pending_acks: config.max_pending_acks,
                 prune_config: config.prune_config,
             },
             Mailbox::new(sender),
@@ -251,7 +243,6 @@ where
             artifact: None,
             resolvers: self.resolvers,
             sync_completed,
-            max_pending_acks: self.max_pending_acks,
             prune_config: self.prune_config,
             metrics,
         };
@@ -284,7 +275,6 @@ where
             databases,
             anchor,
             metrics,
-            self.max_pending_acks,
             self.prune_config,
         );
         Processing {
@@ -463,7 +453,6 @@ mod tests {
                     db_config: (),
                     input_provider: (),
                     marshal,
-                    max_pending_acks: NZUsize!(1),
                     mailbox_size: NZUsize!(8),
                     plan: plan.with_floor(finalization),
                     resolvers: NoopResolver,
