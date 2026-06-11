@@ -18,44 +18,9 @@ use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
-    fmt::Display,
     sync::Arc,
 };
-use tracing::{debug_span, field, info_span, Span};
-
-/// Creates the span carried with a mailbox request, parented on the enqueuing
-/// caller.
-fn enqueue_span(
-    operation: &'static str,
-    round: Option<&dyn Display>,
-    height: Option<&dyn Display>,
-    digest: Option<&dyn Display>,
-    commitment: Option<&dyn Display>,
-) -> Span {
-    info_span!(
-        "marshal.mailbox",
-        operation,
-        round = round.map(field::display),
-        height = height.map(field::display),
-        digest = digest.map(field::display),
-        commitment = commitment.map(field::display)
-    )
-}
-
-/// Creates the span carried with a read-only mailbox request, parented on the
-/// enqueuing caller.
-fn read_span(
-    operation: &'static str,
-    round: Option<&dyn Display>,
-    height: Option<&dyn Display>,
-) -> Span {
-    debug_span!(
-        "marshal.mailbox.read",
-        operation,
-        round = round.map(field::display),
-        height = height.map(field::display)
-    )
-}
+use tracing::{info_span, Span};
 
 /// Messages sent to the marshal [Actor](super::Actor).
 ///
@@ -664,7 +629,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetInfo {
-            span: read_span("get_info", None, None),
+            span: info_span!("marshal.mailbox", operation = "get_info"),
             identifier,
             response,
         });
@@ -680,7 +645,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         let identifier = identifier.into();
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetBlock {
-            span: read_span("get_block", None, None),
+            span: info_span!("marshal.mailbox", operation = "get_block"),
             identifier,
             response,
         });
@@ -691,7 +656,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
     pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
         let (response, receiver) = oneshot::channel();
-        let span = read_span("get_finalization", None, Some(&height));
+        let span = info_span!("marshal.mailbox", operation = "get_finalization", height = %height);
         let _ = self.sender.enqueue(Message::GetFinalization {
             span,
             height,
@@ -704,7 +669,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn get_processed_height(&self) -> Option<Height> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetProcessedHeight {
-            span: read_span("get_processed_height", None, None),
+            span: info_span!("marshal.mailbox", operation = "get_processed_height"),
             response,
         });
         receiver.await.ok().flatten()
@@ -730,7 +695,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// epocher cannot map the height to an epoch, or the provider cannot supply
     /// a scheme for that epoch, the hint is silently dropped.
     pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
-        let span = enqueue_span("hint_finalized", None, Some(&height), None, None);
+        let span = info_span!("marshal.mailbox", operation = "hint_finalized", height = %height);
         let _ = self.sender.enqueue(Message::HintFinalized {
             span,
             height,
@@ -756,7 +721,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         fallback: DigestFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
-        let span = enqueue_span("subscribe_by_digest", None, None, Some(&digest), None);
+        let span = info_span!("marshal.mailbox", operation = "subscribe_by_digest", digest = %digest);
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
             span,
             digest,
@@ -783,13 +748,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         fallback: CommitmentFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
-        let span = enqueue_span(
-            "subscribe_by_commitment",
-            None,
-            None,
-            None,
-            Some(&commitment),
-        );
+        let span = info_span!("marshal.mailbox", operation = "subscribe_by_commitment", commitment = %commitment);
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             span,
             fallback,
@@ -808,13 +767,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// This is useful when a local-only waiter already exists and later
     /// certification makes a network fetch by notarized round valid.
     pub fn hint_notarized(&self, round: Round, commitment: V::Commitment) {
-        let span = enqueue_span(
-            "hint_notarized",
-            Some(&round),
-            None,
-            None,
-            Some(&commitment),
-        );
+        let span = info_span!("marshal.mailbox", operation = "hint_notarized", round = %round, commitment = %commitment);
         let _ = self.sender.enqueue(Message::HintNotarized {
             span,
             round,
@@ -849,7 +802,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns the verified block previously persisted for `round`, if any.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
-        let span = read_span("get_verified", Some(&round), None);
+        let span = info_span!("marshal.mailbox", operation = "get_verified", round = %round);
         let _ = self.sender.enqueue(Message::GetVerified {
             span,
             round,
@@ -864,7 +817,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let span = enqueue_span("proposed", Some(&round), None, None, None);
+        let span = info_span!("marshal.mailbox", operation = "proposed", round = %round);
         let _ = self.sender.enqueue(Message::Proposed {
             span,
             round,
@@ -880,7 +833,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let span = enqueue_span("verified", Some(&round), None, None, None);
+        let span = info_span!("marshal.mailbox", operation = "verified", round = %round);
         let _ = self.sender.enqueue(Message::Verified {
             span,
             round,
@@ -896,7 +849,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let span = enqueue_span("certified", Some(&round), None, None, None);
+        let span = info_span!("marshal.mailbox", operation = "certified", round = %round);
         let _ = self.sender.enqueue(Message::Certified {
             span,
             round,
@@ -916,7 +869,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// [Self::prune] instead.
     /// Use [`crate::marshal::Config::start`] to provide the startup anchor.
     pub fn set_floor(&self, finalization: Finalization<S, V::Commitment>) {
-        let span = enqueue_span("set_floor", Some(&finalization.round()), None, None, None);
+        let span = info_span!("marshal.mailbox", operation = "set_floor", round = %finalization.round());
         let _ = self
             .sender
             .enqueue(Message::SetFloor { span, finalization });
@@ -927,7 +880,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Unlike [Self::set_floor], this does not affect the sync starting point.
     /// Requests above marshal's current floor are ignored.
     pub fn prune(&self, height: Height) {
-        let span = enqueue_span("prune", None, Some(&height), None, None);
+        let span = info_span!("marshal.mailbox", operation = "prune", height = %height);
         let _ = self.sender.enqueue(Message::Prune { span, height });
     }
 
@@ -938,7 +891,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         commitment: V::Commitment,
         recipients: Recipients<S::PublicKey>,
     ) -> Feedback {
-        let span = enqueue_span("forward", Some(&round), None, None, Some(&commitment));
+        let span = info_span!("marshal.mailbox", operation = "forward", round = %round, commitment = %commitment);
         self.sender.enqueue(Message::Forward {
             span,
             round,
@@ -954,23 +907,11 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
             Activity::Notarization(notarization) => {
-                let span = enqueue_span(
-                    "notarization",
-                    Some(&notarization.round()),
-                    None,
-                    None,
-                    None,
-                );
+                let span = info_span!("marshal.mailbox", operation = "notarization", round = %notarization.round());
                 Message::Notarization { span, notarization }
             }
             Activity::Finalization(finalization) => {
-                let span = enqueue_span(
-                    "finalization",
-                    Some(&finalization.round()),
-                    None,
-                    None,
-                    None,
-                );
+                let span = info_span!("marshal.mailbox", operation = "finalization", round = %finalization.round());
                 Message::Finalization { span, finalization }
             }
             _ => return Feedback::Ok,
