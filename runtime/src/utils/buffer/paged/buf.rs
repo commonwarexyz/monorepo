@@ -129,6 +129,64 @@ mod tests {
     use commonware_codec::{Error, ReadExt};
 
     #[test]
+    fn test_brute_force_against_contiguous() {
+        // Exhaustively compare PagedBuf against a contiguous slice for every split of an
+        // 8-byte payload into slices and every two-step advance sequence.
+        let payload: Vec<u8> = (10u8..18).collect();
+        let n = payload.len();
+        // Enumerate split points via bitmask: bit i set => split after byte i.
+        for mask in 0u32..(1 << (n - 1)) {
+            let mut slices: Vec<&[u8]> = Vec::new();
+            let mut start = 0;
+            for i in 0..n - 1 {
+                if mask & (1 << i) != 0 {
+                    slices.push(&payload[start..=i]);
+                    start = i + 1;
+                }
+            }
+            slices.push(&payload[start..]);
+            if slices.len() > MAX_GATHER_PAGES {
+                continue;
+            }
+            // For every starting advance a (0..=n) then a second advance b (0..=n-a),
+            // verify remaining/consumed/chunk prefix agreement.
+            for a in 0..=n {
+                for b in 0..=(n - a) {
+                    let mut buf = PagedBuf::new();
+                    for s in &slices {
+                        assert!(buf.push(s));
+                    }
+                    assert_eq!(buf.len(), n);
+                    buf.advance(a);
+                    assert_eq!(buf.consumed(), a, "mask={mask} a={a}");
+                    buf.advance(b);
+                    let consumed = a + b;
+                    assert_eq!(buf.consumed(), consumed, "mask={mask} a={a} b={b}");
+                    assert_eq!(buf.remaining(), n - consumed);
+                    // chunk() must be a non-empty prefix of the rest while remaining > 0.
+                    if buf.remaining() > 0 {
+                        let chunk = buf.chunk();
+                        assert!(!chunk.is_empty(), "mask={mask} a={a} b={b}");
+                        assert_eq!(
+                            chunk,
+                            &payload[consumed..consumed + chunk.len()],
+                            "mask={mask} a={a} b={b}"
+                        );
+                    } else {
+                        assert!(buf.chunk().is_empty());
+                    }
+                    // Drain the rest with copy_to_slice and compare to the contiguous tail.
+                    let mut rest = vec![0u8; n - consumed];
+                    buf.copy_to_slice(&mut rest);
+                    assert_eq!(rest, &payload[consumed..], "mask={mask} a={a} b={b}");
+                    assert_eq!(buf.remaining(), 0);
+                    assert_eq!(buf.consumed(), n);
+                }
+            }
+        }
+    }
+
+    #[test]
     fn test_empty() {
         let buf = PagedBuf::new();
         assert_eq!(buf.remaining(), 0);

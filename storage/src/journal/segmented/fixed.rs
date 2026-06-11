@@ -273,8 +273,8 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// `Some(item)` for each hit and `None` for each miss.
     ///
     /// Positions must be strictly increasing. An unavailable section or out-of-bounds position
-    /// marks every position as a miss; the caller's async fallback surfaces any real error.
-    /// Returns an error only when resident bytes are malformed (corruption).
+    /// marks every position as a miss. Like [Self::try_get_sync], decode failures on the sync
+    /// path are reported as misses; the caller's async fallback surfaces any real error.
     ///
     /// `scratch` is cleared and used to stage byte offsets, letting callers amortize its
     /// allocation across many calls.
@@ -284,12 +284,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         positions: &[u64],
         scratch: &mut Vec<u64>,
         out: &mut Vec<Option<A>>,
-    ) -> Result<(), Error> {
+    ) {
+        let base = out.len();
         let blob = self.manager.get(section).ok().flatten();
         let size = blob.as_ref().and_then(|blob| blob.try_size());
         let Some((blob, size)) = blob.zip(size) else {
-            out.resize_with(out.len() + positions.len(), || None);
-            return Ok(());
+            out.resize_with(base + positions.len(), || None);
+            return;
         };
 
         scratch.clear();
@@ -300,13 +301,20 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
                     .is_some_and(|end| end <= size)
             });
             let Some(offset) = offset else {
-                out.resize_with(out.len() + positions.len(), || None);
-                return Ok(());
+                out.resize_with(base + positions.len(), || None);
+                return;
             };
             scratch.push(offset);
         }
-        blob.try_decode_sync_many::<A>(scratch, Self::CHUNK_SIZE, &(), out)
-            .map_err(Error::Codec)
+        if blob
+            .try_decode_sync_many::<A>(scratch, Self::CHUNK_SIZE, &(), out)
+            .is_err()
+        {
+            // Mirror try_get_sync: report the whole batch as misses and let the async
+            // fallback re-read the authoritative bytes and surface the error.
+            out.truncate(base);
+            out.resize_with(base + positions.len(), || None);
+        }
     }
 
     /// Read the last item in a section, if any.

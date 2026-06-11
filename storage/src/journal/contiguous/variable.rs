@@ -186,6 +186,13 @@ impl<E: Context, V: CodecShared> Inner<E, V> {
 /// This journal manages section assignment automatically, allowing callers to append items
 /// sequentially without manually tracking section numbers.
 ///
+/// # Synchronous Reads
+///
+/// When compression is disabled, read paths opportunistically decode items in place from the
+/// page cache (or write buffer) while holding internal locks shared with the append path. `V`'s
+/// `Read` implementation must therefore be cheap and parse-only: no blocking and no expensive
+/// work.
+///
 /// # Repair
 ///
 /// Like

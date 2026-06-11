@@ -269,6 +269,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// This is implemented as a wrapper around [SegmentedJournal] that provides position-based access
 /// where positions are automatically mapped to (section, position_in_section) pairs.
 ///
+/// # Synchronous Reads
+///
+/// Read paths opportunistically decode items in place from the page cache (or write buffer)
+/// while holding internal locks shared with the append path. `A`'s `Read` implementation must
+/// therefore be cheap and parse-only: no blocking and no expensive work.
+///
 /// # Repair
 ///
 /// Like
@@ -375,7 +381,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                         &section_positions,
                         &mut offset_scratch,
                         &mut result,
-                    )?;
+                    );
                 }
                 Err(_) => result.resize_with(result.len() + (group_end - group_start), || None),
             }
@@ -397,7 +403,10 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         if miss_positions.is_empty() {
             self.metrics.record_cache_hits(hits);
             self.metrics.items_read.inc_by(positions.len() as u64);
-            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
+            return Ok(result
+                .into_iter()
+                .map(|r| r.expect("all slots filled"))
+                .collect());
         }
 
         // Phase 2: Read cache misses grouped by section (sequential).
@@ -449,7 +458,10 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         self.metrics
             .record_cache_misses(positions.len() as u64 - hits);
         self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result.into_iter().map(|r| r.unwrap()).collect())
+        Ok(result
+            .into_iter()
+            .map(|r| r.expect("all slots filled"))
+            .collect())
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {

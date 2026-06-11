@@ -811,7 +811,9 @@ impl<B: Blob> Append<B> {
         out: &mut Vec<Option<T>>,
     ) -> Result<(), commonware_codec::Error> {
         assert!(
-            offsets.windows(2).all(|w| w[0] < w[1]),
+            offsets
+                .windows(2)
+                .all(|w| w[0].checked_add(len as u64).is_some_and(|end| end <= w[1])),
             "offsets must be sorted and non-overlapping"
         );
         let base = out.len();
@@ -842,7 +844,11 @@ impl<B: Blob> Append<B> {
     }
 
     /// Decode a `T` occupying exactly `len` bytes of the tip buffer, returning `None` when
-    /// `[offset, offset + len)` is not fully buffered or fails to decode.
+    /// `[offset, offset + len)` is not fully buffered.
+    ///
+    /// Both error outcomes are authoritative: all `len` bytes were validated to be below the
+    /// logical size under the buffer read guard, and committed bytes are immutable under the
+    /// append-only contract, so the async path would decode the same bytes to the same result.
     fn decode_tip_exact<T: CodecRead>(
         buffer: &Buffer,
         offset: u64,
@@ -856,13 +862,11 @@ impl<B: Blob> Append<B> {
         let start = (offset - buffer.offset) as usize;
         let mut buf = &buffer.as_ref()[start..start + len];
         match T::read_cfg(&mut buf, cfg) {
-            // All `len` bytes were available, so under-consumption is an authoritative
-            // wrong-length error rather than a sign of missing data.
+            // Under-consumption means the encoding does not occupy exactly `len` bytes.
+            // Report the same error as `Decode::decode_cfg`.
             Ok(value) if buf.is_empty() => Some(Ok(value)),
             Ok(_) => Some(Err(commonware_codec::Error::ExtraData(buf.len()))),
-            // A decode failure at the tip is indistinguishable from racing an in-flight
-            // append; let the async path produce the authoritative result.
-            Err(_) => None,
+            Err(err) => Some(Err(err)),
         }
     }
 
@@ -929,8 +933,10 @@ impl<B: Blob> Append<B> {
             "read_many_into requires buf.len() == offsets.len() * item_size"
         );
         assert!(
-            offsets.windows(2).all(|w| w[0] < w[1]),
-            "offsets must be strictly increasing"
+            offsets.windows(2).all(|w| w[0]
+                .checked_add(item_size as u64)
+                .is_some_and(|end| end <= w[1])),
+            "offsets must be sorted and non-overlapping"
         );
         if offsets.is_empty() {
             return Ok(0);
@@ -1890,44 +1896,59 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Writer appends u64 items (item i has value i) and syncs periodically.
+            // Writer appends u64 items (item i has value i) and syncs periodically, pacing
+            // itself so reader probes interleave with in-flight appends and flushes.
             let writer_append = append.clone();
-            let writer = context.child("writer").spawn(move |_| async move {
+            let writer_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writer_done_w = writer_done.clone();
+            let writer = context.child("writer").spawn(move |context| async move {
                 for i in 0u64..200 {
                     writer_append.append(&i.to_be_bytes()).await.unwrap();
                     if i % 32 == 0 {
                         writer_append.sync().await.unwrap();
                     }
+                    context.sleep(std::time::Duration::from_millis(1)).await;
                 }
                 writer_append.sync().await.unwrap();
+                writer_done_w.store(true, Ordering::SeqCst);
             });
 
             // Reader probes items behind the observed size; every hit must decode the
             // value written for that offset.
             let reader_append = append.clone();
+            let writer_done_r = writer_done.clone();
             let reader = context.child("reader").spawn(move |context| async move {
                 let mut hits = 0u64;
+                let mut racy_hits = 0u64;
                 for round in 0u64..400 {
                     if let Some(size) = reader_append.try_size() {
                         let items = size / 8;
                         if items > 0 {
                             let item = round % items;
+                            let racy = !writer_done_r.load(Ordering::SeqCst);
                             if let Some(result) =
                                 reader_append.try_decode_sync::<u64>(item * 8, 8, &())
                             {
                                 assert_eq!(result.unwrap(), item);
                                 hits += 1;
+                                if racy {
+                                    racy_hits += 1;
+                                }
                             }
                         }
                     }
                     context.sleep(std::time::Duration::from_millis(1)).await;
                 }
-                hits
+                (hits, racy_hits)
             });
 
             writer.await.unwrap();
-            let hits = reader.await.unwrap();
+            let (hits, racy_hits) = reader.await.unwrap();
             assert!(hits > 0, "reader should observe at least one sync hit");
+            assert!(
+                racy_hits > 0,
+                "reader should observe hits while the writer is still appending"
+            );
 
             // After the writer finishes, every item is decodable through some path.
             for i in 0u64..200 {
