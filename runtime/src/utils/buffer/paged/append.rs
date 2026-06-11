@@ -764,12 +764,16 @@ impl<B: Blob> Append<B> {
         let end = tip.len().min(start.saturating_add(max_len));
         let total = end - start;
         let mut buf = &tip[start..end];
-        // At the tip, a decode failure is indistinguishable from racing an in-flight append;
-        // let the async path (which validates sizes under proper locks) produce the
-        // authoritative result.
-        T::read_cfg(&mut buf, cfg)
-            .ok()
-            .map(|value| Ok((value, total - buf.len())))
+        match T::read_cfg(&mut buf, cfg) {
+            Ok(value) => Some(Ok((value, total - buf.len()))),
+            // The decoder saw the whole requested window of committed bytes, so the failure
+            // is authoritative (mirroring the cache fast path).
+            Err(err) if total == max_len => Some(Err(err)),
+            // A window clamped by the logical size may have starved the decoder; let the
+            // async path (which validates sizes under proper locks) produce the
+            // authoritative result.
+            Err(_) => None,
+        }
     }
 
     /// Like [Self::try_decode_prefix_sync] but requires the encoding to occupy exactly `len`

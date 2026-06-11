@@ -130,9 +130,11 @@ mod tests {
 
     #[test]
     fn test_brute_force_against_contiguous() {
-        // Exhaustively compare PagedBuf against a contiguous slice for every split of an
-        // 8-byte payload into slices and every two-step advance sequence.
-        let payload: Vec<u8> = (10u8..18).collect();
+        // Exhaustively compare PagedBuf against a contiguous slice for every split of a
+        // 9-byte payload into slices and every two-step advance sequence. Splits that
+        // exceed MAX_GATHER_PAGES (only the all-split mask) verify the push rejection
+        // path instead.
+        let payload: Vec<u8> = (10u8..19).collect();
         let n = payload.len();
         // Enumerate split points via bitmask: bit i set => split after byte i.
         for mask in 0u32..(1 << (n - 1)) {
@@ -146,6 +148,11 @@ mod tests {
             }
             slices.push(&payload[start..]);
             if slices.len() > MAX_GATHER_PAGES {
+                let mut buf = PagedBuf::new();
+                for s in &slices[..MAX_GATHER_PAGES] {
+                    assert!(buf.push(s));
+                }
+                assert!(!buf.push(slices[MAX_GATHER_PAGES]));
                 continue;
             }
             // For every starting advance a (0..=n) then a second advance b (0..=n-a),

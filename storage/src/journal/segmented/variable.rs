@@ -85,7 +85,7 @@ use crate::journal::Error;
 use commonware_codec::{
     util::at_least,
     varint::{UInt, MAX_U32_VARINT_SIZE},
-    Codec, CodecShared, EncodeSize, Read as CodecRead, ReadExt, Write as CodecWrite,
+    Codec, CodecShared, Decode, EncodeSize, Read as CodecRead, ReadExt, Write as CodecWrite,
 };
 use commonware_runtime::{
     buffer::paged::{Append, CacheRef, Replay},
@@ -212,14 +212,12 @@ impl<V: CodecRead> CodecRead for PrefixedItem<V> {
 
     fn read_cfg(buf: &mut impl Buf, cfg: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let data_len = UInt::<u32>::read(buf)?.0 as usize;
+        // The at_least guard must stay: it ensures every V (even a decoder driven by
+        // `remaining()`) sees exactly `data_len` bytes in both the sync and async paths,
+        // rather than successfully decoding a short prefix when a gather is truncated
+        // mid-payload.
         at_least(buf, data_len)?;
-        let mut limited = buf.take(data_len);
-        let item = V::read_cfg(&mut limited, cfg)?;
-        let remaining = limited.remaining();
-        if remaining > 0 {
-            return Err(commonware_codec::Error::ExtraData(remaining));
-        }
-        Ok(Self(item))
+        V::decode_cfg(buf.take(data_len), cfg).map(Self)
     }
 }
 

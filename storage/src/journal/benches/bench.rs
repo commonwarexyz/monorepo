@@ -33,6 +33,12 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(8_192);
 
 /// The number of pages to cache in the page cache. Make it big enough to be
 /// fast, but not so big we avoid any page faults for the larger benchmarks.
+///
+/// The random-read benches label this configuration `cache=cold`, but it is
+/// capacity-constrained rather than fully cold: their 5M-item working set is roughly
+/// 19.5k pages (fixed) to 25k pages (variable, data plus offsets), so in steady state
+/// about half of random reads still hit the cache while evictions keep the miss path
+/// exercised.
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10_000);
 
 /// A page cache capacity large enough to hold every page written by the random-read

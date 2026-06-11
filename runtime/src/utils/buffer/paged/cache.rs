@@ -19,9 +19,10 @@ use std::{
 };
 use tracing::{error, trace};
 
-/// Number of offsets decoded per page-cache read-lock acquisition in
-/// [CacheRef::decode_cached_exact_many], bounding lock hold time.
-const DECODE_BATCH_CHUNK: usize = 256;
+/// Maximum number of bytes decoded per page-cache read-lock acquisition in
+/// [CacheRef::decode_cached_exact_many]. Bounding hold time by bytes rather than item count
+/// keeps writers from being held off for long stretches when items are large.
+const DECODE_BATCH_BYTES: usize = 8192;
 
 /// Result of attempting to decode a value from cached pages.
 pub(super) enum CachedDecode<T> {
@@ -293,7 +294,8 @@ impl CacheRef {
         cfg: &T::Cfg,
         out: &mut Vec<Option<T>>,
     ) -> Result<(), commonware_codec::Error> {
-        for chunk in offsets.chunks(DECODE_BATCH_CHUNK) {
+        let chunk_size = (DECODE_BATCH_BYTES / len.max(1)).max(1);
+        for chunk in offsets.chunks(chunk_size) {
             let cache = self.cache.read();
             for &offset in chunk {
                 match cache.decode_exact::<T>(blob_id, offset, len, cfg) {
@@ -619,6 +621,10 @@ impl Cache {
         }
 
         let mut buf = self.gather(blob_id, offset, max_len);
+        assert!(
+            buf.len() >= in_page,
+            "gather must cover at least the fast-path page slice"
+        );
         if buf.len() == in_page {
             // No bytes beyond the already-tried page are resident, so the failure above was
             // (possibly) an artifact of missing data.
@@ -1604,8 +1610,8 @@ mod tests {
 
     #[test_traced]
     fn test_decode_cached_exact_many_chunked() {
-        // Use more offsets than DECODE_BATCH_CHUNK to exercise multiple lock
-        // acquisitions, with a missing page in the middle.
+        // Use more bytes than DECODE_BATCH_BYTES covers in one chunk to exercise multiple
+        // lock acquisitions, with a missing page in the middle.
         let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
         let blob_id = cache_ref.next_id();
         let items_per_page = PAGE_SIZE.get() as usize / 8;
@@ -1617,9 +1623,10 @@ mod tests {
             2 * PAGE_SIZE_U64,
         );
 
-        // Offsets covering pages 0 (resident), 1 (absent), and 2 (resident).
-        let offsets: Vec<u64> = (0..3 * items_per_page as u64).map(|i| i * 8).collect();
-        assert!(offsets.len() > DECODE_BATCH_CHUNK);
+        // Offsets covering pages 0 and 2 (resident) and pages 1 and 3..9 (absent), spanning
+        // enough total bytes to require multiple lock acquisitions.
+        let offsets: Vec<u64> = (0..9 * items_per_page as u64).map(|i| i * 8).collect();
+        assert!(offsets.len() * 8 > DECODE_BATCH_BYTES);
         let mut out = Vec::with_capacity(offsets.len());
         cache_ref
             .decode_cached_exact_many::<u64>(blob_id, &offsets, 8, &(), &mut out)
@@ -1627,14 +1634,14 @@ mod tests {
 
         assert_eq!(out.len(), offsets.len());
         for (i, (item, &offset)) in out.iter().zip(&offsets).enumerate() {
-            if i / items_per_page == 1 {
-                assert!(item.is_none(), "offset {offset} should miss");
-            } else {
+            if matches!(i / items_per_page, 0 | 2) {
                 assert_eq!(
                     item.as_ref().copied(),
                     Some(patterned_u64(offset as usize % PAGE_SIZE.get() as usize)),
                     "offset {offset} should hit"
                 );
+            } else {
+                assert!(item.is_none(), "offset {offset} should miss");
             }
         }
     }

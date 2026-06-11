@@ -410,7 +410,6 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         }
 
         // Phase 2: Read cache misses grouped by section (sequential).
-        let mut disk_offset = 0;
         let mut group_start = 0;
         while group_start < miss_positions.len() {
             let section = miss_positions[group_start] / items_per_blob;
@@ -422,7 +421,6 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                 group_end += 1;
             }
 
-            let group_len = group_end - group_start;
             let first_position = first_in_section(pruning_boundary, section, items_per_blob)?;
             section_positions.clear();
             section_positions.extend(
@@ -446,11 +444,11 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                 })?;
 
             hits += group_hits as u64;
-            for (item, &miss_idx) in items.into_iter().zip(&miss_indices[disk_offset..]) {
+            assert_eq!(items.len(), group_end - group_start);
+            for (item, &miss_idx) in items.into_iter().zip(&miss_indices[group_start..group_end]) {
                 result[miss_idx] = Some(item);
             }
 
-            disk_offset += group_len;
             group_start = group_end;
         }
 
