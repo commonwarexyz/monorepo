@@ -13,7 +13,7 @@ use crate::{
         self,
         any::{
             self,
-            batch::{lookup_sorted, DiffEntry},
+            batch::{DiffCursors, DiffEntry},
             operation::{update, Operation},
             ValueEncoding,
         },
@@ -524,7 +524,9 @@ where
     // 2. Inactivate previous CommitFloor.
     overlay.clear_bit(base, pruned_chunks, batch_base - 1);
 
-    // 3. Set active bits + clear superseded locations from the diff.
+    // 3. Set active bits + clear superseded locations from the diff. The diff is key-sorted,
+    // so ancestor resolution streams (one cursor per ancestor diff).
+    let mut ancestors = DiffCursors::new(ancestor_diffs.iter().map(|d| d.as_slice()));
     for (key, entry) in diff {
         // Set the active bit for this key's final location.
         if let Some(loc) = entry.loc() {
@@ -536,11 +538,8 @@ where
         // Clear the most recent superseded location. Older locations were already cleared by the
         // ancestor batch that superseded them.
         let mut prev_loc = entry.base_old_loc();
-        for ancestor_diff in ancestor_diffs {
-            if let Some(ancestor_entry) = lookup_sorted(ancestor_diff.as_slice(), key) {
-                prev_loc = ancestor_entry.loc();
-                break;
-            }
+        if let Some(ancestor_entry) = ancestors.resolve(key) {
+            prev_loc = ancestor_entry.loc();
         }
         if let Some(old) = prev_loc {
             overlay.clear_bit(base, pruned_chunks, *old);
