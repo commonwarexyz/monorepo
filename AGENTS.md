@@ -892,6 +892,10 @@ spawned whom, so it cannot describe that relationship.
 
 - Span names are dot-separated paths (e.g. `component.module.operation`). Never use `::`
   in span names.
+- The operation segment matches the instrumented function's name.
+- A variant that qualifies the type an operation runs on sits with the type's path
+  segment (e.g. `qmdb.any.unordered.batch.merkleize`). A variant that qualifies the
+  operation's own path follows the operation (e.g. `certify.embedded`, `new.from_db`).
 - The name should identify the crate/component and the operation, not the call site.
 - Spans are viewed stand-alone (in search results, span lists, and metrics), so every name
   must be fully descriptive on its own. Unlike runtime context labels
@@ -903,6 +907,10 @@ spawned whom, so it cannot describe that relationship.
 - Prefer `#[tracing::instrument(name = "...", level = "info", skip_all)]` on the function
   performing the work. Always use `skip_all` and opt fields in explicitly; never capture
   parameters implicitly.
+- In `#[instrument(fields(...))]` a bare name declares an empty field: `fields(index)`
+  records nothing. Write `fields(index = index)` to capture the variable. This is the
+  opposite of the span macros, where a bare `info_span!("...", index)` is shorthand for
+  `index = index`.
 - As a rule of thumb, a span name should never be declared twice. If the same name appears
   at two or more call sites, that is a good sign the span belongs as `#[instrument]` on a
   re-usable function.

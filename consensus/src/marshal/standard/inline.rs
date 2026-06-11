@@ -69,7 +69,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    sync::{AsyncMutex, Mutex},
+    sync::{Mutex, TracedAsyncMutex},
 };
 use rand::Rng;
 use std::{collections::BTreeSet, sync::Arc};
@@ -136,7 +136,7 @@ where
     B: Block + Clone,
     ES: Epocher,
 {
-    context: Arc<AsyncMutex<E>>,
+    context: Arc<TracedAsyncMutex<E>>,
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
@@ -201,7 +201,7 @@ where
         let ancestor_fetch_duration = Timed::new(ancestor_fetch_histogram);
 
         Self {
-            context: Arc::new(AsyncMutex::new(context)),
+            context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
             application,
             marshal,
             epocher,

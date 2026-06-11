@@ -188,7 +188,7 @@ where
             ancestry_stream,
         )
         .instrument(info_span!(
-            "marshal.application.verify",
+            "marshal.standard.application.verify",
             round = %context.round,
             digest = %block.digest(),
             parent_view = %parent_view,

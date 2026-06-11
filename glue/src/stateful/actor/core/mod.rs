@@ -42,12 +42,6 @@ mod syncing;
 
 type BlockDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 
-/// Opens the dequeue-side child of a mailbox request's span, separating queue
-/// wait from processing time in traces.
-fn process_span(parent: &tracing::Span) -> tracing::Span {
-    tracing::info_span!(parent: parent, "stateful.actor.process")
-}
-
 /// Periodic pruning configuration.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PruneConfig {
@@ -346,14 +340,14 @@ mod tests {
         buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::AsyncRwLock, NZUsize, NZU16, NZU64};
+    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
     use std::{convert::Infallible, sync::Arc, time::Duration};
 
     #[derive(Clone)]
     struct NoopResolver;
 
     impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<AsyncRwLock<TestDb>>) {}
+        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {

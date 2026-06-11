@@ -210,9 +210,7 @@ where
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
-            parent: &Span::current(),
-            "stateful.mailbox",
-            operation = "propose",
+            "stateful.mailbox.propose",
             epoch = %context.1.epoch(),
             view = %context.1.view()
         );
@@ -234,9 +232,7 @@ where
         // of the application based on the availabilitiy of the actor.
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
-            parent: &Span::current(),
-            "stateful.mailbox",
-            operation = "verify",
+            "stateful.mailbox.verify",
             epoch = %context.1.epoch(),
             view = %context.1.view()
         );
@@ -263,17 +259,15 @@ where
         let message = match activity {
             Update::Tip(_, _, _) => return Feedback::Ok,
             Update::Block(block, acknowledgement) => {
-                let digest = block.digest();
                 let context = block.context();
+                let span = info_span!(
+                    "stateful.mailbox.finalized",
+                    epoch = %context.epoch(),
+                    view = %context.view(),
+                    digest = %block.digest()
+                );
                 Message::Finalized {
-                    span: info_span!(
-                        parent: &Span::current(),
-                        "stateful.mailbox",
-                        operation = "finalized",
-                        epoch = %context.epoch(),
-                        view = %context.view(),
-                        digest = %digest
-                    ),
+                    span,
                     block,
                     acknowledgement,
                 }

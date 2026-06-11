@@ -1,6 +1,6 @@
 use crate::stateful::{
     actor::{
-        core::{mailbox::Message, process_span},
+        core::mailbox::Message,
         processor::{FinalizeStatus, Processor},
     },
     Application,
@@ -24,7 +24,7 @@ use futures::{
 };
 use rand::Rng;
 use std::sync::mpsc::TryRecvError;
-use tracing::{debug, Instrument as _};
+use tracing::{debug, info_span, Instrument as _};
 
 /// A single unit of work for the processing loop: either a mailbox message to
 /// handle or a deferred prune to run while the mailbox is idle.
@@ -104,7 +104,7 @@ where
                     ancestry,
                     response,
                 }) => {
-                    let process = process_span(&span);
+                    let process = info_span!(parent: &span, "stateful.actor.propose");
                     self.processor
                         .propose(
                             self.context.as_present(),
@@ -123,7 +123,7 @@ where
                     ancestry,
                     response,
                 }) => {
-                    let process = process_span(&span);
+                    let process = info_span!(parent: &span, "stateful.actor.verify");
                     self.processor
                         .verify(
                             self.context.as_present(),
@@ -140,8 +140,8 @@ where
                     block,
                     acknowledgement,
                 }) => {
-                    let process = process_span(&span);
-                    if let Some(prune) = async {
+                    let process = info_span!(parent: &span, "stateful.actor.finalized");
+                    let prune = async {
                         if skip_finalized_block(&mut self.skip_finalized_until, block.height()) {
                             self.processor
                                 .notify_finalized(self.context.as_present(), &block)
@@ -157,8 +157,8 @@ where
                         prune
                     }
                     .instrument(process)
-                    .await
-                    {
+                    .await;
+                    if let Some(prune) = prune {
                         pending_prune = Some(prune);
                     }
                 }

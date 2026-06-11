@@ -348,6 +348,16 @@ where
     /// [`crate::merkle::Error::LocationOverflow`] if `start_loc` >
     /// [`crate::merkle::Family::MAX_LEAVES`]. Returns [`crate::merkle::Error::RangeOutOfBounds`] if
     /// `start_loc` >= number of leaves in the tree.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.current.db.range_proof",
+        level = "info",
+        skip_all,
+        fields(
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
     pub async fn range_proof(
         &self,
         hasher: &StandardHasher<H>,
