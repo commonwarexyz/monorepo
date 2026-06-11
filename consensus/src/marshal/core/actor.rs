@@ -880,7 +880,7 @@ where
     }
 
     /// Handle a produce request from a remote peer.
-    #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
+    #[tracing::instrument(name = "marshal.resolver.handle_produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
         key: ResolverRequestFor<V>,
@@ -1920,7 +1920,7 @@ where
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
-    #[tracing::instrument(name = "marshal.actor.repair_gaps", level = "info", skip_all)]
+    #[tracing::instrument(name = "marshal.actor.try_repair_gaps", level = "info", skip_all)]
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,

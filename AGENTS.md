@@ -892,6 +892,10 @@ spawned whom, so it cannot describe that relationship.
 
 - Span names are dot-separated paths (e.g. `component.module.operation`). Never use `::`
   in span names.
+- The operation segment matches the instrumented function's name.
+- A variant that qualifies the type an operation runs on sits with the type's path
+  segment (e.g. `qmdb.any.unordered.batch.merkleize`). A variant that qualifies the
+  operation's own path follows the operation (e.g. `certify.embedded`, `new.from_db`).
 - The name should identify the crate/component and the operation, not the call site.
 - Spans are viewed stand-alone (in search results, span lists, and metrics), so every name
   must be fully descriptive on its own. Unlike runtime context labels
