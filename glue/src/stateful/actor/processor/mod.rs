@@ -113,16 +113,17 @@ impl<T> Prune<T> {
 /// Tracks the configured prune cadence and finalized sync targets needed to
 /// make pruning safe.
 struct Pruning<T> {
-    config: PruneConfig,
+    maintenance_interval: NonZeroUsize,
     marshal_retention_window: usize,
     qmdb_retention_window: usize,
     retained_targets: VecDeque<(Height, T)>,
 }
 
 impl<T: Clone> Pruning<T> {
-    const fn new(config: PruneConfig, max_pending_acks: NonZeroUsize) -> Self {
+    const fn new(config: PruneConfig) -> Self {
         config.assert_valid();
-        let base_retention_window = max_pending_acks
+        let base_retention_window = config
+            .max_pending_acks
             .get()
             .checked_add(1)
             .expect("max_pending_acks retention window overflowed");
@@ -133,7 +134,7 @@ impl<T: Clone> Pruning<T> {
             .checked_add(config.retained_qmdb_blocks)
             .expect("qmdb prune retention window overflowed");
         Self {
-            config,
+            maintenance_interval: config.maintenance_interval,
             marshal_retention_window,
             qmdb_retention_window,
             retained_targets: VecDeque::new(),
@@ -152,7 +153,7 @@ impl<T: Clone> Pruning<T> {
             self.retained_targets.pop_front();
         }
 
-        let interval = u64::try_from(self.config.maintenance_interval.get())
+        let interval = u64::try_from(self.maintenance_interval.get())
             .expect("prune interval should fit in u64");
         if !height.get().is_multiple_of(interval) {
             return None;
@@ -214,7 +215,6 @@ where
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
         metrics: ProcessorMetrics,
-        max_pending_acks: NonZeroUsize,
         prune_config: Option<PruneConfig>,
     ) -> Self {
         Self {
@@ -223,7 +223,7 @@ where
             pending: BTreeMap::new(),
             last_processed,
             metrics,
-            pruning: prune_config.map(|config| Pruning::new(config, max_pending_acks)),
+            pruning: prune_config.map(Pruning::new),
         }
     }
 
@@ -1337,7 +1337,6 @@ mod tests {
                         digest: Block::genesis().digest(),
                     },
                     metrics,
-                    NZUsize!(1),
                     None,
                 ),
                 provider,
@@ -1551,12 +1550,12 @@ mod tests {
 
     #[test]
     fn pruning_waits_for_full_retention_window() {
-        let config = PruneConfig {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(2),
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
-        };
-        let mut pruning = Pruning::new(config, NZUsize!(2));
+        });
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1572,12 +1571,12 @@ mod tests {
 
     #[test]
     fn pruning_uses_oldest_retained_target() {
-        let config = PruneConfig {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 1,
-        };
-        let mut pruning = Pruning::new(config, NZUsize!(1));
+        });
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None,);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None,);
@@ -1599,12 +1598,12 @@ mod tests {
 
     #[test]
     fn pruning_can_retain_more_marshal_history_than_qmdb() {
-        let config = PruneConfig {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(3),
             retained_marshal_blocks: 3,
             retained_qmdb_blocks: 1,
-        };
-        let mut pruning = Pruning::new(config, NZUsize!(1));
+        });
 
         assert_eq!(pruning.observe_finalized(Height::new(1), 10_u64), None);
         assert_eq!(pruning.observe_finalized(Height::new(2), 20_u64), None);
@@ -1622,12 +1621,12 @@ mod tests {
 
     #[test]
     fn pruning_only_runs_on_maintenance_interval() {
-        let config = PruneConfig {
+        let mut pruning = Pruning::new(PruneConfig {
+            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(5),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 0,
-        };
-        let mut pruning = Pruning::new(config, NZUsize!(1));
+        });
 
         // Window fills at height 3, but pruning only fires on multiples of the
         // maintenance interval regardless of how small the retention window is.
@@ -1663,6 +1662,7 @@ mod tests {
     #[should_panic(expected = "marshal must retain at least as many blocks as QMDB")]
     fn prune_config_rejects_less_marshal_retention_than_qmdb() {
         PruneConfig {
+            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 1,
             retained_qmdb_blocks: 2,
@@ -1673,6 +1673,7 @@ mod tests {
     #[test]
     fn prune_config_accepts_zero_retention() {
         PruneConfig {
+            max_pending_acks: NZUsize!(1),
             maintenance_interval: NZUsize!(1),
             retained_marshal_blocks: 0,
             retained_qmdb_blocks: 0,
@@ -1696,8 +1697,8 @@ mod tests {
                     digest: Block::genesis().digest(),
                 },
                 ProcessorMetrics::new(harness.context_cell.child("staged_processor_metrics")),
-                NZUsize!(1),
                 Some(PruneConfig {
+                    max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(1),
                     retained_marshal_blocks: 1,
                     retained_qmdb_blocks: 1,

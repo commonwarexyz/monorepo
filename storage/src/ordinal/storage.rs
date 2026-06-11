@@ -1,8 +1,6 @@
 use super::{Config, Error};
-use crate::{rmap::RMap, Context, Persistable};
-use commonware_codec::{
-    CodecFixed, CodecFixedShared, Encode, FixedSize, Read, ReadExt, Write as CodecWrite,
-};
+use crate::{rmap::RMap, Context};
+use commonware_codec::{CodecFixed, Encode, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_formatting::hex;
 use commonware_runtime::{
@@ -436,22 +434,6 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
-    }
-}
-
-impl<E: BufferPooler + Context, V: CodecFixedShared> Persistable for Ordinal<E, V> {
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Self::Error> {
-        Self::sync(self).await
-    }
-
-    async fn destroy(self) -> Result<(), Self::Error> {
-        self.destroy().await
     }
 }
 

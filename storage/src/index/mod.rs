@@ -127,6 +127,24 @@ pub trait Unordered: Send + Sync {
     where
         Self::Value: 'a;
 
+    /// Visits every value associated with each key, calling `visit(key_idx, value)`.
+    ///
+    /// Probe order is implementation-defined: implementations may reorder probes for locality,
+    /// so visits are identified by `key_idx` rather than issued in input order.
+    fn get_many<'a, K: AsRef<[u8]>>(
+        &'a self,
+        keys: &[K],
+        mut visit: impl FnMut(usize, &'a Self::Value),
+    ) where
+        Self::Value: 'a,
+    {
+        for (key_idx, key) in keys.iter().enumerate() {
+            for value in self.get(key.as_ref()) {
+                visit(key_idx, value);
+            }
+        }
+    }
+
     /// Provides mutable access to the values associated with a translated key, if the key exists.
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>>;
 
@@ -353,6 +371,61 @@ mod tests {
                 assert_eq!(index.keys(), 0);
                 run_index_basic(&mut index);
                 assert_eq!(index.keys(), 0);
+            }
+        });
+    }
+
+    fn run_index_get_many<I: Unordered<Value = u64>>(index: &mut I) {
+        // "ab" and "abX" share a translated bucket; "zz" lives in a different bucket (and a
+        // different partition for partitioned indexes).
+        index.insert(b"ab", 1);
+        index.insert(b"ab", 2);
+        index.insert(b"abX", 3);
+        index.insert(b"zz", 4);
+
+        // Visits must be attributed to the requesting slot regardless of probe order, missing
+        // keys produce no visits, and duplicate input keys are visited once per slot.
+        let keys: Vec<&[u8]> = vec![b"zz", b"missing", b"ab", b"zz"];
+        let mut visits: Vec<Vec<u64>> = vec![Vec::new(); keys.len()];
+        index.get_many(&keys, |key_idx, value| visits[key_idx].push(*value));
+        assert_eq!(visits[0], vec![4]);
+        assert!(visits[1].is_empty());
+        assert_eq!(visits[2], vec![3, 2, 1]);
+        assert_eq!(visits[3], vec![4]);
+
+        // Empty input visits nothing.
+        index.get_many::<&[u8]>(&[], |_, _| panic!("no visits expected"));
+    }
+
+    #[test_traced]
+    fn test_hash_index_get_many() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_get_many(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_get_many() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_get_many(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_partitioned_index_get_many() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.child("unordered"));
+                run_index_get_many(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context.child("ordered"));
+                run_index_get_many(&mut index);
             }
         });
     }

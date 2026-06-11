@@ -93,7 +93,7 @@ use crate::{
         update_key, FloorHelper,
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_utils::Array;
@@ -491,28 +491,6 @@ where
     /// Durably commit the journal state published by prior [`Db::apply_batch`] calls.
     pub async fn commit(&mut self) -> Result<(), Error> {
         self.log.commit().await.map_err(Into::into)
-    }
-}
-
-impl<E, K, V, T> Persistable for Db<E, K, V, T>
-where
-    E: Context,
-    K: Array,
-    V: VariableValue,
-    T: Translator,
-{
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Error> {
-        Self::commit(self).await
-    }
-
-    async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
-    }
-
-    async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
     }
 }
 

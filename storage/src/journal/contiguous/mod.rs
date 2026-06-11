@@ -224,6 +224,33 @@ pub trait Mutable: Contiguous + Send + Sync {
     /// Returns an error if the underlying storage operation fails.
     fn rewind(&mut self, size: u64) -> impl std::future::Future<Output = Result<(), Error>> + Send;
 
+    /// Durably persist the journal, guaranteeing the current state will survive a crash.
+    ///
+    /// For a stronger guarantee that eliminates potential recovery, use [Self::sync] instead.
+    fn commit(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send {
+        self.sync()
+    }
+
+    /// Durably persist the journal, guaranteeing the current state will survive a crash, and that
+    /// no recovery will be needed on startup.
+    ///
+    /// This provides a stronger guarantee than [Self::commit] but may be slower.
+    fn sync(&mut self) -> impl std::future::Future<Output = Result<(), Error>> + Send;
+
+    /// Destroy the journal, removing all associated storage.
+    ///
+    /// This method consumes the journal and deletes all persisted data, leaving behind no storage
+    /// artifacts. This can be used to clean up disk resources in tests.
+    ///
+    /// # Crash Safety
+    ///
+    /// This operation is intended for final teardown and is not crash-safe. If interrupted,
+    /// reopening the same storage may observe partially removed state. Use a reset operation
+    /// provided by the concrete type when the journal must remain recoverable.
+    fn destroy(self) -> impl std::future::Future<Output = Result<(), Error>> + Send
+    where
+        Self: Sized;
+
     /// Rewinds the journal to the last item matching `predicate`. If no item matches, the journal
     /// is rewound to the pruning boundary, discarding all unpruned items.
     ///
