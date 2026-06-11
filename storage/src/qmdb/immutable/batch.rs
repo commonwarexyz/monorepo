@@ -2,7 +2,7 @@
 
 use super::Immutable;
 use crate::{
-    journal::{authenticated, contiguous::Mutable, Error as JournalError},
+    journal::{authenticated, contiguous::Mutable},
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
@@ -12,7 +12,7 @@ use crate::{
         Error,
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::{Digest, Hasher as CHasher};
@@ -105,7 +105,7 @@ where
     ) -> Self
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -135,7 +135,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -169,7 +169,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -238,7 +238,7 @@ where
     ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -331,7 +331,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         H: CHasher<Digest = D>,
         T: Translator,
@@ -357,7 +357,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+        C: Mutable<Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         H: CHasher<Digest = D>,
         T: Translator,
@@ -432,7 +432,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + Persistable<Error = JournalError>,
+    C: Mutable<Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
