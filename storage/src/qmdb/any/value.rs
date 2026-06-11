@@ -10,7 +10,7 @@ mod sealed {
     /// Having separate wrappers for fixed and variable size values allows us to use the same
     /// operation type for both fixed and variable size values, while still being able to
     /// parameterize the operation encoding by the value type.
-    pub trait ValueEncoding: Clone + Send + Sync {
+    pub trait ValueEncoding: Clone + Send + Sync + 'static {
         /// The wrapped value type.
         type Value: CodecShared + Clone;
     }
@@ -35,9 +35,9 @@ impl<V: VariableValue> sealed::ValueEncoding for VariableEncoding<V> {
 }
 
 /// A fixed-size, clonable value.
-pub trait FixedValue: CodecFixedShared + Clone {}
-impl<T: CodecFixedShared + Clone> FixedValue for T {}
+pub trait FixedValue: CodecFixedShared + Clone + 'static {}
+impl<T: CodecFixedShared + Clone + 'static> FixedValue for T {}
 
 /// A variable-size, clonable value.
-pub trait VariableValue: CodecShared + Clone {}
-impl<T: CodecShared + Clone> VariableValue for T {}
+pub trait VariableValue: CodecShared + Clone + 'static {}
+impl<T: CodecShared + Clone + 'static> VariableValue for T {}

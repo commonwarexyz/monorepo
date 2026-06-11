@@ -380,6 +380,48 @@ commonware_macros::stability_scope!(BETA {
 
         /// Return the number of threads that are available, as a hint to chunking.
         fn parallelism_hint(&self) -> usize;
+
+        /// Begin computing `f`, returning a [`Deferred`] that yields the result.
+        ///
+        /// Strategies with worker threads may run `f` concurrently with the caller. The
+        /// default implementation computes `f` inline before returning.
+        fn defer<T, FN>(&self, f: FN) -> Deferred<T>
+        where
+            T: Send + 'static,
+            FN: FnOnce() -> T + Send + 'static,
+        {
+            Deferred(DeferredInner::Ready(f()))
+        }
+    }
+
+    /// A computation started by [`Strategy::defer`], joined with [`Deferred::wait`].
+    pub struct Deferred<T>(DeferredInner<T>);
+
+    enum DeferredInner<T> {
+        /// The result was computed inline at defer time.
+        Ready(T),
+        /// The result is being computed on a worker thread.
+        #[cfg(feature = "std")]
+        Pending(commonware_utils::channel::oneshot::Receiver<std::thread::Result<T>>),
+    }
+
+    impl<T> Deferred<T> {
+        /// Wait for the result.
+        ///
+        /// If the deferred computation panicked, the panic is resumed on the caller, matching
+        /// the unwinding behavior of the strategy's synchronous methods.
+        pub async fn wait(self) -> T {
+            match self.0 {
+                DeferredInner::Ready(value) => value,
+                #[cfg(feature = "std")]
+                DeferredInner::Pending(receiver) => {
+                    match receiver.await.expect("deferred computation never completed") {
+                        Ok(value) => value,
+                        Err(panic) => std::panic::resume_unwind(panic),
+                    }
+                }
+            }
+        }
     }
 
     /// A sequential execution strategy.
@@ -561,6 +603,21 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         fn parallelism_hint(&self) -> usize {
             self.thread_pool.current_num_threads()
         }
+
+        fn defer<T, FN>(&self, f: FN) -> Deferred<T>
+        where
+            T: Send + 'static,
+            FN: FnOnce() -> T + Send + 'static,
+        {
+            // Catch panics and resume them in `wait`: a bare panic in a rayon spawn would
+            // invoke the pool's panic handler (aborting by default) instead of unwinding.
+            let (sender, receiver) = commonware_utils::channel::oneshot::channel();
+            self.thread_pool.spawn(move || {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+                let _ = sender.send(result);
+            });
+            Deferred(DeferredInner::Pending(receiver))
+        }
     }
 });
 
@@ -568,10 +625,31 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
 mod test {
     use crate::{Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
+    use futures::executor::block_on;
     use proptest::prelude::*;
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn defer_sequential_computes_inline() {
+        let deferred = Sequential.defer(|| (0..100u32).sum::<u32>());
+        assert_eq!(block_on(deferred.wait()), 4950);
+    }
+
+    #[test]
+    fn defer_rayon_computes_on_pool() {
+        let deferred = parallel_strategy().defer(|| (0..100u32).sum::<u32>());
+        assert_eq!(block_on(deferred.wait()), 4950);
+    }
+
+    #[test]
+    fn defer_rayon_resumes_panic_on_wait() {
+        let deferred = parallel_strategy().defer(|| -> u32 { panic!("boom") });
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| block_on(deferred.wait())));
+        assert!(result.is_err());
     }
 
     proptest! {

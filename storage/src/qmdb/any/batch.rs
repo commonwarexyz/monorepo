@@ -263,6 +263,10 @@ type AncestorBatch<F, D, U, S> = Arc<MerkleizedBatch<F, D, U, S>>;
 /// from the resolution/merkleization machinery. Helpers that need access to the parent
 /// chain, DB snapshot, or operation log are methods on this struct, eliminating parameter
 /// threading.
+/// Minimum op count for overlapping this batch's leaf hashing with the floor raise; below
+/// this, dispatching to a worker costs more than the overlap hides.
+const DEFER_HASHING_THRESHOLD: usize = 1024;
+
 struct Merkleizer<F: Family, H, U, S: Strategy>
 where
     U: update::Update + Send + Sync,
@@ -523,11 +527,20 @@ where
         &self,
         loc: Location<F>,
         batch_ops: &[Operation<F, U>],
+        batch_ops_tail: &[Operation<F, U>],
     ) -> Option<Operation<F, U>> {
         let loc = *loc;
 
         if loc >= self.base_size {
-            return Some(batch_ops[(loc - self.base_size) as usize].clone());
+            // The batch region is `batch_ops` followed by `batch_ops_tail` (split so the
+            // floor raise can append ops while the earlier ops are hashed concurrently).
+            let idx = (loc - self.base_size) as usize;
+            let op = if idx < batch_ops.len() {
+                &batch_ops[idx]
+            } else {
+                &batch_ops_tail[idx - batch_ops.len()]
+            };
+            return Some(op.clone());
         }
 
         if loc >= self.db_size {
@@ -543,9 +556,10 @@ where
         &self,
         loc: Location<F>,
         batch_ops: &[Operation<F, U>],
+        batch_ops_tail: &[Operation<F, U>],
         reader: &R,
     ) -> Option<Operation<F, U>> {
-        self.try_read_op_from_uncommitted(loc, batch_ops)
+        self.try_read_op_from_uncommitted(loc, batch_ops, batch_ops_tail)
             .or_else(|| reader.try_read_sync(*loc))
     }
 
@@ -554,12 +568,13 @@ where
         &self,
         locations: &[Location<F>],
         batch_ops: &[Operation<F, U>],
+        batch_ops_tail: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
         // Resolve hits synchronously: batch/ancestor first, then journal page cache.
         let results: Vec<Option<Operation<F, U>>> = locations
             .iter()
-            .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
+            .map(|loc| self.try_read_op_sync(*loc, batch_ops, batch_ops_tail, reader))
             .collect();
 
         // Batch-read disk misses. Reader::read_many requires sorted, unique positions, while this
@@ -685,7 +700,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn finish<E, C, I, R, const N: usize>(
         self,
-        mut ops: Vec<Operation<F, U>>,
+        ops: Vec<Operation<F, U>>,
         mut diff: DiffVec<U::Key, F, U::Value>,
         active_keys_delta: isize,
         user_steps: u64,
@@ -700,6 +715,23 @@ where
         I: UnorderedIndex<Value = Location<F>>,
         R: Reader<Item = Operation<F, U>>,
     {
+        // Hash this batch's ops concurrently with the floor raise: their locations are final
+        // (floor-raise moves append strictly after them) and each leaf digest depends only on
+        // the op's bytes and position, so hashing overlaps the scan's reads and bookkeeping.
+        let first = self.journal_batch.leaves();
+        let strategy = self.journal_batch.strategy().clone();
+        let hasher = self.journal_batch.hasher().clone();
+        let user_ops = Arc::new(ops);
+        let deferred = (user_ops.len() >= DEFER_HASHING_THRESHOLD).then(|| {
+            let ops = Arc::clone(&user_ops);
+            let strategy = strategy.clone();
+            let hasher = hasher.clone();
+            self.journal_batch
+                .strategy()
+                .defer(move || authenticated::leaf_digests(&ops, first, &strategy, &hasher))
+        });
+        let mut tail: Vec<Operation<F, U>> = Vec::new();
+
         // Floor raise.
         // Steps = user_steps + 1 (+1 for previous commit becoming inactive).
         let total_steps = user_steps + 1;
@@ -709,7 +741,7 @@ where
         if total_active_keys > 0 {
             // Floor raise: advance the inactivity floor by `total_steps` active operations.
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
-            let fixed_tip = self.base_size + ops.len() as u64;
+            let fixed_tip = self.base_size + user_ops.len() as u64;
             let mut moved = 0u64;
             let mut scan_from = floor;
             let mut floor_diff = Vec::with_capacity(total_steps as usize);
@@ -727,7 +759,7 @@ where
 
                 // Batch-read candidates: cache hits resolve synchronously, disk misses
                 // are fetched concurrently.
-                let resolved = self.read_ops(&candidates, &ops, &reader).await?;
+                let resolved = self.read_ops(&candidates, &user_ops, &tail, &reader).await?;
 
                 // Process results in order, moving active ops to the tip.
                 for (candidate, op) in candidates.into_iter().zip(resolved) {
@@ -759,9 +791,10 @@ where
                     if !active {
                         continue;
                     }
-                    let new_loc = Location::new(self.base_size + ops.len() as u64);
+                    let new_loc =
+                        Location::new(self.base_size + (user_ops.len() + tail.len()) as u64);
                     let value = extract_update_value(&op);
-                    ops.push(op);
+                    tail.push(op);
 
                     let new_entry = (
                         key,
@@ -791,7 +824,7 @@ where
             }
         } else {
             // DB is empty after this batch; raise floor to tip.
-            floor = Location::new(self.base_size + ops.len() as u64);
+            floor = Location::new(self.base_size + (user_ops.len() + tail.len()) as u64);
             debug!(tip = ?floor, "db is empty, raising floor to tip");
         }
 
@@ -800,8 +833,20 @@ where
         drop(reader);
 
         // CommitFloor operation.
-        let commit_loc = Location::<F>::new(self.base_size + ops.len() as u64);
-        ops.push(Operation::CommitFloor(metadata, floor));
+        let commit_loc =
+            Location::<F>::new(self.base_size + (user_ops.len() + tail.len()) as u64);
+        tail.push(Operation::CommitFloor(metadata, floor));
+
+        // Join the overlapped hashing, hash the floor-raise tail, and reassemble the ops.
+        let mut digests = match deferred {
+            Some(deferred) => deferred.wait().await,
+            None => authenticated::leaf_digests(&user_ops, first, &strategy, &hasher),
+        };
+        let tail_first = Location::<F>::new(self.base_size + user_ops.len() as u64);
+        digests.extend(authenticated::leaf_digests(&tail, tail_first, &strategy, &hasher));
+        // The deferred task dropped its Arc clone on completion, so this is a move.
+        let mut ops = Arc::try_unwrap(user_ops).unwrap_or_else(|arc| (*arc).clone());
+        ops.extend(tail);
 
         // Merkleize the journal batch.
         // The journal batch was created eagerly at batch construction time and its
@@ -812,7 +857,7 @@ where
         let inactive_peaks = db.inactive_peaks(leaves, floor);
 
         // Hash before `with_mem` borrows committed Merkle state under its read lock.
-        let journal_batch = self.journal_batch.add_many(ops);
+        let journal_batch = self.journal_batch.add_many_prehashed(ops, digests);
         let journal = db.log.with_mem(|base| journal_batch.merkleize(base));
         let root = db
             .log
@@ -1079,7 +1124,7 @@ where
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
         let reader = db.log.reader().await;
-        let results = m.read_ops(&locations, &[], &reader).await?;
+        let results = m.read_ops(&locations, &[], &[], &reader).await?;
 
         // Generate user mutation operations.
         let mut ops: Vec<Operation<F, update::Unordered<K, V>>> =
@@ -1309,7 +1354,7 @@ where
         let mut updated: Vec<(K, V::Value, Location<F>)> = Vec::new();
 
         for (op, &old_loc) in m
-            .read_ops(&locations, &[], &reader)
+            .read_ops(&locations, &[], &[], &reader)
             .await?
             .into_iter()
             .zip(&locations)
@@ -1391,7 +1436,7 @@ where
         prev_locations.sort();
         prev_locations.dedup();
 
-        let prev_results = m.read_ops(&prev_locations, &[], &reader).await?;
+        let prev_results = m.read_ops(&prev_locations, &[], &[], &reader).await?;
 
         for (op, &old_loc) in prev_results.into_iter().zip(&prev_locations) {
             let data = match op {
@@ -1466,7 +1511,7 @@ where
         let ancestor_locs: Vec<Location<F>> =
             ancestor_active.iter().map(|&(_, _, loc)| loc).collect();
         for (op, (key, value, loc)) in m
-            .read_ops(&ancestor_locs, &[], &reader)
+            .read_ops(&ancestor_locs, &[], &[], &reader)
             .await?
             .into_iter()
             .zip(ancestor_active)
@@ -2778,6 +2823,7 @@ mod tests {
                 .read_ops(
                     &[current_loc, committed_loc, parent_loc, committed_loc],
                     &batch_ops,
+                    &[],
                     &reader,
                 )
                 .await

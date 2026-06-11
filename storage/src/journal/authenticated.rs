@@ -120,29 +120,58 @@ impl<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>
     /// # Panics
     ///
     /// Panics if items were previously added via [`add`](Self::add).
-    pub(crate) fn add_many(mut self, items: Vec<Item>) -> Self {
+    pub(crate) fn add_many(self, items: Vec<Item>) -> Self {
+        let digests = leaf_digests(&items, self.inner.leaves(), self.inner.strategy(), &self.hasher);
+        self.add_many_prehashed(items, digests)
+    }
+
+    /// Like [`add_many`](Self::add_many), but with leaf digests precomputed via
+    /// [`leaf_digests`] using `first == self.leaves()`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if items were previously added via [`add`](Self::add).
+    pub(crate) fn add_many_prehashed(mut self, items: Vec<Item>, digests: Vec<H::Digest>) -> Self {
         assert!(
             self.items.is_empty(),
             "add_many expects no items added via add"
         );
-
-        let first = self.inner.leaves();
-        let hasher = &self.hasher;
-        let digests = self.inner.strategy().map_init_collect_vec(
-            items.iter().enumerate(),
-            Vec::new,
-            |buf, (i, item)| {
-                let pos = Position::try_from(first + i as u64).expect("valid leaf location");
-                buf.clear();
-                item.write(buf);
-                hasher.leaf_digest(pos, buf.as_slice())
-            },
-        );
+        debug_assert_eq!(items.len(), digests.len());
 
         self.inner = self.inner.add_leaf_digests(digests);
         self.items = items;
         self
     }
+
+    /// The number of leaves visible through this batch, including ancestors.
+    pub(crate) fn leaves(&self) -> Location<F> {
+        self.inner.leaves()
+    }
+
+    /// The batch's parallelization strategy.
+    pub(crate) fn strategy(&self) -> &S {
+        self.inner.strategy()
+    }
+
+    /// The batch's item hasher.
+    pub(crate) const fn hasher(&self) -> &StandardHasher<H> {
+        &self.hasher
+    }
+}
+
+/// Compute the Merkle leaf digest of each item, where the first item occupies leaf `first`.
+pub(crate) fn leaf_digests<F: Family, H: Hasher, Item: Encode + Send + Sync, S: Strategy>(
+    items: &[Item],
+    first: Location<F>,
+    strategy: &S,
+    hasher: &StandardHasher<H>,
+) -> Vec<H::Digest> {
+    strategy.map_init_collect_vec(items.iter().enumerate(), Vec::new, |buf, (i, item)| {
+        let pos = Position::try_from(first + i as u64).expect("valid leaf location");
+        buf.clear();
+        item.write(buf);
+        hasher.leaf_digest(pos, buf.as_slice())
+    })
 }
 
 /// A speculative batch whose root digest has been computed, in contrast to [`UnmerkleizedBatch`].
