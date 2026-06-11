@@ -591,18 +591,20 @@ where
             return Ok(results.into_iter().map(Option::unwrap).collect());
         }
 
+        // The common callers (floor-raise candidates and depth-0 mutation reads) pass
+        // sorted, unique locations, so sorting is usually a no-op worth skipping.
         let mut positions: Vec<u64> = committed.iter().map(|(_, loc)| *loc).collect();
-        positions.sort_unstable();
-        positions.dedup();
+        let presorted = positions.is_sorted_by(|a, b| a < b);
+        if !presorted {
+            positions.sort_unstable();
+            positions.dedup();
+        }
 
         let read = reader.read_many(&positions).await?;
 
-        // The common callers (floor-raise candidates and depth-0 mutation reads) pass
-        // sorted, unique, all-committed locations, so the batched read is already in
-        // caller order and the merge below would only re-clone every operation.
-        if positions.len() == locations.len()
-            && positions.iter().zip(locations).all(|(p, l)| *p == **l)
-        {
+        // A presorted input with nothing resolved in memory was read in caller order
+        // already, so the merge below would only re-clone every operation.
+        if presorted && positions.len() == locations.len() {
             return Ok(read);
         }
 
