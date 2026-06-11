@@ -29,11 +29,16 @@
 //! # Typed Synchronous Decoding
 //!
 //! The `try_decode_*` methods decode codec types directly from cached page bytes (or tip-buffer
-//! bytes) without performing I/O, copying, or allocating. The decode runs while internal locks
-//! are held, so the `commonware_codec::Read` implementations used with them must be cheap and
-//! parse-only: no blocking and no expensive work such as decompression. A `None` result always
-//! means "retry via an async read"; a `Some(Err(_))` result means the bytes were fully available
-//! and are malformed.
+//! bytes) without performing I/O and without copying bytes into an intermediate buffer: the
+//! decoder reads borrowed page slots in place, so only the decoded value itself is materialized.
+//! The decode runs while internal locks are held, so the `commonware_codec::Read`
+//! implementations used with them must be cheap and parse-only: no blocking and no expensive
+//! work such as decompression. A `None` result always means "retry via an async read"; a
+//! `Some(Err(_))` result means the bytes were fully available and are malformed.
+//!
+//! Decoders used with the prefix variant must additionally be driven solely by the bytes they
+//! consume (fixed-size or length-prefixed encodings); see
+//! [Append::try_decode_prefix_sync].
 
 use super::{
     cache::CachedDecode,
@@ -718,6 +723,16 @@ impl<B: Blob> Append<B> {
     ///
     /// The decode runs under internal locks and must be parse-only: `T::read_cfg`
     /// implementations used here must not block or perform expensive work such as decompression.
+    ///
+    /// `T`'s decoding must be driven solely by the bytes it consumes (fixed-size or
+    /// length-prefixed encodings). The decoder is handed the resident prefix of the requested
+    /// range, which may be shorter than `max_len` (it can stop at a page boundary, a
+    /// non-resident page, or an internal gathering cap), and a success over that prefix is
+    /// returned as authoritative. A decoder whose result depends on `remaining()` (one that
+    /// greedily consumes everything available, like `commonware_codec::types::Lazy`) would
+    /// observe an arbitrary residency-dependent window and silently diverge from the async
+    /// read; use [Self::try_decode_sync] for such types instead, which only succeeds when the
+    /// decoder sees exactly `len` bytes.
     pub fn try_decode_prefix_sync<T: CodecRead>(
         &self,
         offset: u64,
@@ -783,7 +798,8 @@ impl<B: Blob> Append<B> {
     /// Decode multiple items of exactly `len` bytes each at sorted, non-overlapping offsets
     /// without performing I/O. For each offset, pushes `Some(item)` on success or `None` when
     /// the item's bytes are not synchronously available. Returns an error only when resident
-    /// bytes are malformed (corruption).
+    /// bytes are malformed (corruption); in that case `out` may contain fewer than
+    /// `offsets.len()` new entries and must be discarded.
     ///
     /// Amortizes lock acquisition: the page-cache read lock is taken once per internal chunk of
     /// offsets rather than once per item, and the tip lock is taken at most once.
@@ -794,6 +810,10 @@ impl<B: Blob> Append<B> {
         cfg: &T::Cfg,
         out: &mut Vec<Option<T>>,
     ) -> Result<(), commonware_codec::Error> {
+        assert!(
+            offsets.windows(2).all(|w| w[0] < w[1]),
+            "offsets must be sorted and non-overlapping"
+        );
         let base = out.len();
         self.cache_ref
             .decode_cached_exact_many::<T>(self.id, offsets, len, cfg, out)?;
@@ -810,8 +830,12 @@ impl<B: Blob> Append<B> {
             if slot.is_some() {
                 continue;
             }
-            if let Some(Ok(value)) = Self::decode_tip_exact::<T>(&buffer, offset, len, cfg) {
-                *slot = Some(value);
+            match Self::decode_tip_exact::<T>(&buffer, offset, len, cfg) {
+                Some(Ok(value)) => *slot = Some(value),
+                // The tip result is authoritative (all `len` bytes were stably available),
+                // matching the single-item path.
+                Some(Err(err)) => return Err(err),
+                None => {}
             }
         }
         Ok(())
@@ -1391,7 +1415,10 @@ impl<B: Blob> Append<B> {
     /// # Warning
     ///
     /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
-    /// - Concurrent readers which try to read past the new size during the resize may error.
+    /// - Concurrent readers which try to read past the new size during the resize may error, and
+    ///   the synchronous decode paths (which consult the page cache without taking the buffer or
+    ///   blob locks) may observe pre-resize bytes until the resize completes. Callers must
+    ///   serialize resizes against reads for results to be linearizable.
     /// - The resize is not guaranteed durable until the next sync.
     pub async fn resize(&self, size: u64) -> Result<(), Error> {
         let current_size = self.size().await;

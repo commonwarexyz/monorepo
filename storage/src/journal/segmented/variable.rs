@@ -227,6 +227,13 @@ impl<V: CodecRead> CodecRead for PrefixedItem<V> {
 ///
 /// Each section is stored in a separate blob. Items are length-prefixed with a varint.
 ///
+/// # Synchronous Reads
+///
+/// When compression is disabled, read paths opportunistically decode items in place from the
+/// page cache (or write buffer) while holding internal locks shared with the append path. `V`'s
+/// `Read` implementation must therefore be cheap and parse-only: no blocking and no expensive
+/// work.
+///
 /// # Repair
 ///
 /// Like
@@ -815,7 +822,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             .ok();
         }
 
-        // Otherwise try reading the full item from cache.
+        // Otherwise try reading the full item from cache. The per-call allocation is
+        // acceptable here because decompression dominates the cost of this path.
         let mut buf = vec![0u8; item_len];
         if !blob.try_read_sync(offset, &mut buf) {
             return None;

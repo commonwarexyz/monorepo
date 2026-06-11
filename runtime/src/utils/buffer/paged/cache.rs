@@ -280,7 +280,8 @@ impl CacheRef {
     /// Decode multiple items of exactly `len` bytes each at the given offsets for `blob_id`,
     /// without performing I/O. For each offset, pushes `Some(item)` on success or `None` when the
     /// item's bytes are not fully resident. Returns an error only when resident bytes are
-    /// malformed.
+    /// malformed; in that case `out` may contain fewer than `offsets.len()` new entries and must
+    /// be discarded.
     ///
     /// The page-cache read lock is taken once per chunk of offsets rather than once per item,
     /// amortizing lock acquisition while bounding hold time.
@@ -583,7 +584,13 @@ impl Cache {
     /// point on resize). Every byte reachable through [Self::gather] is therefore a committed
     /// logical byte of the blob, and the page overlapping the tip is never resident, so gathering
     /// naturally stops at the flushed/tip boundary. A successful decode within the gathered prefix
-    /// is thus valid even if gathering was truncated.
+    /// is thus valid even if gathering was truncated, PROVIDED two caller obligations hold:
+    /// the decoder must be driven solely by the bytes it consumes (one whose result depends on
+    /// `remaining()` would observe a residency-dependent window rather than the requested
+    /// range; documented on the public prefix API), and resizes must be serialized against
+    /// synchronous decodes (between a blob truncation and the cache invalidation a decode could
+    /// otherwise serve pre-resize bytes; the journal wrappers hold exclusive access during
+    /// rewinds).
     fn decode_prefix<T: CodecRead>(
         &self,
         blob_id: u64,
@@ -1518,6 +1525,32 @@ mod tests {
         assert!(matches!(
             cache_ref.decode_cached_exact::<[bool; 2]>(blob_id, offset, 2, &()),
             CachedDecode::Missing
+        ));
+    }
+
+    #[test_traced]
+    fn test_decode_cached_short_ok_truncated_is_missing() {
+        // A decoder that succeeds on the truncated gather while consuming fewer than `len`
+        // bytes must be classified as Missing (partial residency), not Invalid(ExtraData):
+        // the absent tail page may hold the rest of the encoding, and the async fallback is
+        // the authority.
+        let cache_ref = CacheRef::new(test_pool(), PAGE_SIZE, NZUsize!(10));
+        let blob_id = cache_ref.next_id();
+        cache_ref.cache(blob_id, &patterned_page(0), 0);
+
+        // u32 needs 4 bytes; exactly 4 bytes are resident before the absent page 1, but the
+        // caller claims the encoding occupies 8 bytes.
+        let offset = PAGE_SIZE_U64 - 4;
+        assert!(matches!(
+            cache_ref.decode_cached_exact::<u32>(blob_id, offset, 8, &()),
+            CachedDecode::Missing
+        ));
+
+        // Same shape through the prefix variant: a successful decode within the resident
+        // prefix is a valid result there.
+        assert!(matches!(
+            cache_ref.decode_cached_prefix::<u32>(blob_id, offset, 8, &()),
+            CachedDecode::Decoded(_, 4)
         ));
     }
 

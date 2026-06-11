@@ -59,6 +59,12 @@ pub struct Config {
 ///
 /// Each section is stored in a separate blob. Within each blob, items are fixed-size.
 ///
+/// # Synchronous Reads
+///
+/// Read paths opportunistically decode items in place from the page cache (or write buffer)
+/// while holding internal locks shared with the append path. `A`'s `Read` implementation must
+/// therefore be cheap and parse-only: no blocking and no expensive work.
+///
 /// # Repair
 ///
 /// Like
