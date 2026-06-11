@@ -53,7 +53,7 @@ pub(super) struct CommonMetrics<E: Clock> {
     /// Single-item read calls.
     pub read_calls: Counter,
     /// Duration of single-item read calls that miss the page cache.
-    read_miss_duration: Timed,
+    read_duration: Timed,
     /// Non-empty batch async read calls.
     pub read_many_calls: Counter,
     /// Duration of non-empty batch read calls.
@@ -111,9 +111,9 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
         let read_calls = context
             .as_ref()
             .counter("read_calls", "Number of single-item read calls");
-        let read_miss_duration = duration_histogram(
+        let read_duration = duration_histogram(
             context.as_ref(),
-            "read_miss_duration",
+            "read_duration",
             "Duration of single-item read calls that miss the page cache",
         );
         let read_many_calls = context
@@ -153,7 +153,7 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
             append_prepared_calls,
             append_prepared_duration: Timed::new(append_prepared_duration),
             read_calls,
-            read_miss_duration: Timed::new(read_miss_duration),
+            read_duration: Timed::new(read_duration),
             read_many_calls,
             read_many_duration: Timed::new(read_many_duration),
             try_read_sync_hits,
@@ -177,8 +177,8 @@ impl<E: Clock> CommonMetrics<E> {
         self.append_prepared_duration.scoped(&self.clock)
     }
 
-    pub(super) fn read_miss_timer(&self) -> ScopedTimer<E> {
-        self.read_miss_duration.scoped(&self.clock)
+    pub(super) fn read_timer(&self) -> ScopedTimer<E> {
+        self.read_duration.scoped(&self.clock)
     }
 
     pub(super) fn read_many_timer(&self) -> ScopedTimer<E> {

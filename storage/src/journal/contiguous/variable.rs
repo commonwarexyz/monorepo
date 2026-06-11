@@ -291,7 +291,7 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
 
         // Only misses are timed: hits complete below the histogram's resolution and the clock
         // reads would dominate their cost.
-        let _timer = self.metrics.read_miss_timer();
+        let _timer = self.metrics.read_timer();
         let item = self
             .guard
             .read(position, self.items_per_section, &self.offsets)
@@ -5497,7 +5497,7 @@ mod tests {
                 "variable_metrics_sync_calls_total 1",
                 "variable_metrics_append_duration_count 1",
                 "variable_metrics_append_many_duration_count 1",
-                "variable_metrics_read_miss_duration_count 0",
+                "variable_metrics_read_duration_count 0",
                 "variable_metrics_read_many_duration_count 1",
                 "variable_metrics_commit_duration_count 1",
                 "variable_metrics_sync_duration_count 1",
@@ -5520,7 +5520,7 @@ mod tests {
 
     #[test_traced]
     fn test_variable_journal_read_miss_timed() {
-        // Reads served from storage record a read_miss_duration sample; cache hits do not.
+        // Reads served from storage record a read_duration sample; cache hits do not.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Sections span multiple full pages so their data must go through the (evictable)
@@ -5550,10 +5550,7 @@ mod tests {
             drop(reader);
 
             let buffer = context.encode();
-            assert!(
-                buffer.contains("miss_read_miss_duration_count 1"),
-                "{buffer}"
-            );
+            assert!(buffer.contains("miss_read_duration_count 1"), "{buffer}");
 
             journal.destroy().await.unwrap();
         });
