@@ -234,13 +234,13 @@ where
     }
 
     /// Like [`Self::get_many`] but additionally returns the committed location each value was
-    /// read from. When `CACHE` is set, each result also carries the update's cached payload
-    /// (for batch reads to stash for merkleize); plain reads pass `false` and pay nothing.
+    /// read from. When `CACHE` is set, each result also carries the update's next key (for
+    /// batch reads to stash for merkleize); plain reads pass `false` and pay nothing.
     #[allow(clippy::type_complexity)]
     pub(crate) async fn get_many_with_locations<const CACHE: bool>(
         &self,
         keys: &[&U::Key],
-    ) -> Result<Vec<Option<(U::Value, Location<F>, Option<U::Cached>)>>, crate::qmdb::Error<F>>
+    ) -> Result<Vec<Option<(U::Value, Location<F>, Option<U::Key>)>>, crate::qmdb::Error<F>>
     {
         if keys.is_empty() {
             return Ok(Vec::new());
@@ -253,8 +253,8 @@ where
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        let mut results: Vec<Option<(U::Value, Location<F>, Option<U::Cached>)>> =
-            (0..keys.len()).map(|_| None).collect();
+        let mut results: Vec<Option<(U::Value, Location<F>, Option<U::Key>)>> =
+            vec![None; keys.len()];
 
         self.snapshot
             .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
@@ -289,8 +289,8 @@ where
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {
-                let cached = CACHE.then(|| data.cached());
-                results[key_idx] = Some((data.value().clone(), Location::new(pos), cached));
+                let next_key = if CACHE { data.next_key().cloned() } else { None };
+                results[key_idx] = Some((data.value().clone(), Location::new(pos), next_key));
             }
         }
 
