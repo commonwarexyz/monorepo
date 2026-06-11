@@ -207,23 +207,25 @@ macro_rules! run_pipeline {
         let mut rng = StdRng::seed_from_u64(99);
         let mut times_ms: Vec<f64> = Vec::with_capacity(args.iters);
         for iter in 0..args.iters {
-            // Pending ancestors are rebuilt per iteration and never applied (untimed).
-            let mut parent: Option<$merkleized> = None;
+            // Pending ancestors are rebuilt per iteration and never applied (untimed). The
+            // whole chain is held alive: dropping an uncommitted ancestor before merkleize
+            // loses its diff (the parent link is a Weak ref).
+            let mut chain: Vec<$merkleized> = Vec::with_capacity(args.depth as usize);
             for _ in 0..args.depth {
-                let mut b = parent
-                    .as_ref()
+                let mut b = chain
+                    .last()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>());
                 for (k, v) in gen_muts(&mut rng, args.num_updates, args.num_keys) {
                     b = b.write(k, Some(v));
                 }
-                parent = Some(b.merkleize(&db, None).await.unwrap());
+                chain.push(b.merkleize(&db, None).await.unwrap());
             }
 
             let muts = gen_muts(&mut rng, args.num_updates, args.num_keys);
             let keys: Vec<&Digest> = muts.iter().map(|(k, _)| k).collect();
             let new_batch = || {
-                parent
-                    .as_ref()
+                chain
+                    .last()
                     .map_or_else(|| db.new_batch(), |p| p.new_batch::<Sha256>())
             };
 

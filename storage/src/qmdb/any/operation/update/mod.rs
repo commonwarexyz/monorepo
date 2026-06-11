@@ -23,14 +23,17 @@ pub trait Update: sealed::Sealed + Clone + Send + Sync {
     /// The value encoding (fixed or variable).
     type ValueEncoding: ValueEncoding<Value = Self::Value>;
 
-    /// Whether batch reads cache resolved committed locations for merkleize to consume.
-    const CACHES_READS: bool;
+    /// Payload cached alongside the resolved location of a batch read, consumed by merkleize.
+    type Cached: Send + Sync;
 
     /// The updated key.
     fn key(&self) -> &Self::Key;
 
     /// The updated value.
     fn value(&self) -> &Self::Value;
+
+    /// Build the cached payload from a resolved update.
+    fn cached(&self) -> Self::Cached;
 
     /// Format the update for display.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result;
