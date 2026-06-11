@@ -441,35 +441,6 @@ impl<'a, K: Ord, F: Family, V> Iterator for DiffMerge<'a, K, F, V> {
     }
 }
 
-/// Resolves a key's `base_old_loc` by walking parallel cursors over already-applied
-/// ancestor diffs (parent-first). Lookups must be issued in ascending key order because
-/// cursors only advance forward. Returns `Some(Some(loc))` for an active entry,
-/// `Some(None)` for a deletion, and `None` when no already-applied ancestor touched the
-/// key.
-struct AppliedAncestorResolver<'a, K, F: Family, V> {
-    cursors: Vec<(&'a DiffSlice<K, F, V>, usize)>,
-}
-
-impl<'a, K: Ord, F: Family, V> AppliedAncestorResolver<'a, K, F, V> {
-    fn new(applied: impl IntoIterator<Item = &'a DiffSlice<K, F, V>>) -> Self {
-        Self {
-            cursors: applied.into_iter().map(|s| (s, 0)).collect(),
-        }
-    }
-
-    fn lookup(&mut self, key: &K) -> Option<Option<Location<F>>> {
-        for (slice, idx) in self.cursors.iter_mut() {
-            while *idx < slice.len() && slice[*idx].0 < *key {
-                *idx += 1;
-            }
-            if *idx < slice.len() && slice[*idx].0 == *key {
-                return Some(slice[*idx].1.loc());
-            }
-        }
-        None
-    }
-}
-
 /// Fill `out` with up to `limit` floor-raise candidates in `[floor, tip)` under a single bitmap
 /// read guard, returning the next `floor`.
 fn fill_candidates<F: Family, const N: usize>(
@@ -947,8 +918,8 @@ where
     /// Batch read multiple keys (mutations -> ancestor diffs -> committed DB).
     ///
     /// Returns results in the same order as the input keys, with `None` for absent or deleted
-    /// keys. When the update kind caches reads, each unique read resolved from the committed
-    /// DB is cached on the batch for reuse at merkleize.
+    /// keys. Each unique read resolved from the committed DB is cached on the batch for reuse
+    /// at merkleize.
     pub async fn get_many<E, C, I, const N: usize>(
         &self,
         keys: &[&U::Key],
@@ -1078,7 +1049,7 @@ where
         I: UnorderedIndex<Value = Location<F>>,
     {
         let mut resolved = core::mem::take(&mut *self.resolved.lock());
-        let (mutations, m) = self.into_parts();
+        let (mut mutations, m) = self.into_parts();
 
         // Pull mutations whose committed location this batch's reads already resolved. They
         // skip the journal re-read and are emitted at their cached location by the merge
@@ -1089,17 +1060,19 @@ where
         // rebuilding the unconsumed remainder from a sorted stream is a linear bulk build.
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(resolved.len().min(mutations.len()));
-        let mut mutations: BTreeMap<K, Option<V::Value>> = mutations
-            .into_iter()
-            .filter_map(|(key, mutation)| match resolved.remove(&key) {
-                Some((loc, ())) => {
-                    cached.push((key, loc, mutation));
-                    None
-                }
-                None => Some((key, mutation)),
-            })
-            .collect();
-        cached.sort_unstable_by_key(|&(_, loc, _)| loc);
+        if !resolved.is_empty() {
+            mutations = mutations
+                .into_iter()
+                .filter_map(|(key, mutation)| match resolved.remove(&key) {
+                    Some((loc, ())) => {
+                        cached.push((key, loc, mutation));
+                        None
+                    }
+                    None => Some((key, mutation)),
+                })
+                .collect();
+            cached.sort_unstable_by_key(|&(_, loc, _)| loc);
+        }
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, false);
@@ -1293,7 +1266,7 @@ where
         I: OrderedIndex<Value = Location<F>>,
     {
         let mut resolved = core::mem::take(&mut *self.resolved.lock());
-        let (mutations, m) = self.into_parts();
+        let (mut mutations, m) = self.into_parts();
 
         // Pull update mutations whose committed op this batch's reads already resolved: they
         // skip the index probe and journal re-read, and their old op's next key feeds the
@@ -1308,16 +1281,18 @@ where
         // mostly-sorted input.
         let mut cached: Vec<(K, V::Value, Location<F>, K)> =
             Vec::with_capacity(resolved.len().min(mutations.len()));
-        let mut mutations: BTreeMap<K, Option<V::Value>> = mutations
-            .into_iter()
-            .filter_map(|(key, mutation)| match (resolved.remove(&key), mutation) {
-                (Some((loc, old_next)), Some(value)) => {
-                    cached.push((key, value, loc, old_next));
-                    None
-                }
-                (_, mutation) => Some((key, mutation)),
-            })
-            .collect();
+        if !resolved.is_empty() {
+            mutations = mutations
+                .into_iter()
+                .filter_map(|(key, mutation)| match (resolved.remove(&key), mutation) {
+                    (Some((loc, old_next)), Some(value)) => {
+                        cached.push((key, value, loc, old_next));
+                        None
+                    }
+                    (_, mutation) => Some((key, mutation)),
+                })
+                .collect();
+        }
 
         // Resolve existing keys.
         let locations = m.gather_existing_locations(&mutations, db, true);
@@ -1920,12 +1895,15 @@ where
                         pending.push(ancestor_diff.as_slice());
                     }
                 }
-                let mut resolver = AppliedAncestorResolver::new(applied);
+                let mut resolver = DiffCursors::new(applied);
                 let merge = DiffMerge::new(
                     iter::once(batch.diff.as_slice()).chain(pending.iter().copied()),
                 );
                 for (key, entry) in merge {
-                    let old = resolver.lookup(key).unwrap_or_else(|| entry.base_old_loc());
+                    let old = resolver
+                        .resolve(key)
+                        .map(DiffEntry::loc)
+                        .unwrap_or_else(|| entry.base_old_loc());
                     apply_diff(&mut self.snapshot, &mut bitmap, key, entry, old);
                 }
             }
@@ -2380,22 +2358,21 @@ mod tests {
     }
 
     #[test]
-    fn applied_ancestor_resolver_uses_nearest_touch() {
+    fn diff_cursors_use_nearest_touch() {
         let parent = vec![(2, active(20, 20)), (5, deleted(Some(5)))];
         let grandparent = vec![
             (2, active(200, 200)),
             (4, active(40, 40)),
             (5, active(50, 50)),
         ];
-        let mut resolver =
-            AppliedAncestorResolver::new([parent.as_slice(), grandparent.as_slice()]);
+        let mut cursors = DiffCursors::new([parent.as_slice(), grandparent.as_slice()]);
 
         // Lookups are issued in ascending order, as they are from DiffMerge in apply_batch.
-        assert_eq!(resolver.lookup(&1), None);
-        assert_eq!(resolver.lookup(&2), Some(Some(loc(20))));
-        assert_eq!(resolver.lookup(&4), Some(Some(loc(40))));
-        assert_eq!(resolver.lookup(&5), Some(None));
-        assert_eq!(resolver.lookup(&9), None);
+        assert_eq!(cursors.resolve(&1).map(DiffEntry::loc), None);
+        assert_eq!(cursors.resolve(&2).map(DiffEntry::loc), Some(Some(loc(20))));
+        assert_eq!(cursors.resolve(&4).map(DiffEntry::loc), Some(Some(loc(40))));
+        assert_eq!(cursors.resolve(&5).map(DiffEntry::loc), Some(None));
+        assert_eq!(cursors.resolve(&9).map(DiffEntry::loc), None);
     }
 
     #[test]
