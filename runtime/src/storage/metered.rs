@@ -91,14 +91,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.metrics.open_blobs.inc();
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             Blob {
                 inner,
                 partition: partition.into(),
-                metrics: Arc::new(MetricsHandle(self.metrics.clone())),
+                metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
             },
             len,
             blob_version,
@@ -126,6 +125,14 @@ pub struct Blob<B> {
 /// metrics when a blob (that may have been cloned multiple times)
 /// is dropped.
 struct MetricsHandle(Arc<Metrics>);
+
+impl MetricsHandle {
+    /// Counts the blob as open until this handle is dropped.
+    fn new(metrics: Arc<Metrics>) -> Self {
+        metrics.open_blobs.inc();
+        Self(metrics)
+    }
+}
 
 impl Deref for MetricsHandle {
     type Target = Metrics;
@@ -238,6 +245,31 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         run_storage_tests(storage).await;
+    }
+
+    /// Test that a failed open does not count an open blob.
+    #[tokio::test]
+    async fn test_failed_open_does_not_count_open_blob() {
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+
+        // Create a blob at the default version and release it
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+        assert_eq!(storage.metrics.open_blobs.get(), 0);
+
+        // Reopen with a disjoint version range
+        let result = storage
+            .open_versioned("partition", b"test_blob", 7..=7)
+            .await;
+        assert!(matches!(result, Err(Error::BlobVersionMismatch { .. })));
+        assert_eq!(
+            storage.metrics.open_blobs.get(),
+            0,
+            "failed open must not count an open blob"
+        );
     }
 
     /// Test that metrics are updated correctly for basic operations.
