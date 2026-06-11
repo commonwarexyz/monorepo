@@ -2,9 +2,7 @@ use super::round::Round;
 use crate::{
     simplex::{
         elector::{Config as ElectorConfig, Elector},
-        interesting,
         metrics::{Leader, Timeout, TimeoutReason},
-        min_active,
         scheme::Scheme,
         types::{
             Artifact, Certificate, Context, Finalization, Finalize, Notarization, Notarize,
@@ -80,6 +78,40 @@ impl ParentPayloadError {
             Self::MissingNullification { .. } | Self::ParentNotCertified { .. } => false,
         }
     }
+}
+
+/// The minimum view we are tracking both in-memory and on-disk.
+const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
+    last_finalized.saturating_sub(activity_timeout)
+}
+
+/// Whether or not a view is interesting to us.
+///
+/// This is a function of both `min_active` and whether `pending` is too far in
+/// the future relative to `current`.
+fn interesting(
+    activity_timeout: ViewDelta,
+    last_finalized: View,
+    current: View,
+    pending: View,
+    allow_unbounded_future: bool,
+    term_length: TermLength,
+) -> bool {
+    // If the view is genesis, skip it, genesis doesn't have votes
+    if pending.is_zero() {
+        return false;
+    }
+    if pending < min_active(activity_timeout, last_finalized) {
+        return false;
+    }
+    // If we don't allow unbounded future views, we still find two future views interesting:
+    // the next view and the first view of the next term. Certificates set
+    // `allow_unbounded_future` because they are self-certifying (see
+    // [`View::admits`]).
+    if !allow_unbounded_future && !current.admits(pending, term_length) {
+        return false;
+    }
+    true
 }
 
 /// Configuration for initializing [`State`].
@@ -425,13 +457,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         // At a term boundary, prefer the highest nullification from the previous
         // term because it proves the skipped views were abandoned.
         if self.view.is_term_start(self.term_length) {
-            let term_start = prev.term_start(self.term_length);
-            // Check for the highest nullification in the previous term
             if let Some(nullification) = self
-                .nullification_views
-                .range(term_start..=prev)
-                .next_back()
-                .copied()
+                .highest_nullification_in_term(prev)
                 .and_then(|v| self.nullification(v).cloned())
             {
                 return Some(Certificate::Nullification(nullification));
@@ -842,20 +869,22 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
 
         // Check for explicit certification
-        let round = self.views.get(&view)?;
-        if round.finalization().is_some() || round.is_certified() {
-            return Some(&round.proposal().expect("proposal must exist").payload);
-        }
-        None
+        self.views.get(&view)?.certified_payload()
     }
 
-    /// Returns whether `view` is covered by a prior-or-equal nullification in its term.
-    fn covered_by_term_nullification(&self, view: View) -> bool {
+    /// Returns the highest view in `view`'s term, at or below `view`, with a
+    /// tracked nullification certificate.
+    fn highest_nullification_in_term(&self, view: View) -> Option<View> {
         let term_start = view.term_start(self.term_length);
         self.nullification_views
             .range(term_start..=view)
             .next_back()
-            .is_some()
+            .copied()
+    }
+
+    /// Returns whether `view` is covered by a prior-or-equal nullification in its term.
+    fn covered_by_term_nullification(&self, view: View) -> bool {
+        self.highest_nullification_in_term(view).is_some()
     }
 
     /// Returns the highest view below `view` in `view`'s term that we voted to nullify.
@@ -914,7 +943,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .views
             .range(..view)
             .rev()
-            .find_map(|(&v, _)| self.is_certified(v).map(|p| (v, p)));
+            .find_map(|(&v, round)| round.certified_payload().map(|p| (v, p)));
         let (candidate, payload) = match result {
             Some((v, p)) => (v, p),
             None => (
@@ -1110,9 +1139,7 @@ mod tests {
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(
-                    std::num::NonZeroU64::new(term_length).expect("term length must be non-zero"),
-                ),
+                term_length: TermLength::new(NZU64!(term_length)),
                 finalization_timeout: Duration::from_secs(30),
             },
         );
@@ -3937,6 +3964,93 @@ mod tests {
                 "late-arriving finalization at the nullified view should unblock the finalize vote"
             );
         });
+    }
+
+    #[test]
+    fn test_interesting() {
+        let activity_timeout = ViewDelta::new(10);
+        let term_length = TermLength::new(NZU64!(10));
+
+        assert!(!interesting(
+            activity_timeout,
+            View::zero(),
+            View::zero(),
+            View::zero(),
+            false,
+            term_length,
+        ));
+
+        // Below min_active
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(5),
+            false,
+            term_length,
+        ));
+
+        // At min_active boundary
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(10),
+            false,
+            term_length,
+        ));
+
+        // strict mode allows only current.next and current.next_term_start above current
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(26),
+            false,
+            term_length,
+        ));
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(31),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(27),
+            false,
+            term_length,
+        ));
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(34),
+            false,
+            term_length,
+        ));
+
+        // unbounded future still respects lower bound
+        assert!(!interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(9),
+            true,
+            term_length,
+        ));
+        assert!(interesting(
+            activity_timeout,
+            View::new(20),
+            View::new(25),
+            View::new(10_000),
+            true,
+            term_length,
+        ));
     }
 
     #[test]

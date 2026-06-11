@@ -358,16 +358,15 @@ impl View {
     ///
     /// When `term_length` is 1, returns `self`.
     pub const fn term_end(self, term_length: TermLength) -> Self {
-        if self.0 == 0 || term_length.is_one() {
+        if self.0 == 0 {
             return self;
         }
-        let term_length = term_length.get();
-        let rounded = self
-            .0
-            .div_ceil(term_length)
-            .checked_mul(term_length)
+        let end = self
+            .term_start(term_length)
+            .get()
+            .checked_add(term_length.get() - 1)
             .expect("view term_end overflow");
-        Self(rounded)
+        Self(end)
     }
 
     /// Returns the first view of the term that follows this view's term.

@@ -322,7 +322,8 @@ where
                     } => {
                         let process = process_span(span.clone());
                         let _guard = process.entered();
-                        let am_leader = self.scheme.me().is_some_and(|me| me == leader);
+                        let me = self.scheme.me();
+                        let am_leader = me.is_some_and(|me| me == leader);
                         current = Current {
                             view: new_current,
                             leader: Some(leader),
@@ -343,13 +344,15 @@ where
                         round.set_span(span);
                         round.set_leader(leader);
 
-                        let has_forwardable_proposal = self.scheme.me().is_some_and(|me| {
-                            round.has_forwardable_proposal(me)
-                        });
+                        let has_forwardable_proposal =
+                            me.is_some_and(|me| round.has_forwardable_proposal(me));
+                        // The guards in Self::leader_nullified are unnecessary here:
+                        // current was just rebuilt (not timed out, leader set).
+                        let nullified_by_leader = round.has_nullify(leader);
 
                         // If the leader nullified this view or has not been active
                         // recently, tell the voter to reduce the leader timeout to now
-                        let timeout_reason = match Self::leader_nullified(&current, &work) {
+                        let timeout_reason = match nullified_by_leader {
                             // Leader already buffered a nullify for this now-current view
                             // (allowed because we accept votes up to `current+1`)
                             true => Some(TimeoutReason::LeaderNullify),
@@ -548,9 +551,8 @@ where
                     continue;
                 }
 
-                // Ignore votes from arbitrarily-future views (DOS via memory exhaustion).
-                // Allow votes from the next view since we may be slightly behind, and from
-                // the first view of the next term (a nullification skips there).
+                // Ignore votes from arbitrarily-future views (DOS via memory
+                // exhaustion); see [`View::admits`] for the allowed window.
                 if !current.view.admits(view, self.term_length) {
                     continue;
                 }

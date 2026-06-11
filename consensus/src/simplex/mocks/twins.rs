@@ -161,17 +161,9 @@ impl Scenario {
     ///
     /// Views after the configured adversarial rounds use full synchrony
     /// (`all -> all`) to model eventual synchrony for liveness checks.
-    /// Use [`Self::partitions_with_term_length`] when stable-leader terms
-    /// should consume one scripted round per term.
-    pub fn partitions<P: Clone>(&self, view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
-        let idx = view_index(view);
-        self.partitions_at(idx, participants)
-    }
-
-    /// Returns recipient sets for the leader term containing `view`.
-    ///
-    /// This keeps scripted network splits aligned with stable-leader terms.
-    pub fn partitions_with_term_length<P: Clone>(
+    /// Each leader term consumes one scripted round, keeping network splits
+    /// aligned with stable-leader terms.
+    pub fn partitions<P: Clone>(
         &self,
         view: View,
         term_length: TermLength,
@@ -192,21 +184,14 @@ impl Scenario {
     ///
     /// For scripted rounds, inbound twin traffic is routed by checking the
     /// sender against the primary and secondary bitmasks. When a sender appears
-    /// in both masks, this returns [`SplitTarget::Both`].
-    /// Use [`Self::route_with_term_length`] when stable-leader terms should
-    /// consume one scripted round per term.
+    /// in both masks, this returns [`SplitTarget::Both`]. Each leader term
+    /// consumes one scripted round.
     ///
     /// # Panics
     ///
     /// Panics if `sender` is not present in `participants` for a scripted
     /// round.
-    pub fn route<P: PartialEq>(&self, view: View, sender: &P, participants: &[P]) -> SplitTarget {
-        let idx = view_index(view);
-        self.route_at(idx, sender, participants)
-    }
-
-    /// Routes a message using the scripted network split for `view`'s leader term.
-    pub fn route_with_term_length<P: PartialEq>(
+    pub fn route<P: PartialEq>(
         &self,
         view: View,
         term_length: TermLength,
@@ -224,10 +209,6 @@ impl Scenario {
         // After attack rounds, both halves see everyone.
         SplitTarget::Both
     }
-}
-
-fn view_index(view: View) -> usize {
-    usize::try_from(view.get().saturating_sub(1)).expect("view index fits in usize")
 }
 
 fn term_index(view: View, term_length: TermLength) -> usize {
@@ -249,24 +230,20 @@ fn route_with_groups<P: PartialEq>(sender: &P, primary: &[P], secondary: &[P]) -
     }
 }
 
-/// Returns the strict disjoint split at index `view % n`.
+/// Returns the strict disjoint split at index `term_start % n` for the leader
+/// term containing `view`.
 ///
 /// # Panics
 ///
 /// Panics if `participants` is empty.
-pub fn view_partitions<P: Clone>(view: View, participants: &[P]) -> (Vec<P>, Vec<P>) {
-    let split = (view.get() as usize) % participants.len();
-    let (primary, secondary) = participants.split_at(split);
-    (primary.to_vec(), secondary.to_vec())
-}
-
-/// Returns the strict disjoint split for the leader term containing `view`.
-pub fn view_partitions_with_term_length<P: Clone>(
+pub fn view_partitions<P: Clone>(
     view: View,
     term_length: TermLength,
     participants: &[P],
 ) -> (Vec<P>, Vec<P>) {
-    view_partitions(view.term_start(term_length), participants)
+    let split = (view.term_start(term_length).get() as usize) % participants.len();
+    let (primary, secondary) = participants.split_at(split);
+    (primary.to_vec(), secondary.to_vec())
 }
 
 /// Routes a sender according to [`view_partitions`].
@@ -275,19 +252,13 @@ pub fn view_partitions_with_term_length<P: Clone>(
 ///
 /// Panics if `participants` is empty or `sender` is not present in
 /// `participants`.
-pub fn view_route<P: Clone + PartialEq>(view: View, sender: &P, participants: &[P]) -> SplitTarget {
-    let (primary, secondary) = view_partitions(view, participants);
-    route_with_groups(sender, &primary, &secondary)
-}
-
-/// Routes a sender according to [`view_partitions_with_term_length`].
-pub fn view_route_with_term_length<P: Clone + PartialEq>(
+pub fn view_route<P: Clone + PartialEq>(
     view: View,
     term_length: TermLength,
     sender: &P,
     participants: &[P],
 ) -> SplitTarget {
-    let (primary, secondary) = view_partitions_with_term_length(view, term_length, participants);
+    let (primary, secondary) = view_partitions(view, term_length, participants);
     route_with_groups(sender, &primary, &secondary)
 }
 
@@ -1779,7 +1750,8 @@ mod tests {
             rounds: vec![round(4, 3, 0b1011, 0b0110)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(1), TermLength::ONE, &participants);
 
         assert_eq!(primary, vec![0, 1, 3]);
         assert_eq!(secondary, vec![1, 2]);
@@ -1804,30 +1776,27 @@ mod tests {
         let participants: Vec<u32> = (0..3).collect();
         let term_length = TermLength::new(NZU64!(3));
 
-        let (primary, secondary) =
-            scenario.partitions_with_term_length(View::new(3), term_length, &participants);
+        let (primary, secondary) = scenario.partitions(View::new(3), term_length, &participants);
         assert_eq!(primary, vec![0]);
         assert_eq!(secondary, vec![1]);
         assert_eq!(
-            scenario.route_with_term_length(View::new(2), term_length, &0, &participants),
+            scenario.route(View::new(2), term_length, &0, &participants),
             SplitTarget::Primary
         );
 
-        let (primary, secondary) =
-            scenario.partitions_with_term_length(View::new(6), term_length, &participants);
+        let (primary, secondary) = scenario.partitions(View::new(6), term_length, &participants);
         assert_eq!(primary, vec![2]);
         assert_eq!(secondary, vec![0, 1]);
         assert_eq!(
-            scenario.route_with_term_length(View::new(5), term_length, &0, &participants),
+            scenario.route(View::new(5), term_length, &0, &participants),
             SplitTarget::Secondary
         );
 
-        let (primary, secondary) =
-            scenario.partitions_with_term_length(View::new(7), term_length, &participants);
+        let (primary, secondary) = scenario.partitions(View::new(7), term_length, &participants);
         assert_eq!(primary, participants);
         assert_eq!(secondary, vec![0, 1, 2]);
         assert_eq!(
-            scenario.route_with_term_length(View::new(7), term_length, &2, &[0, 1, 2]),
+            scenario.route(View::new(7), term_length, &2, &[0, 1, 2]),
             SplitTarget::Both
         );
     }
@@ -1865,23 +1834,23 @@ mod tests {
         let participants: Vec<u32> = (0..4).collect();
 
         assert_eq!(
-            view_partitions(View::new(1), &participants),
+            view_partitions(View::new(1), TermLength::ONE, &participants),
             (vec![0], vec![1, 2, 3])
         );
         assert_eq!(
-            view_partitions(View::new(4), &participants),
+            view_partitions(View::new(4), TermLength::ONE, &participants),
             (Vec::<u32>::new(), participants.clone())
         );
         assert_eq!(
-            view_route(View::new(1), &0, &participants),
+            view_route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            view_route(View::new(1), &3, &participants),
+            view_route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Secondary
         );
         assert_eq!(
-            view_route(View::new(4), &0, &participants),
+            view_route(View::new(4), TermLength::ONE, &0, &participants),
             SplitTarget::Secondary
         );
     }
@@ -1892,19 +1861,19 @@ mod tests {
         let term_length = TermLength::new(NZU64!(3));
 
         assert_eq!(
-            view_partitions_with_term_length(View::new(3), term_length, &participants),
-            view_partitions(View::new(1), &participants)
+            view_partitions(View::new(3), term_length, &participants),
+            view_partitions(View::new(1), TermLength::ONE, &participants)
         );
         assert_eq!(
-            view_partitions_with_term_length(View::new(6), term_length, &participants),
-            view_partitions(View::new(4), &participants)
+            view_partitions(View::new(6), term_length, &participants),
+            view_partitions(View::new(4), TermLength::ONE, &participants)
         );
         assert_eq!(
-            view_route_with_term_length(View::new(2), term_length, &0, &participants),
+            view_route(View::new(2), term_length, &0, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            view_route_with_term_length(View::new(6), term_length, &4, &participants),
+            view_route(View::new(6), term_length, &4, &participants),
             SplitTarget::Secondary
         );
     }
@@ -1916,23 +1885,23 @@ mod tests {
         };
         let participants: Vec<u32> = (0..5).collect();
         assert_eq!(
-            scenario.route(View::new(1), &0, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::None
         );
         assert_eq!(
-            scenario.route(View::new(1), &1, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &1, &participants),
             SplitTarget::Both
         );
         assert_eq!(
-            scenario.route(View::new(1), &2, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &2, &participants),
             SplitTarget::Secondary
         );
         assert_eq!(
-            scenario.route(View::new(1), &3, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &4, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &4, &participants),
             SplitTarget::Primary
         );
     }
@@ -1943,12 +1912,13 @@ mod tests {
             rounds: vec![round(4, 3, 0b1010, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(1), TermLength::ONE, &participants);
 
         assert_eq!(primary, vec![1, 3]);
         assert_eq!(secondary, vec![2, 3]);
         assert_eq!(
-            scenario.route(View::new(1), &3, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Both
         );
     }
@@ -1976,19 +1946,19 @@ mod tests {
         };
         let participants: Vec<u32> = (0..4).collect();
         assert_eq!(
-            scenario.route(View::new(1), &0, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &1, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &1, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &2, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &2, &participants),
             SplitTarget::Secondary
         );
         assert_eq!(
-            scenario.route(View::new(1), &3, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &3, &participants),
             SplitTarget::Secondary
         );
     }
@@ -2002,7 +1972,7 @@ mod tests {
 
         for participant in &participants {
             assert_eq!(
-                scenario.route(View::new(2), participant, &participants),
+                scenario.route(View::new(2), TermLength::ONE, participant, &participants),
                 SplitTarget::Both
             );
         }
@@ -2014,7 +1984,8 @@ mod tests {
             rounds: vec![round(4, 0, 0b0011, 0b1100)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let (primary, secondary) = scenario.partitions(View::new(2), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(2), TermLength::ONE, &participants);
         assert_eq!(primary, participants);
         assert_eq!(secondary, participants);
     }
@@ -2185,23 +2156,24 @@ mod tests {
         };
         let participants: Vec<_> = (0..64).collect();
 
-        let (primary, secondary) = scenario.partitions(View::new(1), &participants);
+        let (primary, secondary) =
+            scenario.partitions(View::new(1), TermLength::ONE, &participants);
         assert_eq!(primary, vec![60, 61, 62, 63]);
         assert_eq!(secondary, vec![61, 63]);
         assert_eq!(
-            scenario.route(View::new(1), &60, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &60, &participants),
             SplitTarget::Primary
         );
         assert_eq!(
-            scenario.route(View::new(1), &61, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &61, &participants),
             SplitTarget::Both
         );
         assert_eq!(
-            scenario.route(View::new(1), &63, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &63, &participants),
             SplitTarget::Both
         );
         assert_eq!(
-            scenario.route(View::new(1), &0, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &0, &participants),
             SplitTarget::None
         );
     }
@@ -2228,7 +2200,7 @@ mod tests {
         };
         let participants: Vec<u32> = (0..4).collect();
         assert_eq!(
-            scenario.route(View::new(1), &2, &participants),
+            scenario.route(View::new(1), TermLength::ONE, &2, &participants),
             SplitTarget::None
         );
     }
@@ -2240,7 +2212,7 @@ mod tests {
             rounds: vec![round(4, 0, 0b0001, 0b0010)],
         };
         let participants: Vec<u32> = (0..4).collect();
-        let _ = scenario.route(View::new(1), &99, &participants);
+        let _ = scenario.route(View::new(1), TermLength::ONE, &99, &participants);
     }
 
     #[test]

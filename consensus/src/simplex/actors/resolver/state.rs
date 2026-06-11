@@ -180,11 +180,21 @@ impl<S: Scheme, D: Digest> State<S, D> {
             }
         }
 
-        let start = view.term_start(self.term_length);
+        // Otherwise, return the nullification covering the view if it exists.
+        self.covering_nullification(view)
+            .map(|n| Certificate::Nullification(n.clone()))
+    }
+
+    /// Returns the stored nullification covering `view`, if any.
+    ///
+    /// Since a nullification covers the rest of its term, it may be keyed at
+    /// an earlier view in `view`'s term.
+    fn covering_nullification(&self, view: View) -> Option<&Nullification<S>> {
+        let term_start = view.term_start(self.term_length);
         self.nullifications
-            .range(start..=view)
+            .range(term_start..=view)
             .next_back()
-            .map(|(_, n)| Certificate::Nullification(n.clone()))
+            .map(|(_, n)| n)
     }
 
     /// Updates the current view if the new view is greater.
@@ -200,7 +210,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// floor is inside the same term.
     fn encounter_nullification(&mut self, view: View) -> bool {
         self.current_view = self.current_view.max(view);
-        view.term_end(self.term_length) > self.floor_view()
+        covers_above_floor(view, self.term_length, self.floor_view())
     }
 
     /// Get the view of the floor.
@@ -224,13 +234,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
         let mut effects = Vec::with_capacity(self.fetch_concurrent);
         let mut cursor = self.floor_view().next();
         while cursor < self.current_view && effects.len() < self.fetch_concurrent {
-            let term_start = cursor.term_start(self.term_length);
-            if self
-                .nullifications
-                .range(term_start..=cursor)
-                .next_back()
-                .is_none()
-            {
+            if self.covering_nullification(cursor).is_none() {
                 effects.push(Effect::Fetch {
                     view: cursor,
                     cause,
@@ -246,12 +250,22 @@ impl<S: Scheme, D: Digest> State<S, D> {
     fn prune(&mut self) -> Effect {
         let floor = self.floor_view();
         self.notarizations.retain(|view, _| *view > floor);
+        let term_length = self.term_length;
         self.nullifications
-            .retain(|view, _| view.term_end(self.term_length) > floor);
+            .retain(|view, _| covers_above_floor(*view, term_length, floor));
         self.satisfied_by.retain(|view, _| *view > floor);
         self.failed_views.retain(|view| *view > floor);
         Effect::RetainAbove(floor)
     }
+}
+
+/// Returns whether a nullification at `view` covers any view above `floor`.
+///
+/// A nullification covers the rest of its term, so it remains relevant while
+/// its term end is above the floor. Admission (`encounter_nullification`) and
+/// retention (`prune`) must agree on this boundary.
+fn covers_above_floor(view: View, term_length: TermLength, floor: View) -> bool {
+    view.term_end(term_length) > floor
 }
 
 #[cfg(test)]

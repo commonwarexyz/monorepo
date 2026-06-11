@@ -545,11 +545,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return Some(recipients.clone());
                     };
-                    let (primary, secondary) = twins::view_partitions_with_term_length(
-                        msg.view(),
-                        term_length,
-                        participants.as_ref(),
-                    );
+                    let (primary, secondary) =
+                        twins::view_partitions(msg.view(), term_length, participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -566,11 +563,8 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     ) else {
                         return Some(recipients.clone());
                     };
-                    let (primary, secondary) = twins::view_partitions_with_term_length(
-                        msg.view(),
-                        term_length,
-                        participants.as_ref(),
-                    );
+                    let (primary, secondary) =
+                        twins::view_partitions(msg.view(), term_length, participants.as_ref());
                     match origin {
                         SplitOrigin::Primary => Some(Recipients::Some(primary)),
                         SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -583,12 +577,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     let Ok(msg) = Vote::<P::Scheme, Sha256Digest>::decode(message.clone()) else {
                         return SplitTarget::None;
                     };
-                    twins::view_route_with_term_length(
-                        msg.view(),
-                        term_length,
-                        sender,
-                        participants.as_ref(),
-                    )
+                    twins::view_route(msg.view(), term_length, sender, participants.as_ref())
                 }
             };
             let make_certificate_router = || {
@@ -601,12 +590,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                     ) else {
                         return SplitTarget::None;
                     };
-                    twins::view_route_with_term_length(
-                        msg.view(),
-                        term_length,
-                        sender,
-                        participants.as_ref(),
-                    )
+                    twins::view_route(msg.view(), term_length, sender, participants.as_ref())
                 }
             };
             let (vote_sender, vote_receiver) = vote_network;

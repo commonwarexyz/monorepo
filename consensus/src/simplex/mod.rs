@@ -385,7 +385,7 @@ pub mod types;
 
 cfg_if::cfg_if! {
     if #[cfg(not(target_arch = "wasm32"))] {
-        use crate::types::{Round, TermLength, View, ViewDelta};
+        use crate::types::Round;
         use commonware_cryptography::PublicKey;
         use commonware_p2p::Recipients;
 
@@ -395,40 +395,6 @@ cfg_if::cfg_if! {
         mod engine;
         pub use engine::Engine;
         mod metrics;
-
-        /// The minimum view we are tracking both in-memory and on-disk.
-        pub(crate) const fn min_active(activity_timeout: ViewDelta, last_finalized: View) -> View {
-            last_finalized.saturating_sub(activity_timeout)
-        }
-
-        /// Whether or not a view is interesting to us.
-        ///
-        /// This is a function of both `min_active` and whether `pending` is too far in
-        /// the future relative to `current`.
-        pub(crate) fn interesting(
-            activity_timeout: ViewDelta,
-            last_finalized: View,
-            current: View,
-            pending: View,
-            allow_unbounded_future: bool,
-            term_length: TermLength,
-        ) -> bool {
-            // If the view is genesis, skip it, genesis doesn't have votes
-            if pending.is_zero() {
-                return false;
-            }
-            if pending < min_active(activity_timeout, last_finalized) {
-                return false;
-            }
-            // If we don't allow unbounded future views, we still find two future views interesting:
-            // the next view and the first view of the next term. Certificates set
-            // `allow_unbounded_future` because they are self-certifying (see
-            // [`View::admits`]).
-            if !allow_unbounded_future && !current.admits(pending, term_length) {
-                return false;
-            }
-            true
-        }
 
         /// Describes how a payload should be broadcast to the network.
         pub enum Plan<P: PublicKey> {
@@ -484,7 +450,7 @@ mod tests {
                 Nullification as TNullification, Nullify as TNullify, Proposal, Vote,
             },
         },
-        types::{Epoch, Participant, Round},
+        types::{Epoch, Participant, Round, TermLength, View, ViewDelta},
         Monitor, Viewable,
     };
     use commonware_codec::{Decode, DecodeExt, Encode};
@@ -579,93 +545,6 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
     const TEST_QUOTA: Quota = Quota::per_second(NonZeroU32::MAX);
-
-    #[test]
-    fn test_interesting() {
-        let activity_timeout = ViewDelta::new(10);
-        let term_length = TermLength::new(NZU64!(10));
-
-        assert!(!interesting(
-            activity_timeout,
-            View::zero(),
-            View::zero(),
-            View::zero(),
-            false,
-            term_length,
-        ));
-
-        // Below min_active
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(5),
-            false,
-            term_length,
-        ));
-
-        // At min_active boundary
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(10),
-            false,
-            term_length,
-        ));
-
-        // strict mode allows only current.next and current.next_term_start above current
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(26),
-            false,
-            term_length,
-        ));
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(31),
-            false,
-            term_length,
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(27),
-            false,
-            term_length,
-        ));
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(34),
-            false,
-            term_length,
-        ));
-
-        // unbounded future still respects lower bound
-        assert!(!interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(9),
-            true,
-            term_length,
-        ));
-        assert!(interesting(
-            activity_timeout,
-            View::new(20),
-            View::new(25),
-            View::new(10_000),
-            true,
-            term_length,
-        ));
-    }
 
     /// Register a validator with the oracle.
     async fn register_validator(
@@ -6042,11 +5921,8 @@ mod tests {
                         let scenario = scenario.clone();
                         move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                             let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                            let (primary, secondary) = scenario.partitions_with_term_length(
-                                msg.view(),
-                                term_length,
-                                participants.as_ref(),
-                            );
+                            let (primary, secondary) =
+                                scenario.partitions(msg.view(), term_length, participants.as_ref());
                             match origin {
                                 SplitOrigin::Primary => Some(Recipients::Some(primary)),
                                 SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -6060,11 +5936,8 @@ mod tests {
                         move |origin: SplitOrigin, _: &Recipients<_>, message: &IoBuf| {
                             let msg: Certificate<S, D> =
                                 Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                            let (primary, secondary) = scenario.partitions_with_term_length(
-                                msg.view(),
-                                term_length,
-                                participants.as_ref(),
-                            );
+                            let (primary, secondary) =
+                                scenario.partitions(msg.view(), term_length, participants.as_ref());
                             match origin {
                                 SplitOrigin::Primary => Some(Recipients::Some(primary)),
                                 SplitOrigin::Secondary => Some(Recipients::Some(secondary)),
@@ -6076,12 +5949,7 @@ mod tests {
                         let scenario = scenario.clone();
                         move |(sender, message): &(_, IoBuf)| {
                             let msg: Vote<S, D> = Vote::decode(message.clone()).unwrap();
-                            scenario.route_with_term_length(
-                                msg.view(),
-                                term_length,
-                                sender,
-                                participants.as_ref(),
-                            )
+                            scenario.route(msg.view(), term_length, sender, participants.as_ref())
                         }
                     };
                     let make_certificate_router = || {
@@ -6091,12 +5959,7 @@ mod tests {
                         move |(sender, message): &(_, IoBuf)| {
                             let msg: Certificate<S, D> =
                                 Certificate::decode_cfg(&mut message.as_ref(), &codec).unwrap();
-                            scenario.route_with_term_length(
-                                msg.view(),
-                                term_length,
-                                sender,
-                                participants.as_ref(),
-                            )
+                            scenario.route(msg.view(), term_length, sender, participants.as_ref())
                         }
                     };
                     let (vote_sender_primary, vote_sender_secondary) =

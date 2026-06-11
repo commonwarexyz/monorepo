@@ -347,8 +347,7 @@ mod tests {
             RoundRobin::<Sha256>::default().build(&participants, TermLength::new(NZU64!(5)));
 
         let round = Round::new(Epoch::new(u64::MAX - 1), View::new(6));
-        let term_start = round.view().term_start(TermLength::new(NZU64!(5)));
-        let term_idx = term_start.get().div_ceil(5);
+        let term_idx = round.view().term_index(TermLength::new(NZU64!(5)));
         let expected = round.epoch().get().wrapping_add(term_idx) % 5;
 
         assert_eq!(

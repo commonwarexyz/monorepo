@@ -255,6 +255,15 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
+    /// Returns the certified payload for this round, if any (a finalized round
+    /// is implicitly certified).
+    pub const fn certified_payload(&self) -> Option<&D> {
+        if self.finalization.is_some() || self.is_certified() {
+            return Some(&self.proposal().expect("proposal must exist").payload);
+        }
+        None
+    }
+
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {
