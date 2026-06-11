@@ -186,7 +186,7 @@ where
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
     #[tracing::instrument(
-        name = "qmdb.immutable_compact.batch.merkleize",
+        name = "qmdb.immutable.compact.batch.merkleize",
         level = "info",
         skip_all
     )]
@@ -496,7 +496,7 @@ where
     /// - [`Error::FloorBeyondSize`] if any unapplied commit's floor exceeds its own commit
     ///   location.
     #[tracing::instrument(
-        name = "qmdb.immutable_compact.db.apply_batch",
+        name = "qmdb.immutable.compact.db.apply_batch",
         level = "info",
         skip_all
     )]
@@ -522,7 +522,7 @@ where
     /// This is the point at which in-memory mutations become servable via compact sync. The compact
     /// Merkle frontier and last-commit witness are written into the same slot, reusing the cached
     /// witness when the current state has already been persisted.
-    #[tracing::instrument(name = "qmdb.immutable_compact.db.sync", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.immutable.compact.db.sync", level = "info", skip_all)]
     pub async fn sync(&self) -> Result<(), Error<F>> {
         witness::persist_witness::<F, E, H, S>(
             &self.merkle,
@@ -535,7 +535,7 @@ where
     }
 
     /// Durably persist the current db state to disk (alias for [`Self::sync`]).
-    #[tracing::instrument(name = "qmdb.immutable_compact.db.commit", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.immutable.compact.db.commit", level = "info", skip_all)]
     pub async fn commit(&self) -> Result<(), Error<F>>
     where
         F: Family,
@@ -567,7 +567,7 @@ where
     /// reloading the cached commit metadata or inactivity floor) fails, leaving this `Db`'s
     /// in-memory fields out of sync with the persisted slot. Callers must drop this handle
     /// after any `Err` from `rewind` and reopen from storage.
-    #[tracing::instrument(name = "qmdb.immutable_compact.db.rewind", level = "info", skip_all)]
+    #[tracing::instrument(name = "qmdb.immutable.compact.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self) -> Result<(), Error<F>>
     where
         F: Family,
