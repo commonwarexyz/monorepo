@@ -52,7 +52,7 @@ pub(super) struct CommonMetrics<E: Clock> {
     append_prepared_duration: Timed,
     /// Single-item read calls.
     pub read_calls: Counter,
-    /// Duration of single-item read calls.
+    /// Duration of single-item read calls that miss the page cache.
     read_duration: Timed,
     /// Non-empty batch async read calls.
     pub read_many_calls: Counter,
@@ -114,7 +114,7 @@ impl<E: RuntimeMetrics + Clock> CommonMetrics<E> {
         let read_duration = duration_histogram(
             context.as_ref(),
             "read_duration",
-            "Duration of single-item read calls",
+            "Duration of single-item read calls that miss the page cache",
         );
         let read_many_calls = context
             .as_ref()
