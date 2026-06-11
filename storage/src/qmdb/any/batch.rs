@@ -597,6 +597,15 @@ where
 
         let read = reader.read_many(&positions).await?;
 
+        // The common callers (floor-raise candidates and depth-0 mutation reads) pass
+        // sorted, unique, all-committed locations, so the batched read is already in
+        // caller order and the merge below would only re-clone every operation.
+        if positions.len() == locations.len()
+            && positions.iter().zip(locations).all(|(p, l)| *p == **l)
+        {
+            return Ok(read);
+        }
+
         // Merge read results back in order.
         for (idx, loc) in committed {
             // `positions` is sorted and deduped, and `loc` came from it before deduping, so
