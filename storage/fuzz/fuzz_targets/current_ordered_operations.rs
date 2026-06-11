@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable, Location},
@@ -136,9 +136,7 @@ fn fuzz_family<F: Graftable>(data: &FuzzInput, suffix: &str) {
     let operations = data.operations.clone();
     runner.start(|context| async move {
         let hasher = qmdb::hasher::<Sha256>();
-        let page_cache = CacheRef::from_pooler(
-            &context,
-            PAGE_SIZE,
+        let page_cache = context.storage_buffer_pool().page_cache(PAGE_SIZE,
             NZUsize!(PAGE_CACHE_SIZE),
         );
         let cfg = Config {

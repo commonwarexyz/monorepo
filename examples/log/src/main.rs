@@ -55,7 +55,7 @@ use commonware_consensus::{
 use commonware_cryptography::{ed25519, Sha256, Signer as _};
 use commonware_p2p::{authenticated::discovery, Manager as _};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, tokio, Quota, Runner, Supervisor as _};
+use commonware_runtime::{tokio, BufferPooler, Quota, Runner, Supervisor as _};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -224,7 +224,9 @@ fn main() {
             activity_timeout: ViewDelta::new(10),
             skip_timeout: ViewDelta::new(5),
             fetch_concurrent: NZUsize!(32),
-            page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+            page_cache: context
+                .storage_buffer_pool()
+                .page_cache(NZU16!(16_384), NZUsize!(10_000)),
             strategy: Sequential,
             forwarding: simplex::ForwardingPolicy::Disabled,
         };

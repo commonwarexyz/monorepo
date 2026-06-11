@@ -393,9 +393,7 @@ mod tests {
     use commonware_cryptography::{ed25519, sha256, Sha256};
     use commonware_p2p::{Provider, TrackedPeers};
     use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
-    };
+    use commonware_runtime::{deterministic, BufferPool, Runner as _, Supervisor as _};
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, full::Config as MmrJournalConfig, Location, Proof},
@@ -488,8 +486,8 @@ mod tests {
         oneshot::channel()
     }
 
-    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
+    fn db_config(suffix: &str, pool: &BufferPool) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = pool.page_cache(NZU16!(101), NZUsize!(11));
         FixedConfig {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),
@@ -510,9 +508,12 @@ mod tests {
     }
 
     async fn init_db(context: deterministic::Context, suffix: &str) -> Arc<AsyncRwLock<TestDb>> {
-        let db = TestDb::init(context.child("db"), db_config(suffix, &context))
-            .await
-            .expect("db init should succeed");
+        let db = TestDb::init(
+            context.child("db"),
+            db_config(suffix, context.storage_buffer_pool()),
+        )
+        .await
+        .expect("db init should succeed");
         Arc::new(AsyncRwLock::new(db))
     }
 

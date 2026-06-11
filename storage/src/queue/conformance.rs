@@ -3,9 +3,7 @@
 use crate::queue::{Config, Queue};
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_utils::{NZUsize, NZU16, NZU64};
 use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
@@ -15,11 +13,11 @@ const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
+fn config(seed: u64, pool: &BufferPool) -> Config<(RangeCfg<usize>, ())> {
     Config {
         partition: format!("queue-conformance-{seed}"),
         items_per_section: ITEMS_PER_SECTION,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
         compression: None,
         codec_config: (RangeCfg::new(0..256), ()),
@@ -34,7 +32,7 @@ impl Conformance for QueueConformance {
         runner.start(|mut context| async move {
             let mut queue = Queue::<_, Vec<u8>>::init(
                 context.child("queue").with_attribute("index", 0),
-                config(seed, &context),
+                config(seed, context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -65,7 +63,7 @@ impl Conformance for QueueConformance {
             // Re-open and verify surviving items are readable
             let mut queue = Queue::<_, Vec<u8>>::init(
                 context.child("queue").with_attribute("index", 1),
-                config(seed, &context),
+                config(seed, context.storage_buffer_pool()),
             )
             .await
             .unwrap();

@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{full::Config as MerkleConfig, mmb, mmr, Graftable},
@@ -76,8 +74,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(name: &str, pooler: &impl BufferPooler) -> Config<OneCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(2));
+fn test_config(name: &str, pool: &BufferPool) -> Config<OneCap, Sequential> {
+    let page_cache = pool.page_cache(PAGE_SIZE, NZUsize!(2));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{name}-merkle"),
@@ -115,7 +113,7 @@ fn fuzz_family<F: Graftable>(input: &FuzzInput, test_name: &str) {
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {
-        let cfg = test_config(&test_name, &context);
+        let cfg = test_config(&test_name, context.storage_buffer_pool());
         let mut db: Db<F> = Db::init(context.child("storage"), cfg)
             .await
             .expect("init current unordered db");

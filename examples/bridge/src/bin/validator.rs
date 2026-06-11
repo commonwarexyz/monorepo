@@ -20,7 +20,7 @@ use commonware_cryptography::{
 use commonware_formatting::from_hex;
 use commonware_p2p::{authenticated, Manager as _};
 use commonware_runtime::{
-    buffer::paged::CacheRef, tokio, Network, Quota, Runner, Supervisor as _, ThreadPooler,
+    tokio, BufferPooler, Network, Quota, Runner, Supervisor as _, ThreadPooler,
 };
 use commonware_stream::encrypted::{dial, Config as StreamConfig};
 use commonware_utils::{ordered::Set, union, NZUsize, TryCollect, NZU16, NZU32};
@@ -258,7 +258,9 @@ fn main() {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: ViewDelta::new(5),
                 fetch_concurrent: NZUsize!(32),
-                page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },

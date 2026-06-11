@@ -26,9 +26,7 @@ use commonware_cryptography::{
     BatchVerifier, PublicKey, Signer,
 };
 use commonware_parallel::Strategy;
-use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage,
-};
+use commonware_runtime::{Buf, BufMut, BufferPooler, Clock, Metrics, Storage as RuntimeStorage};
 use commonware_storage::{
     journal::segmented::variable::{Config as SVConfig, Journal as SVJournal},
     metadata::{Config as MetadataConfig, Metadata},
@@ -205,7 +203,9 @@ where
         max_read_size: NonZeroU32,
         max_supported_mode: ModeVersion,
     ) -> Self {
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_CAPACITY);
+        let page_cache = context
+            .storage_buffer_pool()
+            .page_cache(PAGE_SIZE, PAGE_CACHE_CAPACITY);
 
         let states: Metadata<E, u64, Epoch<V, P>> = Metadata::init(
             context.child("states"),

@@ -150,9 +150,8 @@ pub(crate) mod test {
     use commonware_math::algebra::Random;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPool, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZUsize, NZU16, NZU64};
     use rand::RngCore;
@@ -167,9 +166,8 @@ pub(crate) mod test {
     pub(crate) type AnyTest =
         Db<mmr::Family, deterministic::Context, Digest, Vec<u8>, Sha256, TwoCap, Sequential>;
 
-    pub(crate) fn create_test_config(seed: u64, pooler: &impl BufferPooler) -> VarConfig {
-        let page_cache =
-            CacheRef::from_pooler(pooler, NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
+    pub(crate) fn create_test_config(seed: u64, pool: &BufferPool) -> VarConfig {
+        let page_cache = pool.page_cache(NZU16!(PAGE_SIZE), NZUsize!(PAGE_CACHE_SIZE));
         VariableConfig {
             merkle_config: crate::mmr::full::Config {
                 journal_partition: format!("mmr-journal-{seed}"),
@@ -194,7 +192,7 @@ pub(crate) mod test {
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let config = create_test_config(seed, &context);
+        let config = create_test_config(seed, context.storage_buffer_pool());
         AnyTest::init(context, config).await.unwrap()
     }
 
@@ -270,7 +268,8 @@ pub(crate) mod test {
 
     /// Return a variable db with FixedBytes<4> keys.
     async fn open_variable_db(context: Context) -> VariableDb {
-        let cfg = variable_db_config::<_>("fixed-bytes-var-partition", &context);
+        let cfg =
+            variable_db_config::<_>("fixed-bytes-var-partition", context.storage_buffer_pool());
         VariableDb::init(context, cfg).await.unwrap()
     }
 

@@ -36,15 +36,14 @@
 //!
 //! ```rust
 //! use commonware_codec::RangeCfg;
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{BufferPooler, Spawner, Runner, deterministic};
 //! use commonware_storage::{queue::{Queue, Config}};
 //! use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 //!
 //! let executor = deterministic::Runner::default();
 //! executor.start(|context| async move {
 //!     // Create a page cache
-//!     let page_cache = CacheRef::from_pooler(
-//!         &context,
+//!     let page_cache = context.storage_buffer_pool().page_cache(
 //!         NonZeroU16::new(1024).unwrap(),
 //!         NonZeroUsize::new(10).unwrap(),
 //!     );

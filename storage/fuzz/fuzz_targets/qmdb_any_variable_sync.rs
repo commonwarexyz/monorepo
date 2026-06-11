@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{
@@ -139,11 +137,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 const PAGE_SIZE: NonZeroU16 = NZU16!(128);
 type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
 
-fn test_config(
-    test_name: &str,
-    pooler: &impl BufferPooler,
-) -> Config<TwoCap, CodecConfig, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+fn test_config(test_name: &str, pool: &BufferPool) -> Config<TwoCap, CodecConfig, Sequential> {
+    let page_cache = pool.page_cache(PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),
@@ -171,7 +166,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
     let test_name = test_name.to_string();
     runner.start(|context| async move {
         let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
-        let cfg = test_config(&test_name, &context);
+        let cfg = test_config(&test_name, context.storage_buffer_pool());
         let mut db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
             context.child("storage"),
             cfg,
@@ -328,7 +323,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
                     historical_roots.clear();
                     drop(db);
 
-                    let cfg = test_config(&test_name, &context);
+                    let cfg = test_config(&test_name, context.storage_buffer_pool());
                     db = Db::<F, _, Key, Vec<u8>, Sha256, TwoCap, Sequential>::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,

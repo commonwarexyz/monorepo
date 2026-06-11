@@ -8,7 +8,7 @@
 use crate::{Hasher, Key, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer, BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPool, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
@@ -33,8 +33,8 @@ pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher, Sequential>;
 pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the keyless variant.
-pub fn create_config(context: &impl BufferPooler) -> fixed::Config<Sequential> {
-    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
+pub fn create_config(pool: &BufferPool) -> fixed::Config<Sequential> {
+    let page_cache = pool.page_cache(NZU16!(2048), NZUsize!(10));
     keyless::Config {
         merkle: MmrConfig {
             journal_partition: "mmr-journal".into(),

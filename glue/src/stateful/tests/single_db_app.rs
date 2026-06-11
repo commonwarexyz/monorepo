@@ -42,8 +42,7 @@ use commonware_cryptography::{
 use commonware_formatting::hex;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, Buf, BufMut, Clock, Handle, Metrics, Quota, Spawner, Storage,
-    Supervisor as _,
+    Buf, BufMut, BufferPooler, Clock, Handle, Metrics, Quota, Spawner, Storage, Supervisor as _,
 };
 use commonware_storage::{
     archive::prunable,
@@ -346,7 +345,9 @@ impl EngineDefinition for SingleDbEngine {
         let scheme = self.schemes[index].clone();
 
         let partition_prefix = format!("validator-{index}");
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = context
+            .storage_buffer_pool()
+            .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
 
         // QMDB database config (created by Stateful::start)
         let db_config = FixedConfig {

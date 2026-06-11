@@ -22,9 +22,8 @@
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::Rayon;
 use commonware_runtime::{
-    buffer::paged::CacheRef,
     tokio::{Config as RConfig, Context, Runner},
-    Runner as _, Supervisor as _, ThreadPooler as _,
+    BufferPooler, Runner as _, Supervisor as _, ThreadPooler as _,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -299,7 +298,9 @@ fn main() {
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_PAGES);
+        let pc = ctx
+            .storage_buffer_pool()
+            .page_cache(PAGE_SIZE, PAGE_CACHE_PAGES);
         let pc_var = pc.clone();
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),

@@ -103,7 +103,7 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_resolver::{Delivery, Fetch, Resolver, TargetedResolver};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Clock, Metrics, Runner, Supervisor as _,
+        deterministic, BufferPooler, Clock, Metrics, Runner, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -333,11 +333,9 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(
-                &context,
-                harness::PAGE_SIZE,
-                harness::PAGE_CACHE_SIZE,
-            ),
+            page_cache: context
+                .storage_buffer_pool()
+                .page_cache(harness::PAGE_SIZE, harness::PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 

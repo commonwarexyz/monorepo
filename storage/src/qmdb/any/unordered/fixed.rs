@@ -140,7 +140,7 @@ pub(crate) mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Metrics as _, Runner as _, Supervisor as _,
+        BufferPooler, Metrics as _, Runner as _, Supervisor as _,
     };
     use commonware_utils::{test_rng_seeded, NZU64};
     use rand::RngCore;
@@ -167,14 +167,14 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
-        let cfg = fixed_db_config::<TwoCap>("partition", &context);
+        let cfg = fixed_db_config::<TwoCap>("partition", context.storage_buffer_pool());
         crate::qmdb::any::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), context.storage_buffer_pool());
         AnyTest::init(context, cfg).await.unwrap()
     }
 

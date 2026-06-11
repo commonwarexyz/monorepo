@@ -1068,9 +1068,7 @@ mod tests {
     };
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-    };
+    use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
     use commonware_utils::{non_empty_range, sequence::prefixed_u64::U64, NZUsize, NZU16, NZU64};
     use std::{
         collections::BTreeMap,
@@ -1084,14 +1082,14 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(111);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(5);
 
-    fn test_config(pooler: &impl BufferPooler) -> Config<Sequential> {
+    fn test_config(pool: &BufferPool) -> Config<Sequential> {
         Config {
             journal_partition: "journal-partition".into(),
             metadata_partition: "metadata-partition".into(),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
@@ -1100,7 +1098,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1127,7 +1125,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("second"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1187,7 +1185,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("oob_prune"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1226,7 +1224,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             element_pruned_context.child("element_pruned"),
             &hasher,
-            test_config(&element_pruned_context),
+            test_config(element_pruned_context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1248,7 +1246,7 @@ mod tests {
 
         // Case 2: rewind partially succeeds, then returns Empty.
         let empty_context = context.child("empty_case");
-        let cfg = test_config(&empty_context);
+        let cfg = test_config(empty_context.storage_buffer_pool());
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(empty_context, &hasher, cfg)
             .await
             .unwrap();
@@ -1279,7 +1277,7 @@ mod tests {
 
     async fn full_basic_inner<F: Family>(context: deterministic::Context) {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config(context.storage_buffer_pool());
         let mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -1351,7 +1349,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1422,7 +1420,7 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("first"),
                 &hasher,
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1454,7 +1452,7 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("second"),
                 &hasher,
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1485,7 +1483,7 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("first"),
                 &hasher,
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1508,7 +1506,7 @@ mod tests {
             let mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("second"),
                 &hasher,
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1535,7 +1533,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("first"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1567,7 +1565,9 @@ mod tests {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await
@@ -1581,7 +1581,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("second"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1596,7 +1596,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("third"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1621,7 +1621,7 @@ mod tests {
         let hasher: Standard<Sha256> = Standard::new(ForwardFold);
         // make sure pruning doesn't break root computation, adding of new nodes, etc.
         const LEAF_COUNT: usize = 2000;
-        let cfg_pruned = test_config(&context);
+        let cfg_pruned = test_config(context.storage_buffer_pool());
         let mut pruned_mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("pruned"),
             &hasher,
@@ -1794,7 +1794,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1817,7 +1817,7 @@ mod tests {
             let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
                 context.child("iter").with_attribute("index", i),
                 &hasher,
-                test_config(&context),
+                test_config(context.storage_buffer_pool()),
             )
             .await
             .unwrap();
@@ -1860,7 +1860,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("final"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1882,7 +1882,7 @@ mod tests {
     async fn full_historical_proof_basic_inner<F: Family>(context: deterministic::Context) {
         // Create structure with 10 elements
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config(context.storage_buffer_pool());
         let mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -1965,7 +1965,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("main"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -1996,7 +1996,9 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
         .await
@@ -2060,7 +2062,9 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
         .await
@@ -2089,7 +2093,9 @@ mod tests {
                 items_per_blob: NZU64!(7),
                 write_buffer: NZUsize!(1024),
                 strategy: Sequential,
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
             },
         )
         .await
@@ -2136,7 +2142,7 @@ mod tests {
 
     async fn full_historical_proof_singleton_inner<F: Family>(context: deterministic::Context) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
-        let cfg = test_config(&context);
+        let cfg = test_config(context.storage_buffer_pool());
         let mmr = Merkle::<F, _, Digest, Sequential>::init(context, &hasher, cfg)
             .await
             .unwrap();
@@ -2186,7 +2192,7 @@ mod tests {
 
         // Test fresh start scenario with completely new structure (no existing data)
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(context.storage_buffer_pool()),
             range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(52)),
             pinned_nodes: None,
         };
@@ -2234,7 +2240,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2262,7 +2268,7 @@ mod tests {
             );
         }
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(context.storage_buffer_pool()),
             range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
@@ -2314,7 +2320,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2344,7 +2350,7 @@ mod tests {
         }
 
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(context.storage_buffer_pool()),
             range: non_empty_range!(lower_bound_loc, upper_bound_loc),
             pinned_nodes: None,
         };
@@ -2392,7 +2398,7 @@ mod tests {
         context: deterministic::Context,
     ) {
         let sync_cfg = SyncConfig::<F, sha256::Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(context.storage_buffer_pool()),
             range: non_empty_range!(Location::<F>::new(6), Location::<F>::new(20)),
             pinned_nodes: Some(vec![test_digest(1), test_digest(2), test_digest(3)]),
         };
@@ -2426,7 +2432,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2448,7 +2454,7 @@ mod tests {
         // Simulate a crash after journal prune but before metadata was updated:
         // clear all metadata and write only a stale pruning boundary of 0 (no pinned nodes).
         let meta_cfg = MConfig {
-            partition: test_config(&context).metadata_partition,
+            partition: test_config(context.storage_buffer_pool()).metadata_partition,
             codec_config: ((0..).into(), ()),
         };
         let mut metadata =
@@ -2470,7 +2476,7 @@ mod tests {
         let result = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await;
 
@@ -2503,7 +2509,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2529,7 +2535,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2571,7 +2577,9 @@ mod tests {
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(64),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
         // Create structure with enough elements to span multiple sections.
@@ -2635,7 +2643,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2700,7 +2708,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2756,7 +2764,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2802,7 +2810,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2847,7 +2855,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("empty"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2869,7 +2877,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("fully_pruned"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2899,7 +2907,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("single_leaf"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2947,7 +2955,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("oob"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -2990,7 +2998,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("range_validation"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -3079,7 +3087,7 @@ mod tests {
         let mut mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("non_size_prune"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -3146,7 +3154,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("init"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -3171,7 +3179,9 @@ mod tests {
                     partition: "journal-partition".into(),
                     items_per_blob: NZU64!(7),
                     write_buffer: NZUsize!(1024),
-                    page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 },
             )
             .await
@@ -3184,7 +3194,7 @@ mod tests {
 
         // init_sync should recover by rewinding to the last valid size.
         let sync_cfg = SyncConfig::<F, Digest, Sequential> {
-            config: test_config(&context),
+            config: test_config(context.storage_buffer_pool()),
             range: non_empty_range!(Location::<F>::new(0), Location::<F>::new(100)),
             pinned_nodes: None,
         };
@@ -3216,7 +3226,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("storage"),
             &Standard::<Sha256>::new(ForwardFold),
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -3260,7 +3270,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("storage"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();
@@ -3293,7 +3303,7 @@ mod tests {
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("storage"),
             &hasher,
-            test_config(&context),
+            test_config(context.storage_buffer_pool()),
         )
         .await
         .unwrap();

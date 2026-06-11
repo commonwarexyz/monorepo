@@ -23,7 +23,7 @@ use commonware_conformance::{conformance_tests, Conformance};
 use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPool, BufferPooler, Runner as _, Supervisor as _,
 };
 use commonware_utils::{sequence::U64, NZUsize, NZU16, NZU64};
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -178,11 +178,8 @@ fn variable_log_config<C>(suffix: &str, page_cache: CacheRef, codec_config: C) -
     }
 }
 
-fn any_fixed_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> any::FixedConfig<OneCap, Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+fn any_fixed_config(suffix: &str, pool: &BufferPool) -> any::FixedConfig<OneCap, Sequential> {
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
@@ -192,9 +189,9 @@ fn any_fixed_config(
 
 fn any_variable_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> any::VariableConfig<OneCap, ((), ()), Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     any::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
@@ -204,9 +201,9 @@ fn any_variable_config(
 
 fn current_fixed_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> current::FixedConfig<OneCap, Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: fixed_log_config(suffix, pc),
@@ -217,9 +214,9 @@ fn current_fixed_config(
 
 fn current_variable_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> current::VariableConfig<OneCap, ((), ()), Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     current::Config {
         merkle_config: merkle_config(suffix, &pc),
         journal_config: variable_log_config(suffix, pc, ((), ())),
@@ -230,9 +227,9 @@ fn current_variable_config(
 
 fn immutable_fixed_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> immutable::fixed::Config<TwoCap, Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
         merkle_config: merkle_config(suffix, &pc),
         log: fixed_log_config(suffix, pc),
@@ -242,9 +239,9 @@ fn immutable_fixed_config(
 
 fn immutable_variable_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     immutable::Config {
         merkle_config: merkle_config(suffix, &pc),
         log: variable_log_config(suffix, pc, ((), ())),
@@ -252,11 +249,8 @@ fn immutable_variable_config(
     }
 }
 
-fn keyless_fixed_config(
-    suffix: &str,
-    pooler: &impl BufferPooler,
-) -> keyless::fixed::Config<Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+fn keyless_fixed_config(suffix: &str, pool: &BufferPool) -> keyless::fixed::Config<Sequential> {
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     keyless::Config {
         merkle: merkle_config(suffix, &pc),
         log: fixed_log_config(suffix, pc),
@@ -265,9 +259,9 @@ fn keyless_fixed_config(
 
 fn keyless_variable_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> keyless::variable::Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
-    let pc = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let pc = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     keyless::Config {
         merkle: merkle_config(suffix, &pc),
         log: variable_log_config(suffix, pc, ((0..=10000).into(), ())),
@@ -276,58 +270,58 @@ fn keyless_variable_config(
 
 fn compact_witness_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> crate::journal::contiguous::variable::Config<()> {
     crate::journal::contiguous::variable::Config {
         partition: format!("{suffix}-compact-witness"),
         items_per_section: NZU64!(64),
         compression: None,
         codec_config: (),
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: NZUsize!(1024),
     }
 }
 
 fn immutable_fixed_compact_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> immutable::fixed::CompactConfig<Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
+        witness: compact_witness_config(suffix, pool),
         commit_codec_config: (),
     }
 }
 
 fn immutable_variable_compact_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> immutable::variable::CompactConfig<((), ()), Sequential> {
     immutable::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
+        witness: compact_witness_config(suffix, pool),
         commit_codec_config: ((), ()),
     }
 }
 
 fn keyless_fixed_compact_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> keyless::fixed::CompactConfig<Sequential> {
     keyless::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
+        witness: compact_witness_config(suffix, pool),
         commit_codec_config: (),
     }
 }
 
 fn keyless_variable_compact_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
 ) -> keyless::variable::CompactConfig<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
     keyless::CompactConfig {
         strategy: Sequential,
-        witness: compact_witness_config(suffix, pooler),
+        witness: compact_witness_config(suffix, pool),
         commit_codec_config: ((0..=10000usize).into(), ()),
     }
 }
@@ -607,9 +601,10 @@ macro_rules! db_conformance {
         impl Conformance for $name {
             async fn commit($s: u64) -> Vec<u8> {
                 deterministic::Runner::seeded($s).start(|ctx| async move {
-                    let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx))
-                        .await
-                        .unwrap();
+                    let mut $d =
+                        <$db>::init(ctx.child("db"), ($cfg_fn)("cf", ctx.storage_buffer_pool()))
+                            .await
+                            .unwrap();
                     let root = $body;
                     $d.destroy().await.unwrap();
                     root
@@ -974,12 +969,18 @@ macro_rules! order_test {
         #[test]
         fn $name() {
             deterministic::Runner::default().start(|ctx| async move {
-                let mut $fwd = <$db>::init(ctx.child("fwd"), ($cfg_fn)("fwd", &ctx))
-                    .await
-                    .unwrap();
-                let mut $rev = <$db>::init(ctx.child("rev"), ($cfg_fn)("rev", &ctx))
-                    .await
-                    .unwrap();
+                let mut $fwd = <$db>::init(
+                    ctx.child("fwd"),
+                    ($cfg_fn)("fwd", ctx.storage_buffer_pool()),
+                )
+                .await
+                .unwrap();
+                let mut $rev = <$db>::init(
+                    ctx.child("rev"),
+                    ($cfg_fn)("rev", ctx.storage_buffer_pool()),
+                )
+                .await
+                .unwrap();
                 $body;
                 $fwd.destroy().await.unwrap();
                 $rev.destroy().await.unwrap();

@@ -159,8 +159,8 @@ mod test {
     };
     use commonware_parallel::{Sequential, Strategy as ParallelStrategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, telemetry::traces::collector::TraceStorage, Clock,
-        Handle, Metrics, Quota, Runner as _, Supervisor,
+        buffer::paged::CacheRef, deterministic, telemetry::traces::collector::TraceStorage,
+        BufferPooler, Clock, Handle, Metrics, Quota, Runner as _, Supervisor,
     };
     use commonware_storage::archive::immutable;
     use commonware_utils::{
@@ -542,7 +542,9 @@ mod test {
                 let scheme = schemes[index].clone();
                 let node_ctx = context.child("node").with_attribute("index", index);
                 let partition_prefix = format!("node-{index}");
-                let page_cache = CacheRef::from_pooler(&node_ctx, NZU16!(1024), NZUsize!(10));
+                let page_cache = node_ctx
+                    .storage_buffer_pool()
+                    .page_cache(NZU16!(1024), NZUsize!(10));
                 let control = oracle.control(public_key.clone());
 
                 // Marshal backfill resolver.

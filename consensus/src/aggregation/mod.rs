@@ -100,9 +100,8 @@ mod tests {
     use commonware_p2p::simulated::{Link, Network, Oracle, Receiver, Sender};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef,
         deterministic::{self, Context},
-        Clock, Quota, Runner, Spawner, Supervisor as _,
+        BufferPooler, Clock, Quota, Runner, Spawner, Supervisor as _,
     };
     use commonware_utils::{
         channel::{fallible::OneshotExt, oneshot},
@@ -287,7 +286,9 @@ mod tests {
                     journal_replay_buffer: NZUsize!(4096),
                     journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: context
+                        .storage_buffer_pool()
+                        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                     strategy: Sequential,
                 },
             );
@@ -514,11 +515,9 @@ mod tests {
                                 journal_replay_buffer: NZUsize!(4096),
                                 journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                                 journal_compression: Some(3),
-                                journal_page_cache: CacheRef::from_pooler(
-                                    &context,
-                                    PAGE_SIZE,
-                                    PAGE_CACHE_SIZE,
-                                ),
+                                journal_page_cache: context
+                                    .storage_buffer_pool()
+                                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                                 strategy: Sequential,
                             },
                         );
@@ -657,11 +656,9 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
-                                &context,
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
+                            journal_page_cache: context
+                                .storage_buffer_pool()
+                                .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                             strategy: Sequential,
                         },
                     );
@@ -742,11 +739,9 @@ mod tests {
                             journal_replay_buffer: NZUsize!(4096),
                             journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                             journal_compression: Some(3),
-                            journal_page_cache: CacheRef::from_pooler(
-                                &context,
-                                PAGE_SIZE,
-                                PAGE_CACHE_SIZE,
-                            ),
+                            journal_page_cache: context
+                                .storage_buffer_pool()
+                                .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                             strategy: Sequential,
                         },
                     );
@@ -1040,9 +1035,7 @@ mod tests {
                         journal_replay_buffer: NZUsize!(4096),
                         journal_heights_per_section: std::num::NonZeroU64::new(6).unwrap(),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
-                            PAGE_SIZE,
+                        journal_page_cache: context.storage_buffer_pool().page_cache(PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
                         strategy: Sequential,

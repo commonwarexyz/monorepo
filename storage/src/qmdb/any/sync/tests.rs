@@ -23,7 +23,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
-    deterministic, BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _,
+    deterministic, BufferPool, BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _,
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -111,7 +111,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn sync_target_root(db: &Self::Db) -> Digest;
 
     /// Create a config with unique partition names
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self>;
+    fn config(suffix: &str, pool: &BufferPool) -> ConfigOf<Self>;
 
     /// Generate n test operations using the default seed (0)
     fn create_ops(n: usize) -> Vec<OpOf<Self>>;
@@ -149,7 +149,10 @@ where
         let target_db = H::init_db(context.child("target")).await;
 
         // Use an arbitrary target
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(10),
@@ -194,7 +197,10 @@ where
         let resolver = resolver::tests::FailResolver::<H::Family, OpOf<H>, Digest>::new();
         let target_root = Digest::from([0; 32]);
 
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let engine_config = Config {
             context: context.child("client"),
             target: Target {
@@ -243,7 +249,10 @@ where
         let lower_bound = target_db.sync_boundary().await;
 
         // Configure sync
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let target_db = Arc::new(target_db);
         let client_context = context.child("client");
         let config = Config {
@@ -327,7 +336,10 @@ where
         // commit already done in apply_ops
 
         // Sync to the original root (before final_op was added)
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let config = Config {
             db_config,
             fetch_batch_size: NZU64!(10),
@@ -379,7 +391,10 @@ where
         // Heap-pin large sub-futures so their state machines don't inflate this test's outer
         // state machine and overflow the test thread stack.
         let mut target_db = Box::pin(H::init_db(context.child("target"))).await;
-        let sync_db_config = H::config(&context.next_u64().to_string(), &context);
+        let sync_db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let client_context = context.child("client");
         let mut sync_db: H::Db = Box::pin(H::init_db_with_config(
             client_context.child("client"),
@@ -476,9 +491,15 @@ where
         let target_ops = H::create_ops(num_ops);
 
         // Create two databases with their own configs
-        let target_config = H::config(&context.next_u64().to_string(), &context);
+        let target_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let mut target_db = H::init_db_with_config(context.child("target"), target_config).await;
-        let sync_config = H::config(&context.next_u64().to_string(), &context);
+        let sync_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let client_context = context.child("client");
         let mut sync_db =
             H::init_db_with_config(client_context.child("client"), sync_config.clone()).await;
@@ -580,7 +601,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
@@ -649,7 +673,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: initial_root,
@@ -732,7 +759,10 @@ where
             let target_db = Arc::new(target_db);
             let config = Config {
                 context: context.child("client"),
-                db_config: H::config(&context.next_u64().to_string(), &context),
+                db_config: H::config(
+                    &context.next_u64().to_string(),
+                    context.storage_buffer_pool(),
+                ),
                 fetch_batch_size: NZU64!(1),
                 target: Target {
                     root: initial_root,
@@ -804,7 +834,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(20),
             target: Target {
                 root: sync_root,
@@ -871,7 +904,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root,
@@ -948,7 +984,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(10),
             target: initial_target.clone(),
             resolver: target_db.clone(),
@@ -1079,7 +1118,7 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string(), context.storage_buffer_pool()),
             fetch_batch_size: NZU64!(2),
             target: initial_target.clone(),
             resolver: target_db.clone(),
@@ -1185,7 +1224,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(3),
             target: target.clone(),
             resolver: target_db.clone(),
@@ -1239,7 +1281,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: H::sync_target_root(&target_db),
@@ -1289,7 +1334,10 @@ where
         let target_db = Arc::new(target_db);
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(
+                &context.next_u64().to_string(),
+                context.storage_buffer_pool(),
+            ),
             fetch_batch_size: NZU64!(5),
             target: Target {
                 root: H::sync_target_root(&target_db),
@@ -1351,7 +1399,10 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
         let client = {
             let config = Config {
                 context: context.child("client"),
-                db_config: H::config(&context.next_u64().to_string(), &context),
+                db_config: H::config(
+                    &context.next_u64().to_string(),
+                    context.storage_buffer_pool(),
+                ),
                 target: Target {
                     root: initial_sync_root,
                     range: non_empty_range!(initial_lower_bound, initial_upper_bound),
@@ -1455,7 +1506,10 @@ where
         let upper_bound = target_db.bounds().await.end;
 
         // Perform sync
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let client_context = context.child("client");
         let target_db = Arc::new(target_db);
         let config = Config {
@@ -1524,7 +1578,10 @@ where
         let upper_bound = target_db.bounds().await.end;
         let target_db = Arc::new(target_db);
 
-        let config = H::config(&context.next_u64().to_string(), &context);
+        let config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let config = Config {
             db_config: config,
             fetch_batch_size: NZU64!(100),
@@ -1571,7 +1628,10 @@ where
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let mut db = H::init_db_with_config(context.child("source"), db_config.clone()).await;
         let ops = H::create_ops(100);
         db = H::apply_ops(db, ops).await;
@@ -1622,7 +1682,10 @@ where
     executor.start(|mut context| async move {
         // Create and populate two databases.
         let mut target_db = H::init_db(context.child("target")).await;
-        let sync_db_config = H::config(&context.next_u64().to_string(), &context);
+        let sync_db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
         let client_context = context.child("client");
         let mut sync_db =
             H::init_db_with_config(client_context.child("client"), sync_db_config.clone()).await;
@@ -1719,7 +1782,10 @@ where
         let (mmr, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
-        let new_db_config = H::config(&context.next_u64().to_string(), &context);
+        let new_db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
 
         let db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
@@ -1764,7 +1830,10 @@ where
         let (mmr, journal) = source_db.into_log_components();
 
         // Use a different config (simulating a new empty database)
-        let new_db_config = H::config(&context.next_u64().to_string(), &context);
+        let new_db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
 
         let mut synced_db: DbOf<H> = <DbOf<H> as qmdb::sync::Database>::from_sync_result(
             context.child("synced"),
@@ -1868,7 +1937,10 @@ where
         let lower_bound = target_db.sync_boundary().await;
         let upper_bound = target_db.bounds().await.end;
 
-        let db_config = H::config(&context.next_u64().to_string(), &context);
+        let db_config = H::config(
+            &context.next_u64().to_string(),
+            context.storage_buffer_pool(),
+        );
 
         let resolver = CorruptFirstPinnedNodesResolver {
             inner: Arc::new(target_db),
@@ -2049,7 +2121,7 @@ where
 
         let config = Config {
             context: context.child("client"),
-            db_config: H::config(&context.next_u64().to_string(), &context),
+            db_config: H::config(&context.next_u64().to_string(), context.storage_buffer_pool()),
             fetch_batch_size: NZU64!(1),
             target: old_target.clone(),
             resolver,
@@ -2128,7 +2200,7 @@ mod harnesses {
     };
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_runtime::{deterministic::Context, BufferPool, BufferPooler};
     use commonware_utils::test_rng_seeded;
     use rand::RngCore;
 
@@ -2249,9 +2321,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pool)
         }
 
         fn create_ops(
@@ -2308,11 +2380,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                pool,
             )
         }
 
@@ -2374,9 +2446,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pool)
         }
 
         fn create_ops_seeded(
@@ -2433,11 +2505,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                pool,
             )
         }
 
@@ -2514,9 +2586,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pool)
         }
 
         fn create_ops(
@@ -2534,7 +2606,10 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(
+                &seed.to_string(),
+                ctx.storage_buffer_pool(),
+            );
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -2593,11 +2668,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                pool,
             )
         }
 
@@ -2618,7 +2693,10 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config = crate::qmdb::any::ordered::variable::test::create_test_config(seed, &ctx);
+            let config = crate::qmdb::any::ordered::variable::test::create_test_config(
+                seed,
+                ctx.storage_buffer_pool(),
+            );
             Self::Db::init(ctx, config).await.unwrap()
         }
 
@@ -2681,9 +2759,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pool)
         }
 
         fn create_ops(
@@ -2703,7 +2781,10 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(&seed.to_string(), &ctx);
+            let cfg = crate::qmdb::any::test::fixed_db_config::<TwoCap>(
+                &seed.to_string(),
+                ctx.storage_buffer_pool(),
+            );
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -2762,11 +2843,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            pool: &BufferPool,
         ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                pool,
             )
         }
 
@@ -2787,8 +2868,10 @@ mod harnesses {
 
         async fn init_db(mut ctx: Context) -> Self::Db {
             let seed = ctx.next_u64();
-            let config =
-                crate::qmdb::any::unordered::variable::test::create_test_config(seed, &ctx);
+            let config = crate::qmdb::any::unordered::variable::test::create_test_config(
+                seed,
+                ctx.storage_buffer_pool(),
+            );
             Self::Db::init(ctx, config).await.unwrap()
         }
 

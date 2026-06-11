@@ -367,7 +367,7 @@ impl<B: Blob> Buf for Replay<B> {
 #[cfg(test)]
 mod tests {
     use super::{super::append::Append, *};
-    use crate::{deterministic, Runner as _, Storage as _};
+    use crate::{deterministic, BufferPooler, Runner as _, Storage as _};
     use commonware_macros::test_traced;
     use commonware_utils::{NZUsize, NZU16};
 
@@ -381,8 +381,9 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -419,8 +420,9 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -448,8 +450,9 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -504,8 +507,9 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
             assert_eq!(blob_size, 0);
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();
@@ -543,8 +547,9 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"test_blob").await.unwrap();
 
-            let cache_ref =
-                super::super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_PAGES));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(BUFFER_PAGES));
             let append = Append::new(blob.clone(), blob_size, BUFFER_PAGES * 115, cache_ref)
                 .await
                 .unwrap();

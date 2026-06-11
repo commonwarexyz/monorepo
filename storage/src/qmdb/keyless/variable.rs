@@ -95,7 +95,7 @@ mod test {
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -106,9 +106,9 @@ mod test {
 
     fn db_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        pool: &BufferPool,
     ) -> Config<(commonware_codec::RangeCfg<usize>, ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::full::Config {
                 journal_partition: format!("journal-{suffix}"),
@@ -148,7 +148,7 @@ mod test {
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
-        let cfg = db_config(suffix, &context);
+        let cfg = db_config(suffix, context.storage_buffer_pool());
         TestDb::init(context, cfg).await.unwrap()
     }
 
@@ -162,7 +162,9 @@ mod test {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((0..=10000usize).into(), ()),

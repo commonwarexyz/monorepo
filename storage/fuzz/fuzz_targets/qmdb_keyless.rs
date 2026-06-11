@@ -3,9 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential, Strategy};
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{
@@ -194,10 +192,10 @@ type Db<F, S> = Keyless<F, deterministic::Context, Vec<u8>, Sha256, S>;
 
 fn test_config<S: Strategy>(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
     strategy: S,
 ) -> Config<CodecConfig, S> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+    let page_cache = pool.page_cache(PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
     Config {
         merkle: MerkleConfig {
             journal_partition: format!("{test_name}-journal"),
@@ -223,7 +221,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
 
     runner.start(|context| async move {
         let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);
-        let cfg = test_config(suffix, &context, strategy.clone());
+        let cfg = test_config(suffix, context.storage_buffer_pool(), strategy.clone());
         let mut db: Db<F, S> = Db::init(context.child("storage"), cfg)
             .await
             .expect("Failed to init keyless db");
@@ -480,7 +478,7 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
                     pending_appends.clear();
                     drop(db);
 
-                    let cfg = test_config(suffix, &context, strategy.clone());
+                    let cfg = test_config(suffix, context.storage_buffer_pool(), strategy.clone());
                     db = Db::init(
                         context.child("db").with_attribute("instance", restarts),
                         cfg,

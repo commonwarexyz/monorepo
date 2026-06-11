@@ -138,7 +138,9 @@ pub fn any_fix_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> AnyFixedConfig<EightCap, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
@@ -150,7 +152,9 @@ pub fn imm_fix_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> ImmutableFixedConfig<EightCap, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     ImmutableFixedConfig {
         merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
@@ -168,7 +172,9 @@ pub fn cur_fix_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> CurrentFixedConfig<EightCap, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentFixedConfig {
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
@@ -187,7 +193,9 @@ pub fn any_var_digest_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> AnyVariableConfig<EightCap, ((), ()), Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
@@ -205,7 +213,9 @@ pub fn cur_var_digest_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> CurrentVariableConfig<EightCap, ((), ()), Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
@@ -227,7 +237,9 @@ pub fn any_var_vec_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> AnyVariableConfig<EightCap, VarVecCfg, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     AnyVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(
@@ -250,7 +262,9 @@ pub fn cur_var_vec_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> CurrentVariableConfig<EightCap, VarVecCfg, Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     CurrentVariableConfig {
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(
@@ -274,7 +288,9 @@ pub fn keyless_cfg_with(
     ctx: &(impl BufferPooler + ThreadPooler),
     items_per_blob: NonZeroU64,
 ) -> KeylessConfig<(commonware_codec::RangeCfg<usize>, ()), Rayon> {
-    let page_cache = CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE);
+    let page_cache = ctx
+        .storage_buffer_pool()
+        .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
     KeylessConfig {
         merkle: merkle_cfg(PARTITION_KEYLESS, ctx, page_cache.clone(), items_per_blob),
         log: var_log_cfg(

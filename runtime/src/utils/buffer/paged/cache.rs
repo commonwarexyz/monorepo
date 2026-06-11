@@ -2,7 +2,7 @@
 //! physical page format used by the blob, which is left to the blob implementation.
 
 use super::get_page_from_blob;
-use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
+use crate::{Blob, BufferPool, Error, IoBuf, IoBufMut};
 use ahash::AHashMap;
 use commonware_utils::sync::RwLock;
 use futures::{future::Shared, FutureExt};
@@ -176,6 +176,15 @@ pub struct CacheRef {
     pool: BufferPool,
 }
 
+impl BufferPool {
+    /// Create a [CacheRef] backed by this pool.
+    ///
+    /// The cache stores at most `capacity` pages, each exactly `page_size` bytes.
+    pub fn page_cache(&self, page_size: NonZeroU16, capacity: NonZeroUsize) -> CacheRef {
+        CacheRef::new(self.clone(), page_size, capacity)
+    }
+}
+
 impl CacheRef {
     /// Create a shared page-cache handle backed by `pool`.
     ///
@@ -190,16 +199,6 @@ impl CacheRef {
             cache: Arc::new(RwLock::new(Cache::new(pool.clone(), page_size, capacity))),
             pool,
         }
-    }
-
-    /// Create a shared page-cache handle, extracting the storage [BufferPool] from a
-    /// [BufferPooler].
-    pub fn from_pooler(
-        pooler: &impl BufferPooler,
-        page_size: NonZeroU16,
-        capacity: NonZeroUsize,
-    ) -> Self {
-        Self::new(pooler.storage_buffer_pool().clone(), page_size, capacity)
     }
 
     /// The page size used by this page cache.
@@ -617,8 +616,8 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
-        BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
-        Supervisor as _,
+        BufferPoolConfig, BufferPooler, Clock as _, IoBufsMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -903,7 +902,9 @@ mod tests {
             }
 
             // Fill the page cache with the blob's data via CacheRef::read.
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(10));
             assert_eq!(cache_ref.next_id(), 0);
             assert_eq!(cache_ref.next_id(), 1);
             for i in 0..11 {
@@ -936,7 +937,9 @@ mod tests {
     fn test_cache_max_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(2));
 
             // Use the largest page-aligned offset representable for the configured PAGE_SIZE.
             let aligned_max_offset = u64::MAX - (u64::MAX % PAGE_SIZE_U64);
@@ -963,8 +966,9 @@ mod tests {
         executor.start(|context| async move {
             // Use the minimum page size (CHECKSUM_SIZE + 1 = 13) with high offset.
             const MIN_PAGE_SIZE: u64 = CHECKSUM_SIZE + 1;
-            let cache_ref =
-                CacheRef::from_pooler(&context, NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(NZU16!(MIN_PAGE_SIZE as u16), NZUsize!(2));
 
             // Create two pages worth of logical data (no CRCs - CacheRef::cache expects logical
             // only).
@@ -1002,7 +1006,9 @@ mod tests {
         executor.start(|context| async move {
             // Set up a small cache and a blob whose read never completes once started.
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(10));
             let (started_tx, started_rx) = oneshot::channel();
             let blob = BlockingBlob {
                 started: Arc::new(Mutex::new(Some(started_tx))),
@@ -1043,7 +1049,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(10));
 
             // Return one valid full page, but hold the underlying read until the test releases it.
             let logical_page = vec![7u8; PAGE_SIZE.get() as usize];
@@ -1174,7 +1182,9 @@ mod tests {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let blob_id = 0;
-            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10));
+            let cache_ref = context
+                .storage_buffer_pool()
+                .page_cache(PAGE_SIZE, NZUsize!(10));
 
             // Hold one shared fetch in flight, then make the underlying read fail.
             let (started_tx, started_rx) = oneshot::channel();

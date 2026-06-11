@@ -112,7 +112,7 @@ pub mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_runtime::{deterministic, BufferPooler, Runner as _, Supervisor as _};
     use commonware_utils::{
         bitmap::{Prunable as BitMap, Readable as _},
         NZU64,
@@ -132,7 +132,7 @@ pub mod test {
 
     /// Return an [Db] database initialized with a fixed config.
     async fn open_db(context: deterministic::Context, partition_prefix: String) -> CurrentTest {
-        let cfg = fixed_config::<OneCap>(&partition_prefix, &context);
+        let cfg = fixed_config::<OneCap>(&partition_prefix, context.storage_buffer_pool());
         CurrentTest::init(context, cfg).await.unwrap()
     }
 

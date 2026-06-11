@@ -999,7 +999,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_storage::{
         journal::contiguous::{
@@ -1049,8 +1049,8 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn fixed_config(suffix: &str, pool: &BufferPool) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
@@ -1073,9 +1073,9 @@ mod tests {
 
     fn variable_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        pool: &BufferPool,
     ) -> VariableConfig<TwoCap, ((), ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("stateful-current-journal-{suffix}"),
@@ -1121,7 +1121,7 @@ mod tests {
     #[test]
     fn ordered_fixed_managed_db_finalizes_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("ordered-fixed-managed-db", &context);
+            let config = fixed_config("ordered-fixed-managed-db", context.storage_buffer_pool());
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -1165,7 +1165,8 @@ mod tests {
     #[test]
     fn ordered_variable_managed_db_finalizes_batch_and_proves_exclusion() {
         deterministic::Runner::default().start(|context| async move {
-            let config = variable_config("ordered-variable-managed-db", &context);
+            let config =
+                variable_config("ordered-variable-managed-db", context.storage_buffer_pool());
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -1209,7 +1210,7 @@ mod tests {
     #[test]
     fn ordered_managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("ordered-matches-sync-target", &context);
+            let config = fixed_config("ordered-matches-sync-target", context.storage_buffer_pool());
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
@@ -1266,7 +1267,7 @@ mod tests {
     #[test]
     fn ordered_managed_db_rewind_to_target_round_trips() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("ordered-rewind-round-trip", &context);
+            let config = fixed_config("ordered-rewind-round-trip", context.storage_buffer_pool());
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
@@ -1330,7 +1331,7 @@ mod tests {
     #[test]
     fn managed_db_matches_sync_target_rejects_wrong_ops_root_and_range() {
         deterministic::Runner::default().start(|context| async move {
-            let config = fixed_config("matches-sync-target", &context);
+            let config = fixed_config("matches-sync-target", context.storage_buffer_pool());
             let db = FixedDb::init(context.child("db"), config.clone())
                 .await
                 .unwrap();

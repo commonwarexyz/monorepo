@@ -77,7 +77,7 @@ mod test {
     use commonware_macros::test_traced;
     use commonware_parallel::{Rayon, Sequential, Strategy};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+        deterministic, BufferPool, BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::{NonZeroU16, NonZeroUsize};
@@ -85,8 +85,8 @@ mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    fn db_config<S: Strategy>(suffix: &str, pooler: &impl BufferPooler, strategy: S) -> Config<S> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn db_config<S: Strategy>(suffix: &str, pool: &BufferPool, strategy: S) -> Config<S> {
+        let page_cache = pool.page_cache(PAGE_SIZE, PAGE_CACHE_SIZE);
         Config {
             merkle: crate::merkle::full::Config {
                 journal_partition: format!("fixed-journal-{suffix}"),
@@ -120,12 +120,16 @@ mod test {
         suffix: &str,
         context: deterministic::Context,
     ) -> TestDb<F> {
-        let cfg = db_config(suffix, &context, Sequential);
+        let cfg = db_config(suffix, context.storage_buffer_pool(), Sequential);
         TestDb::init(context, cfg).await.unwrap()
     }
 
     async fn open_rayon_db<F: Family>(context: deterministic::Context) -> TestRayonDb<F> {
-        let cfg = db_config("rayon", &context, Rayon::new(NZUsize!(2)).unwrap());
+        let cfg = db_config(
+            "rayon",
+            context.storage_buffer_pool(),
+            Rayon::new(NZUsize!(2)).unwrap(),
+        );
         TestRayonDb::init(context, cfg).await.unwrap()
     }
 
@@ -139,7 +143,9 @@ mod test {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
@@ -956,7 +962,7 @@ mod test {
         use std::sync::Arc;
 
         deterministic::Runner::default().start(|ctx| async move {
-            let target_config = db_config("sync-target", &ctx, Sequential);
+            let target_config = db_config("sync-target", ctx.storage_buffer_pool(), Sequential);
             let mut target_db: TestDb<mmr::Family> =
                 TestDb::init(ctx.child("target"), target_config)
                     .await
@@ -975,7 +981,7 @@ mod test {
             let lower_bound = bounds.start;
             let upper_bound = bounds.end;
 
-            let client_config = db_config("sync-client", &ctx, Sequential);
+            let client_config = db_config("sync-client", ctx.storage_buffer_pool(), Sequential);
             let target_db = Arc::new(target_db);
             let config = Config {
                 db_config: client_config,

@@ -13,7 +13,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _, ThreadPooler,
+    BufferPool, BufferPooler, Supervisor as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -73,8 +73,8 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
     }
 }
 
-fn pc(ctx: &impl BufferPooler) -> CacheRef {
-    CacheRef::from_pooler(ctx, PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
+fn pc(pool: &BufferPool) -> CacheRef {
+    pool.page_cache(PAGE_SIZE, LARGE_PAGE_CACHE_SIZE)
 }
 
 fn cur_fix_cfg(

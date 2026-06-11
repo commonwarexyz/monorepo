@@ -24,7 +24,7 @@
 //! # Example
 //!
 //! ```rust
-//! use commonware_runtime::{Spawner, Runner, deterministic, buffer::paged::CacheRef};
+//! use commonware_runtime::{BufferPooler, Spawner, Runner, deterministic};
 //! use commonware_cryptography::{Hasher as _, Sha256};
 //! use commonware_storage::{
 //!     archive::{
@@ -44,7 +44,7 @@
 //!         freezer_table_resize_frequency: 4,
 //!         freezer_table_resize_chunk_size: 16_384,
 //!         freezer_key_partition: "key".into(),
-//!         freezer_key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+//!         freezer_key_page_cache: context.storage_buffer_pool().page_cache(NZU16!(1024), NZUsize!(10)),
 //!         freezer_value_partition: "value".into(),
 //!         freezer_value_target_size: 1024,
 //!         freezer_value_compression: Some(3),
@@ -133,7 +133,7 @@ mod tests {
     use super::*;
     use crate::archive::Archive as ArchiveTrait;
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
-    use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
+    use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use std::num::NonZeroU16;
 
@@ -151,7 +151,9 @@ mod tests {
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "test-key2".into(),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "test-value2".into(),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),
@@ -218,7 +220,9 @@ mod tests {
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
                 freezer_key_partition: "empty-key".into(),
-                freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                freezer_key_page_cache: context
+                    .storage_buffer_pool()
+                    .page_cache(PAGE_SIZE, PAGE_CACHE_SIZE),
                 freezer_value_partition: "empty-value".into(),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: Some(3),

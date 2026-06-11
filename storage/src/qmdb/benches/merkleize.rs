@@ -322,7 +322,7 @@ fn any_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = ctx.storage_buffer_pool().page_cache(PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
@@ -334,7 +334,7 @@ fn any_var_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = ctx.storage_buffer_pool().page_cache(PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
@@ -346,7 +346,7 @@ fn cur_fix_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = ctx.storage_buffer_pool().page_cache(PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
@@ -359,7 +359,7 @@ fn cur_var_cfg(
     ctx: &(impl BufferPooler + ThreadPooler),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = ctx.storage_buffer_pool().page_cache(PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),

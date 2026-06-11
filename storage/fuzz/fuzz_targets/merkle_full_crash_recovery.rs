@@ -6,9 +6,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
-};
+use commonware_runtime::{deterministic, BufferPool, BufferPooler, Runner, Supervisor as _};
 use commonware_storage::merkle::{
     full::Config, hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold,
     Family as MerkleFamily, Location,
@@ -89,7 +87,7 @@ struct FuzzInput {
 
 fn merkle_config(
     partition_suffix: &str,
-    pooler: &impl BufferPooler,
+    pool: &BufferPool,
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
@@ -101,7 +99,7 @@ fn merkle_config(
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
+        page_cache: pool.page_cache(page_size, page_cache_size),
     }
 }
 
@@ -243,7 +241,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
                 &hasher,
                 merkle_config(
                     &partition_suffix,
-                    &ctx,
+                    ctx.storage_buffer_pool(),
                     page_size,
                     page_cache_size,
                     items_per_blob,
@@ -275,7 +273,7 @@ fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, suffix: &str) {
             &hasher,
             merkle_config(
                 &partition_suffix,
-                &ctx,
+                ctx.storage_buffer_pool(),
                 page_size,
                 page_cache_size,
                 items_per_blob,

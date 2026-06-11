@@ -2,10 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{
-    buffer::{
-        paged::{Append, CacheRef},
-        Read, Write,
-    },
+    buffer::{paged::Append, Read, Write},
     deterministic, Blob, BufferPooler, Runner, Storage,
 };
 use commonware_utils::{NZUsize, NZU16};
@@ -181,11 +178,11 @@ fn fuzz(input: FuzzInput) {
                     // a different page size would corrupt reads since page size is embedded
                     // in the CRC records.
                     if cache_ref.is_none() {
-                        cache_ref = Some(CacheRef::from_pooler(
-                            &context,
-                            NZU16!(cache_page_size),
-                            cache_capacity,
-                        ));
+                        cache_ref = Some(
+                            context
+                                .storage_buffer_pool()
+                                .page_cache(NZU16!(cache_page_size), cache_capacity),
+                        );
                         cache_page_size_ref = Some(cache_page_size);
                     }
 

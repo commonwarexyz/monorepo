@@ -22,7 +22,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
+    deterministic, deterministic::Context, BufferPool, BufferPooler, Runner as _, Supervisor as _,
 };
 use commonware_utils::non_empty_range;
 use rand::RngCore as _;
@@ -285,8 +285,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str, pool: &BufferPool) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::TwoCap>(suffix, pool)
         }
 
         fn create_ops(
@@ -303,7 +303,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg =
+                fixed_config::<crate::translator::TwoCap>("default", ctx.storage_buffer_pool());
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -332,8 +333,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str, pool: &BufferPool) -> ConfigOf<Self> {
+            variable_config::<crate::translator::TwoCap>(suffix, pool)
         }
 
         fn create_ops(
@@ -350,7 +351,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::TwoCap>("default", &ctx);
+            let cfg =
+                variable_config::<crate::translator::TwoCap>("default", ctx.storage_buffer_pool());
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -379,8 +381,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str, pool: &BufferPool) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::OneCap>(suffix, pool)
         }
 
         fn create_ops(
@@ -397,7 +399,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = fixed_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg =
+                fixed_config::<crate::translator::OneCap>("default", ctx.storage_buffer_pool());
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -426,8 +429,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str, pool: &BufferPool) -> ConfigOf<Self> {
+            variable_config::<crate::translator::OneCap>(suffix, pool)
         }
 
         fn create_ops(
@@ -444,7 +447,8 @@ mod harnesses {
         }
 
         async fn init_db(ctx: Context) -> Self::Db {
-            let cfg = variable_config::<crate::translator::OneCap>("default", &ctx);
+            let cfg =
+                variable_config::<crate::translator::OneCap>("default", ctx.storage_buffer_pool());
             Self::Db::init(ctx, cfg).await.unwrap()
         }
 
@@ -492,7 +496,10 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let target_context = context.child("target");
         let mut target_db: Db = Db::init(
             target_context.child("target"),
-            variable_config::<crate::translator::TwoCap>(&target_suffix, &target_context),
+            variable_config::<crate::translator::TwoCap>(
+                &target_suffix,
+                target_context.storage_buffer_pool(),
+            ),
         )
         .await
         .unwrap();
@@ -524,7 +531,10 @@ fn test_current_mmb_sync_with_pruned_full_chunk_reopens() {
         let upper_bound = target_db.bounds().await.end;
 
         let client_suffix = context.next_u64().to_string();
-        let client_config = variable_config::<crate::translator::TwoCap>(&client_suffix, &context);
+        let client_config = variable_config::<crate::translator::TwoCap>(
+            &client_suffix,
+            context.storage_buffer_pool(),
+        );
         let target_db = std::sync::Arc::new(target_db);
         // Supply the trusted canonical root so `build_db`'s authentication check actually
         // runs: this is the success-path coverage for the overlay-state authentication
@@ -588,7 +598,8 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
     let executor = deterministic::Runner::default();
     executor.start(|mut context: Context| async move {
         let suffix = context.next_u64().to_string();
-        let config = variable_config::<crate::translator::TwoCap>(&suffix, &context);
+        let config =
+            variable_config::<crate::translator::TwoCap>(&suffix, context.storage_buffer_pool());
         let mut db: Db = Db::init(context.child("db"), config.clone()).await.unwrap();
 
         let key = Digest::from([9u8; 32]);

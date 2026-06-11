@@ -3,7 +3,7 @@
 use crate::{Hasher, Key, Translator, Value};
 use commonware_cryptography::{Hasher as CryptoHasher, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{BufferPooler, Clock, Metrics, Storage};
+use commonware_runtime::{BufferPool, Clock, Metrics, Storage};
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
     merkle::{
@@ -27,12 +27,8 @@ pub type Database<E> = fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator,
 pub type Operation = fixed::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig, Sequential> {
-    let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-        context,
-        NZU16!(2048),
-        NZUsize!(10),
-    );
+pub fn create_config(pool: &BufferPool) -> Config<Translator, FConfig, Sequential> {
+    let page_cache = pool.page_cache(NZU16!(2048), NZUsize!(10));
     Config {
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),

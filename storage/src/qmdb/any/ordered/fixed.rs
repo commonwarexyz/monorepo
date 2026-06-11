@@ -149,7 +149,7 @@ pub(crate) mod test {
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         deterministic::{self, Context},
-        Runner as _, Supervisor as _,
+        BufferPooler, Runner as _, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, test_rng_seeded, NZU64};
     use futures::StreamExt as _;
@@ -177,20 +177,20 @@ pub(crate) mod test {
 
     /// Return an `Any` database initialized with a fixed config, generic over merkle family.
     async fn open_db_generic<F: Family>(context: deterministic::Context) -> AnyTestGeneric<F> {
-        let cfg = fixed_db_config::<TwoCap>("partition", &context);
+        let cfg = fixed_db_config::<TwoCap>("partition", context.storage_buffer_pool());
         crate::qmdb::any::init(context, cfg).await.unwrap()
     }
 
     /// Return an `Any` database initialized with a fixed config.
     async fn open_db(context: deterministic::Context) -> AnyTest {
-        let cfg = fixed_db_config::<_>("partition", &context);
+        let cfg = fixed_db_config::<_>("partition", context.storage_buffer_pool());
         AnyTest::init(context, cfg).await.unwrap()
     }
 
     /// Create a test database with unique partition names
     pub(crate) async fn create_test_db(mut context: Context) -> AnyTest {
         let seed = context.next_u64();
-        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+        let cfg = fixed_db_config::<TwoCap>(&seed.to_string(), context.storage_buffer_pool());
         AnyTest::init(context, cfg).await.unwrap()
     }
 
@@ -478,7 +478,8 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|mut context| async move {
             let seed = context.next_u64();
-            let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
+            let config =
+                fixed_db_config::<OneCap>(&seed.to_string(), context.storage_buffer_pool());
             let mut db =
                 Db::<mmr::Family, Context, FixedBytes<2>, i32, Sha256, OneCap, Sequential>::init(
                     context, config,
@@ -1136,7 +1137,8 @@ pub(crate) mod test {
             let seed = context.next_u64();
 
             // Use a OneCap to ensure many collisions.
-            let config = fixed_db_config::<OneCap>(&seed.to_string(), &context);
+            let config =
+                fixed_db_config::<OneCap>(&seed.to_string(), context.storage_buffer_pool());
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, OneCap, Sequential>::init(
                 context.child("first"),
                 config,
@@ -1147,7 +1149,8 @@ pub(crate) mod test {
             db.destroy().await.unwrap();
 
             // Repeat test with TwoCap to test low/no collisions.
-            let config = fixed_db_config::<TwoCap>(&seed.to_string(), &context);
+            let config =
+                fixed_db_config::<TwoCap>(&seed.to_string(), context.storage_buffer_pool());
             let db = Db::<mmr::Family, Context, Digest, i32, Sha256, TwoCap, Sequential>::init(
                 context.child("second"),
                 config,
@@ -1166,7 +1169,7 @@ pub(crate) mod test {
 
     /// Return a fixed db with FixedBytes<4> keys.
     async fn open_fixed_db(context: Context) -> FixedDb {
-        let cfg = fixed_db_config::<_>("fixed-bytes-partition", &context);
+        let cfg = fixed_db_config::<_>("fixed-bytes-partition", context.storage_buffer_pool());
         FixedDb::init(context, cfg).await.unwrap()
     }
 
