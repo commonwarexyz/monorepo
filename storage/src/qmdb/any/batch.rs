@@ -38,6 +38,25 @@ use tracing::debug;
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
+/// Minimum number of items before per-item resolution work (synchronous reads, floor-raise
+/// classification) is sharded across the strategy pool. Below this, dispatch overhead
+/// exceeds the win.
+const MIN_PARALLEL_ITEMS: usize = 1024;
+
+/// Contiguous chunks per pool thread when sharding per-item work, leaving headroom for
+/// load imbalance between chunks.
+const CHUNKS_PER_THREAD: usize = 4;
+
+/// Split per-item work into contiguous chunk lengths for the strategy pool.
+fn parallel_chunk_len<S: Strategy>(items: usize, strategy: &S) -> usize {
+    items
+        .div_ceil(strategy.parallelism_hint() * CHUNKS_PER_THREAD)
+        .max(1)
+}
+
+/// One contiguous chunk of floor-raise candidates paired with their resolved operations.
+type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
+
 /// Sorted `(key, (value, loc))` vec consulted by `find_prev_key` to find the predecessor
 /// of a given key during ordered merkleization. The value is `None` for cache-resolved
 /// keys: the predecessor-rewrite loop only reads a value for keys outside this batch's
@@ -291,6 +310,28 @@ where
         }
     }
     None
+}
+
+/// Outcome of classifying one floor-raise candidate against the batch diff, ancestor
+/// diffs, and committed snapshot.
+///
+/// Classification is a pure function of the pre-raise state: at most one candidate per key
+/// can be active (the bitmap holds exactly one set bit per committed key, and each diff or
+/// ancestor entry resolves a key to a single location), and a move only rewrites the moved
+/// key's own diff entry to a location above the scan tip. Classifying all candidates
+/// against a single snapshot of the diff therefore yields the same outcomes as the
+/// interleaved sequential walk, which lets the per-candidate work run sharded across the
+/// strategy pool.
+enum FloorOutcome<F: Family> {
+    /// Not the active op for its key (or not a keyed op); leave in place.
+    Inactive,
+    /// Active with an existing diff entry at this index; move and rewrite it in place.
+    MoveExisting {
+        idx: usize,
+        base_old_loc: Option<Location<F>>,
+    },
+    /// Active with no diff entry; move and stage a new entry.
+    MoveNew { base_old_loc: Option<Location<F>> },
 }
 
 /// Streaming equivalent of [`resolve_in_ancestors`] for an ascending sequence of queries:
@@ -556,6 +597,17 @@ where
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
+        // Strictly increasing, all-committed inputs (the floor-raise candidate stream and
+        // depth-0 mutation reads) skip the per-location probes entirely: one batched read
+        // serves all page-cache hits under a single lock acquisition per section, where
+        // per-location probes pay a cache lock acquisition each.
+        if locations.last().is_some_and(|&last| *last < self.db_size)
+            && locations.windows(2).all(|w| w[0] < w[1])
+        {
+            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
+            return Ok(reader.read_many(&positions).await?);
+        }
+
         // Resolve hits synchronously: batch/ancestor first, then journal page cache.
         let results: Vec<Option<Operation<F, U>>> = locations
             .iter()
@@ -650,7 +702,7 @@ where
                 }
             }
         }
-        locations.sort();
+        db.strategy().sort_by(&mut locations, |a, b| a.cmp(b));
         locations.dedup();
         locations
     }
@@ -709,6 +761,7 @@ where
         if total_active_keys > 0 {
             // Floor raise: advance the inactivity floor by `total_steps` active operations.
             // `fixed_tip` prevents scanning into floor-raise moves just appended.
+            let strategy = db.strategy();
             let fixed_tip = self.base_size + ops.len() as u64;
             let mut moved = 0u64;
             let mut scan_from = floor;
@@ -729,51 +782,101 @@ where
                 // are fetched concurrently.
                 let resolved = self.read_ops(&candidates, &ops, &reader).await?;
 
-                // Process results in order, moving active ops to the tip.
-                for (candidate, op) in candidates.into_iter().zip(resolved) {
-                    floor = Location::new(*candidate + 1);
-                    let Some(key) = op.key().cloned() else {
-                        continue; // skip CommitFloor and other non-keyed ops
+                // Classify every candidate against the pre-raise state (see [`FloorOutcome`]).
+                // Revalidation is required even for candidates whose committed bitmap bit is
+                // set: this batch's diff or an uncommitted ancestor diff may supersede the
+                // committed location, and neither source is reflected in the bitmap.
+                let classify = |candidate: Location<F>, op: &Operation<F, U>| {
+                    let Some(key) = op.key() else {
+                        return FloorOutcome::Inactive; // CommitFloor and other non-keyed ops
                     };
-                    // A single batch-diff lookup drives the activity check, the previous
-                    // committed location, and the in-place diff update below. Revalidation is required
-                    // even for candidates whose committed bitmap bit is set: this batch's diff
-                    // or an uncommitted ancestor diff may supersede the committed location, and
-                    // neither source is reflected in the bitmap.
-                    let search = diff.binary_search_by(|(k, _)| k.cmp(&key));
-                    let (active, base_old_loc) = match search {
+                    match diff.binary_search_by(|(k, _)| k.cmp(key)) {
                         Ok(idx) => {
                             let entry = &diff[idx].1;
-                            (entry.loc() == Some(candidate), entry.base_old_loc())
+                            if entry.loc() == Some(candidate) {
+                                FloorOutcome::MoveExisting {
+                                    idx,
+                                    base_old_loc: entry.base_old_loc(),
+                                }
+                            } else {
+                                FloorOutcome::Inactive
+                            }
                         }
-                        Err(_) => resolve_in_ancestors(&self.ancestors, &key).map_or_else(
+                        Err(_) => resolve_in_ancestors(&self.ancestors, key).map_or_else(
                             || {
-                                (
-                                    db.snapshot.get(&key).any(|&l| l == candidate),
-                                    Some(candidate),
-                                )
+                                if db.snapshot.get(key).any(|&l| l == candidate) {
+                                    FloorOutcome::MoveNew {
+                                        base_old_loc: Some(candidate),
+                                    }
+                                } else {
+                                    FloorOutcome::Inactive
+                                }
                             },
-                            |entry| (entry.loc() == Some(candidate), entry.base_old_loc()),
+                            |entry| {
+                                if entry.loc() == Some(candidate) {
+                                    FloorOutcome::MoveNew {
+                                        base_old_loc: entry.base_old_loc(),
+                                    }
+                                } else {
+                                    FloorOutcome::Inactive
+                                }
+                            },
                         ),
-                    };
-                    if !active {
-                        continue;
                     }
-                    let new_loc = Location::new(self.base_size + ops.len() as u64);
-                    let value = extract_update_value(&op);
-                    ops.push(op);
+                };
+                let outcomes: Vec<Vec<FloorOutcome<F>>> =
+                    if candidates.len() >= MIN_PARALLEL_ITEMS && strategy.parallelism_hint() > 1 {
+                        let chunk_len = parallel_chunk_len(candidates.len(), strategy);
+                        let chunks: Vec<CandidateChunk<'_, F, U>> = candidates
+                            .chunks(chunk_len)
+                            .zip(resolved.chunks(chunk_len))
+                            .collect();
+                        strategy.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
+                            chunk_locs
+                                .iter()
+                                .zip(chunk_ops)
+                                .map(|(loc, op)| classify(*loc, op))
+                                .collect()
+                        })
+                    } else {
+                        vec![candidates
+                            .iter()
+                            .zip(&resolved)
+                            .map(|(loc, op)| classify(*loc, op))
+                            .collect()]
+                    };
 
-                    let new_entry = (
-                        key,
-                        DiffEntry::Active {
-                            value,
-                            loc: new_loc,
-                            base_old_loc,
-                        },
-                    );
-                    match search {
-                        Ok(idx) => diff[idx] = new_entry,
-                        Err(_) => floor_diff.push(new_entry),
+                // Apply in candidate order, moving active ops to the tip.
+                let mut outcomes = outcomes.into_iter().flatten();
+                for (candidate, op) in candidates.into_iter().zip(resolved) {
+                    let outcome = outcomes.next().expect("one outcome per candidate");
+                    floor = Location::new(*candidate + 1);
+                    match outcome {
+                        FloorOutcome::Inactive => continue,
+                        FloorOutcome::MoveExisting { idx, base_old_loc } => {
+                            let new_loc = Location::new(self.base_size + ops.len() as u64);
+                            let value = extract_update_value(&op);
+                            ops.push(op);
+                            diff[idx].1 = DiffEntry::Active {
+                                value,
+                                loc: new_loc,
+                                base_old_loc,
+                            };
+                        }
+                        FloorOutcome::MoveNew { base_old_loc } => {
+                            let key = op.key().cloned().expect("moved op has a key");
+                            let new_loc = Location::new(self.base_size + ops.len() as u64);
+                            let value = extract_update_value(&op);
+                            ops.push(op);
+                            floor_diff.push((
+                                key,
+                                DiffEntry::Active {
+                                    value,
+                                    loc: new_loc,
+                                    base_old_loc,
+                                },
+                            ));
+                        }
                     }
                     moved += 1;
                     if moved >= total_steps {
@@ -786,7 +889,7 @@ where
                 // A key can only be moved once during this floor raise because, after it is
                 // moved, its new location lies above `fixed_tip` and the scan never revisits it.
                 diff.extend(floor_diff);
-                diff.sort_by(|a, b| a.0.cmp(&b.0));
+                strategy.sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
                 assert!(diff.is_sorted_by(|a, b| a.0 < b.0));
             }
         } else {
@@ -1073,7 +1176,7 @@ where
                     None => Some((key, mutation)),
                 })
                 .collect();
-            cached.sort_unstable_by_key(|&(_, loc, _)| loc);
+            db.strategy().sort_by(&mut cached, |a, b| a.1.cmp(&b.1));
         }
 
         // Resolve existing keys.
@@ -1173,7 +1276,8 @@ where
         for (key, value, base_old_loc) in parent_deleted_creates {
             creates.push((key, value, base_old_loc));
         }
-        creates.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        db.strategy()
+            .sort_by(&mut creates, |(a, _, _), (b, _, _)| a.cmp(b));
         for (key, value, base_old_loc) in creates {
             let new_loc = Location::new(m.base_size + ops.len() as u64);
             ops.push(Operation::Update(update::Unordered(
@@ -1191,7 +1295,7 @@ where
             active_keys_delta += 1;
         }
 
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        db.strategy().sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
@@ -1351,8 +1455,8 @@ where
             updated.push((key, value, loc));
         }
 
-        deleted.sort_by(|a, b| a.0.cmp(&b.0));
-        updated.sort_by(|a, b| a.0.cmp(&b.0));
+        db.strategy().sort_by(&mut deleted, |a, b| a.0.cmp(&b.0));
+        db.strategy().sort_by(&mut updated, |a, b| a.0.cmp(&b.0));
 
         // Handle parent-deleted keys that the child wants to re-create.
         let parent_deleted_creates = m.extract_parent_deleted_creates(&mut mutations);
@@ -1374,7 +1478,8 @@ where
             next_candidates.push(key.clone());
             created.push((key, value, base_old_loc));
         }
-        created.sort_by(|(a, _, _), (b, _, _)| a.cmp(b));
+        db.strategy()
+            .sort_by(&mut created, |(a, _, _), (b, _, _)| a.cmp(b));
 
         // Look up prev_translated_key for created/deleted keys.
         let mut prev_locations = Vec::new();
@@ -1481,7 +1586,7 @@ where
         }
 
         // Sort + dedup candidate sets now so find_next_key/find_prev_key can binary-search.
-        next_candidates.sort();
+        db.strategy().sort_by(&mut next_candidates, |a, b| a.cmp(b));
         next_candidates.dedup();
         // For `prev_candidates`, duplicates can occur when the same key is pushed from multiple
         // sources (main scan, prev_results, ancestor walk). Later pushes carry the freshest state
@@ -1631,7 +1736,7 @@ where
             }
         }
 
-        diff.sort_by(|a, b| a.0.cmp(&b.0));
+        db.strategy().sort_by(&mut diff, |a, b| a.0.cmp(&b.0));
 
         // Remaining phases: floor raise, CommitFloor, journal, diff merge.
         m.finish(
@@ -2148,16 +2253,16 @@ mod tests {
         mmr,
         qmdb::any::{
             ordered::fixed::Db as OrderedFixedDb,
-            test::{colliding_digest, fixed_db_config},
+            test::{colliding_digest, fixed_db_config, fixed_db_config_with},
             unordered::fixed::Db as UnorderedFixedDb,
             BITMAP_CHUNK_BYTES,
         },
         translator::OneCap,
     };
     use commonware_cryptography::{sha256, Sha256};
-    use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _};
-    use commonware_utils::test_rng;
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
+    use commonware_utils::{test_rng, NZUsize};
     use rand::Rng;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -3405,6 +3510,75 @@ mod tests {
             assert!(results.is_empty());
 
             db.destroy().await.unwrap();
+        });
+    }
+
+    /// Roots from a multi-thread strategy must match the sequential strategy exactly.
+    ///
+    /// Floor raises with at least `MIN_PARALLEL_ITEMS` candidates take the sharded
+    /// classification path and the pool-dispatched sorts, which the rest of the suite
+    /// (sequential strategies only) never exercises. Updating alternating halves of the
+    /// key set makes each floor raise classify a mix of superseded (batch diff) and
+    /// still-active (snapshot) candidates.
+    #[test]
+    fn parallel_floor_raise_root_matches_sequential() {
+        const SEEDED: u64 = 4096;
+
+        async fn roots<S: Strategy>(
+            context: deterministic::Context,
+            strategy: S,
+            suffix: &str,
+        ) -> Vec<sha256::Digest> {
+            let config = fixed_db_config_with::<OneCap, S>(suffix, &context, strategy);
+            let mut db = UnorderedFixedDb::<
+                mmr::Family,
+                deterministic::Context,
+                sha256::Digest,
+                sha256::Digest,
+                Sha256,
+                OneCap,
+                S,
+            >::init(context, config)
+            .await
+            .unwrap();
+
+            let mut roots = Vec::new();
+            let mut batch = db.new_batch();
+            for i in 0..SEEDED {
+                batch = batch.write(Sha256::hash(&i.to_be_bytes()), Some(Sha256::hash(&[1])));
+            }
+            let merkleized = batch.merkleize(&db, None).await.unwrap();
+            roots.push(merkleized.root());
+            db.apply_batch(merkleized).await.unwrap();
+            db.commit().await.unwrap();
+
+            for round in 0..2u8 {
+                let mut batch = db.new_batch();
+                for i in (0..SEEDED).filter(|i| i % 2 == u64::from(round)) {
+                    batch = batch.write(
+                        Sha256::hash(&i.to_be_bytes()),
+                        Some(Sha256::hash(&[2 + round])),
+                    );
+                }
+                let merkleized = batch.merkleize(&db, None).await.unwrap();
+                roots.push(merkleized.root());
+                db.apply_batch(merkleized).await.unwrap();
+                db.commit().await.unwrap();
+            }
+            db.destroy().await.unwrap();
+            roots
+        }
+
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let sequential = roots(context.child("seq"), Sequential, "par-parity-seq").await;
+            let parallel = roots(
+                context.child("rayon"),
+                Rayon::new(NZUsize!(4)).unwrap(),
+                "par-parity-rayon",
+            )
+            .await;
+            assert_eq!(sequential, parallel);
         });
     }
 }

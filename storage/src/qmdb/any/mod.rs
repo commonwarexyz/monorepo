@@ -210,10 +210,11 @@ pub(crate) mod test {
     const PAGE_SIZE: NonZeroU16 = NZU16!(101);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(11);
 
-    pub(crate) fn fixed_db_config<T: Translator + Default>(
+    pub(crate) fn fixed_db_config_with<T: Translator + Default, S: Strategy>(
         suffix: &str,
         pooler: &impl BufferPooler,
-    ) -> FixedConfig<T, Sequential> {
+        strategy: S,
+    ) -> FixedConfig<T, S> {
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
@@ -221,7 +222,7 @@ pub(crate) mod test {
                 metadata_partition: format!("metadata-{suffix}"),
                 items_per_blob: NZU64!(11),
                 write_buffer: NZUsize!(1024),
-                strategy: Sequential,
+                strategy,
                 page_cache: page_cache.clone(),
             },
             journal_config: FConfig {
@@ -232,6 +233,13 @@ pub(crate) mod test {
             },
             translator: T::default(),
         }
+    }
+
+    pub(crate) fn fixed_db_config<T: Translator + Default>(
+        suffix: &str,
+        pooler: &impl BufferPooler,
+    ) -> FixedConfig<T, Sequential> {
+        fixed_db_config_with(suffix, pooler, Sequential)
     }
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
