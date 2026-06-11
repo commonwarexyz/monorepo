@@ -226,20 +226,17 @@ where
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
-        let results = self.get_many_with_locations(keys).await?;
-        Ok(results
-            .into_iter()
-            .map(|result| result.map(|(value, ..)| value))
-            .collect())
+        self.get_many_map(keys, |data, _| data.value().clone())
+            .await
     }
 
-    /// Like [`Self::get_many`] but additionally returns the committed location each value was
-    /// read from, plus the update's cached payload (stashed by batch reads for merkleize).
-    #[allow(clippy::type_complexity)]
-    pub(crate) async fn get_many_with_locations(
+    /// Like [`Self::get_many`] but maps each matched update through `map`, which also
+    /// receives the committed location the update was read from.
+    pub(crate) async fn get_many_map<T>(
         &self,
         keys: &[&U::Key],
-    ) -> Result<Vec<Option<(U::Value, Location<F>, U::Cached)>>, crate::qmdb::Error<F>> {
+        map: impl Fn(&U, Location<F>) -> T,
+    ) -> Result<Vec<Option<T>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -251,8 +248,7 @@ where
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        let mut results: Vec<Option<(U::Value, Location<F>, U::Cached)>> =
-            (0..keys.len()).map(|_| None).collect();
+        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
 
         self.snapshot
             .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
@@ -287,7 +283,7 @@ where
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {
-                results[key_idx] = Some((data.value().clone(), Location::new(pos), data.cached()));
+                results[key_idx] = Some(map(data, Location::new(pos)));
             }
         }
 

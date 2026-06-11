@@ -44,16 +44,16 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     type Cached = K;
 
-    fn cached(&self) -> K {
-        self.next_key.clone()
-    }
-
     fn key(&self) -> &K {
         &self.key
     }
 
     fn value(&self) -> &V::Value {
         &self.value
+    }
+
+    fn cached(&self) -> K {
+        self.next_key.clone()
     }
 
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

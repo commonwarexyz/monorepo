@@ -236,12 +236,17 @@ pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
 ///
 /// # Panics
 ///
-/// Panics if `possible_next` is empty.
+/// Panics if `possible_next` is empty, or on any out-of-order query that would return a
+/// wrong result (`idx` has already advanced past a candidate above the query).
 pub(crate) fn find_next_key_ascending<K: Ord + Clone>(
     key: &K,
     possible_next: &[K],
     idx: &mut usize,
 ) -> K {
+    assert!(
+        *idx == 0 || possible_next[*idx - 1] <= *key,
+        "queries must be non-decreasing"
+    );
     while *idx < possible_next.len() && possible_next[*idx] <= *key {
         *idx += 1;
     }
@@ -350,6 +355,16 @@ mod test {
                 );
             }
         }
+    }
+
+    /// An out-of-order query that would return a wrong result must panic instead.
+    #[test]
+    #[should_panic(expected = "queries must be non-decreasing")]
+    fn find_next_key_ascending_rejects_out_of_order_query() {
+        let candidates = vec![1u64, 5, 9];
+        let mut idx = 0;
+        assert_eq!(find_next_key_ascending(&5, &candidates, &mut idx), 9);
+        find_next_key_ascending(&1, &candidates, &mut idx);
     }
 
     pub(crate) async fn test_ordered_any_db_empty<

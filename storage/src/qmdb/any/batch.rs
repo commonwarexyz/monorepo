@@ -42,8 +42,7 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 /// of a given key during ordered merkleization.
 type PrevCandidates<K, F, V> = Vec<(K, (V, Location<F>))>;
 
-/// Committed-DB locations (plus the update kind's cached payload) cached by a batch's reads,
-/// keyed by the resolved key.
+/// Committed-DB locations cached by a batch's reads, keyed by the resolved key.
 type ResolvedReads<F, U> =
     AHashMap<<U as update::Update>::Key, (Location<F>, <U as update::Update>::Cached)>;
 
@@ -184,10 +183,10 @@ where
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 
-    /// Committed-DB locations (plus the update kind's cached payload) cached by this batch's
-    /// reads (`get`/`get_many`), keyed by the key they matched. Consumed by `merkleize`: when
-    /// a mutation key is present here, `merkleize` reuses the location (and, for ordered, the
-    /// old next key) and skips the redundant index probe and journal read.
+    /// Committed-DB locations cached by this batch's reads (`get`/`get_many`), keyed by the
+    /// key they matched. Consumed by `merkleize`: when a mutation key is present here,
+    /// `merkleize` reuses the location (and, for ordered, the old next key) and skips the
+    /// redundant index probe and journal read.
     ///
     /// Only committed-snapshot resolutions are cached. A cached location doubles as the
     /// key's previous committed location (`base_old_loc`), which holds because a
@@ -307,9 +306,18 @@ impl<'a, K: Ord, F: Family, V> DiffCursors<'a, K, F, V> {
     }
 
     /// Resolve `key` against the diffs (closest-first). Queries must be non-decreasing:
-    /// cursors only advance, so an out-of-order query may miss entries.
+    /// cursors only advance, so an out-of-order query could miss entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics on any out-of-order query that would return a wrong result (the cursor has
+    /// already advanced past an entry at or above the query).
     pub(crate) fn resolve(&mut self, key: &K) -> Option<&'a DiffEntry<F, V>> {
         for (diff, cursor) in &mut self.diffs {
+            assert!(
+                *cursor == 0 || diff[*cursor - 1].0 < *key,
+                "queries must be non-decreasing"
+            );
             while *cursor < diff.len() && diff[*cursor].0 < *key {
                 *cursor += 1;
             }
@@ -568,21 +576,6 @@ where
             .or_else(|| reader.try_read_sync(*loc))
     }
 
-    /// Read a single operation by location (test oracle; production paths batch via
-    /// [`Self::read_ops`]).
-    #[cfg(test)]
-    async fn read_op<R: Reader<Item = Operation<F, U>>>(
-        &self,
-        loc: Location<F>,
-        batch_ops: &[Operation<F, U>],
-        reader: &R,
-    ) -> Result<Operation<F, U>, crate::qmdb::Error<F>> {
-        match self.try_read_op_sync(loc, batch_ops, reader) {
-            Some(op) => Ok(op),
-            None => Ok(reader.read(*loc).await?),
-        }
-    }
-
     /// Read multiple operations by location.
     async fn read_ops<R: Reader<Item = Operation<F, U>>>(
         &self,
@@ -659,8 +652,7 @@ where
                 locations.extend(db.snapshot.get(key).copied());
             }
         } else {
-            // `mutations.keys()` ascends, so ancestor resolution streams.
-            let mut ancestors = self.diff_cursors();
+            let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
             for key in mutations.keys() {
                 match ancestors.resolve(key) {
                     Some(DiffEntry::Deleted { .. }) => {
@@ -690,12 +682,6 @@ where
         locations
     }
 
-    /// Build a [`DiffCursors`] over the ancestor diffs (closest-first) for streaming
-    /// resolution of an ascending key sequence.
-    fn diff_cursors(&self) -> DiffCursors<'_, U::Key, F, U::Value> {
-        DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()))
-    }
-
     /// Extract keys that were deleted by a parent batch but are being
     /// re-created by this child batch. Removes those keys from `mutations`
     /// and returns `(key, value, base_old_loc)` entries.
@@ -707,8 +693,7 @@ where
         if self.ancestors.is_empty() {
             return Vec::new();
         }
-        // `retain` visits keys in ascending order, so ancestor resolution streams.
-        let mut ancestors = self.diff_cursors();
+        let mut ancestors = DiffCursors::new(self.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut creates = Vec::new();
         mutations.retain(|key, value| {
             if let Some(DiffEntry::Deleted { base_old_loc }) = ancestors.resolve(key) {
@@ -1018,7 +1003,11 @@ where
         }
 
         if !db_keys.is_empty() {
-            let db_results = db.get_many_with_locations(&db_keys).await?;
+            let db_results = db
+                .get_many_map(&db_keys, |data, loc| {
+                    (data.value().clone(), loc, data.cached())
+                })
+                .await?;
             let mut resolved = self.resolved.lock();
             resolved.reserve(db_keys.len());
             for (slot, result) in db_indices.into_iter().zip(db_results) {
@@ -1257,8 +1246,9 @@ where
     /// Consumes the payloads cached by this batch's reads: keys loaded via `get`/`get_many`
     /// before being updated skip the index probe and journal re-read their resolution would
     /// otherwise require (the cached old value and next key feed op generation directly).
-    /// Deletes never consume the cache: a deleted key's own-bucket scan doubles as same-bucket
-    /// predecessor discovery.
+    /// Deletes never consume the cache. Deleting a key requires rewriting its predecessor,
+    /// which may be a colliding key in the deleted key's snapshot bucket, so that bucket
+    /// must be scanned regardless and the cached location saves nothing.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
         name = "qmdb::any::batch::merkleize",
@@ -1307,8 +1297,9 @@ where
 
         // Pull update mutations whose committed op this batch's reads already resolved: they
         // skip the index probe and journal re-read, and their old op's next key feeds the
-        // candidate sets directly. Deletes never consume the cache because a deleted key's
-        // own-bucket scan doubles as same-bucket predecessor discovery.
+        // candidate sets directly. Deletes never consume the cache: a deleted key's
+        // predecessor may be a colliding key in its snapshot bucket, so that bucket must be
+        // scanned regardless.
         //
         // The join drains `mutations` (sorted streaming) and probes `resolved` per key: a
         // hash probe is much cheaper than the tree descent the inverse join would pay, and
@@ -1549,11 +1540,9 @@ where
             Vec::with_capacity(deleted.len() + updated.len() + created.len());
         let mut active_keys_delta: isize = 0;
         let mut user_steps: u64 = 0;
-        // Each emit loop below iterates a key-sorted vec, so ancestor resolution and
-        // next-key selection advance cursors in a sorted merge (one `DiffCursors` /
-        // `find_next_key_ascending` index per loop) instead of binary-searching per key.
+
         // Process deletes.
-        let mut ancestors = m.diff_cursors();
+        let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         for (key, old_loc) in &deleted {
             ops.push(Operation::Delete(key.clone()));
 
@@ -1567,7 +1556,7 @@ where
         }
 
         // Process updates of existing keys.
-        let mut ancestors = m.diff_cursors();
+        let mut ancestors = DiffCursors::new(m.ancestors.iter().map(|a| a.diff.as_slice()));
         let mut next_idx = 0;
         for (key, value, old_loc) in &updated {
             let new_loc = Location::new(m.base_size + ops.len() as u64);
@@ -2186,6 +2175,8 @@ mod tests {
     use commonware_cryptography::{sha256, Sha256};
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::test_rng;
+    use rand::Rng;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
 
@@ -2207,9 +2198,6 @@ mod tests {
     /// diff and diffs with disjoint or overlapping key ranges.
     #[test]
     fn diff_cursors_matches_lookup_sorted() {
-        use commonware_utils::test_rng;
-        use rand::Rng;
-
         let mut rng = test_rng();
         for _ in 0..50 {
             // Build 1-4 sorted diffs over a small key universe so overlaps are common.
@@ -2253,6 +2241,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An out-of-order query that would return a wrong result must panic instead.
+    #[test]
+    #[should_panic(expected = "queries must be non-decreasing")]
+    fn diff_cursors_rejects_out_of_order_query() {
+        let diff: DiffVec<u64, mmr::Family, u64> = vec![1, 5]
+            .into_iter()
+            .map(|k| {
+                (
+                    k,
+                    DiffEntry::Active {
+                        value: k,
+                        loc: loc(k),
+                        base_old_loc: None,
+                    },
+                )
+            })
+            .collect();
+        let mut cursors = DiffCursors::new([diff.as_slice()]);
+        assert!(cursors.resolve(&5).is_some());
+        cursors.resolve(&1);
     }
 
     /// Single-step oracle for [`fill_candidates`]: return the next floor-raise candidate in
@@ -2802,36 +2812,6 @@ mod tests {
                     Operation::Update(update::Unordered(key_db, value_db)),
                 ]
             );
-
-            // read_op: single-location reads across all three sources.
-            let reader = db.log.reader().await;
-            let disk_op = merkleizer
-                .read_op(committed_loc, &batch_ops, &reader)
-                .await
-                .unwrap();
-            assert_eq!(
-                disk_op,
-                Operation::Update(update::Unordered(key_db, value_db))
-            );
-
-            let ancestor_op = merkleizer
-                .read_op(parent_loc, &batch_ops, &reader)
-                .await
-                .unwrap();
-            assert_eq!(
-                ancestor_op,
-                Operation::Update(update::Unordered(key_parent, value_parent))
-            );
-
-            let current_op = merkleizer
-                .read_op(current_loc, &batch_ops, &reader)
-                .await
-                .unwrap();
-            assert_eq!(
-                current_op,
-                Operation::Update(update::Unordered(key_current, value_current))
-            );
-            drop(reader);
 
             db.destroy().await.unwrap();
         });
