@@ -16,7 +16,7 @@ use commonware_storage::{
         verify_proof, Error,
     },
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
 
@@ -175,6 +175,7 @@ impl<'a> Arbitrary<'a> for Operation {
 #[derive(Debug)]
 struct FuzzInput {
     ops: Vec<Operation>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -183,7 +184,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let ops = (0..num_ops)
             .map(|_| Operation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { ops })
+        let raw_bytes = u.bytes(u.len())?.to_vec();
+        Ok(FuzzInput { ops, raw_bytes })
     }
 }
 
@@ -219,7 +221,9 @@ fn test_config<S: Strategy>(
 }
 
 fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy: S) {
-    let runner = deterministic::Runner::default();
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
         let hasher = merkle::hasher::Standard::<Sha256>::new(BackwardFold);

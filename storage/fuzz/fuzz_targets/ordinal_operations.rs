@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_storage::ordinal::{Config, Ordinal};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
@@ -67,11 +67,13 @@ impl<'a> Arbitrary<'a> for OrdinalOperation {
 struct FuzzInput {
     items_per_blob: u16,
     operations: Vec<OrdinalOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 fn fuzz(input: FuzzInput) {
     // Initialize the runtime
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let runner = deterministic::Runner::new(cfg);
     runner.start(|context| async move {
         // Initialize the ordinal
         let items_per_blob = NZU64!(input.items_per_blob.clamp(1, u16::MAX) as u64);

@@ -10,7 +10,7 @@ use commonware_storage::journal::{
     },
     Error,
 };
-use commonware_utils::{NZUsize, NZU16, NZU64};
+use commonware_utils::{FuzzRng, NZUsize, NZU16, NZU64};
 use futures::{pin_mut, StreamExt};
 use libfuzzer_sys::fuzz_target;
 use std::num::NonZeroU16;
@@ -103,6 +103,7 @@ enum JournalOperation {
 #[derive(Debug)]
 struct FuzzInput {
     ops: Vec<JournalOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -111,7 +112,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let ops = (0..num_ops)
             .map(|_| JournalOperation::arbitrary(u))
             .collect::<std::result::Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { ops })
+        let raw_bytes = u.bytes(u.len())?.to_vec();
+        Ok(FuzzInput { ops, raw_bytes })
     }
 }
 
@@ -119,7 +121,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(57);
 const PAGE_CACHE_SIZE: usize = 1;
 
 fn fuzz(input: FuzzInput) {
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
         let cfg = JournalConfig {

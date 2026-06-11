@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{buffer::paged::CacheRef, deterministic, Runner, Supervisor as _};
 use commonware_storage::freezer::{Config, Freezer, Identifier};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::HashMap,
@@ -24,6 +24,7 @@ const MAX_OPERATIONS: usize = 64;
 #[derive(Debug)]
 struct FuzzInput {
     ops: Vec<Op>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -32,7 +33,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let ops = (0..num_ops)
             .map(|_| Op::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { ops })
+        let raw_bytes = u.bytes(u.len())?.to_vec();
+        Ok(FuzzInput { ops, raw_bytes })
     }
 }
 
@@ -47,7 +49,8 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(393);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(100);
 
 fn fuzz(input: FuzzInput) {
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes)));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
         let cfg = Config {

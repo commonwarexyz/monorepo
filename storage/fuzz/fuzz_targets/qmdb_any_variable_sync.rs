@@ -18,7 +18,7 @@ use commonware_storage::{
     },
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::BTreeMap,
@@ -124,6 +124,7 @@ impl<'a> Arbitrary<'a> for Operation {
 #[derive(Debug)]
 struct FuzzInput {
     ops: Vec<Operation>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -132,7 +133,8 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let ops = (0..num_ops)
             .map(|_| Operation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { ops })
+        let raw_bytes = u.bytes(u.len())?.to_vec();
+        Ok(FuzzInput { ops, raw_bytes })
     }
 }
 
@@ -166,7 +168,9 @@ fn test_config(
 }
 
 fn fuzz_family<F: MerkleFamily>(input: &FuzzInput, test_name: &str) {
-    let runner = deterministic::Runner::default();
+    let cfg =
+        deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
+    let runner = deterministic::Runner::new(cfg);
 
     let test_name = test_name.to_string();
     runner.start(|context| async move {

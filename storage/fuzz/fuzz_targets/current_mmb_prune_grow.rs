@@ -21,7 +21,7 @@ use commonware_storage::{
     qmdb::current::{unordered::fixed::Db as CurrentDb, BitmapPrunedBits, FixedConfig as Config},
     translator::TwoCap,
 };
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
+use commonware_utils::{sequence::FixedBytes, FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::{
     collections::{HashMap, HashSet},
@@ -79,6 +79,7 @@ const BOOTSTRAP_COMMITS: u16 = 320;
 #[derive(Debug, Clone)]
 struct FuzzInput {
     operations: Vec<CurrentOperation>,
+    raw_bytes: Vec<u8>,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -87,7 +88,11 @@ impl<'a> Arbitrary<'a> for FuzzInput {
         let operations = (0..num_ops)
             .map(|_| CurrentOperation::arbitrary(u))
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(FuzzInput { operations })
+        let raw_bytes = u.bytes(u.len())?.to_vec();
+        Ok(FuzzInput {
+            operations,
+            raw_bytes,
+        })
     }
 }
 
@@ -362,7 +367,8 @@ async fn drive_post_prune_window(
 }
 
 fn fuzz(data: FuzzInput) {
-    let runner = deterministic::Runner::default();
+    let cfg = deterministic::Config::new().with_rng(Box::new(FuzzRng::new(data.raw_bytes)));
+    let runner = deterministic::Runner::new(cfg);
 
     runner.start(|context| async move {
         let pruned_context = context.child("pruned");
