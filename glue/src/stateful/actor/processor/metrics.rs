@@ -1,7 +1,7 @@
-//! Metrics for the stateful actor.
+//! Metrics for the [`Processor`](super::Processor).
 
 use commonware_runtime::{
-    telemetry::metrics::{histogram::Timed, GaugeExt, Registered},
+    telemetry::metrics::{histogram::Timed, Registered},
     Metrics as MetricsTrait,
 };
 use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Histogram};
@@ -13,15 +13,12 @@ use prometheus_client::metrics::{counter::Counter, gauge::Gauge, histogram::Hist
 /// [`Buckets::LOCAL`]: commonware_runtime::telemetry::metrics::histogram::Buckets::LOCAL
 const BUCKETS: [f64; 10] = [0.001, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0];
 
-/// Metrics for the stateful actor.
+/// Metrics for the stateful processor.
 ///
 /// All duration histograms use [`Timed`] wrappers for automatic recording via
 /// [`Timer`](commonware_runtime::telemetry::metrics::histogram::Timer).
 #[derive(Clone)]
 pub(crate) struct Metrics {
-    /// Whether startup state sync is complete.
-    pub sync_done: Registered<Gauge>,
-
     /// Current number of entries in the in-memory pending map.
     pub pending_blocks: Registered<Gauge>,
 
@@ -45,17 +42,11 @@ pub(crate) struct Metrics {
 }
 
 impl Metrics {
-    /// Create and register all stateful metrics.
+    /// Create and register all processor metrics.
     ///
-    /// The provided `context` determines the metric label hierarchy.
-    pub fn new<E: MetricsTrait>(context: &E) -> Self {
-        let sync_done = context.register(
-            "sync_done",
-            "Whether startup state sync is complete",
-            Gauge::default(),
-        );
-        let _ = sync_done.try_set(0);
-
+    /// The provided `context` is cloned internally to avoid further nesting the
+    /// label hierarchy.
+    pub fn new<E: MetricsTrait>(context: E) -> Self {
         let pending_blocks = context.register(
             "pending_blocks",
             "Current entries in the in-memory pending map",
@@ -99,7 +90,6 @@ impl Metrics {
         );
 
         Self {
-            sync_done,
             pending_blocks,
             pruned_forks,
             propose_duration: Timed::new(propose_hist),

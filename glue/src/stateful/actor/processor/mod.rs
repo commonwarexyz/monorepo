@@ -23,7 +23,6 @@
 //! [`await_or_cancel`].
 
 use crate::stateful::{
-    actor::metrics::Metrics as StatefulMetrics,
     db::{Anchor, DatabaseSet},
     Application, Proposed, PruneConfig,
 };
@@ -48,6 +47,9 @@ use std::{
     num::NonZeroUsize,
 };
 use tracing::{debug, info_span, warn};
+
+mod metrics;
+pub(crate) use metrics::Metrics as ProcessorMetrics;
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
@@ -197,7 +199,7 @@ where
     databases: A::Databases,
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
-    metrics: StatefulMetrics,
+    metrics: ProcessorMetrics,
     pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 }
 
@@ -212,7 +214,7 @@ where
         app: A,
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
-        metrics: StatefulMetrics,
+        metrics: ProcessorMetrics,
         prune_config: Option<PruneConfig>,
     ) -> Self {
         Self {
@@ -904,7 +906,7 @@ mod tests {
         Pruning,
     };
     use crate::stateful::{
-        actor::metrics::Metrics as StatefulMetrics,
+        actor::processor::ProcessorMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
         Application, Proposed, PruneConfig,
     };
@@ -1333,7 +1335,7 @@ mod tests {
                 deterministic::Context,
             >>::init(context.child("db_set"), config.clone())
             .await;
-            let metrics = StatefulMetrics::new(&context);
+            let metrics = ProcessorMetrics::new(context.child("processor_metrics"));
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
@@ -1704,7 +1706,7 @@ mod tests {
                     round: Block::genesis().context().round,
                     digest: Block::genesis().digest(),
                 },
-                StatefulMetrics::new(harness.context_cell.as_present()),
+                ProcessorMetrics::new(harness.context_cell.child("staged_processor_metrics")),
                 Some(PruneConfig {
                     max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(1),

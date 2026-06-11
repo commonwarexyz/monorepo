@@ -7,8 +7,7 @@
 use crate::stateful::{
     actor::{
         core::{mailbox::Message, processing::Processing, syncing::Syncing},
-        metrics::Metrics as StatefulMetrics,
-        processor::Processor,
+        processor::{Processor, ProcessorMetrics},
         syncer::{self, SyncPlan, SyncResult},
     },
     db::{AttachableResolverSet, DatabaseSet, StateSyncSet, SyncEngineConfig},
@@ -23,9 +22,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{
-    spawn_cell, telemetry::metrics::GaugeExt, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
-};
+use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner, Storage};
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
 use rand::Rng;
@@ -217,7 +214,6 @@ where
     /// Starts the application in [`Syncing`] mode, kicking off a state sync process
     /// towards the finalized floor specified in the [`SyncPlan`].
     async fn start_state_sync(self, floor: Finalization<S, V::Commitment>) {
-        let metrics = StatefulMetrics::new(self.context.as_present());
         let sync_metadata = Arc::new(AsyncMutex::new(self.plan.into_sync_metadata()));
         let (sync_complete, sync_completed) = oneshot::channel();
         let (syncer, syncer_mailbox) = syncer::Syncer::new(syncer::Config {
@@ -244,7 +240,6 @@ where
             resolvers: self.resolvers,
             sync_completed,
             prune_config: self.prune_config,
-            metrics,
         };
         let _ = join!(syncer.start(), syncing.start());
     }
@@ -266,15 +261,12 @@ where
         // so that this instance can serve peers database operations and proofs.
         self.resolvers.attach_databases(databases.clone()).await;
 
-        keep_resolvers_alive(self.context.as_present(), self.resolvers);
-
-        let metrics = StatefulMetrics::new(self.context.as_present());
-        let _ = metrics.sync_done.try_set(1);
+        let processor_metrics = ProcessorMetrics::new(self.context.child("processor"));
         let processor = Processor::new(
             self.application,
             databases,
             anchor,
-            metrics,
+            processor_metrics,
             self.prune_config,
         );
         Processing {
@@ -282,25 +274,13 @@ where
             mailbox: self.mailbox,
             input_provider: self.input_provider,
             marshal: self.marshal,
+            resolvers: self.resolvers,
             processor,
             skip_finalized_until,
         }
         .start()
         .await
     }
-}
-
-fn keep_resolvers_alive<E, R>(context: &E, resolvers: R)
-where
-    E: Spawner,
-    R: Send + 'static,
-{
-    context
-        .child("resolver_keepalive")
-        .spawn(|context| async move {
-            let _ = context.stopped().await;
-            drop(resolvers);
-        });
 }
 
 #[cfg(test)]

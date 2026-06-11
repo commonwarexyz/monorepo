@@ -33,7 +33,7 @@ enum Step<M, P> {
     Prune(P),
 }
 
-pub(super) struct Processing<E, A, S, V>
+pub(super) struct Processing<E, A, S, V, R>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
@@ -52,6 +52,13 @@ where
     /// Marshal mailbox used for lazy block lookup.
     pub(super) marshal: MarshalMailbox<S, V>,
 
+    /// State sync resolvers stay alive here so peers can keep syncing from us.
+    #[expect(
+        dead_code,
+        reason = "processing keeps resolver handles alive for peer state sync"
+    )]
+    pub(super) resolvers: R,
+
     /// The processing state of the actor.
     pub(super) processor: Processor<E, A>,
 
@@ -60,7 +67,7 @@ where
     pub(super) skip_finalized_until: Option<Height>,
 }
 
-impl<E, A, S, V> Processing<E, A, S, V>
+impl<E, A, S, V, R> Processing<E, A, S, V, R>
 where
     E: Rng + Spawner + Metrics + Clock,
     A: Application<E>,
