@@ -175,7 +175,11 @@ where
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
-    #[tracing::instrument(name = "qmdb.keyless_compact.batch.merkleize", level = "info", skip_all)]
+    #[tracing::instrument(
+        name = "qmdb.keyless_compact.batch.merkleize",
+        level = "info",
+        skip_all
+    )]
     pub fn merkleize<E, C>(
         self,
         db: &Db<F, E, V, H, C, S>,

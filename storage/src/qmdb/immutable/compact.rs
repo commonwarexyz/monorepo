@@ -185,7 +185,11 @@ where
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
-    #[tracing::instrument(name = "qmdb.immutable_compact.batch.merkleize", level = "info", skip_all)]
+    #[tracing::instrument(
+        name = "qmdb.immutable_compact.batch.merkleize",
+        level = "info",
+        skip_all
+    )]
     pub fn merkleize<E, C>(
         self,
         db: &Db<F, E, K, V, H, C, S>,
@@ -491,7 +495,11 @@ where
     ///   (walking ancestors oldest-first, then the tip).
     /// - [`Error::FloorBeyondSize`] if any unapplied commit's floor exceeds its own commit
     ///   location.
-    #[tracing::instrument(name = "qmdb.immutable_compact.db.apply_batch", level = "info", skip_all)]
+    #[tracing::instrument(
+        name = "qmdb.immutable_compact.db.apply_batch",
+        level = "info",
+        skip_all
+    )]
     pub fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,

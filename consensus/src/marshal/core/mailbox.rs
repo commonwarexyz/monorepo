@@ -767,7 +767,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// This is useful when a local-only waiter already exists and later
     /// certification makes a network fetch by notarized round valid.
     pub fn hint_notarized(&self, round: Round, commitment: V::Commitment) {
-        let span = info_span!("marshal.mailbox.hint_notarized", round = %round, commitment = %commitment);
+        let span =
+            info_span!("marshal.mailbox.hint_notarized", round = %round, commitment = %commitment);
         let _ = self.sender.enqueue(Message::HintNotarized {
             span,
             round,
@@ -907,11 +908,13 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
             Activity::Notarization(notarization) => {
-                let span = info_span!("marshal.mailbox.notarization", round = %notarization.round());
+                let span =
+                    info_span!("marshal.mailbox.notarization", round = %notarization.round());
                 Message::Notarization { span, notarization }
             }
             Activity::Finalization(finalization) => {
-                let span = info_span!("marshal.mailbox.finalization", round = %finalization.round());
+                let span =
+                    info_span!("marshal.mailbox.finalization", round = %finalization.round());
                 Message::Finalization { span, finalization }
             }
             _ => return Feedback::Ok,
