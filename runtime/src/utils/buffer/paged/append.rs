@@ -24,8 +24,26 @@
 //! Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while an
 //! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
 //! recovery, and are not covered by [Append]'s [`Blob::write_at_sync`] fast paths.
+//!
+//! # Typed Synchronous Decoding
+//!
+//! The `try_decode_*` methods decode codec types directly from cached page bytes (or tip-buffer
+//! bytes) without performing I/O and without copying bytes into an intermediate buffer: only the
+//! decoded value itself is materialized. Bytes served from the page cache are gathered as
+//! refcounted page slices and decoded after the cache lock is released; bytes served from the
+//! tip buffer are decoded under the tip read guard, so `commonware_codec::Read` implementations
+//! used with these methods must still be cheap and parse-only. A `None` result always means
+//! "retry via an async read"; a `Some(Err(_))` result means the bytes were fully available and
+//! are malformed.
+//!
+//! Decoders used with the prefix variant must additionally be driven solely by the bytes they
+//! consume (fixed-size or length-prefixed encodings); see
+//! [Append::try_decode_prefix_sync].
 
-use super::read::{PageReader, Replay};
+use super::{
+    cache::CachedDecode,
+    read::{PageReader, Replay},
+};
 use crate::{
     buffer::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
@@ -34,6 +52,7 @@ use crate::{
     Blob, Error, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
+use commonware_codec::Read as CodecRead;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -554,27 +573,159 @@ impl<B: Blob> Append<B> {
         true
     }
 
-    /// Pass the contiguous bytes starting at `offset` to `f` if they can be obtained
-    /// synchronously (e.g. without I/O), returning `None` otherwise.
+    /// Decode a `T` from the bytes starting at `offset`, letting the decoder consume up to
+    /// `max_len` bytes, without performing I/O. Returns the decoded value and the number of bytes
+    /// consumed.
     ///
-    /// The slice never crosses a page boundary (page cache) or the end of buffered data (tip
-    /// buffer), so it may be shorter than the caller needs; fall back to a copying read like
-    /// [Self::try_read_sync] for more. Cached pages are retained by refcount, so `f` runs
-    /// without holding the cache lock.
-    pub fn try_read_sync_with<R>(&self, offset: u64, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
-        // Fast path: clone the page containing `offset` out of the page cache.
-        let (page_num, offset_in_page) = self.cache_ref.offset_to_page(offset);
-        if let Some(page) = self.cache_ref.cached_page(self.id, page_num) {
-            return Some(f(&page.as_ref()[offset_in_page as usize..]));
+    /// Returns `None` when the required bytes are not synchronously available (page-cache miss,
+    /// tip-lock contention, or the range straddles the flushed/tip boundary); the caller must
+    /// fall back to an async read. Returns `Some(Err(_))` only when the bytes were fully
+    /// available and are malformed.
+    ///
+    /// `T`'s decoding must be driven solely by the bytes it consumes (fixed-size or
+    /// length-prefixed encodings). The decoder is handed the resident prefix of the requested
+    /// range, which may be shorter than `max_len` (it can stop at a page boundary, a
+    /// non-resident page, or an internal gathering cap), and a success over that prefix is
+    /// returned as authoritative. A decoder whose result depends on `remaining()` (one that
+    /// greedily consumes everything available, like `commonware_codec::types::Lazy`) would
+    /// observe an arbitrary residency-dependent window and silently diverge from the async
+    /// read; use [Self::try_decode_sync] for such types instead, which only succeeds when the
+    /// decoder sees exactly `len` bytes.
+    pub fn try_decode_prefix_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        max_len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<(T, usize), commonware_codec::Error>> {
+        // The page cache is consulted first to minimize the risk of writer starvation from a
+        // burst of buffer reads (which jump ahead of queued writers on the buffer lock).
+        match self
+            .cache_ref
+            .decode_cached_prefix::<T>(self.id, offset, max_len, cfg)
+        {
+            CachedDecode::Decoded(value, consumed) => return Some(Ok((value, consumed))),
+            CachedDecode::Invalid(err) => return Some(Err(err)),
+            CachedDecode::Missing => {}
         }
 
-        // Tip path: serve from buffered bytes if the buffer lock is free.
-        let buffer = self.buffer.try_read().ok()?;
+        let Ok(buffer) = self.buffer.try_read() else {
+            return None;
+        };
+        // A range starting below the tip cannot be served here because the cache attempt
+        // already failed, and a range starting at or beyond the logical size is left for the
+        // async path to report.
         if offset < buffer.offset || offset >= buffer.size() {
             return None;
         }
         let start = (offset - buffer.offset) as usize;
-        Some(f(&buffer.as_ref()[start..]))
+        let tip = buffer.as_ref();
+        let end = tip.len().min(start.saturating_add(max_len));
+        let total = end - start;
+        let mut buf = &tip[start..end];
+        // At the tip, a decode failure is indistinguishable from racing an in-flight append;
+        // let the async path (which validates sizes under proper locks) produce the
+        // authoritative result.
+        T::read_cfg(&mut buf, cfg)
+            .ok()
+            .map(|value| Ok((value, total - buf.len())))
+    }
+
+    /// Like [Self::try_decode_prefix_sync] but requires the encoding to occupy exactly `len`
+    /// bytes; under-consumption is reported as an error, matching the
+    /// `commonware_codec::Decode::decode_cfg` semantics.
+    pub fn try_decode_sync<T: CodecRead>(
+        &self,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<T, commonware_codec::Error>> {
+        match self
+            .cache_ref
+            .decode_cached_exact::<T>(self.id, offset, len, cfg)
+        {
+            CachedDecode::Decoded(value, _) => return Some(Ok(value)),
+            CachedDecode::Invalid(err) => return Some(Err(err)),
+            CachedDecode::Missing => {}
+        }
+        let Ok(buffer) = self.buffer.try_read() else {
+            return None;
+        };
+        Self::decode_tip_exact(&buffer, offset, len, cfg)
+    }
+
+    /// Decode multiple items of exactly `len` bytes each at sorted, non-overlapping offsets
+    /// without performing I/O. For each offset, pushes `Some(item)` on success or `None` when
+    /// the item's bytes are not synchronously available. Returns an error only when resident
+    /// bytes are malformed (corruption); in that case `out` may contain fewer than
+    /// `offsets.len()` new entries and must be discarded.
+    ///
+    /// Amortizes lock acquisition: the page-cache read lock is taken once per internal chunk of
+    /// offsets rather than once per item, and the tip lock is taken at most once.
+    pub fn try_decode_sync_many<T: CodecRead>(
+        &self,
+        offsets: &[u64],
+        len: usize,
+        cfg: &T::Cfg,
+        out: &mut Vec<Option<T>>,
+    ) -> Result<(), commonware_codec::Error> {
+        assert!(
+            offsets
+                .windows(2)
+                .all(|w| w[0].checked_add(len as u64).is_some_and(|end| end <= w[1])),
+            "offsets must be sorted and non-overlapping"
+        );
+        let base = out.len();
+        self.cache_ref
+            .decode_cached_exact_many::<T>(self.id, offsets, len, cfg, out)?;
+        if !out[base..].iter().any(Option::is_none) {
+            return Ok(());
+        }
+
+        // Resolve any misses that lie entirely within the tip buffer. If the tip lock is
+        // contended, leave them as misses for the caller's async fallback.
+        let Ok(buffer) = self.buffer.try_read() else {
+            return Ok(());
+        };
+        for (slot, &offset) in out[base..].iter_mut().zip(offsets) {
+            if slot.is_some() {
+                continue;
+            }
+            match Self::decode_tip_exact::<T>(&buffer, offset, len, cfg) {
+                Some(Ok(value)) => *slot = Some(value),
+                // The tip result is authoritative (all `len` bytes were stably available),
+                // matching the single-item path.
+                Some(Err(err)) => return Err(err),
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Decode a `T` occupying exactly `len` bytes of the tip buffer, returning `None` when
+    /// `[offset, offset + len)` is not fully buffered.
+    ///
+    /// Both error outcomes are authoritative: all `len` bytes were validated to be below the
+    /// logical size under the buffer read guard, and committed bytes are immutable under the
+    /// append-only contract, so the async path would decode the same bytes to the same result.
+    fn decode_tip_exact<T: CodecRead>(
+        buffer: &Buffer,
+        offset: u64,
+        len: usize,
+        cfg: &T::Cfg,
+    ) -> Option<Result<T, commonware_codec::Error>> {
+        let end = offset.checked_add(len as u64)?;
+        if offset < buffer.offset || end > buffer.size() {
+            return None;
+        }
+        let start = (offset - buffer.offset) as usize;
+        let mut buf = &buffer.as_ref()[start..start + len];
+        match T::read_cfg(&mut buf, cfg) {
+            // Under-consumption means the encoding does not occupy exactly `len` bytes.
+            // Report the same error as `Decode::decode_cfg`.
+            Ok(value) if buf.is_empty() => Some(Ok(value)),
+            Ok(_) => Some(Err(commonware_codec::Error::ExtraData(buf.len()))),
+            Err(err) => Some(Err(err)),
+        }
     }
 
     /// Read exactly `len` immutable bytes starting at `offset`.
@@ -640,8 +791,10 @@ impl<B: Blob> Append<B> {
             "read_many_into requires buf.len() == offsets.len() * item_size"
         );
         assert!(
-            offsets.windows(2).all(|w| w[0] < w[1]),
-            "offsets must be strictly increasing"
+            offsets.windows(2).all(|w| w[0]
+                .checked_add(item_size as u64)
+                .is_some_and(|end| end <= w[1])),
+            "offsets must be sorted and non-overlapping"
         );
         if offsets.is_empty() {
             return Ok(0);
@@ -1106,7 +1259,10 @@ impl<B: Blob> Append<B> {
     /// # Warning
     ///
     /// - Concurrent mutable operations (append, resize) are not supported and will cause data loss.
-    /// - Concurrent readers which try to read past the new size during the resize may error.
+    /// - Concurrent readers which try to read past the new size during the resize may error, and
+    ///   the synchronous decode paths (which consult the page cache without taking the buffer or
+    ///   blob locks) may observe pre-resize bytes until the resize completes. Callers must
+    ///   serialize resizes against reads for results to be linearizable.
     /// - The resize is not guaranteed durable until the next sync.
     pub async fn resize(&self, size: u64) -> Result<(), Error> {
         let current_size = self.size().await;
@@ -1252,7 +1408,8 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, IoBufsMut, Runner as _, Storage as _,
+        BufferPool, BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
@@ -1335,6 +1492,308 @@ mod tests {
             let mut buf = vec![0u8; data.len()];
             assert!(append.try_read_sync(0, &mut buf));
             assert_eq!(buf, data);
+        });
+    }
+
+    /// The blob type produced by the deterministic runtime's storage.
+    type TestBlob = <deterministic::Context as crate::Storage>::Blob;
+
+    /// Open an [Append] over a fresh blob and fill it with `len` patterned bytes
+    /// (byte `i` is `i as u8`), without syncing.
+    async fn patterned_append(
+        context: &deterministic::Context,
+        name: &[u8],
+        len: usize,
+    ) -> Append<TestBlob> {
+        let (blob, blob_size) = context.open("test_partition", name).await.unwrap();
+        let cache_ref = CacheRef::from_pooler(context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+        let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            .await
+            .unwrap();
+        let data: Vec<u8> = (0..len).map(|i| i as u8).collect();
+        append.append(&data).await.unwrap();
+        append
+    }
+
+    /// The `u64` stored at `offset` in the patterned byte stream.
+    fn patterned_u64(offset: usize) -> u64 {
+        let bytes: Vec<u8> = (offset..offset + 8).map(|i| i as u8).collect();
+        u64::from_be_bytes(bytes.try_into().unwrap())
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_tip_only() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            // No sync: all bytes live in the tip buffer.
+            let append = patterned_append(&context, b"decode_tip", 20).await;
+
+            let offset = 4u64;
+            let decoded: u64 = append
+                .try_decode_sync(offset, 8, &())
+                .expect("tip bytes should be available")
+                .unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+
+            // A decode extending past the logical size must defer to the async path.
+            assert!(append.try_decode_sync::<u64>(16, 8, &()).is_none());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_from_cache() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            // Sync flushes three full pages (which are cached) and leaves a partial tip.
+            let len = 3 * PAGE_SIZE.get() as usize + 10;
+            let append = patterned_append(&context, b"decode_cache", len).await;
+            append.sync().await.unwrap();
+
+            // Fully inside a flushed page.
+            let offset = 16u64;
+            let decoded: u64 = append.try_decode_sync(offset, 8, &()).unwrap().unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+
+            // Spanning a page boundary in cache.
+            let offset = PAGE_SIZE.get() as u64 - 4;
+            let decoded: u64 = append.try_decode_sync(offset, 8, &()).unwrap().unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_straddles_flushed_tip_boundary() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let len = 3 * page_size + 10;
+            let append = patterned_append(&context, b"decode_straddle", len).await;
+            append.sync().await.unwrap();
+
+            // The item starts in the last flushed page and ends in the tip. The page
+            // overlapping the tip is never resident, so the sync attempt must fall back.
+            let offset = 3 * page_size as u64 - 4;
+            assert!(append.try_decode_sync::<u64>(offset, 8, &()).is_none());
+
+            // The async fallback returns the correct value.
+            let mut buf = [0u8; 8];
+            append.read_into(&mut buf, offset).await.unwrap();
+            let decoded = <u64 as ReadExt>::read(&mut &buf[..]).unwrap();
+            assert_eq!(decoded, patterned_u64(offset as usize));
+        });
+    }
+
+    /// A varint length prefix followed by exactly that many payload bytes, rehearsing the
+    /// variable journal's fused header-plus-item decode.
+    struct VarPrefixed(Vec<u8>);
+
+    impl CodecRead for VarPrefixed {
+        type Cfg = ();
+
+        fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+            let len = commonware_codec::varint::UInt::<u32>::read(buf)?.0 as usize;
+            commonware_codec::util::at_least(buf, len)?;
+            let mut data = vec![0u8; len];
+            buf.copy_to_slice(&mut data);
+            Ok(Self(data))
+        }
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_prefix_sync_varint() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let (blob, blob_size) = context.open("test_partition", b"decode_var").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Item A sits inside page 0; item B's header lands in page 0 and its payload
+            // extends across the page 0/1 boundary.
+            let payload_a = vec![0xAB; 20];
+            let payload_b = vec![0xCD; page_size];
+            let header_a = commonware_codec::Encode::encode(&commonware_codec::varint::UInt(
+                payload_a.len() as u32,
+            ));
+            let header_b = commonware_codec::Encode::encode(&commonware_codec::varint::UInt(
+                payload_b.len() as u32,
+            ));
+            append.append(&header_a).await.unwrap();
+            append.append(&payload_a).await.unwrap();
+            let offset_b = append.size().await;
+            assert!(offset_b < page_size as u64);
+            append.append(&header_b).await.unwrap();
+            append.append(&payload_b).await.unwrap();
+            // Pad so every touched page is full (and therefore cached) after sync.
+            let size = append.size().await;
+            let pad = page_size as u64 - (size % page_size as u64);
+            append.append(&vec![0u8; pad as usize]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // Item fully within one page.
+            let (item, consumed) = append
+                .try_decode_prefix_sync::<VarPrefixed>(0, page_size, &())
+                .expect("item A should be resident")
+                .unwrap();
+            assert_eq!(item.0, payload_a);
+            assert_eq!(consumed, header_a.len() + payload_a.len());
+
+            // Item crossing a page boundary.
+            let (item, consumed) = append
+                .try_decode_prefix_sync::<VarPrefixed>(offset_b, 2 * page_size, &())
+                .expect("item B should be resident")
+                .unwrap();
+            assert_eq!(item.0, payload_b);
+            assert_eq!(consumed, header_b.len() + payload_b.len());
+
+            // Header resident but a payload page absent: evict page 1 onward and verify
+            // the decode defers to the async path.
+            append.cache_ref.invalidate_from(append.id, 1);
+            assert!(append
+                .try_decode_prefix_sync::<VarPrefixed>(offset_b, 2 * page_size, &())
+                .is_none());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_many_mixed() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let len = 3 * page_size + 16;
+            let append = patterned_append(&context, b"decode_many", len).await;
+            append.sync().await.unwrap();
+
+            // Evict page 1 (and nothing else) by invalidating from page 1 and re-reading
+            // page 2 to repopulate it.
+            append.cache_ref.invalidate_from(append.id, 1);
+            let mut buf = [0u8; 8];
+            append
+                .read_into(&mut buf, 2 * page_size as u64)
+                .await
+                .unwrap();
+
+            // Hits in page 0, page 2, and the tip; a miss in evicted page 1.
+            let offsets = [
+                8u64,
+                page_size as u64 + 8,
+                2 * page_size as u64 + 8,
+                3 * page_size as u64 + 4,
+            ];
+            let mut out = Vec::with_capacity(offsets.len());
+            append
+                .try_decode_sync_many::<u64>(&offsets, 8, &(), &mut out)
+                .unwrap();
+
+            assert_eq!(out.len(), offsets.len());
+            assert_eq!(out[0], Some(patterned_u64(offsets[0] as usize)));
+            assert_eq!(out[1], None, "evicted page should miss");
+            assert_eq!(out[2], Some(patterned_u64(offsets[2] as usize)));
+            assert_eq!(out[3], Some(patterned_u64(offsets[3] as usize)));
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_many_corruption() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let page_size = PAGE_SIZE.get() as usize;
+            let (blob, blob_size) = context
+                .open("test_partition", b"decode_corrupt")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // 0xFF is not a valid bool encoding. After sync, page 0 is resident, so the
+            // batch decode must surface corruption as an error.
+            append.append(&vec![0xFF; page_size]).await.unwrap();
+            append.sync().await.unwrap();
+
+            let mut out: Vec<Option<bool>> = Vec::new();
+            assert!(append
+                .try_decode_sync_many::<bool>(&[0, 1, 2], 1, &(), &mut out)
+                .is_err());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_try_decode_sync_concurrent_with_appends() {
+        let executor = deterministic::Runner::seeded(42);
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"decode_concurrent")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // Writer appends u64 items (item i has value i) and syncs periodically, pacing
+            // itself so reader probes interleave with in-flight appends and flushes.
+            let writer_append = append.clone();
+            let writer_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let writer_done_w = writer_done.clone();
+            let writer = context.child("writer").spawn(move |context| async move {
+                for i in 0u64..200 {
+                    writer_append.append(&i.to_be_bytes()).await.unwrap();
+                    if i % 32 == 0 {
+                        writer_append.sync().await.unwrap();
+                    }
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                }
+                writer_append.sync().await.unwrap();
+                writer_done_w.store(true, Ordering::SeqCst);
+            });
+
+            // Reader probes items behind the observed size; every hit must decode the
+            // value written for that offset.
+            let reader_append = append.clone();
+            let writer_done_r = writer_done.clone();
+            let reader = context.child("reader").spawn(move |context| async move {
+                let mut hits = 0u64;
+                let mut racy_hits = 0u64;
+                for round in 0u64..400 {
+                    if let Some(size) = reader_append.try_size() {
+                        let items = size / 8;
+                        if items > 0 {
+                            let item = round % items;
+                            let racy = !writer_done_r.load(Ordering::SeqCst);
+                            if let Some(result) =
+                                reader_append.try_decode_sync::<u64>(item * 8, 8, &())
+                            {
+                                assert_eq!(result.unwrap(), item);
+                                hits += 1;
+                                if racy {
+                                    racy_hits += 1;
+                                }
+                            }
+                        }
+                    }
+                    context.sleep(std::time::Duration::from_millis(1)).await;
+                }
+                (hits, racy_hits)
+            });
+
+            writer.await.unwrap();
+            let (hits, racy_hits) = reader.await.unwrap();
+            assert!(hits > 0, "reader should observe at least one sync hit");
+            assert!(
+                racy_hits > 0,
+                "reader should observe hits while the writer is still appending"
+            );
+
+            // After the writer finishes, every item is decodable through some path.
+            for i in 0u64..200 {
+                let mut buf = [0u8; 8];
+                append.read_into(&mut buf, i * 8).await.unwrap();
+                assert_eq!(u64::from_be_bytes(buf), i);
+            }
         });
     }
 

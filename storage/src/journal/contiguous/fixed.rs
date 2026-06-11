@@ -270,6 +270,12 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 /// This is implemented as a wrapper around [SegmentedJournal] that provides position-based access
 /// where positions are automatically mapped to (section, position_in_section) pairs.
 ///
+/// # Synchronous Reads
+///
+/// Batched read paths opportunistically decode items in place from the page cache while holding
+/// its read lock (single-item reads decode after the lock is released). `A`'s `Read`
+/// implementation must therefore be cheap and parse-only: no blocking and no expensive work.
+///
 /// # Repair
 ///
 /// Like
@@ -346,37 +352,90 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
 
         let items_per_blob = self.items_per_blob;
         let pruning_boundary = self.guard.pruning_boundary;
-        let chunk_size = SegmentedJournal::<E, A>::CHUNK_SIZE;
 
-        // Read all positions grouped by section. Each group goes through the segmented journal's
-        // batched read, which serves page-cache and tip-buffer hits under a single lock acquisition
-        // and reads only true misses from the blob (concurrently). This avoids one lock acquisition
-        // per item that a per-item synchronous probe would incur for the warm steady state.
-        let mut result: Vec<A> = Vec::with_capacity(positions.len());
-        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
-        let mut hits = 0u64;
-
+        // Phase 1: Drain page-cache hits synchronously, one batched decode per section
+        // group (positions are sorted, so groups are contiguous runs). The two staging
+        // buffers are reused across groups to avoid per-group allocation.
+        let mut result: Vec<Option<A>> = Vec::with_capacity(positions.len());
+        let mut section_positions: Vec<u64> = Vec::new();
+        let mut offset_scratch: Vec<u64> = Vec::new();
         let mut group_start = 0;
         while group_start < positions.len() {
             let section = positions[group_start] / items_per_blob;
-
             let mut group_end = group_start + 1;
             while group_end < positions.len() && positions[group_end] / items_per_blob == section {
                 group_end += 1;
             }
 
+            // An unusable section boundary marks the whole group as misses; the async
+            // phase below surfaces any real error.
+            match first_in_section(pruning_boundary, section, items_per_blob) {
+                Ok(first_position) => {
+                    section_positions.clear();
+                    section_positions.extend(
+                        positions[group_start..group_end]
+                            .iter()
+                            .map(|&pos| pos - first_position),
+                    );
+                    self.guard.journal.try_get_many_sync(
+                        section,
+                        &section_positions,
+                        &mut offset_scratch,
+                        &mut result,
+                    );
+                }
+                Err(_) => result.resize_with(result.len() + (group_end - group_start), || None),
+            }
+            group_start = group_end;
+        }
+
+        // Collect cache misses for the async phase. Items decoded in phase 1 count as
+        // hits, as does anything the batched fallback below serves without a blob read.
+        let mut miss_indices: Vec<usize> = Vec::new();
+        let mut miss_positions: Vec<u64> = Vec::new();
+        for (i, item) in result.iter().enumerate() {
+            if item.is_none() {
+                miss_indices.push(i);
+                miss_positions.push(positions[i]);
+            }
+        }
+        let mut hits = (positions.len() - miss_positions.len()) as u64;
+
+        if miss_positions.is_empty() {
+            self.metrics.record_cache_hits(hits);
+            self.metrics.items_read.inc_by(positions.len() as u64);
+            return Ok(result
+                .into_iter()
+                .map(|r| r.expect("all slots filled"))
+                .collect());
+        }
+
+        // Phase 2: Read cache misses grouped by section (sequential).
+        let mut disk_offset = 0;
+        let mut group_start = 0;
+        while group_start < miss_positions.len() {
+            let section = miss_positions[group_start] / items_per_blob;
+
+            let mut group_end = group_start + 1;
+            while group_end < miss_positions.len()
+                && miss_positions[group_end] / items_per_blob == section
+            {
+                group_end += 1;
+            }
+
             let group_len = group_end - group_start;
             let first_position = first_in_section(pruning_boundary, section, items_per_blob)?;
-            let section_positions: Vec<u64> = positions[group_start..group_end]
-                .iter()
-                .map(|&pos| pos - first_position)
-                .collect();
+            section_positions.clear();
+            section_positions.extend(
+                miss_positions[group_start..group_end]
+                    .iter()
+                    .map(|&pos| pos - first_position),
+            );
 
-            let buf = &mut reusable_buf[..group_len * chunk_size];
             let (items, group_hits) = self
                 .guard
                 .journal
-                .get_many(section, &section_positions, buf)
+                .get_many(section, &section_positions)
                 .await
                 .map_err(|e| match e {
                     Error::SectionOutOfRange(e)
@@ -388,7 +447,11 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
                 })?;
 
             hits += group_hits as u64;
-            result.extend(items);
+            for (item, &miss_idx) in items.into_iter().zip(&miss_indices[disk_offset..]) {
+                result[miss_idx] = Some(item);
+            }
+
+            disk_offset += group_len;
             group_start = group_end;
         }
 
@@ -396,7 +459,10 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         self.metrics
             .record_cache_misses(positions.len() as u64 - hits);
         self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result)
+        Ok(result
+            .into_iter()
+            .map(|r| r.expect("all slots filled"))
+            .collect())
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
@@ -4445,6 +4511,55 @@ mod tests {
                 assert_eq!(batch[i], reader.read(pos).await.unwrap());
             }
             drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_cold_and_hot_sections() {
+        // Two sections where the page cache only retains the second section's pages
+        // (capacity is too small for both), verifying read_many mixes synchronous cache
+        // hits with async fallbacks and records hit/miss metrics accordingly.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "rm-cold-hot".into(),
+                items_per_blob: NZU64!(4),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(2048),
+            };
+            let journal = Journal::init(context.child("rm_metrics"), cfg)
+                .await
+                .unwrap();
+
+            // Two full sections of 4 items each (128 bytes per section blob). Syncing
+            // flushes both blobs; with a 2-page cache, the second section's full pages
+            // evict the first section's, leaving section 0 cold and section 1 hot.
+            for i in 0..8u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // With PAGE_SIZE 44 and 32-byte items, each section has two full pages
+            // (items 0 and 1 within a section) plus a tip (item 3 and the straddling
+            // item 2). Expected per section: cold => only the tip item hits; hot =>
+            // everything but the straddling item hits. That is 4 hits and 4 misses.
+            let positions: Vec<u64> = (0..8).collect();
+            let reader = journal.reader().await;
+            let batch = reader.read_many(&positions).await.unwrap();
+            for &pos in &positions {
+                assert_eq!(batch[pos as usize], test_digest(pos));
+            }
+            drop(reader);
+
+            let buffer = context.encode();
+            for expected in [
+                "rm_metrics_cache_hits_total 4",
+                "rm_metrics_cache_misses_total 4",
+            ] {
+                assert!(buffer.contains(expected), "{expected}\n{buffer}");
+            }
 
             journal.destroy().await.unwrap();
         });

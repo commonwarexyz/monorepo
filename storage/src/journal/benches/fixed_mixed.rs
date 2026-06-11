@@ -49,6 +49,7 @@ fn bench_fixed_mixed(c: &mut Criterion) {
                         ctx.child("journal"),
                         PARTITION,
                         ITEMS_PER_BLOB,
+                        crate::PAGE_CACHE_SIZE,
                     )
                     .await;
                     append_fixed_random_data(&mut journal, INITIAL_ITEMS).await;
