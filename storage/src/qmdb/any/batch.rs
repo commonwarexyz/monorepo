@@ -537,7 +537,9 @@ where
             .or_else(|| reader.try_read_sync(*loc))
     }
 
-    /// Read a single operation by location.
+    /// Read a single operation by location (test oracle; production paths batch via
+    /// [`Self::read_ops`]).
+    #[cfg(test)]
     async fn read_op<R: Reader<Item = Operation<F, U>>>(
         &self,
         loc: Location<F>,
@@ -1405,6 +1407,11 @@ where
         //
         // Depth-1 chains skip the set entirely — a single ancestor can't shadow itself,
         // and each diff's keys are unique by construction.
+        //
+        // Each diff is key-sorted, as are `updated`/`created`/`deleted`, so the handled check
+        // advances three cursors in a sorted merge instead of three binary searches per key.
+        // Active entries are collected and read in one batch below instead of one awaited
+        // read per key.
         let track_shadow = m.ancestors.len() > 1;
         let seen_cap = if track_shadow {
             m.ancestors.iter().map(|a| a.diff.len()).sum()
@@ -1413,28 +1420,32 @@ where
         };
         let mut seen: AHashSet<&K> = AHashSet::with_capacity(seen_cap);
         let mut ancestor_deleted: Vec<K> = Vec::new();
+        let mut ancestor_active: Vec<(&K, &V::Value, Location<F>)> = Vec::new();
         for batch in m.ancestors.iter() {
+            let (mut ui, mut ci, mut di) = (0, 0, 0);
             for (key, entry) in batch.diff.iter() {
                 if track_shadow && !seen.insert(key) {
                     continue;
                 }
                 // Skip keys already handled by this batch's mutations.
-                if updated.binary_search_by(|(k, _, _)| k.cmp(key)).is_ok()
-                    || created.binary_search_by(|(k, _, _)| k.cmp(key)).is_ok()
-                    || deleted.binary_search_by(|(k, _)| k.cmp(key)).is_ok()
+                while ui < updated.len() && updated[ui].0 < *key {
+                    ui += 1;
+                }
+                while ci < created.len() && created[ci].0 < *key {
+                    ci += 1;
+                }
+                while di < deleted.len() && deleted[di].0 < *key {
+                    di += 1;
+                }
+                if updated.get(ui).is_some_and(|(k, ..)| k == key)
+                    || created.get(ci).is_some_and(|(k, ..)| k == key)
+                    || deleted.get(di).is_some_and(|(k, _)| k == key)
                 {
                     continue;
                 }
                 match entry {
                     DiffEntry::Active { value, loc, .. } => {
-                        let op = m.read_op(*loc, &[], &reader).await?;
-                        let data = match op {
-                            Operation::Update(data) => data,
-                            _ => unreachable!("ancestor diff Active should reference Update op"),
-                        };
-                        next_candidates.push(key.clone());
-                        next_candidates.push(data.next_key);
-                        prev_candidates.push((key.clone(), (value.clone(), *loc)));
+                        ancestor_active.push((key, value, *loc));
                     }
                     DiffEntry::Deleted { .. } => {
                         ancestor_deleted.push(key.clone());
@@ -1444,6 +1455,24 @@ where
         }
         ancestor_deleted.sort();
         ancestor_deleted.dedup();
+
+        // Batch-read the collected active entries' ops and emit their candidates.
+        let ancestor_locs: Vec<Location<F>> =
+            ancestor_active.iter().map(|&(_, _, loc)| loc).collect();
+        for (op, (key, value, loc)) in m
+            .read_ops(&ancestor_locs, &[], &reader)
+            .await?
+            .into_iter()
+            .zip(ancestor_active)
+        {
+            let data = match op {
+                Operation::Update(data) => data,
+                _ => unreachable!("ancestor diff Active should reference Update op"),
+            };
+            next_candidates.push(key.clone());
+            next_candidates.push(data.next_key);
+            prev_candidates.push((key.clone(), (value.clone(), loc)));
+        }
 
         // Sort + dedup candidate sets now so find_next_key/find_prev_key can binary-search.
         next_candidates.sort();
