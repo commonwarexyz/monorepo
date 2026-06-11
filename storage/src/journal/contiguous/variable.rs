@@ -277,7 +277,6 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
     }
 
     async fn read(&self, position: u64) -> Result<V, Error> {
-        let _timer = self.metrics.read_timer();
         self.metrics.read_calls.inc();
 
         // Serve from the page cache synchronously when possible, collapsing the offsets and data
@@ -290,6 +289,9 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<'_, E, V> {
             return Ok(item);
         }
 
+        // Only misses are timed: hits complete below the histogram's resolution and the clock
+        // reads would dominate their cost.
+        let _timer = self.metrics.read_miss_timer();
         let item = self
             .guard
             .read(position, self.items_per_section, &self.offsets)
@@ -5495,7 +5497,7 @@ mod tests {
                 "variable_metrics_sync_calls_total 1",
                 "variable_metrics_append_duration_count 1",
                 "variable_metrics_append_many_duration_count 1",
-                "variable_metrics_read_duration_count 1",
+                "variable_metrics_read_miss_duration_count 0",
                 "variable_metrics_read_many_duration_count 1",
                 "variable_metrics_commit_duration_count 1",
                 "variable_metrics_sync_duration_count 1",
@@ -5511,6 +5513,47 @@ mod tests {
             ] {
                 assert!(!buffer.contains(unexpected), "{unexpected}\n{buffer}");
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_journal_read_miss_timed() {
+        // Reads served from storage record a read_miss_duration sample; cache hits do not.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            // Sections span multiple full pages so their data must go through the (evictable)
+            // page cache rather than staying resident in each blob's partial tail page.
+            let cfg = Config {
+                partition: "miss".into(),
+                items_per_section: NZU64!(50),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, u64>::init(context.child("miss"), cfg)
+                .await
+                .unwrap();
+            for i in 0..200u64 {
+                journal.append(&i).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // The page cache cannot hold every page, so some position must be cold.
+            let reader = journal.reader().await;
+            let pos = (0..200)
+                .find(|&pos| reader.try_read_sync(pos).is_none())
+                .expect("some position should be cold");
+            assert_eq!(reader.read(pos).await.unwrap(), pos);
+            drop(reader);
+
+            let buffer = context.encode();
+            assert!(
+                buffer.contains("miss_read_miss_duration_count 1"),
+                "{buffer}"
+            );
 
             journal.destroy().await.unwrap();
         });
