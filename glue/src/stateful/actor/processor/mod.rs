@@ -492,7 +492,12 @@ where
             response.send_lossy(false);
             return;
         };
-        let tail = info_span!("stateful.processor.match_commitments").entered();
+        let tail = info_span!(
+            "stateful.processor.match_commitments",
+            block = %block_digest,
+            parent = %parent_digest,
+        )
+        .entered();
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
             warn!(
                 ?parent_digest,
@@ -511,7 +516,12 @@ where
     }
 
     /// Ensure parent state exists, then prepare unmerkleized batches for execution.
-    #[tracing::instrument(name = "stateful.processor.prepare_batches", level = "info", skip_all)]
+    #[tracing::instrument(
+        name = "stateful.processor.prepare_batches",
+        level = "info",
+        skip_all,
+        fields(parent = %parent.digest())
+    )]
     pub(super) async fn prepare_batches<S, V, Response>(
         &mut self,
         context: &E,
@@ -830,7 +840,8 @@ where
 #[tracing::instrument(
     name = "stateful.processor.is_already_processed",
     level = "info",
-    skip_all
+    skip_all,
+    fields(height = %block.height(), digest = %block.digest())
 )]
 async fn is_already_processed<S, V, Response>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,

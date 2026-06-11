@@ -244,7 +244,7 @@ where
             .child("deferred_verify")
             .with_attribute("round", context.round);
         let span = info_span!(
-            "marshal.deferred.verify.deferred",
+            "marshal.deferred.deferred.verify",
             round = %context.round
         );
         runtime_context.spawn(move |runtime_context| {
@@ -317,7 +317,7 @@ where
             .child("certify")
             .with_attribute("round", round);
         let span = info_span!(
-            "marshal.deferred.certify.embedded",
+            "marshal.deferred.embedded.certify",
             round = %round,
             digest = %digest
         );
@@ -402,7 +402,7 @@ where
             .child("certify_existing")
             .with_attribute("round", round);
         let span = info_span!(
-            "marshal.deferred.certify.existing",
+            "marshal.deferred.existing.certify",
             round = %round,
             digest = %digest
         );
@@ -685,7 +685,7 @@ where
             .child("optimistic_verify")
             .with_attribute("round", round);
         let span = info_span!(
-            "marshal.deferred.verify.optimistic",
+            "marshal.deferred.optimistic.verify",
             round = %round,
             digest = %digest
         );

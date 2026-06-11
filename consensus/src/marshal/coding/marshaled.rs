@@ -331,7 +331,7 @@ where
             .child("deferred_verify")
             .with_attribute("round", consensus_context.round);
         let span = info_span!(
-            "marshal.coding.verify.deferred",
+            "marshal.coding.deferred.verify",
             round = %consensus_context.round,
             commitment = %commitment
         );
@@ -505,7 +505,7 @@ where
             .child("certify")
             .with_attribute("round", round);
         let span = info_span!(
-            "marshal.coding.certify.embedded",
+            "marshal.coding.embedded.certify",
             round = %round,
             commitment = %payload
         );
@@ -602,7 +602,7 @@ where
             .child("certify_existing")
             .with_attribute("round", round);
         let span = info_span!(
-            "marshal.coding.certify.existing",
+            "marshal.coding.existing.certify",
             round = %round,
             commitment = %payload
         );
@@ -978,7 +978,7 @@ where
                 .child("verify_reproposal")
                 .with_attribute("round", round);
             let span = info_span!(
-                "marshal.coding.verify.reproposal",
+                "marshal.coding.reproposal.verify",
                 round = %round,
                 commitment = %payload
             );
