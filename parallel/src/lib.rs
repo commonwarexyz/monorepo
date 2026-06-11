@@ -475,7 +475,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub type ThreadPool = Arc<RThreadPool>;
 
     /// Minimum slice length before [`Rayon::sort_by`] dispatches to the thread pool.
-    const MIN_PARALLEL_SORT: usize = 1024;
+    ///
+    /// Mirrors rayon's `CHUNK_LENGTH`: `par_sort_by` sorts slices of up to one chunk
+    /// sequentially, so dispatching them pays the pool handoff for no parallelism.
+    const MIN_PARALLEL_SORT: usize = 2000;
 
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
@@ -592,7 +595,10 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            // Small slices gain nothing from dispatch and pay the handoff into the pool.
+            // install() from a non-worker thread injects the job and parks the caller until
+            // a pool worker runs it. rayon's small-slice sequential fallback only applies
+            // after that handoff, so small slices skip the dispatch and sort on the calling
+            // thread instead.
             if items.len() < MIN_PARALLEL_SORT {
                 items.sort_by(compare);
                 return;
