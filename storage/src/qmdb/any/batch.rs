@@ -742,8 +742,8 @@ where
                     break;
                 }
 
-                // Batch-read candidates: cache hits resolve synchronously, disk misses
-                // are fetched concurrently.
+                // Batch-read candidates: page-cache hits are served by one batched read,
+                // disk misses are fetched concurrently.
                 let resolved = self.read_ops(&candidates, &ops, &reader).await?;
 
                 // Classify every candidate against the pre-raise state (see [`FloorOutcome`]).

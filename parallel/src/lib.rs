@@ -11,6 +11,7 @@
 //! **Core Operations:**
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
+//! - [`sort_by`](Strategy::sort_by): Sorts a slice with a comparator
 //!
 //! **Convenience Methods:**
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
