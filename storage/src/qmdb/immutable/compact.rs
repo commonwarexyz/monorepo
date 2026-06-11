@@ -1,35 +1,38 @@
-//! An immutable authenticated db that does not retain historical operations after sync.
+//! An immutable authenticated db that discards historical operations, retaining only a witness
+//! for each synced commit.
 //!
 //! Mirrors the API of [`crate::qmdb::immutable::Immutable`] (`new_batch -> merkleize ->
 //! apply_batch -> sync`, pipelined batch chains, `StaleBatch` validation) but is backed by
 //! the peak-only [`crate::merkle::compact`]. Because history is discarded, there are no
 //! `get` / `proof` / `bounds` methods; use the full variant if you need them.
 //!
-//! # Compact serving witness
+//! # Witness journal
 //!
-//! On every durable sync, this db persists the encoded last-commit operation together with its
-//! inclusion proof against the current root. Reopen and rewind re-verify that proof; corruption
-//! surfaces as [`Error::DataCorrupted`]. This authenticated witness is what lets compact nodes
-//! serve compact sync without retaining historical operations.
+//! The witness journal holds a complete snapshot of every synced commit, so [`Db::rewind`] can
+//! restore any commit still retained there (history is bounded only by [`Db::prune`]). Reopen
+//! and rewind re-verify the persisted snapshot; corruption surfaces as [`Error::DataCorrupted`].
+//! The witness (the last-commit operation plus its inclusion proof) is also what lets compact
+//! nodes serve compact sync without retaining historical operations.
 //!
 //! # Inactivity floor
 //!
-//! Commits still carry an inactivity floor, but only for wire-format compatibility with
+//! Commits carry an inactivity floor for wire-format compatibility with
 //! [`crate::qmdb::immutable::Immutable`]: the root is computed over the encoded operation
 //! sequence, and that sequence must include the same floor to produce the same root as the
-//! full variant. Here the floor has no effect on pruning or snapshot rebuilding. All
-//! historical in-memory state is discarded on every `sync`.
+//! full variant. The floor has no effect on pruning or snapshot rebuilding here; all
+//! historical in-memory state is discarded on every sync.
 
 use super::operation::Operation;
 use crate::{
-    merkle::{batch, compact as compact_merkle, Family, Location, Proof},
+    journal::contiguous::variable::{self, Config as JournalConfig},
+    merkle::{batch, compact as compact_merkle, Family, Location},
     qmdb::{
         self,
         any::value::ValueEncoding,
         batch_chain::{self, Bounds},
         compact::{
             batch as compact_batch,
-            witness::{self, ServeState},
+            witness::{self, VerifiedWitness, Witness},
         },
         operation::Key,
         sync::compact as compact_sync,
@@ -49,14 +52,18 @@ use std::{
 /// Configuration for a compact immutable authenticated db.
 #[derive(Clone)]
 pub struct Config<C, S: Strategy> {
-    /// Configuration for the backing compact Merkle structure.
-    pub merkle: compact_merkle::Config<S>,
+    /// Strategy used to parallelize merkleization.
+    pub strategy: S,
+
+    /// Configuration for the journal that persists the witness.
+    pub witness: JournalConfig<()>,
 
     /// Codec config used to decode the persisted last commit operation on reopen.
     pub commit_codec_config: C,
 }
 
-/// An immutable authenticated db that does not retain historical operations after sync.
+/// An immutable authenticated db that discards historical operations, retaining only a witness
+/// for each synced commit.
 pub struct Db<F, E, K, V, H, C, S: Strategy>
 where
     F: Family,
@@ -68,17 +75,12 @@ where
     Operation<F, K, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
 {
-    merkle: compact_merkle::Merkle<F, E, H::Digest, S>,
+    merkle: compact_merkle::Merkle<F, H::Digest, S>,
     last_commit_loc: Location<F>,
     last_commit_metadata: Option<V::Value>,
     inactivity_floor_loc: Location<F>,
     commit_codec_config: C,
-    /// Cache of the last durably persisted compact witness.
-    ///
-    /// This cache is rebuilt from persisted witness bytes on reopen/rewind and refreshed on
-    /// [`Self::sync`]. It intentionally does not track unsynced in-memory mutations, so compact
-    /// serving never advertises state that has not been durably persisted.
-    witness: witness::Cache<F, H::Digest>,
+    witness: witness::Store<E, F, H::Digest>,
     _key: PhantomData<K>,
 }
 
@@ -102,7 +104,7 @@ where
     db_size: u64,
 }
 
-/// A merkleized batch for a compact immutable db.
+/// A speculative batch whose root digest has been computed.
 #[derive(Clone)]
 pub struct MerkleizedBatch<F: Family, D: Digest, K: Key, V: ValueEncoding, S: Strategy>
 where
@@ -204,7 +206,7 @@ where
         ops.push(Operation::Commit(metadata.clone(), inactivity_floor));
 
         let total_size = self.base_size + ops.len() as u64;
-        let merkle = compact_batch::merkleize_ops::<F, E, H, S, _>(
+        let merkle = compact_batch::merkleize_ops::<F, H, S, _>(
             &db.merkle,
             self.merkle_batch,
             ops.as_slice(),
@@ -245,13 +247,14 @@ where
     }
 }
 
-impl<F, E, K, V, H, C, S: Strategy> Db<F, E, K, V, H, C, S>
+impl<F, E, K, V, H, C, S> Db<F, E, K, V, H, C, S>
 where
     F: Family,
     E: Context,
     K: Key,
     V: ValueEncoding,
     H: Hasher,
+    S: Strategy,
     Operation<F, K, V>: EncodeShared,
     Operation<F, K, V>: Read<Cfg = C>,
     C: Clone + Send + Sync + 'static,
@@ -262,43 +265,90 @@ where
             .to_vec()
     }
 
-    async fn load_active_witness(
-        merkle: &compact_merkle::Merkle<F, E, H::Digest, S>,
-        commit_codec_config: &C,
-    ) -> Result<(ServeState<F, H::Digest>, Operation<F, K, V>), Error<F>> {
-        witness::load_active_witness::<F, E, H, S, _, Operation<F, K, V>, _>(
-            merkle,
-            commit_codec_config,
-            Operation::has_floor,
-        )
-        .await
-    }
-
-    /// Build a compact db handle from already-verified compact state.
+    /// Build a compact db handle from already-validated compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and already authenticated the
-    /// supplied witness/root pair. This seeds the in-memory witness cache from that verified witness
-    /// but does not itself persist anything; persistence happens only after the caller finishes the
-    /// root check for the reconstructed db.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn init_from_verified_state(
-        merkle: compact_merkle::Merkle<F, E, H::Digest, S>,
+    /// supplied witness/root pair. The import lives only in memory until the first
+    /// [`Self::sync`], which replaces the journal's contents with it. Until then, dropping the
+    /// handle leaves the previous on-disk state untouched, and rewind/prune are rejected.
+    pub(crate) fn init_from_validated_state(
+        strategy: S,
+        journal: witness::Journal<E, F, H::Digest>,
         commit_codec_config: C,
-        last_commit_metadata: Option<V::Value>,
-        inactivity_floor_loc: Location<F>,
-        root: H::Digest,
-        last_commit_op_bytes: Vec<u8>,
-        last_commit_proof: Proof<F, H::Digest>,
-        pinned_nodes: Vec<H::Digest>,
+        validated: compact_sync::ValidatedState<F, Operation<F, K, V>, H::Digest>,
     ) -> Result<Self, Error<F>> {
-        let (last_commit_loc, witness) = witness::witness_from_authenticated_state(
-            &merkle,
+        let compact_sync::ValidatedState {
+            state:
+                compact_sync::State {
+                    leaf_count,
+                    pinned_nodes,
+                    last_commit_op,
+                    last_commit_proof,
+                },
             root,
+        } = validated;
+        let last_commit_loc = Location::new(*leaf_count - 1);
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+            return Err(Error::UnexpectedData(last_commit_loc));
+        };
+
+        let merkle =
+            compact_merkle::Merkle::from_compact_state(strategy, leaf_count, pinned_nodes.clone())?;
+        let imported = VerifiedWitness {
+            witness: Witness {
+                op_bytes: Self::encode_commit_op(
+                    last_commit_metadata.clone(),
+                    inactivity_floor_loc,
+                ),
+                proof: last_commit_proof,
+                pinned_nodes,
+            },
+            root,
+        };
+
+        let witness = witness::Store::from_import(journal, imported);
+        Ok(Self {
+            merkle,
+            last_commit_loc,
+            last_commit_metadata,
             inactivity_floor_loc,
-            last_commit_op_bytes,
-            last_commit_proof,
-            pinned_nodes,
-        )?;
+            commit_codec_config,
+            witness,
+            _key: PhantomData,
+        })
+    }
+
+    /// Open a compact db from persisted compact state and rebuild its witness store.
+    ///
+    /// On first open, this bootstraps the initial commit and its witness so every later reopen and
+    /// rewind can assume the journal tip is a complete compact witness.
+    pub(crate) async fn init_from_merkle(
+        mut merkle: compact_merkle::Merkle<F, H::Digest, S>,
+        witness_context: E,
+        witness_config: JournalConfig<()>,
+        commit_codec_config: C,
+    ) -> Result<Self, Error<F>>
+    where
+        F: Family,
+        Operation<F, K, V>: Read<Cfg = C>,
+    {
+        // Bootstrap: append an initial Commit(None, 0) on first open.
+        let journal: witness::Journal<E, F, H::Digest> =
+            variable::Journal::init(witness_context, witness_config).await?;
+        let (witness, last_commit_op) = witness::init::<E, F, H, S, Operation<F, K, V>>(
+            journal,
+            &mut merkle,
+            &commit_codec_config,
+            Operation::<F, K, V>::Commit(None, Location::new(0))
+                .encode()
+                .to_vec(),
+            Operation::has_floor,
+        )
+        .await?;
+        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
+            return Err(Error::DataCorrupted("last operation was not a commit"));
+        };
+        let last_commit_loc = Location::new(*witness.with(|w| w.leaf_count()) - 1);
 
         Ok(Self {
             merkle,
@@ -306,56 +356,9 @@ where
             last_commit_metadata,
             inactivity_floor_loc,
             commit_codec_config,
-            witness: witness::Cache::new(witness),
+            witness,
             _key: PhantomData,
         })
-    }
-
-    /// Open a compact db from persisted compact state and rebuild its witness cache.
-    ///
-    /// On first open, this bootstraps the initial commit and its witness so every later reopen and
-    /// rewind can assume "the active slot has a complete compact witness".
-    pub(crate) async fn init_from_merkle(
-        mut merkle: compact_merkle::Merkle<F, E, H::Digest, S>,
-        commit_codec_config: C,
-    ) -> Result<Self, Error<F>>
-    where
-        F: Family,
-        Operation<F, K, V>: Read<Cfg = C>,
-    {
-        // Bootstrap: append an initial Commit(None, 0) on first open. This establishes the
-        // invariant that every merkleized batch ends with a Commit op, so `last_commit_loc =
-        // leaves - 1` is always correct without replaying the log (which we can't, since we
-        // don't retain it).
-        //
-        // We also persist that initial commit's witness immediately so every later reopen or
-        // rewind can uniformly assume "the active slot has a current tip witness".
-        if merkle.leaves() == 0 {
-            witness::bootstrap_initial_commit::<F, E, H, S>(
-                &mut merkle,
-                Operation::<F, K, V>::Commit(None, Location::new(0))
-                    .encode()
-                    .to_vec(),
-            )
-            .await?;
-        }
-
-        let (witness, last_commit_op) =
-            Self::load_active_witness(&merkle, &commit_codec_config).await?;
-        let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
-            return Err(Error::DataCorrupted("last operation was not a commit"));
-        };
-
-        Self::init_from_verified_state(
-            merkle,
-            commit_codec_config,
-            last_commit_metadata,
-            inactivity_floor_loc,
-            witness.root,
-            witness.last_commit_op_bytes,
-            witness.last_commit_proof,
-            witness.pinned_nodes,
-        )
     }
 
     /// Return the root of the db.
@@ -400,18 +403,14 @@ where
 
     /// Return the compact-sync target described by the current witness.
     ///
-    /// This reflects the last state for which both frontier and witness were durably captured,
-    /// which may lag behind live in-memory mutations until [`Self::sync`] is called.
-    pub fn current_target(&self) -> compact_sync::Target<F, H::Digest> {
-        self.witness.with(ServeState::target)
+    /// This reflects the last durably persisted commit, which may lag behind live in-memory
+    /// mutations until [`Self::sync`] is called.
+    pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
+        self.witness.with(VerifiedWitness::target)
     }
 
     /// Return the compact-sync state for `target`, or a stale-target error if the source's
     /// current witness no longer matches.
-    ///
-    /// The witness lock is held only long enough to verify the requested target and snapshot
-    /// the bytes, proof, and pinned nodes needed for [`compact_sync::State`]. Decoding the
-    /// commit operation runs outside the lock so concurrent readers do not contend on it.
     pub(crate) fn compact_state(
         &self,
         target: compact_sync::Target<F, H::Digest>,
@@ -419,29 +418,26 @@ where
     where
         Operation<F, K, V>: Read<Cfg = C>,
     {
-        let (op_bytes, last_commit_proof, pinned_nodes, leaf_count) = self.witness.with(|w| {
-            if target.root != w.root || target.leaf_count != w.leaf_count {
+        // Hold the witness lock only long enough to verify the requested target and snapshot the
+        // entry; decode outside it so concurrent readers do not contend.
+        let (entry, leaf_count) = self.witness.with(|w| {
+            if target.root != w.root || target.leaf_count != w.leaf_count() {
                 return Err(compact_sync::ServeError::StaleTarget {
                     requested: target.clone(),
                     current: w.target(),
                 });
             }
-            Ok((
-                w.last_commit_op_bytes.clone(),
-                w.last_commit_proof.clone(),
-                w.pinned_nodes.clone(),
-                w.leaf_count,
-            ))
+            Ok((w.witness.clone(), w.leaf_count()))
         })?;
+        let Witness {
+            op_bytes,
+            proof: last_commit_proof,
+            pinned_nodes,
+        } = entry;
         let op = Operation::<F, K, V>::decode_cfg(op_bytes.as_ref(), &self.commit_codec_config)
             .map_err(|_| {
                 compact_sync::ServeError::Database(Error::DataCorrupted("invalid commit operation"))
             })?;
-        if !matches!(&op, Operation::Commit(_, _)) {
-            return Err(compact_sync::ServeError::Database(Error::DataCorrupted(
-                "last operation was not a commit",
-            )));
-        }
         Ok(compact_sync::State {
             leaf_count,
             pinned_nodes,
@@ -456,7 +452,7 @@ where
         UnmerkleizedBatch::new(self, committed_size)
     }
 
-    /// Create an owned merkleized batch representing the current committed state.
+    /// Create an owned merkleized batch representing the current applied state.
     pub fn to_batch(&self) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
     where
         F: Family,
@@ -481,15 +477,15 @@ where
     /// Apply a merkleized batch to the database.
     ///
     /// Returns the range of locations written. The state is updated in memory only; call
-    /// [`Self::sync`] or [`Self::commit`] to persist.
+    /// [`Self::sync`] to persist.
     ///
     /// # Errors
     ///
     /// - [`Error::StaleBatch`] if the batch was created from a stale DB state.
-    /// - [`Error::FloorRegressed`] if any unapplied commit's floor is below the running floor
-    ///   (walking ancestors oldest-first, then the tip).
-    /// - [`Error::FloorBeyondSize`] if any unapplied commit's floor exceeds its own commit
-    ///   location.
+    /// - [`Error::FloorRegressed`] if any commit in the chain declares a floor below the
+    ///   previous commit's floor.
+    /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
+    ///   commit location.
     pub fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
@@ -508,79 +504,71 @@ where
     }
 
     /// Durably persist the current db state to disk.
-    ///
-    /// This is the point at which in-memory mutations become servable via compact sync. The compact
-    /// Merkle frontier and last-commit witness are written into the same slot, reusing the cached
-    /// witness when the current state has already been persisted.
     pub async fn sync(&self) -> Result<(), Error<F>> {
-        witness::persist_witness::<F, E, H, S>(
-            &self.merkle,
-            &self.witness,
-            self.last_commit_loc,
-            self.inactivity_floor_loc,
-            Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc),
-        )
-        .await
+        self.witness
+            .persist::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
+                Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
+            })
+            .await
     }
 
-    /// Durably persist the current db state to disk (alias for [`Self::sync`]).
-    pub async fn commit(&self) -> Result<(), Error<F>>
-    where
-        F: Family,
-    {
-        self.sync().await
-    }
-
-    /// Restore the state as of the sync before the most recent one.
-    ///
-    /// Discards any uncommitted batches, flips the db back to the previous persisted state,
-    /// and reloads the cached commit metadata and inactivity floor from that slot.
-    ///
-    /// Callers must drop any [`Arc<MerkleizedBatch>`] merkleized against state that this rewind
-    /// discards. [`Self::apply_batch`] validates batches by size only: a discarded-branch batch
-    /// will usually trip the size-mismatch check, but if the db later regrows to the same size
-    /// along an alternate branch, the stale batch becomes admissible again and applying it will
-    /// corrupt the committed root. Batches merkleized against the state this rewind restores to
-    /// (for example, a batch built before an advance that is then discarded by the rewind)
-    /// remain compatible and apply cleanly.
+    /// Rewind the db to the synced commit with exactly `target` operations, discarding any
+    /// uncommitted batches and any later commits. The rewind is made durable before this
+    /// method returns.
     ///
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no prior state exists — either no sync has occurred yet, or the previous state was
-    /// already consumed by a rewind with no intervening sync.
-    ///
-    /// Any error from this method is fatal for this handle. The Merkle layer may have already
-    /// flipped its generation pointer and rebuilt its in-memory state before a later step (e.g.
-    /// reloading the cached commit metadata or inactivity floor) fails, leaving this `Db`'s
-    /// in-memory fields out of sync with the persisted slot. Callers must drop this handle
-    /// after any `Err` from `rewind` and reopen from storage.
-    pub async fn rewind(&mut self) -> Result<(), Error<F>>
+    /// no retained commit has exactly `target` operations (never synced, or pruned). Any error
+    /// is fatal for this handle: drop it and reopen from storage.
+    pub async fn rewind(&mut self, target: Location<F>) -> Result<(), Error<F>>
     where
         F: Family,
     {
-        self.merkle.rewind().await?;
-        // Reload the witness from the reverted slot as well, so compact serving stays aligned with
-        // the same frontier/root that `rewind` restored.
-        let (witness, last_commit_op) =
-            Self::load_active_witness(&self.merkle, &self.commit_codec_config).await?;
+        // Fast path: already durably at `target` with no uncommitted state.
+        if self.size() == target
+            && self.witness.with(|w| w.leaf_count()) == target
+            && !self.witness.import_pending()
+        {
+            return Ok(());
+        }
+
+        let last_commit_op = self
+            .witness
+            .rewind::<H, S, Operation<F, K, V>>(
+                &self.merkle,
+                target,
+                &self.commit_codec_config,
+                Operation::has_floor,
+            )
+            .await?;
         let Operation::Commit(last_commit_metadata, inactivity_floor_loc) = last_commit_op else {
             return Err(Error::DataCorrupted("last operation was not a commit"));
         };
         self.last_commit_metadata = last_commit_metadata;
         self.inactivity_floor_loc = inactivity_floor_loc;
-        self.last_commit_loc = Location::new(*witness.leaf_count - 1);
-        self.witness.replace(witness);
+        self.last_commit_loc = Location::new(*target - 1);
         Ok(())
+    }
+
+    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
+    /// below the boundary may survive.
+    ///
+    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness
+    /// always survives. The prune is made durable before this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Fails if a compact-sync import has not yet been persisted by [`Self::sync`]. Any error
+    /// is fatal for this handle: drop it and reopen from storage.
+    pub async fn prune(&mut self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
+        self.witness.prune(pruning_boundary).await
     }
 
     /// Destroy all persisted state associated with this database.
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.merkle.destroy().await.map_err(Into::into)
-    }
-
-    pub(crate) async fn persist_cached_witness(&self) -> Result<(), Error<F>> {
-        witness::persist_cached_witness::<F, E, H, S>(&self.merkle, &self.witness).await
+        self.witness.destroy().await?;
+        Ok(())
     }
 }
 
@@ -589,65 +577,49 @@ mod tests {
     use super::*;
     use crate::{
         merkle::mmr,
-        metadata::{Config as MConfig, Metadata},
-        qmdb::any::value::FixedEncoding,
+        qmdb::{any::value::FixedEncoding, compact::witness},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-    use commonware_utils::sequence::prefixed_u64::U64 as MetadataKey;
+    use commonware_runtime::{
+        buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
+    };
+    use commonware_utils::{NZUsize, NZU16, NZU64};
+    use std::num::{NonZeroU16, NonZeroUsize};
 
     type TestDb<F> =
         Db<F, deterministic::Context, Digest, FixedEncoding<Digest>, Sha256, (), Sequential>;
 
+    const WITNESS_PAGE_SIZE: NonZeroU16 = NZU16!(77);
+    const WITNESS_PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
+
+    fn witness_config(partition: &str, pooler: &impl BufferPooler) -> variable::Config<()> {
+        variable::Config {
+            partition: format!("{partition}-witness"),
+            items_per_section: NZU64!(64),
+            compression: None,
+            codec_config: (),
+            page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
+            write_buffer: NZUsize!(1024),
+        }
+    }
+
     async fn open_db<F: Family>(context: deterministic::Context, partition: &str) -> TestDb<F> {
-        let merkle = crate::merkle::compact::Merkle::init(
-            context,
-            crate::merkle::compact::Config {
-                partition: partition.into(),
-                strategy: Sequential,
-            },
-        )
-        .await
-        .unwrap();
-        Db::init_from_merkle(merkle, ()).await.unwrap()
+        let witness_cfg = witness_config(partition, &context);
+        let merkle = crate::merkle::compact::Merkle::new(Sequential);
+        Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
+            .await
+            .unwrap()
     }
 
-    async fn tamper_metadata_key(
+    /// Open the persisted witness journal directly so tests can corrupt the tip entry.
+    async fn open_witness_journal(
         context: deterministic::Context,
         partition: &str,
-        key: MetadataKey,
-    ) {
-        let mut metadata = open_metadata(context, partition).await;
-        let mut bytes = metadata.get(&key).cloned().expect("metadata entry missing");
-        *bytes.last_mut().expect("metadata entry empty") ^= 0x01;
-        metadata.put_sync(key, bytes).await.unwrap();
-    }
-
-    async fn open_metadata(
-        context: deterministic::Context,
-        partition: &str,
-    ) -> Metadata<deterministic::Context, MetadataKey, Vec<u8>> {
-        Metadata::<_, MetadataKey, Vec<u8>>::init(
-            context.child("meta_write"),
-            MConfig {
-                partition: partition.into(),
-                codec_config: ((0..).into(), ()),
-            },
-        )
-        .await
-        .unwrap()
-    }
-
-    async fn overwrite_metadata_key(
-        context: deterministic::Context,
-        partition: &str,
-        key: MetadataKey,
-        bytes: Vec<u8>,
-    ) {
-        let mut metadata = open_metadata(context, partition).await;
-        metadata.put_sync(key, bytes).await.unwrap();
+    ) -> witness::Journal<deterministic::Context, mmr::Family, Digest> {
+        let cfg = witness_config(partition, &context);
+        variable::Journal::init(context, cfg).await.unwrap()
     }
 
     #[test_traced("INFO")]
@@ -681,11 +653,8 @@ mod tests {
         });
     }
 
-    /// Regression: `to_batch()` must reflect the live in-memory state, not the lagging durable
-    /// serve-state cache. Compact dbs intentionally keep the serve-state cache behind unsynced
-    /// mutations, so a snapshot built without `sync()` / `commit()` between
-    /// `apply_batch()` and `to_batch()` previously bound its cached root to the stale serve
-    /// state.
+    /// Regression: `to_batch()` must snapshot the live in-memory state, not the lagging witness
+    /// cache.
     #[test_traced("INFO")]
     fn test_compact_to_batch_reflects_live_state() {
         deterministic::Runner::default().start(|context| async move {
@@ -709,8 +678,7 @@ mod tests {
             )
             .unwrap();
 
-            // Deliberately skip `sync()` / `commit()` so the durable serve-state cache lags the
-            // live merkle state.
+            // Leave the witness cache behind the live Merkle state.
             let live_root = db.root();
             assert_ne!(
                 live_root, pre_apply_root,
@@ -721,7 +689,7 @@ mod tests {
             assert_eq!(
                 snapshot.root(),
                 live_root,
-                "to_batch().root() must match the live db.root() even before sync/commit"
+                "to_batch().root() must match the live db.root() even before sync"
             );
 
             db.destroy().await.unwrap();
@@ -800,7 +768,7 @@ mod tests {
 
             db.apply_batch(parent).unwrap();
             db.apply_batch(child).unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             assert_eq!(db.root(), expected_root);
 
@@ -833,8 +801,11 @@ mod tests {
         });
     }
 
+    // A chained batch whose tip floor is below its parent's floor must be rejected:
+    // the parent's Commit participates in the per-commit monotonicity invariant even
+    // before it is applied.
     #[test_traced("INFO")]
-    fn test_compact_rejects_regressed_ancestor_floor() {
+    fn test_compact_ancestor_floor_regressed() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
                 open_db::<mmr::Family>(context.child("db"), "immutable-regressed-ancestor-floor")
@@ -874,8 +845,9 @@ mod tests {
                     .merkleize(&db, Some(meta1), floor1),
             )
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             let root_after_first = db.root();
+            let size_after_first = db.size();
 
             let k2 = Sha256::hash(&[2]);
             let v2 = Sha256::fill(22u8);
@@ -888,11 +860,11 @@ mod tests {
                     .merkleize(&db, Some(meta2), floor2),
             )
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.get_metadata(), Some(meta2));
             assert_eq!(db.inactivity_floor_loc(), floor2);
 
-            db.rewind().await.unwrap();
+            db.rewind(size_after_first).await.unwrap();
             assert_eq!(db.root(), root_after_first);
             assert_eq!(db.get_metadata(), Some(meta1));
             assert_eq!(db.inactivity_floor_loc(), floor1);
@@ -918,8 +890,9 @@ mod tests {
                         .merkleize(&db, Some(meta1), floor1),
                 )
                 .unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
                 let root = db.root();
+                let size_after_first = db.size();
 
                 db.apply_batch(
                     db.new_batch()
@@ -927,9 +900,9 @@ mod tests {
                         .merkleize(&db, Some(meta2), floor2),
                 )
                 .unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
 
-                db.rewind().await.unwrap();
+                db.rewind(size_after_first).await.unwrap();
                 root
             };
 
@@ -953,29 +926,128 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1)),
             )
             .unwrap();
-            db.commit().await.unwrap();
-            let slot = db.merkle.active_slot();
+            db.sync().await.unwrap();
             drop(db);
 
-            tamper_metadata_key(
-                context.child("tamper"),
-                partition,
-                crate::qmdb::compact::witness::last_commit_proof_key(slot),
+            // Corrupt the persisted proof so it no longer verifies against the stored root.
+            let journal = open_witness_journal(context.child("tamper"), partition).await;
+            let (op_bytes, mut proof, pinned_nodes) = witness::tests::tip(&journal).await;
+            if let Some(digest) = proof.digests.first_mut() {
+                *digest = Sha256::fill(0xff);
+            } else {
+                proof.leaves = Location::new(*proof.leaves + 1);
+            }
+            witness::tests::overwrite_tip(&journal, op_bytes, proof, pinned_nodes).await;
+            drop(journal);
+
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen_witness"),
+                witness_config(partition, &context),
+                (),
             )
             .await;
-
-            let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _, Sequential> =
-                crate::merkle::compact::Merkle::init(
-                    context.child("reopen"),
-                    crate::merkle::compact::Config {
-                        partition: partition.into(),
-                        strategy: Sequential,
-                    },
-                )
-                .await
-                .unwrap();
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(merkle, ()).await;
             assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_rejects_corrupt_target_entry() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-corrupt-rewind-target";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                    .merkleize(&db, None, Location::new(1)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let rewind_target = db.target().leaf_count;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[2]), Sha256::fill(2u8))
+                    .merkleize(&db, None, Location::new(1)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let tip_target = db.target();
+            drop(db);
+
+            // Corrupt the rewind target's entry (the journal holds bootstrap, target, tip).
+            let journal = open_witness_journal(context.child("corrupt"), partition).await;
+            witness::tests::corrupt_entry(&journal, 1, |entry| {
+                entry.pinned_nodes[0] = Sha256::fill(0xff);
+            })
+            .await;
+            drop(journal);
+
+            // The tip entry is intact, so reopen succeeds.
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let mut reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.target(), tip_target);
+
+            // The corrupt entry fails the rewind before any truncation.
+            assert!(matches!(
+                reopened.rewind(rewind_target).await,
+                Err(Error::DataCorrupted(_))
+            ));
+            drop(reopened);
+
+            // The newer history survives: reopen still lands on the original tip.
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen2"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await
+            .unwrap();
+            assert_eq!(reopened.target(), tip_target);
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_reopen_rejects_interrupted_import() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-interrupted-import";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[7]), Sha256::fill(7u8))
+                    .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Simulate a crash between an import's journal clear and its entry append: the
+            // journal is empty but its size is nonzero.
+            let journal = open_witness_journal(context.child("clear"), partition).await;
+            let size = journal.size().await;
+            journal.clear_to_size(size.max(1)).await.unwrap();
+            drop(journal);
+
+            // Reopen must fail rather than bootstrap a fresh db.
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen_witness"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await;
+            assert!(matches!(reopened, Err(Error::Journal(_))));
         });
     }
 
@@ -990,35 +1062,30 @@ mod tests {
                     .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1)),
             )
             .unwrap();
-            db.commit().await.unwrap();
-            let slot = db.merkle.active_slot();
+            db.sync().await.unwrap();
             drop(db);
             let oversized_floor = Location::new(10);
 
-            overwrite_metadata_key(
-                context.child("tamper"),
-                partition,
-                crate::qmdb::compact::witness::last_commit_op_key(slot),
-                Operation::<mmr::Family, Digest, FixedEncoding<Digest>>::Commit(
-                    Some(Sha256::fill(0xaa)),
-                    oversized_floor,
-                )
-                .encode()
-                .to_vec(),
+            // Overwrite the persisted commit op with a floor beyond its own commit location.
+            let journal = open_witness_journal(context.child("tamper"), partition).await;
+            let (_, proof, pinned_nodes) = witness::tests::tip(&journal).await;
+            let bad_op = Operation::<mmr::Family, Digest, FixedEncoding<Digest>>::Commit(
+                Some(Sha256::fill(0xaa)),
+                oversized_floor,
+            )
+            .encode()
+            .to_vec();
+            witness::tests::overwrite_tip(&journal, bad_op, proof, pinned_nodes).await;
+            drop(journal);
+
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen_witness"),
+                witness_config(partition, &context),
+                (),
             )
             .await;
-
-            let merkle: crate::merkle::compact::Merkle<mmr::Family, _, _, Sequential> =
-                crate::merkle::compact::Merkle::init(
-                    context.child("reopen"),
-                    crate::merkle::compact::Config {
-                        partition: partition.into(),
-                        strategy: Sequential,
-                    },
-                )
-                .await
-                .unwrap();
-            let reopened = TestDb::<mmr::Family>::init_from_merkle(merkle, ()).await;
             assert!(matches!(
                 reopened,
                 Err(Error::DataCorrupted("invalid compact witness"))
@@ -1027,17 +1094,268 @@ mod tests {
     }
 
     #[test_traced("INFO")]
+    fn test_compact_reopen_rejects_tampered_pinned_nodes() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-pins-tamper";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[7]), Sha256::fill(7u8))
+                    .merkleize(&db, Some(Sha256::fill(0xaa)), Location::new(1)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            drop(db);
+
+            // Corrupt one pinned frontier node: the root recomputed from the rebuilt Merkle no
+            // longer matches the proof stored in the same entry.
+            let journal = open_witness_journal(context.child("tamper"), partition).await;
+            let (op_bytes, proof, mut pinned_nodes) = witness::tests::tip(&journal).await;
+            pinned_nodes[0] = Sha256::fill(0xff);
+            witness::tests::overwrite_tip(&journal, op_bytes, proof, pinned_nodes).await;
+            drop(journal);
+
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let reopened = TestDb::<mmr::Family>::init_from_merkle(
+                merkle,
+                context.child("reopen_witness"),
+                witness_config(partition, &context),
+                (),
+            )
+            .await;
+            assert!(matches!(reopened, Err(Error::DataCorrupted(_))));
+        });
+    }
+
+    /// A witness entry appended but not synced (a commit interrupted before its journal sync)
+    /// must be dropped on reopen, recovering the last synced commit.
+    #[test_traced("INFO")]
+    fn test_compact_reopen_drops_unsynced_witness() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-witness-unsynced";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+
+            // Commit state A.
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                    .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(1)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let target_a = db.target();
+            drop(db);
+
+            // Simulate the crash window: append an entry ahead of the tip without syncing it,
+            // then drop the journal. The unsynced tail must not survive reopen.
+            let journal = open_witness_journal(context.child("crash"), partition).await;
+            let (op_bytes, mut proof, pinned_nodes) = witness::tests::tip(&journal).await;
+            proof.leaves = Location::new(*proof.leaves + 2);
+            witness::tests::append_unsynced(&journal, op_bytes, proof, pinned_nodes).await;
+            drop(journal);
+
+            // Reopen must drop the unsynced entry and recover state A.
+            let reopened = open_db::<mmr::Family>(context.child("reopen"), partition).await;
+            assert_eq!(reopened.target(), target_a);
+            reopened.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
     fn test_compact_rewind_beyond_history() {
         deterministic::Runner::default().start(|context| async move {
             let mut db =
                 open_db::<mmr::Family>(context.child("db"), "immutable-rewind-beyond").await;
-            // Bootstrap sync flipped the pointer from the default slot 0 to slot 1; slot 0 is
-            // still empty, so there is no prior state to rewind to.
+            // The bootstrap commit is the oldest retained state (one leaf); no commit with zero
+            // operations exists to rewind to.
             assert!(matches!(
-                db.rewind().await,
+                db.rewind(Location::new(0)).await,
+                Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
+            ));
+            // A target past the tip is not a commit either.
+            assert!(matches!(
+                db.rewind(Location::new(*db.size() + 100)).await,
                 Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
             ));
             db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_between_commits() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "immutable-rewind-between").await;
+
+            // A multi-op commit jumps the committed size from 1 (bootstrap) to 4.
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                    .set(Sha256::hash(&[2]), Sha256::fill(2u8))
+                    .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let root_a = db.root();
+            let size_a = db.size();
+            assert_eq!(size_a, Location::new(4));
+
+            // A second commit moves the size to 6.
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[3]), Sha256::fill(3u8))
+                    .merkleize(&db, Some(Sha256::fill(0xb1)), Location::new(0)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let root_b = db.root();
+
+            // Targets inside a commit's span match no entry, even though entries exist on
+            // both sides.
+            for target in [2u64, 3, 5] {
+                assert!(matches!(
+                    db.rewind(Location::new(target)).await,
+                    Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
+                ));
+            }
+            assert_eq!(db.root(), root_b);
+
+            // The exact commit boundary remains a valid target.
+            db.rewind(size_a).await.unwrap();
+            assert_eq!(db.root(), root_a);
+            assert_eq!(db.get_metadata(), Some(Sha256::fill(0xa1)));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_multiple_commits() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-rewind-multi";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+
+            // Commit A, B, C, recording the state after A.
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                    .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let root_a = db.root();
+            let size_a = db.size();
+            let target_a = db.target();
+
+            for i in [2u8, 3] {
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[i]), Sha256::fill(i))
+                        .merkleize(&db, Some(Sha256::fill(i)), Location::new(0)),
+                )
+                .unwrap();
+                db.sync().await.unwrap();
+            }
+            assert_ne!(db.root(), root_a);
+
+            // Rewind two commits in one call.
+            db.rewind(size_a).await.unwrap();
+            assert_eq!(db.root(), root_a);
+            assert_eq!(db.size(), size_a);
+            assert_eq!(db.get_metadata(), Some(Sha256::fill(0xa1)));
+            assert_eq!(db.target(), target_a);
+            drop(db);
+
+            // The rewind is durable: reopen recovers state A.
+            let db = open_db::<mmr::Family>(context.child("reopen"), partition).await;
+            assert_eq!(db.root(), root_a);
+            assert_eq!(db.target(), target_a);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_to_current_is_noop() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db = open_db::<mmr::Family>(context.child("db"), "immutable-rewind-noop").await;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                    .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let root = db.root();
+            let size = db.size();
+
+            db.rewind(size).await.unwrap();
+            assert_eq!(db.root(), root);
+            assert_eq!(db.size(), size);
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_prune_then_rewind() {
+        deterministic::Runner::default().start(|context| async move {
+            // One entry per section so pruning takes effect at entry granularity (pruning is
+            // section-aligned and never drops a partial section).
+            let mut witness_cfg = witness_config("immutable-prune-rewind", &context);
+            witness_cfg.items_per_section = NZU64!(1);
+            let merkle = crate::merkle::compact::Merkle::new(Sequential);
+            let mut db: TestDb<mmr::Family> =
+                Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())
+                    .await
+                    .unwrap();
+
+            // Commit A, B, C.
+            let mut sizes = Vec::new();
+            for i in [1u8, 2, 3] {
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[i]), Sha256::fill(i))
+                        .merkleize(&db, Some(Sha256::fill(i)), Location::new(0)),
+                )
+                .unwrap();
+                db.sync().await.unwrap();
+                sizes.push(db.size());
+            }
+
+            // Prune history below B: rewinding to B still works, rewinding to A does not.
+            db.prune(sizes[1]).await.unwrap();
+            assert!(matches!(
+                db.rewind(sizes[0]).await,
+                Err(Error::Merkle(crate::merkle::Error::RewindBeyondHistory))
+            ));
+            db.rewind(sizes[1]).await.unwrap();
+            assert_eq!(db.size(), sizes[1]);
+            assert_eq!(db.get_metadata(), Some(Sha256::fill(2)));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_prune_past_tip_keeps_tip() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-prune-past-tip";
+            let mut db = open_db::<mmr::Family>(context.child("db"), partition).await;
+            db.apply_batch(
+                db.new_batch()
+                    .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                    .merkleize(&db, Some(Sha256::fill(0xa1)), Location::new(0)),
+            )
+            .unwrap();
+            db.sync().await.unwrap();
+            let target = db.target();
+
+            // Prune with a boundary beyond the tip: the tip entry must survive.
+            db.prune(Location::new(*db.size() + 100)).await.unwrap();
+            assert_eq!(db.target(), target);
+            drop(db);
+
+            let reopened = open_db::<mmr::Family>(context.child("reopen"), partition).await;
+            assert_eq!(reopened.target(), target);
+            reopened.destroy().await.unwrap();
         });
     }
 
@@ -1056,7 +1374,8 @@ mod tests {
                     .merkleize(&db, None, Location::new(0)),
             )
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            let size_after_first = db.size();
 
             // Merkleize a batch against the post-commit-A state.
             let held = db
@@ -1071,8 +1390,8 @@ mod tests {
                     .merkleize(&db, None, Location::new(0)),
             )
             .unwrap();
-            db.commit().await.unwrap();
-            db.rewind().await.unwrap();
+            db.sync().await.unwrap();
+            db.rewind(size_after_first).await.unwrap();
 
             // The rewind restored the state that `held` was merkleized against, so it still
             // matches the Merkle size and applies cleanly.
@@ -1098,14 +1417,14 @@ mod tests {
                 Location::new(0),
             ))
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             let root_after_first = db.root();
             let size_after_first = db.size();
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.size(), size_after_first);
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.current_target().root, db.root());
+            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -1128,7 +1447,7 @@ mod tests {
                     Location::new(0),
                 ))
                 .unwrap();
-                db.commit().await.unwrap();
+                db.sync().await.unwrap();
                 (db.root(), db.size())
             };
 
@@ -1136,10 +1455,10 @@ mod tests {
             assert_eq!(db.root(), root_before_drop);
             assert_eq!(db.size(), size_before_drop);
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.size(), size_before_drop);
             assert_eq!(db.root(), root_before_drop);
-            assert_eq!(db.current_target().root, db.root());
+            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -1161,7 +1480,7 @@ mod tests {
                 Location::new(0),
             ))
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             let root_after_first = db.root();
             let size_after_first = db.size();
 
@@ -1173,16 +1492,16 @@ mod tests {
                 Location::new(1),
             ))
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
-            db.rewind().await.unwrap();
+            db.rewind(size_after_first).await.unwrap();
             assert_eq!(db.size(), size_after_first);
             assert_eq!(db.root(), root_after_first);
 
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
             assert_eq!(db.size(), size_after_first);
             assert_eq!(db.root(), root_after_first);
-            assert_eq!(db.current_target().root, db.root());
+            assert_eq!(db.target().root, db.root());
 
             db.destroy().await.unwrap();
         });
@@ -1200,7 +1519,8 @@ mod tests {
                     .merkleize(&db, None, Location::new(0)),
             )
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
+            let size_after_first = db.size();
 
             db.apply_batch(
                 db.new_batch()
@@ -1208,7 +1528,7 @@ mod tests {
                     .merkleize(&db, None, Location::new(0)),
             )
             .unwrap();
-            db.commit().await.unwrap();
+            db.sync().await.unwrap();
 
             // Merkleize a batch against the post-commit-B state, which the rewind will discard.
             let held = db
@@ -1216,33 +1536,13 @@ mod tests {
                 .set(Sha256::hash(&[3]), Sha256::fill(3u8))
                 .merkleize(&db, None, Location::new(0));
 
-            db.rewind().await.unwrap();
+            db.rewind(size_after_first).await.unwrap();
 
             // After rewind, mem.size reflects post-commit-A, but the held batch starts after
             // post-commit-B. Apply must be rejected with StaleBatch.
             assert!(matches!(
                 db.apply_batch(held),
                 Err(Error::StaleBatch { .. })
-            ));
-
-            db.destroy().await.unwrap();
-        });
-    }
-
-    #[test_traced("INFO")]
-    fn test_witness_state_reports_cached_commit_corruption() {
-        deterministic::Runner::default().start(|context| async move {
-            let db =
-                open_db::<mmr::Family>(context.child("db"), "immutable-serve-corruption").await;
-            let target = db.current_target();
-            db.witness
-                .mutate(|witness| witness.last_commit_op_bytes.clear());
-
-            assert!(matches!(
-                db.compact_state(target),
-                Err(compact_sync::ServeError::Database(Error::DataCorrupted(
-                    "invalid commit operation"
-                )))
             ));
 
             db.destroy().await.unwrap();
@@ -1261,6 +1561,36 @@ mod tests {
                 db.apply_batch(batch),
                 Err(Error::FloorBeyondSize(floor, tip))
                     if floor == Location::new(2) && tip == Location::new(1)
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
+
+    // A chained batch whose ancestor's floor exceeds that ancestor's own commit location
+    // must be rejected, identifying the ancestor's bound rather than the tip's.
+    #[test_traced("INFO")]
+    fn test_compact_ancestor_floor_beyond_size() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut db =
+                open_db::<mmr::Family>(context.child("db"), "immutable-ancestor-floor-beyond")
+                    .await;
+
+            // parent: set + commit at loc 2, floor=3 (one past parent's commit).
+            let parent = db
+                .new_batch()
+                .set(Sha256::hash(&[1]), Sha256::fill(1u8))
+                .merkleize(&db, None, Location::new(3));
+            // child: valid on its own (floor=0), but parent's floor is bad.
+            let child = parent
+                .new_batch::<Sha256>()
+                .set(Sha256::hash(&[2]), Sha256::fill(2u8))
+                .merkleize(&db, None, Location::new(0));
+
+            assert!(matches!(
+                db.apply_batch(child),
+                Err(Error::FloorBeyondSize(floor, commit))
+                    if floor == Location::new(3) && commit == Location::new(2)
             ));
 
             db.destroy().await.unwrap();
