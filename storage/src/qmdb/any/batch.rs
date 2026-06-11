@@ -1259,15 +1259,16 @@ where
         // Pull update mutations whose committed op this batch's reads already resolved: they
         // skip the index probe and journal re-read, and their old op's next key feeds the
         // candidate sets directly. Deletes never consume the cache because a deleted key's
-        // own-bucket scan doubles as same-bucket predecessor discovery.
+        // own-bucket scan doubles as same-bucket predecessor discovery; they are reinserted
+        // (one lookup per key on the hot path instead of a get-then-remove pair).
         let mut cached: Vec<(K, V::Value, Location<F>, K)> = Vec::with_capacity(resolved.len());
         for (key, (loc, old_next)) in resolved {
-            if matches!(mutations.get(&key), Some(Some(_))) {
-                let value = mutations
-                    .remove(&key)
-                    .flatten()
-                    .expect("mutation presence checked above");
-                cached.push((key, value, loc, old_next));
+            match mutations.remove(&key) {
+                Some(Some(value)) => cached.push((key, value, loc, old_next)),
+                Some(None) => {
+                    mutations.insert(key, None);
+                }
+                None => {}
             }
         }
 
