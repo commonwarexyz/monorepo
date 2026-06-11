@@ -604,6 +604,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
                 items.sort_by(compare);
                 return;
             }
+
             self.thread_pool.install(|| items.par_sort_by(compare));
         }
 
