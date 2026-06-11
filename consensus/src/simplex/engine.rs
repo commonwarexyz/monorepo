@@ -95,7 +95,6 @@ impl<
                 timeout_retry: cfg.timeout_retry,
                 activity_timeout: cfg.activity_timeout,
                 term_length: cfg.term_length,
-                term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
                 finalization_timeout: cfg.finalization_timeout,
                 replay_buffer: cfg.replay_buffer,
                 write_buffer: cfg.write_buffer,

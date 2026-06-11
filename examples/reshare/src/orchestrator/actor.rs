@@ -360,7 +360,6 @@ where
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },

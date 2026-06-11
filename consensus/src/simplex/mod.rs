@@ -118,10 +118,9 @@
 //! * Upon seeing `notarization(c,v)`, instead of moving to the view `v+1` immediately, request certification from
 //!   the application (see [Certification](#certification)). Only move to view `v+1` and broadcast `finalize(c,v)`
 //!   if certification succeeds, otherwise broadcast `nullify(v)` and refuse to build upon `c`.
-//! * With stable leaders (`term_length > 1`), if a participant has voted `nullify(v_n)` in a term, it will not vote
-//!   `finalize(c,v_f)` for later views in that same term.
-//! * With stable leaders, `term_stop_notarize_on_nullify` can additionally prevent voting `notarize(c,v_n)` for later
-//!   views in the same term after a local `nullify(v)` vote.
+//! * With stable leaders (`term_length > 1`), a prior same-term `nullify` vote blocks later `finalize` votes until
+//!   a covering finalization is observed; notarize votes are never withheld (see
+//!   [Same-Term Vote Safety](#same-term-vote-safety)).
 //! * If an entered view remains unfinalized for `finalization_timeout` and we are still in the same term,
 //!   we locally time out the current view and vote `nullify`. In practice, this tracks the oldest unfinalized view we
 //!   have entered in the current term.
@@ -146,6 +145,40 @@
 //! at most `f` covering `nullify` votes exist, which is insufficient to form a nullification
 //! certificate. Without that certificate, no future leader can skip view `v`, and the notarized
 //! payload must be included as an ancestor in all subsequent proposals.
+//!
+//! ### Same-Term Vote Safety
+//!
+//! With stable leaders, a nullification covers the view it was created for and the rest of that
+//! term: a later proposal may use it to skip all of those views at once. This is only safe if no
+//! covered view is finalized, so the protocol must maintain the invariant that a finalization at
+//! view `v` rules out a nullification at any view `u <= v` in the same term (otherwise a proposal
+//! could fork around a finalized view).
+//!
+//! The finalize gate maintains this invariant: a participant that voted `nullify(u)` withholds
+//! `finalize` votes for later views in that term until it observes a same-term finalization at or
+//! above its highest `nullify` vote. To see why the invariant holds, suppose both a nullification
+//! at `u` and a finalization at `v >= u` form in the same term. Their quorums intersect in at
+//! least one honest participant that voted both `nullify(u)` and `finalize(c,v)`. If `u = v`,
+//! this is impossible outright: no honest participant votes both `nullify` and `finalize` in a
+//! single view. If `u < v`, the gate means that participant first observed a same-term
+//! finalization at some `v*` with `u <= v* < v`: at or above `u` because the gate requires
+//! covering its highest `nullify` vote, and below `v` because participants only vote `finalize`
+//! for views above their highest observed finalization. Applying this same argument to the
+//! finalization at `v*` shows, by induction, that no nullification can form at or below `v*`,
+//! contradicting the nullification at `u <= v*`.
+//!
+//! The gate also recovers from a `nullify` vote that never became a nullification (e.g., a
+//! transient timeout on an otherwise healthy network): by the invariant, an observed same-term
+//! finalization at or above the vote proves the nullification can never form, so the vote is
+//! inert and the gate reopens ("heals"). In a healthy network this takes one view: peers
+//! broadcast `finalize(v)` when they certify `v`, so the finalization for `v` typically arrives
+//! shortly after entering `v+1`.
+//!
+//! Healing is not retroactive: a `finalize` vote is only constructed when a view's certification
+//! completes, so a view certified while the gate was blocked never receives this participant's
+//! `finalize` vote. If more than `f` participants were blocked at the time, that view may never
+//! gather its own finalization certificate and is instead finalized transitively by the
+//! finalization of a descendant.
 //!
 //! ### Optimistic Finality
 //!
@@ -388,15 +421,11 @@ cfg_if::cfg_if! {
                 return false;
             }
             // If we don't allow unbounded future views, we still find two future views interesting:
-            // - the next view
-            // - the first view of the next term (it may be the next view if the current view is nullified)
-            // For a term length of 1, these two views are the same
-            if !allow_unbounded_future && pending > current {
-                let next = current.next();
-                let next_term_start = current.next_term_start(term_length);
-                if pending != next && pending != next_term_start {
-                    return false;
-                }
+            // the next view and the first view of the next term. Certificates set
+            // `allow_unbounded_future` because they are self-certifying (see
+            // [`View::admits`]).
+            if !allow_unbounded_future && !current.admits(pending, term_length) {
+                return false;
             }
             true
         }
@@ -903,7 +932,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1144,7 +1172,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1254,7 +1281,6 @@ mod tests {
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1393,7 +1419,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1560,7 +1585,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1718,7 +1742,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -1897,7 +1920,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2022,7 +2044,6 @@ mod tests {
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2154,7 +2175,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2384,7 +2404,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2547,7 +2566,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2743,7 +2761,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2934,7 +2951,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -3133,7 +3149,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3305,7 +3320,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -3473,7 +3487,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -3663,7 +3676,6 @@ mod tests {
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3788,7 +3800,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3946,7 +3957,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4043,7 +4053,6 @@ mod tests {
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4199,7 +4208,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4348,7 +4356,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4514,7 +4521,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4646,7 +4652,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -4772,7 +4777,6 @@ mod tests {
                 skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
@@ -4951,7 +4955,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -5291,7 +5294,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length: TermLength::ONE,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -5500,7 +5502,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length: TermLength::ONE,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -5653,7 +5654,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -5758,7 +5758,6 @@ mod tests {
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
                     term_length,
-                    term_stop_notarize_on_nullify: false,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -6185,7 +6184,6 @@ mod tests {
                             skip_timeout,
                             fetch_concurrent: NZUsize!(4),
                             term_length,
-                            term_stop_notarize_on_nullify: false,
                             finalization_timeout: Duration::from_secs(12),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
@@ -6261,7 +6259,6 @@ mod tests {
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
                         term_length,
-                        term_stop_notarize_on_nullify: false,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),

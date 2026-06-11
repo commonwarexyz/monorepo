@@ -231,8 +231,9 @@ fn view_index(view: View) -> usize {
 }
 
 fn term_index(view: View, term_length: TermLength) -> usize {
-    let term_start = view.term_start(term_length);
-    let idx = term_start.get().saturating_sub(1) / term_length.get();
+    // Convert the canonical 1-based term index into a 0-based scenario index
+    // (genesis shares index 0 with the first term).
+    let idx = view.term_index(term_length).saturating_sub(1);
     usize::try_from(idx).expect("term index fits in usize")
 }
 

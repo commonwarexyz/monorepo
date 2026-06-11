@@ -261,7 +261,6 @@ fn main() {
                 page_cache: CacheRef::from_pooler(&context, NZU16!(16_384), NZUsize!(10_000)),
                 strategy,
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(12),
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },

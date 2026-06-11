@@ -376,6 +376,45 @@ impl View {
     pub const fn next_term_start(self, term_length: TermLength) -> Self {
         self.term_end(term_length).next()
     }
+
+    /// Returns the 1-based index of the term containing this view.
+    ///
+    /// View 0 (genesis) is its own term with index 0. When `term_length` is 1,
+    /// the index equals the view.
+    pub const fn term_index(self, term_length: TermLength) -> u64 {
+        self.term_start(term_length)
+            .get()
+            .div_ceil(term_length.get())
+    }
+
+    /// Returns whether a nullification at this view covers `view`.
+    ///
+    /// A nullification covers the view it was created for and the rest of that
+    /// view's term.
+    pub const fn covers(self, view: Self, term_length: TermLength) -> bool {
+        self.get() <= view.get() && self.same_term(view, term_length)
+    }
+
+    /// Returns whether `pending` is an acceptable view relative to this view
+    /// when future views are bounded.
+    ///
+    /// Views at or below this view are always acceptable (callers enforce any
+    /// lower bound separately). Beyond that, only the next view and the first
+    /// view of the next term are acceptable: the only views this view can
+    /// directly advance into (a nullification of the current view skips to
+    /// the latter). When `term_length` is 1 the two views are the same.
+    ///
+    /// This bound exists to limit memory committed to unverified messages
+    /// (like votes) from future views. It should not be applied to
+    /// self-certifying artifacts (like certificates), which may arrive from
+    /// arbitrarily far ahead and let a lagging participant fast-forward.
+    pub const fn admits(self, pending: Self, term_length: TermLength) -> bool {
+        if pending.get() <= self.get() {
+            return true;
+        }
+        pending.get() == self.next().get()
+            || pending.get() == self.next_term_start(term_length).get()
+    }
 }
 
 impl Display for View {
@@ -1461,7 +1500,8 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).is_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
+                View::new(view)
+                    .is_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
                 expected,
                 "view={view}, term_length={term_length}"
             );
@@ -1482,7 +1522,10 @@ mod tests {
         ];
         for (a, b, term_length, expected) in cases {
             assert_eq!(
-                View::new(a).same_term(View::new(b), TermLength::new(commonware_utils::NZU64!(term_length))),
+                View::new(a).same_term(
+                    View::new(b),
+                    TermLength::new(commonware_utils::NZU64!(term_length))
+                ),
                 expected,
                 "a={a}, b={b}, term_length={term_length}"
             );
@@ -1503,9 +1546,83 @@ mod tests {
         ];
         for (view, term_length, expected) in cases {
             assert_eq!(
-                View::new(view).next_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
+                View::new(view)
+                    .next_term_start(TermLength::new(commonware_utils::NZU64!(term_length))),
                 View::new(expected),
                 "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_term_index() {
+        let cases = [
+            (0, 1, 0),
+            (1, 1, 1),
+            (5, 1, 5),
+            (0, 5, 0),
+            (1, 5, 1),
+            (5, 5, 1),
+            (6, 5, 2),
+            (10, 5, 2),
+            (11, 5, 3),
+        ];
+        for (view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(view).term_index(TermLength::new(commonware_utils::NZU64!(term_length))),
+                expected,
+                "view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_covers() {
+        let cases = [
+            (1, 1, 1, true),
+            (1, 2, 1, false),
+            (2, 1, 1, false),
+            (6, 6, 5, true),
+            (6, 8, 5, true),
+            (6, 10, 5, true),
+            (6, 11, 5, false),
+            (8, 6, 5, false),
+            (6, 5, 5, false),
+        ];
+        for (nullified, view, term_length, expected) in cases {
+            assert_eq!(
+                View::new(nullified).covers(
+                    View::new(view),
+                    TermLength::new(commonware_utils::NZU64!(term_length))
+                ),
+                expected,
+                "nullified={nullified}, view={view}, term_length={term_length}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_view_admits() {
+        let cases = [
+            (5, 4, 1, true),
+            (5, 5, 1, true),
+            (5, 6, 1, true),
+            (5, 7, 1, false),
+            (6, 7, 5, true),
+            (6, 11, 5, true),
+            (6, 8, 5, false),
+            (6, 12, 5, false),
+            (10, 11, 5, true),
+            (10, 12, 5, false),
+        ];
+        for (current, pending, term_length, expected) in cases {
+            assert_eq!(
+                View::new(current).admits(
+                    View::new(pending),
+                    TermLength::new(commonware_utils::NZU64!(term_length))
+                ),
+                expected,
+                "current={current}, pending={pending}, term_length={term_length}"
             );
         }
     }

@@ -732,7 +732,6 @@ impl EngineDefinition for MultiDbEngine {
             fetch_timeout: Duration::from_secs(2),
             fetch_concurrent: NZUsize!(3),
             term_length: TermLength::ONE,
-            term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(3),
             forwarding: ForwardingPolicy::Disabled,
         };

@@ -549,12 +549,10 @@ where
                 }
 
                 // Ignore votes from arbitrarily-future views (DOS via memory exhaustion).
-                // Allow votes from the next view (inclusive) since we may be slightly behind.
-                if view > current.view.next() {
-                    // The next view may be the first view of the next term, so we allow it.
-                    if view != current.view.next_term_start(self.term_length) {
-                        continue;
-                    }
+                // Allow votes from the next view since we may be slightly behind, and from
+                // the first view of the next term (a nullification skips there).
+                if !current.view.admits(view, self.term_length) {
+                    continue;
                 }
 
                 // Add the vote to the verifier

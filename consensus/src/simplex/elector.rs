@@ -163,10 +163,8 @@ pub struct RoundRobinElector<S: Scheme> {
 
 impl<S: Scheme> Elector<S> for RoundRobinElector<S> {
     fn elect(&self, round: Round, _certificate: Option<&S::Certificate>) -> Participant {
-        // In order to get a stable leader, use the index of the term
-        let term_start = round.view().term_start(self.term_length);
-        // Convert the first view in the term into a 1-based term number.
-        let term_idx = term_start.get().div_ceil(self.term_length.get());
+        // In order to get a stable leader, use the 1-based index of the term
+        let term_idx = round.view().term_index(self.term_length);
 
         // Incorporate the epoch number
         let n = self.permutation.len();
@@ -584,7 +582,8 @@ mod tests {
         let Fixture { participants, .. } =
             bls12381_threshold_vrf::fixture::<MinPk, _>(&mut rng, NAMESPACE, 5);
         let participants = Set::try_from_iter(participants).unwrap();
-        let _: RandomElector<ThresholdScheme> = Random.build(&participants, TermLength::new(NZU64!(2)));
+        let _: RandomElector<ThresholdScheme> =
+            Random.build(&participants, TermLength::new(NZU64!(2)));
     }
 
     #[test]
@@ -630,7 +629,8 @@ mod tests {
 
                 // Build the shuffled elector
                 let elector: RoundRobinElector<ed25519::Scheme> =
-                    RoundRobin::<Sha256>::shuffled(&shuffle_seed).build(&participants, TermLength::ONE);
+                    RoundRobin::<Sha256>::shuffled(&shuffle_seed)
+                        .build(&participants, TermLength::ONE);
 
                 // Encode the permutation as the commitment
                 elector.permutation.encode().to_vec()

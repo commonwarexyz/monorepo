@@ -189,10 +189,6 @@ where
     /// of a term, participants skip the rest of the term.
     pub term_length: TermLength,
 
-    /// If true, stop voting to notarize later views in a term after voting to
-    /// nullify any earlier view in that term.
-    pub term_stop_notarize_on_nullify: bool,
-
     /// Maximum time an entered view may remain unfinalized before we allow a
     /// local nullify vote for the current view.
     ///

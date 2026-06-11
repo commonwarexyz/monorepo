@@ -53,7 +53,9 @@ pub struct Round<S: Scheme, D: Digest> {
     certification_deadline: Option<SystemTime>,
     finalization_deadline: Option<SystemTime>,
     timeout_retry: Option<SystemTime>,
-    timeout_reason: Option<TimeoutReason>,
+    // First explicit timeout latched for this round (see latch_timeout).
+    // Unlike timeout_retry, this is first-wins and never moves.
+    latched_timeout: Option<(SystemTime, TimeoutReason)>,
 
     // Certificates received from batcher (constructed or from network).
     notarization: Option<Notarization<S, D>>,
@@ -81,7 +83,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             certification_deadline: None,
             finalization_deadline: None,
             timeout_retry: None,
-            timeout_reason: None,
+            latched_timeout: None,
             notarization: None,
             broadcast_notarize: false,
             broadcast_notarization: false,
@@ -341,28 +343,27 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         self.timeout_retry = when;
     }
 
-    /// Records the first timeout reason observed for this round.
+    /// Latches the first explicit timeout for this round, pinning the moment it
+    /// expired. Later latches preserve the original deadline and reason, and
+    /// latching is ignored once a nullify broadcast began (retry cadence
+    /// governs the round from then on).
     ///
-    /// Returns `(canonical_reason, is_first_timeout)` where `is_first_timeout` is true
-    /// only when this call records the first timeout reason for the round.
-    pub const fn set_timeout_reason(&mut self, reason: TimeoutReason) -> (TimeoutReason, bool) {
-        match self.timeout_reason {
-            Some(canonical) => (canonical, false),
-            None => {
-                self.timeout_reason = Some(reason);
-                (reason, true)
-            }
+    /// A latched timeout makes [`Self::next_timeout`] fire immediately (and
+    /// stably across polls) without touching any deadline: in particular, the
+    /// finalization deadline anchors term-level stall protection and must not
+    /// be reset by a per-view timeout.
+    pub const fn latch_timeout(&mut self, now: SystemTime, reason: TimeoutReason) {
+        if self.latched_timeout.is_none() && !self.broadcast_nullify {
+            self.latched_timeout = Some((now, reason));
         }
     }
 
     /// Returns the latched explicit timeout reason, if any.
     pub const fn timeout_reason(&self) -> Option<TimeoutReason> {
-        self.timeout_reason
-    }
-
-    /// Returns whether we have already emitted a nullify vote for this round.
-    pub const fn is_retrying_nullify(&self) -> bool {
-        self.broadcast_nullify
+        match self.latched_timeout {
+            Some((_, reason)) => Some(reason),
+            None => None,
+        }
     }
 
     /// Returns a nullify vote if we should timeout/retry.
@@ -399,8 +400,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             self.timeout_retry = Some(next);
             return Some((next, TimeoutReason::Retry));
         }
-        if let Some(reason) = self.timeout_reason {
-            return Some((now, reason));
+        if let Some(latched) = self.latched_timeout {
+            return Some(latched);
         }
         if self.proposal().is_none() {
             if let Some(deadline) = self.leader_deadline {
@@ -569,6 +570,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Marks that we've broadcast our finalize vote to prevent duplicates.
     pub fn construct_finalize(&mut self) -> Option<&Proposal<D>> {
         // Ensure we haven't already broadcast a finalize vote or nullify vote.
+        // The nullify check is the never-healing base case of same-term vote
+        // safety (see the module documentation).
         if self.broadcast_finalize || self.broadcast_nullify {
             return None;
         }

@@ -164,7 +164,6 @@ impl<
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
                 term_length: cfg.term_length,
-                term_stop_notarize_on_nullify: cfg.term_stop_notarize_on_nullify,
                 finalization_timeout: cfg.finalization_timeout,
             },
         );
@@ -471,6 +470,11 @@ impl<
     }
 
     /// Stores a finalization certificate and guards against leader equivocation.
+    ///
+    /// The finalization is appended to the journal without an immediate sync.
+    /// If a crash loses a finalization that healed the same-term finalize
+    /// gate, replay restores the blocked gate (which is safe) and it heals
+    /// again as soon as peers redeliver any covering finalization.
     async fn handle_finalization(&mut self, finalization: Finalization<S, D>) {
         let view = finalization.view();
         let artifact = Artifact::Finalization(finalization.clone());
@@ -847,7 +851,9 @@ impl<
     /// Emits any votes or certificates that became available for `view`.
     ///
     /// We don't need to iterate over all views to check for new actions because messages we receive
-    /// only affect a single view.
+    /// only affect a single view. In particular, healing the same-term finalize gate deliberately
+    /// does not retry finalize votes for views certified while the gate was blocked (see the module
+    /// documentation on same-term vote safety for the consequences).
     async fn notify<Sp: Sender, Sr: Sender>(
         &mut self,
         batcher: &mut batcher::Mailbox<S, D>,

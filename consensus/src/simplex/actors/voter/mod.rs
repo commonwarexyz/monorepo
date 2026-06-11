@@ -44,7 +44,6 @@ pub struct Config<
     pub timeout_retry: Duration,
     pub activity_timeout: ViewDelta,
     pub term_length: TermLength,
-    pub term_stop_notarize_on_nullify: bool,
     pub finalization_timeout: Duration,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
@@ -278,7 +277,6 @@ mod tests {
             timeout_retry,
             activity_timeout: ViewDelta::new(10),
             term_length: TermLength::ONE,
-            term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(4),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -384,7 +382,6 @@ mod tests {
             timeout_retry,
             activity_timeout: ViewDelta::new(10),
             term_length,
-            term_stop_notarize_on_nullify: false,
             finalization_timeout,
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -544,7 +541,6 @@ mod tests {
             timeout_retry: Duration::from_mins(60),
             activity_timeout: ViewDelta::new(10),
             term_length: TermLength::ONE,
-            term_stop_notarize_on_nullify: false,
             finalization_timeout: Duration::from_secs(7),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
@@ -974,7 +970,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
@@ -1207,7 +1202,6 @@ mod tests {
                 timeout_retry: Duration::from_millis(1000),
                 activity_timeout,
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -1857,7 +1851,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2049,7 +2042,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2245,7 +2237,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2341,7 +2332,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2488,7 +2478,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2639,8 +2628,9 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
             let elector = RoundRobin::<Sha256>::default();
             let first_round = Round::new(Epoch::new(333), View::new(1));
-            let built_elector: RoundRobinElector<S> =
-                elector.clone().build(schemes[0].participants(), TermLength::new(NZU64!(2)));
+            let built_elector: RoundRobinElector<S> = elector
+                .clone()
+                .build(schemes[0].participants(), TermLength::new(NZU64!(2)));
             let leader_idx = built_elector.elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
             let (mut mailbox, mut batcher_receiver, relay) = setup_voter_with_term_and_latency(
@@ -2726,6 +2716,141 @@ mod tests {
         );
         finalization_timeout_nullifies_current_view::<_, _>(ed25519::fixture);
         finalization_timeout_nullifies_current_view::<_, _>(secp256r1::fixture);
+    }
+
+    fn finalize_resumes_after_same_term_heal<S, F>(mut fixture: F)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"finalize_resumes_after_same_term_heal".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(30));
+        executor.start(|mut context| async move {
+            let (network, oracle) = Network::new(
+                context.child("network"),
+                NConfig {
+                    max_size: 1024 * 1024,
+                    disconnect_on_block: true,
+                    tracked_peer_sets: NZUsize!(1),
+                },
+            );
+            network.start();
+
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _relay) = setup_voter_with_term_and_latency(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+                Duration::from_secs(10),
+                Duration::from_secs(20),
+                TermLength::new(NZU64!(3)),
+                0.0,
+                mocks::application::Certifier::Always,
+            )
+            .await;
+
+            match batcher_receiver.recv().await.unwrap() {
+                batcher::Message::Update { .. } => {}
+                _ => panic!("expected initial update"),
+            }
+
+            // The leader of term [1,3] never proposes, so the leader timeout
+            // fires and we nullify view 1.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Nullify(nullify)) => {
+                        assert_eq!(nullify.view(), View::new(1));
+                        break;
+                    }
+                    batcher::Message::Update { .. } => {}
+                    _ => panic!("expected nullify for view 1"),
+                }
+            }
+
+            // Views 1 and 2 notarize and certify anyway, advancing us to view
+            // 3. The finalize votes are blocked by the same-term nullify at
+            // view 1 (no finalization observed yet).
+            let view_1 = View::new(1);
+            let proposal_1 = Proposal::new(
+                Round::new(Epoch::new(333), view_1),
+                View::zero(),
+                Sha256::hash(b"finalize_resume_view_1"),
+            );
+            let (_, notarization_1) = build_notarization(&schemes, &proposal_1, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_1));
+
+            let view_2 = View::new(2);
+            let proposal_2 = Proposal::new(
+                Round::new(Epoch::new(333), view_2),
+                view_1,
+                Sha256::hash(b"finalize_resume_view_2"),
+            );
+            let (_, notarization_2) = build_notarization(&schemes, &proposal_2, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_2));
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Update { current, .. } if current == View::new(3) => break,
+                    batcher::Message::Constructed(Vote::Finalize(_)) => {
+                        panic!("finalize must be blocked by the same-term nullify");
+                    }
+                    _ => {}
+                }
+            }
+
+            // The finalization for view 1 arrives: our nullify can never form
+            // a nullification, so the gate heals.
+            let (_, finalization_1) = build_finalization(&schemes, &proposal_1, quorum);
+            mailbox.resolved(Certificate::Finalization(finalization_1));
+
+            // View 3 (same term) notarizes and certifies: with the gate
+            // healed, its finalize vote must be broadcast.
+            let view_3 = View::new(3);
+            let proposal_3 = Proposal::new(
+                Round::new(Epoch::new(333), view_3),
+                view_2,
+                Sha256::hash(b"finalize_resume_view_3"),
+            );
+            let (_, notarization_3) = build_notarization(&schemes, &proposal_3, quorum);
+            mailbox.resolved(Certificate::Notarization(notarization_3));
+            loop {
+                select! {
+                    msg = batcher_receiver.recv() => {
+                        if let batcher::Message::Constructed(Vote::Finalize(finalize)) = msg.unwrap() {
+                            assert_eq!(
+                                finalize.view(),
+                                View::new(3),
+                                "finalize voting should resume at the first view certified after the heal"
+                            );
+                            break;
+                        }
+                    },
+                    _ = context.sleep(Duration::from_secs(5)) => {
+                        panic!("expected finalize for view 3 after heal");
+                    }
+                }
+            }
+        });
+    }
+
+    #[test_traced]
+    fn test_finalize_resumes_after_same_term_heal() {
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_threshold_vrf::fixture::<MinPk, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_threshold_vrf::fixture::<MinSig, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_multisig::fixture::<MinPk, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(bls12381_multisig::fixture::<MinSig, _>);
+        finalize_resumes_after_same_term_heal::<_, _>(ed25519::fixture);
+        finalize_resumes_after_same_term_heal::<_, _>(secp256r1::fixture);
     }
 
     fn finalization_from_resolver<S, F, L>(mut fixture: F)
@@ -2998,7 +3123,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout,
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3213,7 +3337,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3415,7 +3538,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3583,7 +3705,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3928,7 +4049,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -4215,7 +4335,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4344,7 +4463,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4486,7 +4604,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4649,7 +4766,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4753,7 +4869,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4926,7 +5041,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5041,7 +5155,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5211,7 +5324,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5328,7 +5440,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5498,7 +5609,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5674,7 +5784,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5777,7 +5886,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5958,7 +6066,6 @@ mod tests {
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6144,7 +6251,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6334,7 +6440,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7277,7 +7382,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7393,7 +7497,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8623,7 +8726,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8751,7 +8853,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8900,7 +9001,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9014,7 +9114,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9158,7 +9257,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9278,7 +9376,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9418,7 +9515,6 @@ mod tests {
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
                 term_length: TermLength::ONE,
-                term_stop_notarize_on_nullify: false,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
