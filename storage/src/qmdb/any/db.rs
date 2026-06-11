@@ -226,7 +226,7 @@ where
         &self,
         keys: &[&U::Key],
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>> {
-        let results = self.get_many_with_locations::<false>(keys).await?;
+        let results = self.get_many_with_locations(keys).await?;
         Ok(results
             .into_iter()
             .map(|result| result.map(|(value, ..)| value))
@@ -234,14 +234,12 @@ where
     }
 
     /// Like [`Self::get_many`] but additionally returns the committed location each value was
-    /// read from. When `CACHE` is set, each result also carries the update's next key (for
-    /// batch reads to stash for merkleize); plain reads pass `false` and pay nothing.
+    /// read from, plus the update's cached payload (stashed by batch reads for merkleize).
     #[allow(clippy::type_complexity)]
-    pub(crate) async fn get_many_with_locations<const CACHE: bool>(
+    pub(crate) async fn get_many_with_locations(
         &self,
         keys: &[&U::Key],
-    ) -> Result<Vec<Option<(U::Value, Location<F>, Option<U::Key>)>>, crate::qmdb::Error<F>>
-    {
+    ) -> Result<Vec<Option<(U::Value, Location<F>, U::Cached)>>, crate::qmdb::Error<F>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
@@ -253,8 +251,8 @@ where
         // Phase 1: Collect candidate locations from the in-memory index.
         // Each key may map to multiple locations due to hash collisions.
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
-        let mut results: Vec<Option<(U::Value, Location<F>, Option<U::Key>)>> =
-            vec![None; keys.len()];
+        let mut results: Vec<Option<(U::Value, Location<F>, U::Cached)>> =
+            (0..keys.len()).map(|_| None).collect();
 
         self.snapshot
             .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
@@ -289,8 +287,7 @@ where
                 panic!("location does not reference update operation. loc={pos}");
             };
             if data.key() == keys[key_idx] {
-                let next_key = if CACHE { data.next_key().cloned() } else { None };
-                results[key_idx] = Some((data.value().clone(), Location::new(pos), next_key));
+                results[key_idx] = Some((data.value().clone(), Location::new(pos), data.cached()));
             }
         }
 

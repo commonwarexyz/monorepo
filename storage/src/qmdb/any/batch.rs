@@ -42,12 +42,10 @@ type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 /// of a given key during ordered merkleization.
 type PrevCandidates<K, F, V> = Vec<(K, (V, Location<F>))>;
 
-/// Committed-DB locations (plus the old op's next key, when the update kind has one) cached
-/// by a batch's reads, keyed by the resolved key.
-type ResolvedReads<F, U> = AHashMap<
-    <U as update::Update>::Key,
-    (Location<F>, Option<<U as update::Update>::Key>),
->;
+/// Committed-DB locations (plus the update kind's cached payload) cached by a batch's reads,
+/// keyed by the resolved key.
+type ResolvedReads<F, U> =
+    AHashMap<<U as update::Update>::Key, (Location<F>, <U as update::Update>::Cached)>;
 
 /// What happened to a key in this batch.
 #[derive(Clone)]
@@ -186,11 +184,10 @@ where
     /// The committed DB or parent batch this batch was created from.
     base: Base<F, H::Digest, U, S>,
 
-    /// Committed-DB locations (plus the old op's next key, when the update kind has one)
-    /// cached by this batch's reads (`get`/`get_many`), keyed by the key they matched.
-    /// Consumed by `merkleize`: when a mutation key is present here, `merkleize` reuses the
-    /// location (and, for ordered, the old next key) and skips the redundant index probe and
-    /// journal read.
+    /// Committed-DB locations (plus the update kind's cached payload) cached by this batch's
+    /// reads (`get`/`get_many`), keyed by the key they matched. Consumed by `merkleize`: when
+    /// a mutation key is present here, `merkleize` reuses the location (and, for ordered, the
+    /// old next key) and skips the redundant index probe and journal read.
     ///
     /// Only committed-snapshot resolutions are cached. A cached location doubles as the
     /// key's previous committed location (`base_old_loc`), which holds because a
@@ -980,12 +977,12 @@ where
         }
 
         if !db_keys.is_empty() {
-            let db_results = db.get_many_with_locations::<true>(&db_keys).await?;
+            let db_results = db.get_many_with_locations(&db_keys).await?;
             let mut resolved = self.resolved.lock();
             resolved.reserve(db_keys.len());
             for (slot, result) in db_indices.into_iter().zip(db_results) {
-                results[slot] = result.map(|(value, loc, next_key)| {
-                    resolved.insert((*keys[slot]).clone(), (loc, next_key));
+                results[slot] = result.map(|(value, loc, cached)| {
+                    resolved.insert((*keys[slot]).clone(), (loc, cached));
                     value
                 });
             }
@@ -1058,7 +1055,7 @@ where
         // below, exactly where the read path would have emitted them.
         let mut cached: Vec<(K, Location<F>, Option<V::Value>)> =
             Vec::with_capacity(resolved.len());
-        for (key, (loc, _)) in resolved {
+        for (key, (loc, ())) in resolved {
             if let Some(mutation) = mutations.remove(&key) {
                 cached.push((key, loc, mutation));
             }
@@ -1265,7 +1262,6 @@ where
         // (one lookup per key on the hot path instead of a get-then-remove pair).
         let mut cached: Vec<(K, V::Value, Location<F>, K)> = Vec::with_capacity(resolved.len());
         for (key, (loc, old_next)) in resolved {
-            let old_next = old_next.expect("ordered updates always carry a next key");
             match mutations.remove(&key) {
                 Some(Some(value)) => cached.push((key, value, loc, old_next)),
                 Some(None) => {

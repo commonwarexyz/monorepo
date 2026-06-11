@@ -34,9 +34,9 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type Key = K;
     type Value = V::Value;
     type ValueEncoding = V;
-    fn next_key(&self) -> Option<&K> {
-        None
-    }
+    type Cached = ();
+
+    fn cached(&self) {}
 
     fn key(&self) -> &K {
         &self.0
