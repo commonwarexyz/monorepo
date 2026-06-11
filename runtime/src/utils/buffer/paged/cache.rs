@@ -148,9 +148,8 @@ struct CacheEntry {
     /// A bit indicating whether this page was recently referenced.
     referenced: AtomicBool,
 
-    /// The page bytes. Pages are immutable once cached: replacement swaps in a new buffer, so a
-    /// reader holding a clone keeps the bytes it observed regardless of later evictions or
-    /// updates.
+    /// The page bytes. Pages are immutable once cached: replacement swaps in a new buffer,
+    /// so a reader holding a clone keeps the bytes it observed.
     page: IoBuf,
 }
 
@@ -377,10 +376,10 @@ impl CacheRef {
                             error!(page_num, ?err, "Page fetch failed");
                         }
 
-                        // Re-copy the page into an exactly page-sized pooled buffer before
+                        // Copy the page into an exactly page-sized pooled buffer before
                         // taking the lock: the fetched buffer is a view of the physical page
-                        // (logical bytes plus checksum record), so caching it directly would pin
-                        // the larger physical allocation for the page's cache lifetime.
+                        // (logical bytes plus checksum record), and caching it directly would
+                        // pin the larger allocation.
                         let frozen = result.as_ref().ok().map(|page| {
                             let mut buf = pool.alloc(page.len());
                             buf.put_slice(page.as_ref());
@@ -444,8 +443,8 @@ impl CacheRef {
         let (mut page_num, offset_in_page) = self.offset_to_page(offset);
         assert_eq!(offset_in_page, 0);
 
-        // Copy each page into its own exactly page-sized pooled buffer before taking the write
-        // lock, so the lock is held only for the (cheap) handle insertions.
+        // Copy each page into its own exactly page-sized pooled buffer before taking the
+        // write lock, so the lock is held only for the handle insertions.
         let page_size = self.page_size as usize;
         let mut pages = Vec::with_capacity(buf.len() / page_size);
         while buf.len() >= page_size {
@@ -476,8 +475,8 @@ impl CacheRef {
 }
 
 impl Cache {
-    /// Return a new empty page cache with a max cache capacity of `capacity` pages, each of size
-    /// `page_size` bytes.
+    /// Return a new empty page cache holding at most `capacity` pages of `page_size` bytes
+    /// each.
     pub fn new(page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
         let capacity = capacity.get();

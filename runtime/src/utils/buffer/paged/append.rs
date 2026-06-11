@@ -557,13 +557,10 @@ impl<B: Blob> Append<B> {
     /// Pass the contiguous bytes starting at `offset` to `f` if they can be obtained
     /// synchronously (e.g. without I/O), returning `None` otherwise.
     ///
-    /// The slice given to `f` never crosses a page boundary (when served from the page cache)
-    /// or the end of buffered data (when served from the tip buffer), so it may be shorter
-    /// than the caller needs; callers requiring more bytes must fall back to a copying read
-    /// like [Self::try_read_sync]. Bytes served from the page cache are retained by a
-    /// refcounted handle, so `f` runs after the cache lock is released.
-    ///
-    /// Like [Self::try_read_sync], the page cache is consulted before the tip buffer.
+    /// The slice never crosses a page boundary (page cache) or the end of buffered data (tip
+    /// buffer), so it may be shorter than the caller needs; fall back to a copying read like
+    /// [Self::try_read_sync] for more. Cached pages are retained by refcount, so `f` runs
+    /// without holding the cache lock.
     pub fn try_read_sync_with<R>(&self, offset: u64, f: impl FnOnce(&[u8]) -> R) -> Option<R> {
         // Fast path: clone the page containing `offset` out of the page cache.
         let (page_num, offset_in_page) = self.cache_ref.offset_to_page(offset);
@@ -571,7 +568,7 @@ impl<B: Blob> Append<B> {
             return Some(f(&page.as_ref()[offset_in_page as usize..]));
         }
 
-        // Tip path: serve from buffered bytes under the (non-blocking) buffer read lock.
+        // Tip path: serve from buffered bytes if the buffer lock is free.
         let buffer = self.buffer.try_read().ok()?;
         if offset < buffer.offset || offset >= buffer.size() {
             return None;
@@ -1816,8 +1813,8 @@ mod tests {
 
             append.sync().await.unwrap();
 
-            // After a full drain the tip no longer pins a slot. The flushed page was published
-            // to the page cache (one slot), so exactly one slot must remain free.
+            // After a full drain the tip releases its slot; only the published cache page
+            // still occupies one.
             assert!(
                 pool.try_alloc(BUFFER_SIZE).is_ok(),
                 "sync should release pooled backing when no partial tail remains"

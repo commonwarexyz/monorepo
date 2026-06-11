@@ -736,13 +736,12 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             return None;
         }
 
-        // Fast path: parse and decode the frame directly from the cached page (or tip buffer)
-        // bytes, with no scratch buffer. `Some(answer)` from the closure is a final result;
-        // `None` means the frame straddles the end of the slice and must be assembled through
-        // the scratch path below.
+        // Fast path: parse and decode the frame directly from the cached page (or tip
+        // buffer) bytes. `Some(answer)` is final; `None` means the frame straddles the slice
+        // end and needs the scratch path below.
         let compressed = self.compression.is_some();
         let fast = blob.try_read_sync_with(offset, |bytes| {
-            // When the slice ends before the blob's data does, a parse that runs out of bytes
+            // If the slice ends before the blob's data does, a parse that runs out of bytes
             // may just be straddling a page boundary rather than hitting real end-of-data.
             let truncated = (bytes.len() as u64) < remaining;
             let mut cursor = Cursor::new(bytes);

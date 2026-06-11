@@ -236,9 +236,9 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             return None;
         }
 
-        // Fast path: decode directly from the cached page (or tip buffer) bytes, with no
-        // scratch buffer. `Some(None)` from the closure means the item straddles the end of
-        // the slice and must be assembled through the scratch path below.
+        // Fast path: decode directly from the cached page (or tip buffer) bytes.
+        // `Some(None)` means the item straddles the slice end and needs the scratch path
+        // below.
         match blob.try_read_sync_with(offset, |bytes| {
             (bytes.len() >= Self::CHUNK_SIZE).then(|| A::decode(&bytes[..Self::CHUNK_SIZE]).ok())
         })? {
