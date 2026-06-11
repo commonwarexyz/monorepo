@@ -313,7 +313,6 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
-        let _timer = self.metrics.read_timer();
         self.metrics.read_calls.inc();
 
         // Serve from the page cache synchronously when possible, avoiding the async storage path.
@@ -324,6 +323,7 @@ impl<E: Context, A: CodecFixedShared> super::Reader for Reader<'_, E, A> {
         }
         self.metrics.record_cache_misses(1);
 
+        let _timer = self.metrics.read_timer();
         let item = self.guard.read(pos, self.items_per_blob).await?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -4491,7 +4491,7 @@ mod tests {
                 "fixed_metrics_sync_calls_total 1",
                 "fixed_metrics_append_duration_count 1",
                 "fixed_metrics_append_many_duration_count 1",
-                "fixed_metrics_read_duration_count 1",
+                "fixed_metrics_read_duration_count 0",
                 "fixed_metrics_read_many_duration_count 1",
                 "fixed_metrics_commit_duration_count 1",
                 "fixed_metrics_sync_duration_count 1",
@@ -4501,6 +4501,35 @@ mod tests {
             ] {
                 assert!(buffer.contains(expected), "{expected}\n{buffer}");
             }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_read_miss_timed() {
+        // Reads served from storage record a read_duration sample; cache hits do not.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let journal =
+                Journal::<_, Digest>::init(context.child("miss"), test_cfg(&context, NZU64!(2)))
+                    .await
+                    .unwrap();
+            for i in 0..20 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // The page cache cannot hold every page, so some position must be cold.
+            let reader = journal.reader().await;
+            let pos = (0..20)
+                .find(|&pos| reader.try_read_sync(pos).is_none())
+                .expect("some position should be cold");
+            assert_eq!(reader.read(pos).await.unwrap(), test_digest(pos));
+            drop(reader);
+
+            let buffer = context.encode();
+            assert!(buffer.contains("miss_read_duration_count 1"), "{buffer}");
 
             journal.destroy().await.unwrap();
         });
