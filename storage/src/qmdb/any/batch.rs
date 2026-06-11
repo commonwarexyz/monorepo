@@ -1266,18 +1266,17 @@ where
         let (mut mutations, m) = self.into_parts();
 
         // Pull update mutations whose committed op this batch's reads already resolved: they
-        // skip the index probe and journal re-read, and their old op's payload feeds the
+        // skip the index probe and journal re-read, and their old op's next key feeds the
         // candidate sets directly. Deletes never consume the cache because a deleted key's
         // own-bucket scan doubles as same-bucket predecessor discovery.
-        let mut cached: Vec<(K, V::Value, Location<F>, V::Value, K)> =
-            Vec::with_capacity(resolved.len());
-        for (key, (loc, (old_value, old_next))) in resolved {
+        let mut cached: Vec<(K, V::Value, Location<F>, K)> = Vec::with_capacity(resolved.len());
+        for (key, (loc, old_next)) in resolved {
             if matches!(mutations.get(&key), Some(Some(_))) {
                 let value = mutations
                     .remove(&key)
                     .flatten()
                     .expect("mutation presence checked above");
-                cached.push((key, value, loc, old_value, old_next));
+                cached.push((key, value, loc, old_next));
             }
         }
 
@@ -1327,10 +1326,13 @@ where
         }
 
         // Merge cache-resolved updates: their old op's next_key and (key, value, loc) feed the
-        // candidate sets exactly as the skipped journal read would have.
-        for (key, value, loc, old_value, old_next) in cached {
+        // candidate sets exactly as the skipped journal read would have. The prev-candidate
+        // value uses the NEW value rather than the old one: a prev candidate's value is only
+        // consumed when the predecessor-rewrite loop emits an op for it, and that loop skips
+        // every key present in `updated`, so a cached key's prev-candidate value is never read.
+        for (key, value, loc, old_next) in cached {
             next_candidates.push(old_next);
-            prev_candidates.push((key.clone(), (old_value, loc)));
+            prev_candidates.push((key.clone(), (value.clone(), loc)));
             updated.push((key, value, loc));
         }
 

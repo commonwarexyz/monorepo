@@ -44,10 +44,10 @@ impl<K: Key, V: ValueEncoding> UpdateTrait for Update<K, V> {
     type ValueEncoding = V;
     const CACHES_READS: bool = true;
 
-    type Cached = (V::Value, K);
+    type Cached = K;
 
-    fn cached(&self) -> (V::Value, K) {
-        (self.value.clone(), self.next_key.clone())
+    fn cached(&self) -> K {
+        self.next_key.clone()
     }
 
     fn key(&self) -> &K {
