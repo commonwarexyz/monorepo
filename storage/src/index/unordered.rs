@@ -146,7 +146,38 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     fn insert_and_retain(&mut self, key: &[u8], value: V, should_retain: impl Fn(&V) -> bool) {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => {
+            Entry::Occupied(mut entry) => {
+                // Fast path: a key with no overflow chain holds exactly one value, so retaining
+                // it and inserting the new value reduces to a few direct cases. This avoids
+                // building a cursor for the common (collision-free) case. The cases below match
+                // the cursor's value ordering and metric accounting exactly.
+                if !self.overflow.contains_key(&k) {
+                    match (should_retain(entry.get()), should_retain(&value)) {
+                        // Keep both: the new value joins the chain as the oldest (the position a
+                        // cursor insert after retain would place it).
+                        (true, true) => {
+                            self.overflow.entry(k).or_default().push(value);
+                            self.items.inc();
+                        }
+                        // Drop the existing value, keep the new one: replace in place.
+                        (false, true) => {
+                            *entry.get_mut() = value;
+                            self.pruned.inc();
+                        }
+                        // Drop both: remove the key entirely.
+                        (false, false) => {
+                            entry.remove();
+                            self.keys.dec();
+                            self.items.dec();
+                            self.pruned.inc();
+                        }
+                        // Keep the existing value, drop the new one: nothing to do.
+                        (true, false) => {}
+                    }
+                    return;
+                }
+
+                // Slow path: the key has conflicting values; walk them with a cursor.
                 let mut cursor = Cursor::<'_, T::Key, V>::new(
                     entry,
                     k,
