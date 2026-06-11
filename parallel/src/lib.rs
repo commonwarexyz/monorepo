@@ -381,8 +381,6 @@ commonware_macros::stability_scope!(BETA {
 
         /// Sorts a slice with a comparator, preserving the order of equal elements.
         ///
-        /// The default implementation sorts on the current thread.
-        ///
         /// # Examples
         ///
         /// ```
@@ -396,10 +394,7 @@ commonware_macros::stability_scope!(BETA {
         fn sort_by<T, C>(&self, items: &mut [T], compare: C)
         where
             T: Send,
-            C: Fn(&T, &T) -> Ordering + Send + Sync,
-        {
-            items.sort_by(compare);
-        }
+            C: Fn(&T, &T) -> Ordering + Send + Sync;
 
         /// Return the number of threads that are available, as a hint to chunking.
         fn parallelism_hint(&self) -> usize;
@@ -460,6 +455,14 @@ commonware_macros::stability_scope!(BETA {
             RB: Send,
         {
             (a(), b())
+        }
+
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            items.sort_by(compare);
         }
 
         fn parallelism_hint(&self) -> usize {
@@ -589,9 +592,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             T: Send,
             C: Fn(&T, &T) -> Ordering + Send + Sync,
         {
-            // Small slices and single-threaded pools gain nothing from dispatch and pay
-            // the cross-thread handoff into the pool.
-            if items.len() < MIN_PARALLEL_SORT || self.thread_pool.current_num_threads() <= 1 {
+            // Small slices gain nothing from dispatch and pay the handoff into the pool.
+            if items.len() < MIN_PARALLEL_SORT {
                 items.sort_by(compare);
                 return;
             }

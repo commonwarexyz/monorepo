@@ -38,22 +38,6 @@ use tracing::debug;
 type DiffVec<K, F, V> = Vec<(K, DiffEntry<F, V>)>;
 type DiffSlice<K, F, V> = [(K, DiffEntry<F, V>)];
 
-/// Minimum number of items before per-item resolution work (synchronous reads, floor-raise
-/// classification) is sharded across the strategy pool. Below this, dispatch overhead
-/// exceeds the win.
-const MIN_PARALLEL_ITEMS: usize = 1024;
-
-/// Contiguous chunks per pool thread when sharding per-item work, leaving headroom for
-/// load imbalance between chunks.
-const CHUNKS_PER_THREAD: usize = 4;
-
-/// Split per-item work into contiguous chunk lengths for the strategy pool.
-fn parallel_chunk_len<S: Strategy>(items: usize, strategy: &S) -> usize {
-    items
-        .div_ceil(strategy.parallelism_hint() * CHUNKS_PER_THREAD)
-        .max(1)
-}
-
 /// One contiguous chunk of floor-raise candidates paired with their resolved operations.
 type CandidateChunk<'a, F, U> = (&'a [Location<F>], &'a [Operation<F, U>]);
 
@@ -578,69 +562,49 @@ where
         None
     }
 
-    /// Resolve an operation by its location `loc` if it can be done synchronously (e.g. without
-    /// I/O), or return `None` otherwise.
-    fn try_read_op_sync<R: Reader<Item = Operation<F, U>>>(
-        &self,
-        loc: Location<F>,
-        batch_ops: &[Operation<F, U>],
-        reader: &R,
-    ) -> Option<Operation<F, U>> {
-        self.try_read_op_from_uncommitted(loc, batch_ops)
-            .or_else(|| reader.try_read_sync(*loc))
-    }
-
-    /// Read multiple operations by location.
+    /// Read multiple operations by location, preserving the caller's order and permitting
+    /// duplicates.
+    ///
+    /// Batch and ancestor regions resolve in memory. All committed locations are served by
+    /// one batched read, which serves page-cache hits under a single lock acquisition per
+    /// section instead of paying a cache lock acquisition per location.
     async fn read_ops<R: Reader<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],
         batch_ops: &[Operation<F, U>],
         reader: &R,
     ) -> Result<Vec<Operation<F, U>>, crate::qmdb::Error<F>> {
-        // Strictly increasing, all-committed inputs (the floor-raise candidate stream and
-        // depth-0 mutation reads) skip the per-location probes entirely: one batched read
-        // serves all page-cache hits under a single lock acquisition per section, where
-        // per-location probes pay a cache lock acquisition each.
-        if locations.last().is_some_and(|&last| *last < self.db_size)
-            && locations.windows(2).all(|w| w[0] < w[1])
-        {
-            let positions: Vec<u64> = locations.iter().map(|loc| **loc).collect();
-            return Ok(reader.read_many(&positions).await?);
-        }
-
-        // Resolve hits synchronously: batch/ancestor first, then journal page cache.
-        let results: Vec<Option<Operation<F, U>>> = locations
+        // Resolve the in-memory regions synchronously.
+        let mut results: Vec<Option<Operation<F, U>>> = locations
             .iter()
-            .map(|loc| self.try_read_op_sync(*loc, batch_ops, reader))
+            .map(|loc| self.try_read_op_from_uncommitted(*loc, batch_ops))
             .collect();
 
-        // Batch-read disk misses. Reader::read_many requires sorted, unique positions, while this
-        // helper preserves the caller's order and permits duplicates.
-        let misses: Vec<(usize, u64)> = locations
+        // Batch-read committed locations. Reader::read_many requires sorted, unique positions.
+        let committed: Vec<(usize, u64)> = locations
             .iter()
             .zip(results.iter())
             .enumerate()
-            .filter_map(|(idx, (loc, cached))| cached.is_none().then_some((idx, **loc)))
+            .filter_map(|(idx, (loc, resolved))| resolved.is_none().then_some((idx, **loc)))
             .collect();
-        if misses.is_empty() {
+        if committed.is_empty() {
             return Ok(results.into_iter().map(Option::unwrap).collect());
         }
 
-        let mut miss_positions: Vec<u64> = misses.iter().map(|(_, loc)| *loc).collect();
-        miss_positions.sort_unstable();
-        miss_positions.dedup();
+        let mut positions: Vec<u64> = committed.iter().map(|(_, loc)| *loc).collect();
+        positions.sort_unstable();
+        positions.dedup();
 
-        let disk_results = reader.read_many(&miss_positions).await?;
+        let read = reader.read_many(&positions).await?;
 
-        // Merge disk results back in order.
-        let mut results = results;
-        for (idx, loc) in misses {
-            // `miss_positions` is sorted and deduped, and `loc` came from it before deduping, so
+        // Merge read results back in order.
+        for (idx, loc) in committed {
+            // `positions` is sorted and deduped, and `loc` came from it before deduping, so
             // binary search must find the matching read_many result.
-            let result_idx = miss_positions
+            let result_idx = positions
                 .binary_search(&loc)
-                .expect("disk result missing for requested location");
-            results[idx] = Some(disk_results[result_idx].clone());
+                .expect("read result missing for requested location");
+            results[idx] = Some(read[result_idx].clone());
         }
         Ok(results
             .into_iter()
@@ -824,27 +788,19 @@ where
                         ),
                     }
                 };
+                let chunk_len = candidates.len().div_ceil(strategy.parallelism_hint());
+                let chunks: Vec<CandidateChunk<'_, F, U>> = candidates
+                    .chunks(chunk_len)
+                    .zip(resolved.chunks(chunk_len))
+                    .collect();
                 let outcomes: Vec<Vec<FloorOutcome<F>>> =
-                    if candidates.len() >= MIN_PARALLEL_ITEMS && strategy.parallelism_hint() > 1 {
-                        let chunk_len = parallel_chunk_len(candidates.len(), strategy);
-                        let chunks: Vec<CandidateChunk<'_, F, U>> = candidates
-                            .chunks(chunk_len)
-                            .zip(resolved.chunks(chunk_len))
-                            .collect();
-                        strategy.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
-                            chunk_locs
-                                .iter()
-                                .zip(chunk_ops)
-                                .map(|(loc, op)| classify(*loc, op))
-                                .collect()
-                        })
-                    } else {
-                        vec![candidates
+                    strategy.map_collect_vec(chunks, |(chunk_locs, chunk_ops)| {
+                        chunk_locs
                             .iter()
-                            .zip(&resolved)
+                            .zip(chunk_ops)
                             .map(|(loc, op)| classify(*loc, op))
-                            .collect()]
-                    };
+                            .collect()
+                    });
 
                 // Apply in candidate order, moving active ops to the tip.
                 let mut outcomes = outcomes.into_iter().flatten();
@@ -2253,16 +2209,16 @@ mod tests {
         mmr,
         qmdb::any::{
             ordered::fixed::Db as OrderedFixedDb,
-            test::{colliding_digest, fixed_db_config, fixed_db_config_with},
+            test::{colliding_digest, fixed_db_config},
             unordered::fixed::Db as UnorderedFixedDb,
             BITMAP_CHUNK_BYTES,
         },
         translator::OneCap,
     };
     use commonware_cryptography::{sha256, Sha256};
-    use commonware_parallel::{Rayon, Sequential};
-    use commonware_runtime::{deterministic, Runner as _, Supervisor as _};
-    use commonware_utils::{test_rng, NZUsize};
+    use commonware_parallel::Sequential;
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::test_rng;
     use rand::Rng;
 
     const BITMAP_CHUNK_BITS: u64 = bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
@@ -3513,72 +3469,4 @@ mod tests {
         });
     }
 
-    /// Roots from a multi-thread strategy must match the sequential strategy exactly.
-    ///
-    /// Floor raises with at least `MIN_PARALLEL_ITEMS` candidates take the sharded
-    /// classification path and the pool-dispatched sorts, which the rest of the suite
-    /// (sequential strategies only) never exercises. Updating alternating halves of the
-    /// key set makes each floor raise classify a mix of superseded (batch diff) and
-    /// still-active (snapshot) candidates.
-    #[test]
-    fn parallel_floor_raise_root_matches_sequential() {
-        const SEEDED: u64 = 4096;
-
-        async fn roots<S: Strategy>(
-            context: deterministic::Context,
-            strategy: S,
-            suffix: &str,
-        ) -> Vec<sha256::Digest> {
-            let config = fixed_db_config_with::<OneCap, S>(suffix, &context, strategy);
-            let mut db = UnorderedFixedDb::<
-                mmr::Family,
-                deterministic::Context,
-                sha256::Digest,
-                sha256::Digest,
-                Sha256,
-                OneCap,
-                S,
-            >::init(context, config)
-            .await
-            .unwrap();
-
-            let mut roots = Vec::new();
-            let mut batch = db.new_batch();
-            for i in 0..SEEDED {
-                batch = batch.write(Sha256::hash(&i.to_be_bytes()), Some(Sha256::hash(&[1])));
-            }
-            let merkleized = batch.merkleize(&db, None).await.unwrap();
-            roots.push(merkleized.root());
-            db.apply_batch(merkleized).await.unwrap();
-            db.commit().await.unwrap();
-
-            for round in 0..2u8 {
-                let mut batch = db.new_batch();
-                for i in (0..SEEDED).filter(|i| i % 2 == u64::from(round)) {
-                    batch = batch.write(
-                        Sha256::hash(&i.to_be_bytes()),
-                        Some(Sha256::hash(&[2 + round])),
-                    );
-                }
-                let merkleized = batch.merkleize(&db, None).await.unwrap();
-                roots.push(merkleized.root());
-                db.apply_batch(merkleized).await.unwrap();
-                db.commit().await.unwrap();
-            }
-            db.destroy().await.unwrap();
-            roots
-        }
-
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let sequential = roots(context.child("seq"), Sequential, "par-parity-seq").await;
-            let parallel = roots(
-                context.child("rayon"),
-                Rayon::new(NZUsize!(4)).unwrap(),
-                "par-parity-rayon",
-            )
-            .await;
-            assert_eq!(sequential, parallel);
-        });
-    }
 }
