@@ -10,6 +10,7 @@ use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 
 mod fixed_append;
+mod fixed_mixed;
 mod fixed_read_random;
 mod fixed_read_sequential;
 mod fixed_replay;
@@ -18,6 +19,7 @@ mod variable_replay;
 
 criterion_main!(
     fixed_append::benches,
+    fixed_mixed::benches,
     fixed_read_random::benches,
     fixed_read_sequential::benches,
     fixed_replay::benches,
