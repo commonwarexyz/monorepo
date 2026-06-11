@@ -17,7 +17,6 @@ mod location;
 pub mod mem;
 pub mod mmb;
 pub mod mmr;
-pub mod path;
 mod position;
 mod proof;
 mod read;
@@ -141,10 +140,22 @@ pub trait Family: Copy + Clone + Debug + Default + Send + Sync + 'static {
     /// given `height`. The caller guarantees `height > 0` (leaves have no children).
     fn children(pos: Position<Self>, height: u32) -> (Position<Self>, Position<Self>);
 
-    /// Return the heights of the internal nodes that lie between `size_for(N)` and
-    /// `size_for(N+1)`, where `N` is the given leaf count. These are the nodes created
-    /// when the `N`-th leaf is appended.
-    fn parent_heights(leaves: Location<Self>) -> impl Iterator<Item = u32>;
+    /// Return the internal nodes created when the leaf at location `loc` is appended, as
+    /// `(height, leftmost)` pairs where `leftmost` is the location of the leftmost leaf in the
+    /// new node's subtree. These are the nodes that lie between `size_for(N)` and
+    /// `size_for(N+1)`, where `N` is the given leaf location.
+    fn parent_heights(loc: Location<Self>) -> impl Iterator<Item = (u32, Location<Self>)>;
+
+    /// Return the position of the node at `height` whose subtree spans leaves
+    /// `[leftmost, leftmost + 2^height)`, or `None` if no such node exists in a structure with
+    /// `leaves` leaves.
+    ///
+    /// `leftmost` must be aligned to `2^height`.
+    fn subtree_root(
+        leftmost: Location<Self>,
+        height: u32,
+        leaves: Location<Self>,
+    ) -> Option<Position<Self>>;
 
     /// Return the height of the node at `pos`.
     ///
@@ -426,4 +437,70 @@ pub enum Error<F: Family> {
     /// Rewind was attempted but no prior committed state is available.
     #[error("rewind beyond history")]
     RewindBeyondHistory,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloc::collections::BTreeMap;
+
+    /// Track every node created while appending leaves one at a time (positions are assigned in
+    /// append order), and verify that at every intermediate size, [`Family::subtree_root`]
+    /// reports exactly the nodes that exist with their actual positions, and that the leftmost
+    /// locations yielded by [`Family::parent_heights`] are consistent with [`Family::children`].
+    fn subtree_root_exhaustive<F: Family>(max_leaves: u64) {
+        // (leftmost, height) -> position, for every node created so far.
+        let mut created = BTreeMap::new();
+        let mut next_pos = 0u64;
+        for leaf in 0..max_leaves {
+            created.insert((leaf, 0u32), next_pos);
+            next_pos += 1;
+            for (height, leftmost) in F::parent_heights(Location::new(leaf)) {
+                let pos = next_pos;
+                next_pos += 1;
+                // The newborn's children must be the roots of the two halves of its subtree.
+                let half = 1u64 << (height - 1);
+                let (left, right) = F::children(Position::new(pos), height);
+                assert_eq!(
+                    created.get(&(*leftmost, height - 1)),
+                    Some(&*left),
+                    "left child of newborn at leaf {leaf}, height {height}"
+                );
+                assert_eq!(
+                    created.get(&(*leftmost + half, height - 1)),
+                    Some(&*right),
+                    "right child of newborn at leaf {leaf}, height {height}"
+                );
+                created.insert((*leftmost, height), pos);
+            }
+
+            // subtree_root for every aligned leftmost at every height (plus one aligned
+            // leftmost past the end) must agree with the set of created nodes.
+            let leaves = Location::<F>::new(leaf + 1);
+            for height in 0..=(leaf + 1).ilog2() + 1 {
+                let width = 1u64 << height;
+                let mut leftmost = 0u64;
+                while leftmost <= leaf + width {
+                    let expected = created.get(&(leftmost, height)).copied();
+                    let got = F::subtree_root(Location::new(leftmost), height, leaves);
+                    assert_eq!(
+                        got.map(|p| *p),
+                        expected,
+                        "subtree_root mismatch: leftmost={leftmost} height={height} leaves={leaves}"
+                    );
+                    leftmost += width;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mmr_subtree_root_exhaustive() {
+        subtree_root_exhaustive::<crate::mmr::Family>(512);
+    }
+
+    #[test]
+    fn mmb_subtree_root_exhaustive() {
+        subtree_root_exhaustive::<crate::mmb::Family>(512);
+    }
 }

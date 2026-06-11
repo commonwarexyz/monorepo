@@ -175,9 +175,26 @@ impl merkle::Family for Family {
         (pos - (1 << height), pos - 1)
     }
 
-    fn parent_heights(leaves: Location) -> impl Iterator<Item = u32> {
-        let count = (*leaves).trailing_ones();
-        1..=count
+    fn parent_heights(loc: Location) -> impl Iterator<Item = (u32, Location)> {
+        let leaf = *loc;
+        // The node at height h whose subtree's 2^h leaves end at `leaf` is born by this
+        // append iff all of those leaves are now present, i.e. leaf + 1 is a multiple of
+        // 2^h, i.e. the low h bits of `leaf` are all ones. So one node is born per
+        // trailing one bit, and its subtree starts 2^h - 1 leaves back.
+        let count = leaf.trailing_ones();
+        (1..=count).map(move |h| (h, Location::new(leaf + 1 - (1u64 << h))))
+    }
+
+    fn subtree_root(leftmost: Location, height: u32, leaves: Location) -> Option<Position> {
+        // An MMR node exists as soon as the last leaf of its subtree has been appended.
+        let width = 1u64.checked_shl(height)?;
+        let born = (*leftmost).checked_add(width)?;
+        if born > *leaves {
+            return None;
+        }
+        Some(Position::new(
+            *Self::location_to_position(leftmost) + (width << 1) - 2,
+        ))
     }
 
     fn pos_to_height(pos: Position) -> u32 {
@@ -786,7 +803,7 @@ mod tests {
             next_pos += 1;
 
             // Parents created when this leaf is appended.
-            for h in Family::parent_heights(loc) {
+            for (h, _) in Family::parent_heights(loc) {
                 assert_eq!(
                     Family::pos_to_height(Position::new(next_pos)),
                     h,
@@ -857,9 +874,9 @@ mod tests {
             // For each parent created at this step, verify subtree_root_position matches the actual
             // position. In an MMR, a height-h parent covers 2^h leaves ending at leaf_idx, so its
             // leftmost leaf = leaf_idx + 1 - 2^h.
-            for h in Family::parent_heights(Location::new(leaf_idx)) {
-                let leftmost = leaf_idx + 1 - (1u64 << h);
-                let pos = Family::subtree_root_position(Location::new(leftmost), h);
+            for (h, leftmost) in Family::parent_heights(Location::new(leaf_idx)) {
+                assert_eq!(*leftmost, leaf_idx + 1 - (1u64 << h));
+                let pos = Family::subtree_root_position(leftmost, h);
                 assert_eq!(
                     *pos, next_pos,
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"

@@ -30,6 +30,61 @@
 //!                          Mem                   (committed)
 //! ```
 //!
+//! # Merkleization
+//!
+//! [`UnmerkleizedBatch::merkleize`] recomputes every node whose digest a batch's mutations
+//! changed. Two terms describe a node's digest, and a third its origin:
+//!
+//! - Dirty: this batch wrote the node's digest. Updated and appended leaves start dirty;
+//!   internal nodes become dirty as merkleization computes them.
+//! - Clean: untouched by this batch; resolved by lookup.
+//! - New: created by this batch's appends (the appended leaf plus the internal nodes
+//!   [`Family::parent_heights`] reports born with it). Every new node ends up dirty, but a
+//!   new internal node needs a digest even when all its children are clean: it has no
+//!   previous digest to keep.
+//!
+//! The batch records only the leaves it wrote and the nodes its appends created. Which
+//! internal nodes to recompute is derived, not tracked: a node needs recomputation exactly
+//! when a child was recomputed or the node is new. Merkleization applies this rule one
+//! height at a time, alternating between two states:
+//!
+//! - A `Frontier`: all dirty nodes at height h, with their computed digests, sorted by the
+//!   leftmost leaf of their subtrees.
+//! - A `Level`: all nodes at height h + 1 that need a digest. Each is a `Parent` holding
+//!   the digests of its dirty children; clean children are resolved by lookup.
+//!
+//! `Frontier::ascend` builds the level by linearly merging the frontier with the new nodes
+//! one height up: sibling frontier nodes are adjacent and fold into one `Parent`, a parent
+//! that is itself new appears once, and nodes with no parent (peaks, parents not yet born)
+//! drop out. `Level::hash` hashes every parent (independently, so possibly in parallel) and
+//! the results are the next frontier.
+//!
+//! The loop starts from the dirty leaves and stops when a frontier is empty and no new
+//! nodes remain above it. This is correct because each frontier is complete: it contains
+//! every dirty node at its height, so the rule above finds every node at the next height
+//! that needs recomputation. (An empty frontier with new nodes above it happens in MMB,
+//! where one append can merge subtrees made entirely of clean nodes.)
+//!
+//! Example: an MMR holds leaves 0..=2; a batch updates leaf 1 and appends leaf 3, creating
+//! positions 4, 5, and 6 (the subtrees under 5 and 6 complete when leaf 3 arrives):
+//!
+//! ```text
+//! height 2:           6*+
+//!                   /     \                 nodes labeled by position
+//! height 1:      2*         5*+             * dirty: digest written by this batch
+//!               /  \       /  \             + new: created by appending leaf 3
+//! height 0:    0    1*    3    4*+
+//!
+//! location:    0    1     2    3
+//! ```
+//!
+//! - The frontier at height 0 holds positions 1 (updated) and 4 (appended).
+//! - Ascend: node 1's parent is node 2 (right child dirty, left child 0 clean); node 4's
+//!   parent is the new node 5 (right child dirty, left child 3 clean). Hash both.
+//! - The frontier at height 1 holds positions 2 and 5: siblings, folding into the new
+//!   node 6 with both children dirty. Hash it.
+//! - The frontier at height 2 holds position 6, a peak: no parent, nothing new above, done.
+//!
 //! # Parent chain and memory
 //!
 //! Each [`MerkleizedBatch`] stores its own local data (appended nodes and overwrites)
@@ -81,7 +136,7 @@
 //! ```
 
 use crate::merkle::{
-    hasher::Hasher, mem::Mem, path, proof::Proof, Error, Family, Location, Position, Readable,
+    hasher::Hasher, mem::Mem, proof::Proof, Error, Family, Location, Position, Readable,
 };
 use ahash::RandomState;
 use alloc::{
@@ -95,30 +150,235 @@ use core::ops::Range;
 /// Overwritten node digests keyed by position.
 pub(crate) type Overwrites<F, D> = hashbrown::HashMap<Position<F>, D, RandomState>;
 
-/// Push a dirty node position into its height bucket, growing the outer Vec as needed.
-fn push_dirty<F: Family>(buckets: &mut Vec<Vec<Position<F>>>, height: u32, pos: Position<F>) {
-    let h = height as usize;
-    if buckets.len() <= h {
-        buckets.resize_with(h + 1, Vec::new);
+/// Nodes newly created by this batch's appends, grouped by height.
+/// Each inner list is sorted by leftmost leaf because appends proceed left to right.
+#[derive(Default)]
+struct NewNodes<F: Family>(Vec<Vec<(Location<F>, Position<F>)>>);
+
+impl<F: Family> NewNodes<F> {
+    /// Add a node created at `height`: its position and its subtree's leftmost leaf.
+    #[inline]
+    fn add(&mut self, height: u32, leftmost: Location<F>, pos: Position<F>) {
+        let height = height as usize;
+        if self.0.len() <= height {
+            self.0.resize_with(height + 1, Vec::new);
+        }
+        self.0[height].push((leftmost, pos));
     }
-    buckets[h].push(pos);
+
+    /// The new nodes at `height`.
+    fn at_height(&self, height: u32) -> &[(Location<F>, Position<F>)] {
+        self.0.get(height as usize).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether any new nodes exist above `height`.
+    fn any_above(&self, height: u32) -> bool {
+        // Lists below the top may be empty, but the topmost is not: the outer vec only
+        // grows to a new height when add pushes a node at that height. So any list
+        // existing above `height` implies a node exists above `height`.
+        self.0.len() > height as usize + 1
+    }
 }
 
-// ---------------------------------------------------------------------------
-// UnmerkleizedBatch
-// ---------------------------------------------------------------------------
+/// A dirty node: one whose digest this batch wrote.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Node<F: Family, D: Digest> {
+    /// Leftmost leaf of the node's subtree.
+    leftmost: Location<F>,
+    /// The node's position.
+    pos: Position<F>,
+    /// The node's computed digest.
+    digest: D,
+}
+
+/// A [`Node`] awaiting its digest: identified as a parent of frontier nodes by
+/// [`Frontier::ascend`], it becomes a [`Node`] through [`Self::into_node`]. `Some` children
+/// are dirty (taken from the frontier by sibling adjacency); `None` children are clean and
+/// resolved by lookup.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Parent<F: Family, D: Digest> {
+    /// Leftmost leaf of the parent's subtree.
+    leftmost: Location<F>,
+    /// The parent's position.
+    pos: Position<F>,
+    /// The left child's digest, if dirty.
+    left: Option<D>,
+    /// The right child's digest, if dirty.
+    right: Option<D>,
+}
+
+impl<F: Family, D: Digest> Parent<F, D> {
+    /// Resolve clean children and hash: the parent -> dirty node transition.
+    fn into_node(
+        self,
+        hasher: &impl Hasher<F, Digest = D>,
+        height: u32,
+        resolve: impl Fn(Position<F>) -> D,
+    ) -> Node<F, D> {
+        let (left_pos, right_pos) = F::children(self.pos, height);
+        let left = self.left.unwrap_or_else(|| resolve(left_pos));
+        let right = self.right.unwrap_or_else(|| resolve(right_pos));
+        Node {
+            leftmost: self.leftmost,
+            pos: self.pos,
+            digest: hasher.node_digest(self.pos, &left, &right),
+        }
+    }
+}
+
+/// The dirty nodes at a single height during merkleization, sorted by strictly increasing
+/// leftmost leaf. Unrelated to the append frontier of a compact structure.
+struct Frontier<F: Family, D: Digest> {
+    /// The height all nodes share.
+    height: u32,
+    /// The dirty nodes, sorted by leftmost leaf.
+    nodes: Vec<Node<F, D>>,
+}
+
+impl<F: Family, D: Digest> Frontier<F, D> {
+    /// Create a frontier from sorted `nodes` at `height`.
+    fn new(height: u32, nodes: Vec<Node<F, D>>) -> Self {
+        debug_assert!(nodes.windows(2).all(|w| w[0].leftmost < w[1].leftmost));
+        Self { height, nodes }
+    }
+
+    const fn height(&self) -> u32 {
+        self.height
+    }
+
+    const fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &Node<F, D>> {
+        self.nodes.iter()
+    }
+
+    /// The frontier -> level transition: pair sibling children by adjacency, merge the new
+    /// nodes one height up, and gate on parent existence. Peaks and not-yet-created parents
+    /// fall out; a parent that is itself a new node appears once.
+    fn ascend(&self, new: &NewNodes<F>, leaves: Location<F>) -> Level<F, D> {
+        let parent_height = self.height + 1;
+        let width = 1u64 << self.height;
+        let parent_mask = !((1u64 << parent_height) - 1);
+
+        let mut parents = Vec::with_capacity(self.nodes.len() / 2 + 1);
+        let mut new_iter = new.at_height(parent_height).iter().copied().peekable();
+        let mut i = 0;
+        while i < self.nodes.len() {
+            let Node {
+                leftmost, digest, ..
+            } = self.nodes[i];
+            let parent_loc = Location::new(*leftmost & parent_mask);
+            // New nodes left of this parent have no dirty children.
+            while let Some(&(new_loc, new_pos)) = new_iter.peek() {
+                if new_loc >= parent_loc {
+                    break;
+                }
+                parents.push(Parent {
+                    leftmost: new_loc,
+                    pos: new_pos,
+                    left: None,
+                    right: None,
+                });
+                new_iter.next();
+            }
+            // A new node at this parent IS this parent; drop the duplicate. (This precedes
+            // the existence gate below, which a new node always passes.)
+            if new_iter
+                .peek()
+                .is_some_and(|&(new_loc, _)| new_loc == parent_loc)
+            {
+                new_iter.next();
+            }
+            // Gather the parent's dirty children: the left child (if dirty) is at parent_loc
+            // and the right child (if dirty) at parent_loc + width, adjacent in the frontier.
+            let (mut left, mut right) = (None, None);
+            if leftmost == parent_loc {
+                left = Some(digest);
+                i += 1;
+                if let Some(next) = self.nodes.get(i) {
+                    if *next.leftmost == *parent_loc + width {
+                        right = Some(next.digest);
+                        i += 1;
+                    }
+                }
+            } else {
+                right = Some(digest);
+                i += 1;
+            }
+            // The parent may not exist (this node is a peak, or its parent's merge has not
+            // happened yet).
+            let Some(pos) = F::subtree_root(parent_loc, parent_height, leaves) else {
+                continue;
+            };
+            parents.push(Parent {
+                leftmost: parent_loc,
+                pos,
+                left,
+                right,
+            });
+        }
+        for (new_loc, new_pos) in new_iter {
+            parents.push(Parent {
+                leftmost: new_loc,
+                pos: new_pos,
+                left: None,
+                right: None,
+            });
+        }
+
+        Level {
+            height: parent_height,
+            parents,
+        }
+    }
+}
+
+/// The parents identified at one height, awaiting their digests: the state between two
+/// frontiers.
+struct Level<F: Family, D: Digest> {
+    /// The height all parents share.
+    height: u32,
+    /// The parents to compute, sorted by leftmost leaf.
+    parents: Vec<Parent<F, D>>,
+}
+
+impl<F: Family, D: Digest> Level<F, D> {
+    /// The level -> frontier transition: resolve clean children and hash every parent (the
+    /// messages are independent, so `strategy` may parallelize).
+    fn hash<S: Strategy>(
+        self,
+        strategy: &S,
+        hasher: &impl Hasher<F, Digest = D>,
+        resolve: impl Fn(Position<F>) -> D + Send + Sync,
+    ) -> Frontier<F, D> {
+        let height = self.height;
+        let nodes = strategy.map_init_collect_vec(
+            &self.parents,
+            || hasher.clone(),
+            |hasher, &parent| parent.into_node(hasher, height, &resolve),
+        );
+        // Strategies preserve input order, so the nodes remain sorted by leftmost.
+        Frontier::new(height, nodes)
+    }
+}
 
 /// A speculative batch whose root digest has not yet been computed,
 /// in contrast to [`MerkleizedBatch`].
 pub struct UnmerkleizedBatch<F: Family, D: Digest, S: Strategy> {
+    /// The merkleized batch this batch extends.
     parent: Arc<MerkleizedBatch<F, D, S>>,
+    /// Nodes appended past the parent's size, in position order (non-leaf slots start as
+    /// placeholders and are filled by `merkleize`).
     appended: Vec<D>,
+    /// Overwrites of positions below the parent's size.
     overwrites: Overwrites<F, D>,
-    /// Dirty internal node positions bucketed by height. Outer index is height; inner Vec
-    /// holds positions at that height in push order (monotonically increasing for
-    /// `add_leaf_digest`; may contain duplicates from interleaved `mark_dirty` walks, deduped
-    /// in `merkleize`). Avoids the BTreeSet insert cost and a final global sort.
-    dirty_nodes: Vec<Vec<Position<F>>>,
+    /// Pre-existing leaves overwritten by this batch, in call order (possibly duplicated;
+    /// `merkleize` sorts and dedups).
+    updated: Vec<Location<F>>,
+    /// Nodes newly created by this batch's appends.
+    new: NewNodes<F>,
 }
 
 impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
@@ -128,7 +388,8 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
             parent,
             appended: Vec::new(),
             overwrites: Overwrites::default(),
-            dirty_nodes: Vec::new(),
+            updated: Vec::new(),
+            new: NewNodes::default(),
         }
     }
 
@@ -177,43 +438,6 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         }
     }
 
-    /// Mark ancestors of the leaf at `loc` as dirty up to its peak.
-    ///
-    /// Walks from peak to leaf (top-down) using [`path::Iterator`], then inserts dirty markers
-    /// bottom-up. Bottom-up ordering enables a best-effort early exit: if the node at a given
-    /// height matches the most recently pushed entry for that bucket, we stop walking since
-    /// the walk that pushed it already marked everything above. This catches consecutive
-    /// shared-path walks in O(1); non-consecutive duplicates (a prior walk for a different
-    /// subtree landed in the bucket after the shared ancestors) are not detected here and are
-    /// collapsed by the per-bucket sort+dedup in `merkleize`.
-    fn mark_dirty(&mut self, loc: Location<F>) {
-        let mut first_leaf = Location::new(0);
-        for (peak_pos, height) in F::peaks(self.size()) {
-            let leaves_in_peak = 1u64 << height;
-            if loc >= first_leaf + leaves_in_peak {
-                first_leaf += leaves_in_peak;
-                continue;
-            }
-
-            let mut buf = [(Position::new(0), Position::new(0), 0u32); path::MAX_PATH_LEN];
-            let mut len = 0;
-            for item in path::Iterator::new(peak_pos, height, first_leaf, loc) {
-                buf[len] = item;
-                len += 1;
-            }
-            for &(parent_pos, _, h) in buf[..len].iter().rev() {
-                let h_idx = h as usize;
-                if self.dirty_nodes.get(h_idx).and_then(|b| b.last()) == Some(&parent_pos) {
-                    break;
-                }
-                push_dirty(&mut self.dirty_nodes, h, parent_pos);
-            }
-            return;
-        }
-
-        panic!("leaf {loc} not found (size: {})", self.size());
-    }
-
     /// Add a pre-computed leaf digest.
     pub fn add_leaf_digest(mut self, digest: D) -> Self {
         self.append_leaf_digest(digest, self.leaves(), self.size());
@@ -230,12 +454,13 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         leaves: Location<F>,
         mut size: Position<F>,
     ) -> Position<F> {
+        self.new.add(0, leaves, size);
         self.appended.push(digest);
         size += 1;
 
-        for height in F::parent_heights(leaves) {
+        for (height, leftmost) in F::parent_heights(leaves) {
             self.appended.push(D::EMPTY);
-            push_dirty(&mut self.dirty_nodes, height, size);
+            self.new.add(height, leftmost, size);
             size += 1;
         }
 
@@ -298,16 +523,16 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         let pos = self.validate_loc(loc)?;
         let digest = hasher.leaf_digest(pos, element);
         self.store_node(pos, digest);
-        self.mark_dirty(loc);
+        self.updated.push(loc);
         Ok(self)
     }
 
-    /// Overwrite the digest of an existing leaf and mark ancestors dirty.
+    /// Overwrite the digest of an existing leaf.
     #[cfg(any(feature = "std", test))]
     pub fn update_leaf_digest(mut self, loc: Location<F>, digest: D) -> Result<Self, Error<F>> {
         let pos = self.validate_loc(loc)?;
         self.store_node(pos, digest);
-        self.mark_dirty(loc);
+        self.updated.push(loc);
         Ok(self)
     }
 
@@ -321,72 +546,80 @@ impl<F: Family, D: Digest, S: Strategy> UnmerkleizedBatch<F, D, S> {
         for (loc, digest) in updates {
             let pos = Position::try_from(*loc).expect("validated above");
             self.store_node(pos, *digest);
-            self.mark_dirty(*loc);
+            self.updated.push(*loc);
         }
         Ok(self)
     }
 
-    /// Consume this batch and produce an immutable [`MerkleizedBatch`] with computed dirty nodes.
-    /// `base` provides committed node data as fallback during hash computation.
+    /// Return the height-0 `Frontier` that seeds merkleization: every leaf this batch
+    /// updated or appended, in location order.
+    fn leaf_frontier(&mut self, base: &Mem<F, D>, new: &NewNodes<F>) -> Frontier<F, D> {
+        let parent_leaves = self.parent.leaves();
+        let parent_size = self.parent.size();
+
+        let mut updated = core::mem::take(&mut self.updated);
+        updated.sort_unstable();
+        updated.dedup();
+        // Updates to leaves this batch itself appended enter the frontier through `new`
+        // below; their slots in `appended` already hold the final digests.
+        updated.retain(|loc| *loc < parent_leaves);
+
+        let appended = new.at_height(0);
+        let mut nodes = Vec::with_capacity(updated.len() + appended.len());
+        nodes.extend(updated.into_iter().map(|leftmost| {
+            let pos = Position::try_from(leftmost).expect("validated leaf location");
+            let digest = self.get_node(base, pos).expect("updated leaf missing");
+            Node {
+                leftmost,
+                pos,
+                digest,
+            }
+        }));
+        nodes.extend(appended.iter().map(|&(leftmost, pos)| Node {
+            leftmost,
+            pos,
+            digest: self.appended[(*pos - *parent_size) as usize],
+        }));
+        Frontier::new(0, nodes)
+    }
+
+    /// Consume this batch and produce an immutable [`MerkleizedBatch`] with computed dirty
+    /// nodes. `base` provides committed node data as fallback during hash computation.
     pub fn merkleize(
         mut self,
         base: &Mem<F, D>,
         hasher: &impl Hasher<F, Digest = D>,
     ) -> Arc<MerkleizedBatch<F, D, S>> {
-        // Each bucket accumulates positions in push order, which for `add_leaf_digest` is
-        // already ascending; the stable `sort` is cheap on such near-sorted input. The dedup
-        // then collapses any duplicates that slipped past `mark_dirty`'s last-entry check.
-        let mut buckets = core::mem::take(&mut self.dirty_nodes);
-        for bucket in &mut buckets {
-            bucket.sort();
-            bucket.dedup();
-        }
-        for (height, positions) in buckets.iter().enumerate() {
-            if positions.is_empty() {
-                continue;
+        let leaves = self.leaves();
+        let new = core::mem::take(&mut self.new);
+        // Bottom-up frontier propagation; see the Merkleization section of the module docs.
+        let mut frontier = self.leaf_frontier(base, &new);
+        while !frontier.is_empty() || new.any_above(frontier.height()) {
+            let level = frontier.ascend(&new, leaves);
+            let computed = level.hash(&self.parent.strategy, hasher, |pos| {
+                self.get_node(base, pos)
+                    .unwrap_or_else(|| panic!("missing child at {pos}"))
+            });
+            for node in computed.iter() {
+                self.store_node(node.pos, node.digest);
             }
-            self.merkleize_bucket(base, hasher, positions, height as u32);
+            frontier = computed;
         }
 
         // Collect ancestor data by walking the parent chain (strong Arc + Weak walk).
         let (ancestor_appended, ancestor_overwrites) = collect_ancestor_batches(&self.parent);
 
-        let parent_size = self.parent.size();
         Arc::new(MerkleizedBatch {
             parent: Some(Arc::downgrade(&self.parent)),
+            parent_size: self.parent.size(),
             appended: Arc::new(self.appended),
             overwrites: Arc::new(self.overwrites),
-            parent_size,
             base_size: self.parent.base_size,
             pruning_boundary: self.parent.pruning_boundary(),
             ancestor_appended,
             ancestor_overwrites,
             strategy: self.parent.strategy.clone(),
         })
-    }
-
-    /// Compute digests for one height's dirty nodes via the configured strategy.
-    fn merkleize_bucket(
-        &mut self,
-        base: &Mem<F, D>,
-        hasher: &impl Hasher<F, Digest = D>,
-        positions: &[Position<F>],
-        height: u32,
-    ) {
-        let computed: Vec<(Position<F>, D)> = self.parent.strategy.map_init_collect_vec(
-            positions,
-            || hasher.clone(),
-            |hasher, &pos| {
-                let (left, right) = F::children(pos, height);
-                let left_d = self.get_node(base, left).expect("left child missing");
-                let right_d = self.get_node(base, right).expect("right child missing");
-                let digest = hasher.node_digest(pos, &left_d, &right_d);
-                (pos, digest)
-            },
-        );
-        for (pos, digest) in computed {
-            self.store_node(pos, digest);
-        }
     }
 }
 
@@ -420,10 +653,6 @@ fn collect_ancestor_batches<F: Family, D: Digest, S: Strategy>(
     overwrites.reverse();
     (appended, overwrites)
 }
-
-// ---------------------------------------------------------------------------
-// MerkleizedBatch
-// ---------------------------------------------------------------------------
 
 /// A speculative batch whose dirty Merkle nodes have been computed, in contrast to
 /// [`UnmerkleizedBatch`].
@@ -623,10 +852,6 @@ impl<F: Family, D: Digest, S: Strategy> Readable for MerkleizedBatch<F, D, S> {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -639,6 +864,253 @@ mod tests {
 
     fn mem_root<F: Family>(mem: &Mem<F, D>, hasher: &H) -> D {
         mem.root(hasher, 0).unwrap()
+    }
+
+    /// Specification tests for the merkleization state machine, using MMR positions
+    /// (leaves at 0, 1, 3, 4; height 1 at 2, 5; height 2 at 6).
+    mod frontier {
+        use super::*;
+        use commonware_parallel::Sequential;
+
+        type F = crate::mmr::Family;
+
+        fn node(leftmost: u64, pos: u64, byte: u8) -> Node<F, D> {
+            Node {
+                leftmost: Location::new(leftmost),
+                pos: Position::new(pos),
+                digest: Sha256::fill(byte),
+            }
+        }
+
+        fn parent(leftmost: u64, pos: u64, left: Option<u8>, right: Option<u8>) -> Parent<F, D> {
+            Parent {
+                leftmost: Location::new(leftmost),
+                pos: Position::new(pos),
+                left: left.map(Sha256::fill),
+                right: right.map(Sha256::fill),
+            }
+        }
+
+        fn new_nodes(entries: &[(u32, u64, u64)]) -> NewNodes<F> {
+            let mut new = NewNodes::default();
+            for &(height, leftmost, pos) in entries {
+                new.add(height, Location::new(leftmost), Position::new(pos));
+            }
+            new
+        }
+
+        fn ascend(
+            height: u32,
+            nodes: Vec<Node<F, D>>,
+            new: &NewNodes<F>,
+            leaves: u64,
+        ) -> Vec<Parent<F, D>> {
+            Frontier::new(height, nodes)
+                .ascend(new, Location::new(leaves))
+                .parents
+        }
+
+        #[test]
+        fn ascend_pairs_adjacent_siblings() {
+            let parents = ascend(0, vec![node(0, 0, 1), node(1, 1, 2)], &new_nodes(&[]), 2);
+            assert_eq!(parents, vec![parent(0, 2, Some(1), Some(2))]);
+        }
+
+        #[test]
+        fn ascend_left_child_only() {
+            let parents = ascend(0, vec![node(0, 0, 1)], &new_nodes(&[]), 2);
+            assert_eq!(parents, vec![parent(0, 2, Some(1), None)]);
+        }
+
+        #[test]
+        fn ascend_right_child_only() {
+            let parents = ascend(0, vec![node(1, 1, 2)], &new_nodes(&[]), 2);
+            assert_eq!(parents, vec![parent(0, 2, None, Some(2))]);
+        }
+
+        #[test]
+        fn ascend_gates_on_parent_existence() {
+            // Leaf 2 is a lone peak in a 3-leaf structure; its parent does not exist yet.
+            let parents = ascend(0, vec![node(2, 3, 1)], &new_nodes(&[]), 3);
+            assert!(parents.is_empty());
+        }
+
+        #[test]
+        fn ascend_drops_new_node_duplicating_parent() {
+            // The dirty child's parent was itself created by an append; it appears once,
+            // with the dirty child attached.
+            let parents = ascend(0, vec![node(1, 1, 2)], &new_nodes(&[(1, 0, 2)]), 2);
+            assert_eq!(parents, vec![parent(0, 2, None, Some(2))]);
+        }
+
+        #[test]
+        fn ascend_emits_new_node_left_of_frontier() {
+            // A new node over clean leaves [0, 2) precedes the parent of the dirty leaf 2.
+            let parents = ascend(0, vec![node(2, 3, 1)], &new_nodes(&[(1, 0, 2)]), 4);
+            assert_eq!(
+                parents,
+                vec![parent(0, 2, None, None), parent(2, 5, Some(1), None)]
+            );
+        }
+
+        #[test]
+        fn ascend_emits_trailing_new_nodes() {
+            let parents = ascend(0, vec![], &new_nodes(&[(1, 0, 2), (1, 2, 5)]), 4);
+            assert_eq!(
+                parents,
+                vec![parent(0, 2, None, None), parent(2, 5, None, None)]
+            );
+        }
+
+        #[test]
+        fn ascend_pairs_higher_heights() {
+            let parents = ascend(1, vec![node(0, 2, 1), node(2, 5, 2)], &new_nodes(&[]), 4);
+            assert_eq!(parents, vec![parent(0, 6, Some(1), Some(2))]);
+        }
+
+        #[test]
+        fn into_node_uses_dirty_children() {
+            let hasher: H = Standard::new(ForwardFold);
+            let node = parent(0, 2, Some(1), Some(2))
+                .into_node(&hasher, 1, |_| panic!("resolve must not be called"));
+            assert_eq!(node.leftmost, Location::new(0));
+            assert_eq!(node.pos, Position::new(2));
+            assert_eq!(
+                node.digest,
+                hasher.node_digest(Position::<F>::new(2), &Sha256::fill(1), &Sha256::fill(2))
+            );
+        }
+
+        #[test]
+        fn into_node_resolves_clean_children() {
+            let hasher: H = Standard::new(ForwardFold);
+            let clean = Sha256::fill(9);
+
+            let left_clean = parent(0, 2, None, Some(2)).into_node(&hasher, 1, |pos| {
+                assert_eq!(pos, Position::new(0));
+                clean
+            });
+            assert_eq!(
+                left_clean.digest,
+                hasher.node_digest(Position::<F>::new(2), &clean, &Sha256::fill(2))
+            );
+
+            let right_clean = parent(0, 2, Some(1), None).into_node(&hasher, 1, |pos| {
+                assert_eq!(pos, Position::new(1));
+                clean
+            });
+            assert_eq!(
+                right_clean.digest,
+                hasher.node_digest(Position::<F>::new(2), &Sha256::fill(1), &clean)
+            );
+        }
+
+        #[test]
+        fn hash_level_preserves_order_and_height() {
+            let hasher: H = Standard::new(ForwardFold);
+            let level = Level {
+                height: 1,
+                parents: vec![
+                    parent(0, 2, Some(1), Some(2)),
+                    parent(2, 5, Some(3), Some(4)),
+                ],
+            };
+            let frontier = level.hash(&Sequential, &hasher, |_| unreachable!());
+            assert_eq!(frontier.height(), 1);
+            let nodes: Vec<_> = frontier.iter().copied().collect();
+            assert_eq!(
+                nodes,
+                vec![
+                    parent(0, 2, Some(1), Some(2)).into_node(&hasher, 1, |_| unreachable!()),
+                    parent(2, 5, Some(3), Some(4)).into_node(&hasher, 1, |_| unreachable!()),
+                ]
+            );
+        }
+
+        #[test]
+        #[should_panic]
+        fn frontier_rejects_unsorted_nodes() {
+            Frontier::new(0, vec![node(1, 1, 1), node(0, 0, 2)]);
+        }
+
+        #[test]
+        fn new_nodes_add_and_query() {
+            let new = new_nodes(&[(2, 0, 6), (0, 4, 7), (1, 4, 9)]);
+            assert_eq!(new.at_height(0), &[(Location::new(4), Position::new(7))]);
+            assert_eq!(new.at_height(1), &[(Location::new(4), Position::new(9))]);
+            assert_eq!(new.at_height(2), &[(Location::new(0), Position::new(6))]);
+            assert_eq!(new.at_height(3), &[]);
+            assert!(new.any_above(0));
+            assert!(new.any_above(1));
+            assert!(!new.any_above(2));
+        }
+    }
+
+    /// Apply randomly interleaved appends, updates (including of leaves appended in the same
+    /// batch), and prunes, comparing the root and spot proofs against a structure rebuilt from
+    /// scratch after every batch.
+    fn randomized_differential<F: Family>() {
+        use commonware_utils::test_rng;
+        use rand::Rng as _;
+
+        let hasher: H = Standard::new(ForwardFold);
+        let mut rng = test_rng();
+        let mut mem = Mem::<F, D>::new();
+        let mut elements: Vec<[u8; 8]> = Vec::new();
+        let mut pruned_to = 0u64;
+        for round in 0..100 {
+            let mut batch = mem.new_batch();
+            for _ in 0..rng.gen_range(1..12) {
+                let leaves = elements.len() as u64;
+                let element = rng.gen::<u64>().to_be_bytes();
+                if leaves == pruned_to || rng.gen_bool(0.5) {
+                    elements.push(element);
+                    batch = batch.add(&hasher, &element);
+                } else {
+                    let loc = rng.gen_range(pruned_to..leaves);
+                    elements[loc as usize] = element;
+                    batch = batch
+                        .update_leaf(&hasher, Location::new(loc), &element)
+                        .unwrap();
+                }
+            }
+            let merkleized = batch.merkleize(&mem, &hasher);
+            mem.apply_batch(&merkleized).unwrap();
+
+            let mut reference = Mem::<F, D>::new();
+            let rebuilt = elements
+                .iter()
+                .fold(reference.new_batch(), |b, e| b.add(&hasher, e))
+                .merkleize(&reference, &hasher);
+            reference.apply_batch(&rebuilt).unwrap();
+            let root = mem_root(&mem, &hasher);
+            assert_eq!(
+                root,
+                mem_root(&reference, &hasher),
+                "root mismatch (round={round}, leaves={}, pruned_to={pruned_to})",
+                elements.len()
+            );
+
+            let leaves = elements.len() as u64;
+            for _ in 0..3 {
+                let loc = rng.gen_range(pruned_to..leaves);
+                let proof = mem.proof(&hasher, Location::new(loc), 0).unwrap();
+                assert!(
+                    proof.verify_element_inclusion(
+                        &hasher,
+                        &elements[loc as usize],
+                        Location::new(loc),
+                        &root
+                    ),
+                    "proof failed (round={round}, loc={loc})"
+                );
+            }
+
+            if rng.gen_bool(0.3) {
+                pruned_to = rng.gen_range(pruned_to..=leaves);
+                mem.prune(Location::new(pruned_to)).unwrap();
+            }
+        }
     }
 
     fn batch_root<F: Family>(
@@ -1130,6 +1602,10 @@ mod tests {
     // --- MMR tests ---
 
     #[test]
+    fn mmr_randomized_differential() {
+        randomized_differential::<crate::mmr::Family>();
+    }
+    #[test]
     fn mmr_consistency() {
         consistency_with_reference::<crate::mmr::Family>();
     }
@@ -1204,6 +1680,10 @@ mod tests {
 
     // --- MMB tests ---
 
+    #[test]
+    fn mmb_randomized_differential() {
+        randomized_differential::<crate::mmb::Family>();
+    }
     #[test]
     fn mmb_consistency() {
         consistency_with_reference::<crate::mmb::Family>();

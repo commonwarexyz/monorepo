@@ -203,14 +203,34 @@ impl merkle::Family for Family {
         Location::try_from(size).is_ok()
     }
 
-    fn parent_heights(leaves: Location) -> impl Iterator<Item = u32> {
-        let leaf = *leaves;
-        let height = if (leaf + 2).is_power_of_two() {
+    fn parent_heights(loc: Location) -> impl Iterator<Item = (u32, Location)> {
+        let leaf = *loc;
+        let newborn = if (leaf + 2).is_power_of_two() {
             None
         } else {
-            Some((leaf + 1).trailing_ones() + 1)
+            let height = (leaf + 1).trailing_ones() + 1;
+            // The appended leaf is the newborn's birth leaf, so its leftmost leaf is
+            // birth - (3*2^(h-1) - 2).
+            let leftmost = leaf + 2 - 3 * (1u64 << (height - 1));
+            Some((height, Location::new(leftmost)))
         };
-        height.into_iter()
+        newborn.into_iter()
+    }
+
+    fn subtree_root(leftmost: Location, height: u32, leaves: Location) -> Option<Position> {
+        if height == 0 {
+            return (leftmost < leaves).then(|| Self::location_to_position(leftmost));
+        }
+        // Born when its birth leaf (leftmost + 3*2^(h-1) - 2) is appended, one position after
+        // that leaf (see Graftable::subtree_root_position for the derivation).
+        let offset = 3u64.checked_shl(height - 1)?.checked_sub(2)?;
+        let birth = (*leftmost).checked_add(offset)?;
+        if birth >= *leaves {
+            return None;
+        }
+        Some(Position::new(
+            *Self::location_to_position(Location::new(birth)) + 1,
+        ))
     }
 
     fn pos_to_height(pos: Position) -> u32 {
@@ -422,7 +442,9 @@ mod tests {
 
         for (i, expected) in expected.iter().enumerate() {
             let loc = Location::new(i as u64);
-            let height: Option<u32> = crate::merkle::Family::parent_heights(loc).next();
+            let height = crate::merkle::Family::parent_heights(loc)
+                .next()
+                .map(|(h, _)| h);
             assert_eq!(height, *expected, "mismatch at loc={i}");
         }
     }
@@ -443,7 +465,7 @@ mod tests {
             next_pos += 1;
 
             // Optional parent (MMB creates at most one parent per leaf).
-            if let Some(h) = Family::parent_heights(loc).next() {
+            if let Some((h, _)) = Family::parent_heights(loc).next() {
                 assert_eq!(
                     Family::pos_to_height(Position::new(next_pos)),
                     h,
@@ -594,11 +616,11 @@ mod tests {
             next_pos += 1;
 
             // Optional parent at this step.
-            if let Some(h) = Family::parent_heights(loc).next() {
+            if let Some((h, leftmost)) = Family::parent_heights(loc).next() {
                 // The parent covers 2^h leaves. Its leftmost leaf is
                 // birth_leaf - (3*2^(h-1) - 2) = leaf_idx - (3*2^(h-1) - 2).
-                let leftmost = leaf_idx + 2 - 3 * (1u64 << (h - 1));
-                let pos = Family::subtree_root_position(Location::new(leftmost), h);
+                assert_eq!(*leftmost, leaf_idx + 2 - 3 * (1u64 << (h - 1)));
+                let pos = Family::subtree_root_position(leftmost, h);
                 assert_eq!(
                     *pos, next_pos,
                     "height-{h} subtree_root_position mismatch at leaf {leaf_idx}"

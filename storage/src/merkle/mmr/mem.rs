@@ -58,10 +58,14 @@ mod tests {
                 "mmr peaks not as expected"
             );
 
-            let heights: Vec<u32> =
+            let parents: Vec<(u32, Location)> =
                 <crate::merkle::mmr::Family as crate::merkle::Family>::parent_heights(mmr.leaves())
                     .collect();
-            assert_eq!(heights, vec![1, 2], "parent_heights not as expected");
+            assert_eq!(
+                parents,
+                vec![(1, Location::new(10)), (2, Location::new(8))],
+                "parent_heights not as expected"
+            );
 
             for leaf in leaves.iter().by_ref() {
                 let pos = Position::try_from(*leaf).unwrap();
