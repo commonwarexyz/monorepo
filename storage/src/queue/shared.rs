@@ -7,7 +7,7 @@
 //! Writers can be cloned to allow multiple tasks to enqueue items concurrently.
 
 use super::{Config, Error, Queue};
-use crate::{Context, Persistable};
+use crate::Context;
 use commonware_codec::CodecShared;
 use commonware_utils::{channel::mpsc, sync::AsyncMutex};
 use std::{ops::Range, sync::Arc};

@@ -212,7 +212,7 @@ pub trait CompactSyncable: ExampleDatabase {
     /// Full databases implement this so they can act as compact-sync sources, and compact-storage
     /// databases implement it so compact nodes can sync from each other. The client still
     /// materializes into compact storage in both cases.
-    fn current_target(&self) -> impl Future<Output = compact::Target<Self::Family, Key>> + Send;
+    fn target(&self) -> impl Future<Output = compact::Target<Self::Family, Key>> + Send;
 }
 
 #[cfg(test)]
@@ -274,7 +274,7 @@ mod tests {
 
                 assert_eq!(full.root(), compact.root());
                 assert_eq!(full.current_floor(), compact.current_floor());
-                assert_eq!(compact.current_target().root, full.root());
+                assert_eq!(compact.target().root, full.root());
             }
 
             full.destroy().await.unwrap();
@@ -308,7 +308,7 @@ mod tests {
 
                 assert_eq!(full.root(), compact.root());
                 assert_eq!(full.current_floor(), compact.current_floor());
-                assert_eq!(compact.current_target().root, full.root());
+                assert_eq!(compact.target().root, full.root());
             }
 
             full.destroy().await.unwrap();

@@ -1,9 +1,6 @@
 //! Queue conformance tests
 
-use crate::{
-    queue::{Config, Queue},
-    Persistable,
-};
+use crate::queue::{Config, Queue};
 use commonware_codec::RangeCfg;
 use commonware_conformance::{conformance_tests, Conformance};
 use commonware_runtime::{

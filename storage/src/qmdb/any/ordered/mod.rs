@@ -1,5 +1,3 @@
-#[cfg(any(test, feature = "test-traits"))]
-use crate::qmdb::any::traits::PersistableMutableLog;
 use crate::{
     index::Ordered as Index,
     journal::contiguous::{Contiguous, Reader},
@@ -232,6 +230,35 @@ pub(crate) fn find_next_key<K: Ord + Clone>(key: &K, possible_next: &[K]) -> K {
         .clone()
 }
 
+/// Streaming equivalent of [`find_next_key`] for an ascending sequence of queries: `idx`
+/// advances in a linear merge instead of binary-searching per query. Queries must be
+/// non-decreasing; `idx` must start at 0 and be threaded through every call.
+///
+/// # Panics
+///
+/// Panics if `possible_next` is empty, or on any out-of-order query that would return a
+/// wrong result (`idx` has already advanced past a candidate above the query).
+pub(crate) fn find_next_key_ascending<K: Ord + Clone>(
+    key: &K,
+    possible_next: &[K],
+    idx: &mut usize,
+) -> K {
+    assert!(
+        *idx == 0 || possible_next[*idx - 1] <= *key,
+        "queries must be non-decreasing"
+    );
+    while *idx < possible_next.len() && possible_next[*idx] <= *key {
+        *idx += 1;
+    }
+    if *idx < possible_next.len() {
+        return possible_next[*idx].clone();
+    }
+    possible_next
+        .first()
+        .expect("possible_next should not be empty")
+        .clone()
+}
+
 /// Returns the previous key to `key` within `possible_previous` (sorted by `.0`, deduplicated).
 /// The result will "cycle around" to the last entry if `key` is the first key.
 ///
@@ -261,7 +288,7 @@ crate::qmdb::any::traits::impl_db_any! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<F, K, V>>,
+        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -279,7 +306,7 @@ crate::qmdb::any::traits::impl_provable! {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: PersistableMutableLog<Operation<F, K, V>>,
+        C: crate::journal::contiguous::Mutable<Item = Operation<F, K, V>>,
         I: Index<Value = crate::merkle::Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -298,8 +325,47 @@ mod test {
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
     use commonware_runtime::{deterministic::Context, Supervisor as _};
-    use commonware_utils::sequence::FixedBytes;
+    use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
+    use rand::Rng;
+
+    /// [`find_next_key_ascending`] must return exactly what [`find_next_key`] returns for any
+    /// ascending query sequence, including queries past the last candidate (cyclic wrap).
+    #[test]
+    fn find_next_key_ascending_matches_binary_search() {
+        let mut rng = test_rng();
+        for _ in 0..50 {
+            let mut candidates: Vec<u64> = (0..rng.gen_range(1..40))
+                .map(|_| rng.gen_range(0..60u64))
+                .collect();
+            candidates.sort_unstable();
+            candidates.dedup();
+
+            let mut queries: Vec<u64> = (0..rng.gen_range(1..80))
+                .map(|_| rng.gen_range(0..70u64))
+                .collect();
+            queries.sort_unstable();
+
+            let mut idx = 0;
+            for q in queries {
+                assert_eq!(
+                    find_next_key(&q, &candidates),
+                    find_next_key_ascending(&q, &candidates, &mut idx),
+                    "query {q} diverged"
+                );
+            }
+        }
+    }
+
+    /// An out-of-order query that would return a wrong result must panic instead.
+    #[test]
+    #[should_panic(expected = "queries must be non-decreasing")]
+    fn find_next_key_ascending_rejects_out_of_order_query() {
+        let candidates = vec![1u64, 5, 9];
+        let mut idx = 0;
+        assert_eq!(find_next_key_ascending(&5, &candidates, &mut idx), 9);
+        find_next_key_ascending(&1, &candidates, &mut idx);
+    }
 
     pub(crate) async fn test_ordered_any_db_empty<
         F: Family,

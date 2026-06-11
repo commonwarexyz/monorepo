@@ -40,7 +40,7 @@ use crate::{
         operation::{Committable, Key},
     },
     translator::Translator,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::Hasher;
@@ -68,7 +68,7 @@ where
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
     T: Translator,
-    C: Mutable<Item = Operation<F, U>> + Persistable<Error = crate::journal::Error>,
+    C: Mutable<Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {

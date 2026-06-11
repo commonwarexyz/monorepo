@@ -4,7 +4,7 @@ use super::{metrics, Error};
 use crate::{
     journal::contiguous::{variable, Reader as _},
     rmap::RMap,
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::CodecShared;
 use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt};
@@ -331,31 +331,27 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
         self.journal.size().saturating_sub(self.read_pos)
     }
 
-    /// Returns the count of acknowledged items above the ack floor (test-only).
-    #[cfg(test)]
-    pub(crate) fn acked_above_count(&self) -> usize {
-        self.acked_above
-            .iter()
-            .map(|(&s, &e)| (e - s + 1) as usize)
-            .sum()
-    }
-}
-
-impl<E: Context + Send, V: CodecShared + Send> Persistable for Queue<E, V> {
-    type Error = Error;
-
-    async fn commit(&mut self) -> Result<(), Error> {
+    /// Durably persist the queue, guaranteeing the current state will survive a crash.
+    ///
+    /// This does not persist acknowledgements. For a stronger guarantee that eliminates potential
+    /// recovery and prunes acknowledged items, use [Self::sync] instead.
+    pub async fn commit(&mut self) -> Result<(), Error> {
         self.journal.commit().await?;
         Ok(())
     }
 
-    async fn sync(&mut self) -> Result<(), Error> {
+    /// Durably persist the queue, guaranteeing the current state will survive a crash, and that
+    /// no recovery will be needed on startup.
+    ///
+    /// This also prunes acknowledged items.
+    pub async fn sync(&mut self) -> Result<(), Error> {
         self.journal.sync().await?;
         self.journal.prune(self.ack_floor).await?;
         Ok(())
     }
 
-    async fn destroy(self) -> Result<(), Error> {
+    /// Destroy the queue, removing all data from disk.
+    pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await?;
         Ok(())
     }
@@ -384,6 +380,14 @@ mod tests {
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(4096),
         }
+    }
+
+    fn acked_above_count<E: Context, V: CodecShared>(queue: &Queue<E, V>) -> usize {
+        queue
+            .acked_above
+            .iter()
+            .map(|(&s, &e)| (e - s + 1) as usize)
+            .sum()
     }
 
     #[test_traced]
@@ -660,17 +664,17 @@ mod tests {
             // Ack some items out of order first
             queue.ack(7).unwrap();
             queue.ack(8).unwrap();
-            assert_eq!(queue.acked_above_count(), 2);
+            assert_eq!(acked_above_count(&queue), 2);
 
             // Batch ack up to 5
             queue.ack_up_to(5).unwrap();
             assert_eq!(queue.ack_floor(), 5);
-            assert_eq!(queue.acked_above_count(), 2);
+            assert_eq!(acked_above_count(&queue), 2);
 
             // Now batch ack up to 9 - should consume the acked_above entries
             queue.ack_up_to(9).unwrap();
             assert_eq!(queue.ack_floor(), 9);
-            assert_eq!(queue.acked_above_count(), 0);
+            assert_eq!(acked_above_count(&queue), 0);
         });
     }
 
@@ -1142,12 +1146,12 @@ mod tests {
 
             // Acked_above should have items 1-8
             assert_eq!(queue.ack_floor(), 0);
-            assert!(queue.acked_above_count() > 0);
+            assert!(acked_above_count(&queue) > 0);
 
             // Now ack 0 - floor should advance to 9, consuming all acked_above
             queue.ack(0).unwrap();
             assert_eq!(queue.ack_floor(), 9);
-            assert_eq!(queue.acked_above_count(), 0);
+            assert_eq!(acked_above_count(&queue), 0);
         });
     }
 

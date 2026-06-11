@@ -117,7 +117,7 @@ use crate::{
         contiguous::{metrics::FixedMetrics as Metrics, Many, Mutable},
         Error,
     },
-    Context, Persistable,
+    Context,
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
@@ -137,6 +137,13 @@ use std::{
     sync::Arc,
 };
 use tracing::warn;
+
+/// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
+/// [`Journal::append_prepared`].
+pub struct PreparedAppend<A> {
+    buf: Vec<u8>,
+    _marker: PhantomData<A>,
+}
 
 /// Return the first retained logical position in `blob`.
 #[inline]
@@ -757,27 +764,54 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     // Shared implementation for `append` and `append_many`; public wrappers record metrics.
     async fn append_many_inner<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
-        if items.is_empty() {
-            return Err(Error::EmptyAppend);
-        }
+        let prepared = self.prepare_append(items);
+        self.write_encoded(prepared).await
+    }
 
+    /// Encode `items` into a buffer that can be appended later with [`Self::append_prepared`].
+    ///
+    /// This lets callers serialize borrowed items synchronously, release those borrows, and
+    /// perform the append without holding unrelated locks across journal I/O.
+    pub fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
         // Encode all items into a single contiguous buffer up front.
         // Uses Write::write directly to avoid per-item Bytes allocations from Encode::encode.
-        let items_count = items.len();
-        let mut items_buf = Vec::with_capacity(items_count * A::SIZE);
-        match &items {
+        let mut buf = Vec::with_capacity(items.len() * A::SIZE);
+        match items {
             Many::Flat(items) => {
-                for item in *items {
-                    item.write(&mut items_buf);
+                for item in items {
+                    item.write(&mut buf);
                 }
             }
             Many::Nested(nested_items) => {
-                for items in *nested_items {
+                for items in nested_items {
                     for item in *items {
-                        item.write(&mut items_buf);
+                        item.write(&mut buf);
                     }
                 }
             }
+        }
+        PreparedAppend {
+            buf,
+            _marker: PhantomData,
+        }
+    }
+
+    /// Append items encoded by [`Self::prepare_append`], returning the position of the last item
+    /// appended.
+    ///
+    /// Returns [Error::EmptyAppend] if `prepared` contains no items.
+    pub async fn append_prepared(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        let _timer = self.metrics.append_prepared_timer();
+        self.metrics.append_prepared_calls.inc();
+        self.write_encoded(prepared).await
+    }
+
+    // Write pre-encoded items; shared by all append paths. Records no call metrics.
+    async fn write_encoded(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        let items_buf = prepared.buf;
+        let items_count = items_buf.len() / A::SIZE;
+        if items_count == 0 {
+            return Err(Error::EmptyAppend);
         }
 
         // Reject the append before writing anything if it would push the size past `u64::MAX`.
@@ -1051,7 +1085,6 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
     }
 
     async fn read(&self, pos: u64) -> Result<A, Error> {
-        let _timer = self.metrics.read_timer();
         self.metrics.read_calls.inc();
 
         // Serve from the page cache synchronously when possible, avoiding the async storage path.
@@ -1062,6 +1095,7 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
         }
         self.metrics.record_cache_misses(1);
 
+        let _timer = self.metrics.read_timer();
         let item = self.read_inner(pos).await?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -1086,63 +1120,40 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
         let pruning_boundary = self.snapshot.bounds.start;
         let chunk_size = A::SIZE;
 
-        // Phase 1: drain page-cache hits synchronously; record the misses.
-        // A cache miss: where the item goes (`result_index`) and where it lives (`position`).
-        struct Miss {
-            result_index: usize,
-            position: u64,
-        }
-        let mut result: Vec<Option<A>> = Vec::with_capacity(positions.len());
-        let mut misses: Vec<Miss> = Vec::new();
-        let mut sync_buf = vec![0u8; chunk_size];
-        for (i, &pos) in positions.iter().enumerate() {
-            if let Some(item) = self.try_read_sync_into(pos, &mut sync_buf) {
-                result.push(Some(item));
-            } else {
-                result.push(None);
-                misses.push(Miss {
-                    result_index: i,
-                    position: pos,
-                });
-            }
-        }
-
-        if misses.is_empty() {
-            self.metrics.record_cache_hits(positions.len() as u64);
-            self.metrics.items_read.inc_by(positions.len() as u64);
-            return Ok(result.into_iter().map(|r| r.unwrap()).collect());
-        }
-        self.metrics
-            .record_cache_hits((positions.len() - misses.len()) as u64);
-        self.metrics.record_cache_misses(misses.len() as u64);
-
-        // Phase 2: read the misses, batched per blob. Misses are position-sorted, so
-        // `chunk_by` splits them into maximal runs that share one blob.
-        let mut reusable_buf = vec![0u8; misses.len() * chunk_size];
-        for group in
-            misses.chunk_by(|a, b| a.position / items_per_blob == b.position / items_per_blob)
-        {
-            let blob = group[0].position / items_per_blob;
+        // Read all positions grouped by blob. Positions are sorted, so `chunk_by` splits them
+        // into maximal runs that share one blob. Each group goes through the blob handle's
+        // batched read, which serves page-cache and tip-buffer hits under a single lock
+        // acquisition and reads only true misses from the blob (concurrently). This avoids one
+        // lock acquisition per item that a per-item synchronous probe would incur for the warm
+        // steady state.
+        let mut result: Vec<A> = Vec::with_capacity(positions.len());
+        let mut reusable_buf = vec![0u8; positions.len() * chunk_size];
+        let mut hits = 0u64;
+        for group in positions.chunk_by(|a, b| a / items_per_blob == b / items_per_blob) {
+            let blob = group[0] / items_per_blob;
             let first_position = first_in_blob(pruning_boundary, blob, items_per_blob)?;
             let blob_offsets: Vec<u64> = group
                 .iter()
-                .map(|miss| Journal::<E, A>::items_to_bytes(miss.position - first_position))
+                .map(|&pos| Journal::<E, A>::items_to_bytes(pos - first_position))
                 .collect::<Result<_, _>>()?;
 
             let handle = self.snapshot.require_handle(blob)?;
             let buf = &mut reusable_buf[..group.len() * chunk_size];
-            handle
+            let group_hits = handle
                 .read_many_into(buf, &blob_offsets, Journal::<E, A>::CHUNK_SIZE)
                 .await?;
+            hits += group_hits as u64;
 
-            for (miss, slice) in group.iter().zip(buf.chunks_exact(chunk_size)) {
-                let item = A::decode(slice).map_err(Error::Codec)?;
-                result[miss.result_index] = Some(item);
+            for slice in buf.chunks_exact(chunk_size) {
+                result.push(A::decode(slice).map_err(Error::Codec)?);
             }
         }
 
+        self.metrics.record_cache_hits(hits);
+        self.metrics
+            .record_cache_misses(positions.len() as u64 - hits);
         self.metrics.items_read.inc_by(positions.len() as u64);
-        Ok(result.into_iter().map(|r| r.unwrap()).collect())
+        Ok(result)
     }
 
     fn try_read_sync(&self, pos: u64) -> Option<A> {
@@ -1386,21 +1397,17 @@ impl<E: Context, A: CodecFixedShared> Mutable for Journal<E, A> {
     async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         Self::rewind(self, size).await
     }
-}
-
-impl<E: Context, A: CodecFixedShared> Persistable for Journal<E, A> {
-    type Error = Error;
 
     async fn commit(&mut self) -> Result<(), Error> {
-        self.commit().await
+        Self::commit(self).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        self.sync().await
+        Self::sync(self).await
     }
 
     async fn destroy(self) -> Result<(), Error> {
-        self.destroy().await
+        Self::destroy(self).await
     }
 }
 
@@ -4588,7 +4595,7 @@ mod tests {
                 "fixed_metrics_sync_calls_total 1",
                 "fixed_metrics_append_duration_count 1",
                 "fixed_metrics_append_many_duration_count 1",
-                "fixed_metrics_read_duration_count 1",
+                "fixed_metrics_read_duration_count 0",
                 "fixed_metrics_read_many_duration_count 1",
                 "fixed_metrics_commit_duration_count 1",
                 "fixed_metrics_sync_duration_count 1",
@@ -4831,6 +4838,104 @@ mod tests {
             }
 
             drop(snapshot);
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_read_many_sparse_sections_and_hit_accounting() {
+        // Verify the batched read path is byte-identical to per-item reads across multiple
+        // blobs, with a mid-blob pruning boundary, a sparse subset of positions, and
+        // exact hit/miss accounting over a mixed cached/uncached batch.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(8));
+            let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
+
+            for i in 0..50u64 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+            // Prune mid-blob so first_in_blob differs from the blob start.
+            journal.prune(11).await.unwrap();
+
+            let reader = journal.reader();
+
+            fn counter(buffer: &str, name: &str) -> u64 {
+                buffer
+                    .lines()
+                    .find(|l| l.contains(name) && !l.starts_with('#'))
+                    .and_then(|l| l.split_whitespace().last())
+                    .and_then(|v| v.parse().ok())
+                    .expect("counter missing")
+            }
+
+            // Sparse subset spanning multiple blobs, including the pruning boundary.
+            // `try_read_sync` probes do not populate the cache, so the cached subset is
+            // whatever the append path left resident; derive the expected hit count from
+            // probes so the batch read's hit/miss accounting is asserted exactly.
+            let positions: Vec<u64> = vec![11, 12, 19, 20, 23, 31, 40, 47, 49];
+            let expected_hits = positions
+                .iter()
+                .filter(|&&pos| reader.try_read_sync(pos).is_some())
+                .count() as u64;
+            let before = context.encode();
+            let batch = reader.read_many(&positions).await.unwrap();
+            let after = context.encode();
+            assert_eq!(batch.len(), positions.len());
+            assert_eq!(
+                counter(&after, "cache_hits") - counter(&before, "cache_hits"),
+                expected_hits,
+                "batch read hit count should match the cached subset"
+            );
+            assert_eq!(
+                counter(&after, "cache_misses") - counter(&before, "cache_misses"),
+                positions.len() as u64 - expected_hits,
+                "batch read miss count should cover the rest"
+            );
+            for (i, &pos) in positions.iter().enumerate() {
+                let single = reader.read(pos).await.unwrap();
+                assert_eq!(batch[i], single);
+                assert_eq!(batch[i], test_digest(pos));
+            }
+
+            // Full contiguous range over retained items.
+            let all: Vec<u64> = (11..50).collect();
+            let batch = reader.read_many(&all).await.unwrap();
+            for (i, &pos) in all.iter().enumerate() {
+                assert_eq!(batch[i], reader.read(pos).await.unwrap());
+            }
+            drop(reader);
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_read_miss_timed() {
+        // Reads served from storage record a read_duration sample; cache hits do not.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut journal =
+                Journal::<_, Digest>::init(context.child("miss"), test_cfg(&context, NZU64!(2)))
+                    .await
+                    .unwrap();
+            for i in 0..20 {
+                journal.append(&test_digest(i)).await.unwrap();
+            }
+            journal.sync().await.unwrap();
+
+            // The page cache cannot hold every page, so some position must be cold.
+            let reader = journal.reader();
+            let pos = (0..20)
+                .find(|&pos| reader.try_read_sync(pos).is_none())
+                .expect("some position should be cold");
+            assert_eq!(reader.read(pos).await.unwrap(), test_digest(pos));
+            drop(reader);
+
+            let buffer = context.encode();
+            assert!(buffer.contains("miss_read_duration_count 1"), "{buffer}");
+
             journal.destroy().await.unwrap();
         });
     }

@@ -499,7 +499,7 @@ impl<B: Blob> Handle<'_, B> {
         buf: &mut [u8],
         offsets: &[u64],
         item_size: NonZeroUsize,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         match self {
             Self::Sealed(s) => s
                 .read_many_into(buf, offsets, item_size)
