@@ -827,7 +827,11 @@ where
 }
 
 /// Returns true when `block` is already covered by committed state.
-#[tracing::instrument(name = "stateful.processor.is_already_processed", level = "info", skip_all)]
+#[tracing::instrument(
+    name = "stateful.processor.is_already_processed",
+    level = "info",
+    skip_all
+)]
 async fn is_already_processed<S, V, Response>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
     marshal: MarshalMailbox<S, V>,
