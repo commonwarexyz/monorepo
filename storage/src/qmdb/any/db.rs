@@ -22,6 +22,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::num::NonZeroU64;
@@ -366,7 +367,7 @@ where
     /// Prune historical operations prior to `prune_loc`. This does not affect the db's root or
     /// snapshot.
     #[tracing::instrument(
-        name = "qmdb::any::Db::prune",
+        name = "qmdb.any.db.prune",
         level = "info",
         skip_all,
         fields(
@@ -398,7 +399,7 @@ where
     /// because pruning removed the commit that would have governed it.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
-        name = "qmdb::any::Db::historical_proof",
+        name = "qmdb.any.db.historical_proof",
         level = "info",
         skip_all,
         fields(
@@ -462,7 +463,7 @@ where
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
     #[tracing::instrument(
-        name = "qmdb::any::Db::rewind",
+        name = "qmdb.any.db.rewind",
         level = "info",
         skip_all,
         fields(
@@ -746,7 +747,7 @@ where
 
     /// Sync all database state to disk.
     #[tracing::instrument(
-        name = "qmdb::any::Db::sync",
+        name = "qmdb.any.db.sync",
         level = "info",
         skip_all,
         fields(
@@ -765,7 +766,7 @@ where
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
     #[tracing::instrument(
-        name = "qmdb::any::Db::commit",
+        name = "qmdb.any.db.commit",
         level = "info",
         skip_all,
         fields(
@@ -782,6 +783,7 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
+    #[boxed]
     pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.destroy().await.map_err(Into::into)
     }

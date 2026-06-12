@@ -234,6 +234,21 @@ pub fn stability_scope(input: TokenStream) -> TokenStream {
 }
 
 #[proc_macro_attribute]
+pub fn boxed(_: TokenStream, item: TokenStream) -> TokenStream {
+    let mut input = parse_macro_input!(item as ItemFn);
+    if input.sig.asyncness.is_none() {
+        return Error::new_spanned(&input.sig, "#[boxed] can only be used with async functions")
+            .to_compile_error()
+            .into();
+    }
+
+    let block = input.block;
+    input.block = syn::parse_quote!({ ::std::boxed::Box::pin(async move #block).await });
+
+    quote!(#input).into()
+}
+
+#[proc_macro_attribute]
 pub fn test_async(_: TokenStream, item: TokenStream) -> TokenStream {
     // Parse the input tokens into a syntax tree
     let input = parse_macro_input!(item as ItemFn);

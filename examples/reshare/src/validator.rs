@@ -13,6 +13,7 @@ use commonware_consensus::{
 use commonware_cryptography::{
     bls12381::primitives::variant::MinSig, ed25519, Hasher, Sha256, Signer,
 };
+use commonware_macros::boxed;
 use commonware_p2p::authenticated::discovery;
 use commonware_runtime::{tokio, Quota, Supervisor as _, ThreadPooler};
 use commonware_utils::{union, union_unique, NZUsize, NZU32};
@@ -35,6 +36,7 @@ const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Run the validator node service.
+#[boxed]
 pub async fn run<S, L>(
     context: tokio::Context,
     args: super::ParticipantArgs,

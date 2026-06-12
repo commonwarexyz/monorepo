@@ -67,9 +67,14 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
-use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
+use commonware_utils::{
+    channel::oneshot,
+    sync::{AsyncRwLock, TracedAsyncRwLock},
+    Array,
+};
 use std::{future::Future, num::NonZeroU64, sync::Arc};
 
 /// Compact-sync target for a compact-storage database.
@@ -371,6 +376,7 @@ where
 /// 5. Assert the db root still matches and persist the state.
 ///
 /// A failure before the final persist leaves on-disk state untouched.
+#[boxed]
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
@@ -598,8 +604,12 @@ macro_rules! impl_compact_resolver_keyless {
                 .map(Into::into)
             }
         }
+        impl_compact_resolver_keyless!(@locked $db, $op, $val_bound, AsyncRwLock);
+        impl_compact_resolver_keyless!(@locked $db, $op, $val_bound, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $val_bound:ident, $lock:ident) => {
 
-        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, S>>>
+        impl<F, E, V, H, S> Resolver for Arc<$lock<$db<F, E, V, H, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -634,7 +644,7 @@ macro_rules! impl_compact_resolver_keyless {
             }
         }
 
-        impl<F, E, V, H, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, S>>>>
+        impl<F, E, V, H, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -712,8 +722,12 @@ macro_rules! impl_compact_resolver_immutable {
                 .map(Into::into)
             }
         }
+        impl_compact_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, AsyncRwLock);
+        impl_compact_resolver_immutable!(@locked $db, $op, $val_bound, $key_bound, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $val_bound:ident, $key_bound:path, $lock:ident) => {
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, T, S>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<$db<F, E, K, V, H, T, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -751,7 +765,7 @@ macro_rules! impl_compact_resolver_immutable {
             }
         }
 
-        impl<F, E, K, V, H, T, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, T, S>>>>
+        impl<F, E, K, V, H, T, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, T, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -818,8 +832,12 @@ macro_rules! impl_compact_resolver_compact_keyless {
                 self.compact_state(target).map(Into::into)
             }
         }
+        impl_compact_resolver_compact_keyless!(@locked $db, $op, AsyncRwLock);
+        impl_compact_resolver_compact_keyless!(@locked $db, $op, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $lock:ident) => {
 
-        impl<F, E, V, H, C, S> Resolver for Arc<AsyncRwLock<$db<F, E, V, H, C, S>>>
+        impl<F, E, V, H, C, S> Resolver for Arc<$lock<$db<F, E, V, H, C, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -843,7 +861,7 @@ macro_rules! impl_compact_resolver_compact_keyless {
             }
         }
 
-        impl<F, E, V, H, C, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, V, H, C, S>>>>
+        impl<F, E, V, H, C, S> Resolver for Arc<$lock<Option<$db<F, E, V, H, C, S>>>>
         where
             F: Family,
             E: crate::Context,
@@ -897,8 +915,12 @@ macro_rules! impl_compact_resolver_compact_immutable {
                 self.compact_state(target).map(Into::into)
             }
         }
+        impl_compact_resolver_compact_immutable!(@locked $db, $op, AsyncRwLock);
+        impl_compact_resolver_compact_immutable!(@locked $db, $op, TracedAsyncRwLock);
+    };
+    (@locked $db:ident, $op:ident, $lock:ident) => {
 
-        impl<F, E, K, V, H, C, S> Resolver for Arc<AsyncRwLock<$db<F, E, K, V, H, C, S>>>
+        impl<F, E, K, V, H, C, S> Resolver for Arc<$lock<$db<F, E, K, V, H, C, S>>>
         where
             F: Family,
             E: crate::Context,
@@ -923,7 +945,7 @@ macro_rules! impl_compact_resolver_compact_immutable {
             }
         }
 
-        impl<F, E, K, V, H, C, S> Resolver for Arc<AsyncRwLock<Option<$db<F, E, K, V, H, C, S>>>>
+        impl<F, E, K, V, H, C, S> Resolver for Arc<$lock<Option<$db<F, E, K, V, H, C, S>>>>
         where
             F: Family,
             E: crate::Context,

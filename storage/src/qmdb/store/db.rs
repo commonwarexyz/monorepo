@@ -93,6 +93,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{CodecShared, Read};
+use commonware_macros::boxed;
 use commonware_utils::Array;
 use core::ops::Range;
 use std::collections::BTreeMap;
@@ -392,6 +393,7 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
+    #[boxed]
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }

@@ -87,6 +87,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
+use commonware_macros::boxed;
 use commonware_runtime::{
     buffer::paged::{self, CacheRef, Replay, Writer},
     Blob, Buf, IoBufMut,
@@ -309,6 +310,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// The data blobs are the source of truth. If the offsets journal is inconsistent
     /// it will be updated to match the data blobs.
+    #[boxed]
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let items_per_section = cfg.items_per_section.get();
         let data_partition = cfg.data_partition();
