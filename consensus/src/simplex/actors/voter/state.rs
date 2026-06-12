@@ -27,7 +27,7 @@ use std::{
     mem::{replace, take},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, warn};
+use tracing::{debug, warn, Span};
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
@@ -247,6 +247,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 self.context.current(),
             )
         })
+    }
+
+    /// Returns the root span for `view`, or a disabled span if the view is not tracked.
+    pub fn view_span(&self, view: View) -> Span {
+        self.views
+            .get(&view)
+            .map(|round| round.span().clone())
+            .unwrap_or_else(Span::none)
     }
 
     /// Returns the deadline for the next timeout (leader, certification, or retry).

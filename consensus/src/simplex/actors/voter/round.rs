@@ -12,7 +12,7 @@ use std::{
     mem::replace,
     time::{Duration, SystemTime},
 };
-use tracing::debug;
+use tracing::{debug, info_span, Span};
 
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
@@ -40,6 +40,9 @@ pub struct Round<S: Scheme, D: Digest> {
 
     round: Rnd,
 
+    // Root span for all work attributed to this view.
+    span: Span,
+
     // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<Leader<S::PublicKey>>,
 
@@ -63,11 +66,18 @@ pub struct Round<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
-    pub const fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
+    pub fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
+        let span = info_span!(
+            parent: None,
+            "simplex.voter.view",
+            epoch = %round.epoch(),
+            view = %round.view()
+        );
         Self {
             start,
             scheme,
             round,
+            span,
             leader: None,
             proposal: ProposalSlot::new(),
             leader_deadline: None,
@@ -173,6 +183,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return;
         }
         self.certify = CertifyState::Aborted;
+    }
+
+    /// Returns the root span for all work attributed to this view.
+    pub const fn span(&self) -> &Span {
+        &self.span
     }
 
     /// Returns the elected leader (if any) for this round.

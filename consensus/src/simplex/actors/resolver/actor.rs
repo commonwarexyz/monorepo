@@ -23,7 +23,7 @@ use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, M
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
-use tracing::debug;
+use tracing::{debug, debug_span, info_span};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -129,12 +129,19 @@ impl<
                 break;
             },
             Some(message) = self.mailbox_receiver.recv() else break => {
+                let span = info_span!(
+                    parent: message.span(),
+                    "simplex.resolver.process",
+                    operation = message.name(),
+                    view = %message.view()
+                );
+                let _guard = span.entered();
                 match message {
-                    MailboxMessage::Certificate(certificate) => {
+                    MailboxMessage::Certificate { certificate, .. } => {
                         // Certificates from mailbox have no associated request view
                         self.state.handle(certificate, None, &mut resolver);
                     }
-                    MailboxMessage::Certified { view, success } => {
+                    MailboxMessage::Certified { view, success, .. } => {
                         self.state.handle_certified(view, success, &mut resolver)
                     }
                 }
@@ -244,6 +251,9 @@ impl<
                 data,
                 response,
             } => {
+                let span = info_span!("simplex.resolver.deliver", view = %view);
+                let _guard = span.entered();
+
                 // Validate incoming message
                 let Some(parsed) = self.validate(view, data) else {
                     // Resolver will block any peers that send invalid responses, so
@@ -260,6 +270,9 @@ impl<
                 self.state.handle(parsed, Some(view), resolver);
             }
             HandlerMessage::Produce { view, response } => {
+                let span = debug_span!("simplex.resolver.produce", view = %view);
+                let _guard = span.entered();
+
                 // Produce message for view
                 let Some(certificate) = self.state.get(view) else {
                     // If we drop the response channel, the resolver will automatically

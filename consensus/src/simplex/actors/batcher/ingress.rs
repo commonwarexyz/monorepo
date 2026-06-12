@@ -6,11 +6,14 @@ use crate::{
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use std::collections::VecDeque;
+use tracing::{info_span, Span};
 
 /// Messages sent to the [super::actor::Actor].
 pub enum Message<S: Scheme, D: Digest> {
     /// View update with leader info.
     Update {
+        /// The span carried with this message.
+        span: Span,
         current: View,
         leader: Participant,
         finalized: View,
@@ -161,6 +164,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         forwardable_proposal: Option<Proposal<D>>,
     ) {
         let _ = self.sender.enqueue(Message::Update {
+            span: info_span!("simplex.batcher.mailbox.update", view = %current),
             current,
             leader,
             finalized,
@@ -222,6 +226,7 @@ mod tests {
 
     fn update(current: View, finalized: View) -> Message<TestScheme, Sha256Digest> {
         Message::Update {
+            span: Span::none(),
             current,
             leader: Participant::new(0),
             finalized,

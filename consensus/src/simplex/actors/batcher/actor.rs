@@ -28,7 +28,7 @@ use commonware_runtime::{
 use commonware_utils::ordered::{Quorum, Set};
 use rand_core::CryptoRngCore;
 use std::collections::BTreeMap;
-use tracing::{debug, trace};
+use tracing::{debug, info_span, trace, Span};
 
 /// Tracks the current view, its leader, and whether the voter has
 /// already been told to timeout this view.
@@ -144,12 +144,19 @@ where
         )
     }
 
-    fn new_round(&self) -> Round<S, B, D, Re> {
+    fn new_round(&self, view: View) -> Round<S, B, D, Re> {
+        let span = info_span!(
+            parent: None,
+            "simplex.batcher.view",
+            epoch = %self.epoch,
+            view = %view
+        );
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
             self.blocker.clone(),
             self.reporter.clone(),
+            span,
         )
     }
 
@@ -285,11 +292,19 @@ where
             },
             Some(message) = self.mailbox_receiver.recv() else break => match message {
                 Message::Update {
+                    span,
                     current: new_current,
                     leader,
                     finalized: new_finalized,
                     forwardable_proposal,
                 } => {
+                    let process = info_span!(
+                        parent: &span,
+                        "simplex.batcher.process",
+                        operation = "update",
+                        view = %new_current
+                    );
+                    let _guard = process.entered();
                     let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                     current = Current {
                         view: new_current,
@@ -298,7 +313,7 @@ where
                     };
                     finalized = new_finalized;
                     work.entry(current.view)
-                        .or_insert_with(|| self.new_round())
+                        .or_insert_with(|| self.new_round(new_current))
                         .set_leader(leader);
 
                     // If the leader nullified this view or has not been active
@@ -346,7 +361,7 @@ where
 
                     // Add the message to the verifier
                     work.entry(view)
-                        .or_insert_with(|| self.new_round())
+                        .or_insert_with(|| self.new_round(view))
                         .add_constructed(message);
                     self.added.inc();
                     updated_view = view;
@@ -387,6 +402,25 @@ where
                 }
                 self.record_activity(&sender, view);
 
+                // Parent under the view's span if we already track the view (we avoid
+                // creating per-view state for certificates that fail verification)
+                let kind = match &message {
+                    Certificate::Notarization(_) => "notarization",
+                    Certificate::Nullification(_) => "nullification",
+                    Certificate::Finalization(_) => "finalization",
+                };
+                let parent = work
+                    .get(&view)
+                    .map(|round| round.span().clone())
+                    .unwrap_or_else(Span::none);
+                let span = info_span!(
+                    parent: parent,
+                    "simplex.batcher.verify_certificate",
+                    kind,
+                    view = %view
+                );
+                let _guard = span.entered();
+
                 match message {
                     Certificate::Notarization(notarization) => {
                         // Skip if we already have a notarization for this view
@@ -404,7 +438,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round())
+                            .or_insert_with(|| self.new_round(view))
                             .set_notarization(notarization.clone());
                         voter.recovered(Certificate::Notarization(notarization));
                     }
@@ -427,7 +461,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round())
+                            .or_insert_with(|| self.new_round(view))
                             .set_nullification(nullification.clone());
                         voter.recovered(Certificate::Nullification(nullification));
                     }
@@ -447,7 +481,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round())
+                            .or_insert_with(|| self.new_round(view))
                             .set_finalization(finalization.clone());
                         voter.recovered(Certificate::Finalization(finalization));
                     }
@@ -488,7 +522,7 @@ where
                 // Add the vote to the verifier
                 if work
                     .entry(view)
-                    .or_insert_with(|| self.new_round())
+                    .or_insert_with(|| self.new_round(view))
                     .add_network(sender.clone(), message)
                 {
                     self.added.inc();
@@ -519,7 +553,7 @@ where
                 if let Some(round) = work.get_mut(&current.view) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
-                            voter.proposal(proposal);
+                            round.span().clone().in_scope(|| voter.proposal(proposal));
                         }
                     }
                 }
@@ -537,6 +571,7 @@ where
                 let Some(round) = work.get_mut(&updated_view) else {
                     continue;
                 };
+                let _guard = round.span().clone().entered();
 
                 // Batch verify votes if ready
                 let timer = self.verify_latency.timer(self.context.as_ref());
@@ -610,6 +645,7 @@ where
                     debug!(view = %updated_view, "constructed finalization, forwarding to voter");
                     voter.recovered(Certificate::Finalization(finalization));
                 }
+                drop(_guard);
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
