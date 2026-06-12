@@ -599,7 +599,6 @@ where
             positions.sort_unstable();
             positions.dedup();
         }
-
         let read = reader.read_many(&positions).await?;
 
         // A presorted input with nothing resolved in memory was read in caller order
