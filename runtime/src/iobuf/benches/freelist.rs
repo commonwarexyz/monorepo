@@ -272,10 +272,13 @@ impl FreelistImplementation for Freelist {
     fn put_batch(&self, entries: &mut Vec<Entry>) {
         if entries.len() == 1 {
             let entry = entries.pop().unwrap();
-            self.put(entry.slot, entry.buffer);
+            // SAFETY: the entry was taken from this freelist and is returned exactly once.
+            unsafe { self.put(entry.slot, entry.buffer) };
             return;
         }
 
-        self.put_batch(entries.drain(..).map(|entry| (entry.slot, entry.buffer)));
+        // SAFETY: every entry was taken from this freelist by a distinct take, so slots are
+        // unique and each is returned exactly once; the drain iterator cannot panic.
+        unsafe { self.put_batch(entries.drain(..).map(|entry| (entry.slot, entry.buffer))) };
     }
 }

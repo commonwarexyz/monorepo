@@ -283,11 +283,16 @@ impl Freelist {
         };
 
         if prefill {
-            freelist.put_batch((0..capacity).map(|_| {
-                freelist
-                    .try_create(false)
-                    .expect("prefill creates exactly capacity buffers")
-            }));
+            // SAFETY: every entry was just created by this freelist and its
+            // slot is owned here; the iterator's expect cannot fire after a
+            // yield because try_create only fails once capacity is exhausted.
+            unsafe {
+                freelist.put_batch((0..capacity).map(|_| {
+                    freelist
+                        .try_create(false)
+                        .expect("prefill creates exactly capacity buffers")
+                }));
+            }
         }
 
         freelist
@@ -363,11 +368,15 @@ impl Freelist {
     /// free bit is set with `Release` ordering. A successful `take` performs
     /// the matching `Acquire` operation before reading the buffer back out.
     ///
-    /// The caller must own `slot`, and `slot` must not already be available in
-    /// this freelist. `buffer` must belong to this freelist and must have been
-    /// allocated by this freelist.
+    /// # Safety
+    ///
+    /// The caller must own `slot`, `slot` must not already be available in
+    /// this freelist, and `buffer` must be the buffer this freelist created
+    /// for `slot`. A foreign buffer would later be deallocated with this
+    /// freelist's layout (undefined behavior), and an unowned or duplicate
+    /// slot would overwrite a parked buffer.
     #[inline]
-    pub fn put(&self, slot: u32, buffer: PooledBuffer) {
+    pub unsafe fn put(&self, slot: u32, buffer: PooledBuffer) {
         // Park the buffer before marking the slot free.
         self.park(slot, buffer);
 
@@ -388,16 +397,18 @@ impl Freelist {
     /// stripe needs only one atomic `fetch_or`, regardless of how many entries
     /// in the batch map to that word.
     ///
-    /// The caller must own every slot in the batch. Slots must be unique within
-    /// the batch and must not already be available in this freelist. Each
-    /// buffer must belong to this freelist.
-    ///
-    /// The iterator **must not panic** after yielding an entry.
-    ///
     /// `BufferPool` callers use simple drain and array iterators, avoiding
     /// per-entry guards keeps this path allocation-free for ordinary batches.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own every slot in the batch; slots must be unique
+    /// within the batch and must not already be available in this freelist;
+    /// each buffer must be the one this freelist created for its slot (see
+    /// [`Self::put`]). The iterator **must not panic** after yielding an
+    /// entry: parked-but-unpublished buffers would be stranded.
     #[inline]
-    pub fn put_batch(&self, entries: impl IntoIterator<Item = (u32, PooledBuffer)>) {
+    pub unsafe fn put_batch(&self, entries: impl IntoIterator<Item = (u32, PooledBuffer)>) {
         let mut entries = entries.into_iter();
 
         // Keep empty and single-entry batches on the cheapest path. The mask
@@ -407,7 +418,8 @@ impl Freelist {
             return;
         };
         let Some((next_slot, next_buffer)) = entries.next() else {
-            self.put(slot, buffer);
+            // SAFETY: same contract as this method.
+            unsafe { self.put(slot, buffer) };
             return;
         };
 
@@ -909,8 +921,11 @@ pub(super) mod tests {
 
         // Returning created buffers makes them available for reuse, but does
         // not reopen slot creation beyond the fixed capacity.
-        set.put(slot0, buffer0);
-        set.put(slot1, buffer1);
+        // SAFETY: each buffer was created by this freelist for its slot and is returned once.
+        unsafe {
+            set.put(slot0, buffer0);
+            set.put(slot1, buffer1);
+        }
         assert_eq!(len(&set), 2);
 
         assert_eq!(created(&set), 2);
@@ -932,9 +947,12 @@ pub(super) mod tests {
         let (slot1, buffer1) = set.try_create(false).unwrap();
         let (slot2, buffer2) = set.try_create(false).unwrap();
         assert_eq!([slot0, slot1, slot2], [0, 1, 2]);
-        set.put(slot0, buffer0);
-        set.put(slot1, buffer1);
-        set.put(slot2, buffer2);
+        // SAFETY: each buffer was created by this freelist for its slot and is returned once.
+        unsafe {
+            set.put(slot0, buffer0);
+            set.put(slot1, buffer1);
+            set.put(slot2, buffer2);
+        }
 
         // Every free slot should be returned exactly once, and the
         // freelist should report empty afterward.
@@ -953,7 +971,8 @@ pub(super) mod tests {
 
         // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
-            set.put(slot, buffer);
+            // SAFETY: each entry was taken from this freelist and is returned exactly once.
+            unsafe { set.put(slot, buffer) };
         }
     }
 
@@ -995,7 +1014,8 @@ pub(super) mod tests {
         let set = Freelist::new(NZU32!(8), NZUsize!(8), TEST_LAYOUT, false);
 
         // Empty batches are a no-op and must not make anything available.
-        set.put_batch(Vec::new());
+        // SAFETY: an empty batch returns no slots.
+        unsafe { set.put_batch(Vec::new()) };
         assert_eq!(len(&set), 0);
 
         // Reserve the full slot range
@@ -1009,7 +1029,8 @@ pub(super) mod tests {
         // A single-entry batch delegates to `put`, preserving the cheaper
         // one-buffer path.
         let buffer = created[3].take().unwrap();
-        set.put_batch(vec![(3, buffer)]);
+        // SAFETY: this freelist created the buffer for slot 3 and it is returned once.
+        unsafe { set.put_batch(vec![(3, buffer)]) };
         assert_eq!(len(&set), 1);
 
         let mut taken = Vec::new();
@@ -1028,7 +1049,8 @@ pub(super) mod tests {
             let buffer = created[slot as usize].take().unwrap();
             batch.push((slot, buffer));
         }
-        set.put_batch(batch);
+        // SAFETY: each batch entry was created by this freelist with a distinct slot.
+        unsafe { set.put_batch(batch) };
         assert_eq!(len(&set), 3);
 
         assert_eq!(
@@ -1041,13 +1063,16 @@ pub(super) mod tests {
         assert_eq!(len(&set), 0);
 
         // Return taken test buffers so the freelist owns deallocation.
-        set.put(single.0, single.1);
+        // SAFETY: the entry was taken from this freelist and is returned exactly once.
+        unsafe { set.put(single.0, single.1) };
         for (slot, buffer) in taken {
-            set.put(slot, buffer);
+            // SAFETY: each entry was taken from this freelist and is returned exactly once.
+            unsafe { set.put(slot, buffer) };
         }
         for (slot, buffer) in created.into_iter().enumerate() {
             if let Some(buffer) = buffer {
-                set.put(slot as u32, buffer);
+                // SAFETY: this freelist created the buffer for this slot; returned exactly once.
+                unsafe { set.put(slot as u32, buffer) };
             }
         }
     }
@@ -1073,7 +1098,8 @@ pub(super) mod tests {
             let buffer = created[slot as usize].take().expect("slot buffer");
             batch.push((slot, buffer));
         }
-        set.put_batch(batch);
+        // SAFETY: each batch entry was created by this freelist with a distinct slot.
+        unsafe { set.put_batch(batch) };
         assert_eq!(len(&set), 4);
 
         let mut taken = Vec::new();
@@ -1088,11 +1114,13 @@ pub(super) mod tests {
 
         // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
-            set.put(slot, buffer);
+            // SAFETY: each entry was taken from this freelist and is returned exactly once.
+            unsafe { set.put(slot, buffer) };
         }
         for (slot, buffer) in created.into_iter().enumerate() {
             if let Some(buffer) = buffer {
-                set.put(slot as u32, buffer);
+                // SAFETY: this freelist created the buffer for this slot; returned exactly once.
+                unsafe { set.put(slot as u32, buffer) };
             }
         }
     }
@@ -1106,15 +1134,19 @@ pub(super) mod tests {
         let (slot3, buffer3) = set.try_create(false).unwrap();
         assert_eq!([slot0, slot1, slot2, slot3], [0, 1, 2, 3]);
 
-        set.put(slot0, buffer0);
-        set.put(slot2, buffer2);
-        set.put(slot3, buffer3);
+        // SAFETY: each buffer was created by this freelist for its slot and is returned once.
+        unsafe {
+            set.put(slot0, buffer0);
+            set.put(slot2, buffer2);
+            set.put(slot3, buffer3);
+        }
 
         assert_eq!(set.drain(), 3);
         assert_eq!(len(&set), 0);
 
         // Return taken test buffer so the freelist owns deallocation.
-        set.put(slot1, buffer1);
+        // SAFETY: this freelist created the buffer for this slot; returned exactly once.
+        unsafe { set.put(slot1, buffer1) };
     }
 
     #[test]
@@ -1125,7 +1157,8 @@ pub(super) mod tests {
         for expected in [0, 1, 2] {
             let (slot, buffer) = set.try_create(false).expect("slot");
             assert_eq!(slot, expected);
-            set.put(slot, buffer);
+            // SAFETY: this freelist just created the buffer for this slot.
+            unsafe { set.put(slot, buffer) };
         }
 
         let mut taken = Vec::new();
@@ -1152,7 +1185,8 @@ pub(super) mod tests {
 
         // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
-            set.put(slot, buffer);
+            // SAFETY: each entry was taken from this freelist and is returned exactly once.
+            unsafe { set.put(slot, buffer) };
         }
     }
 
@@ -1178,7 +1212,8 @@ pub(super) mod tests {
 
         // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
-            set.put(slot, buffer);
+            // SAFETY: each entry was taken from this freelist and is returned exactly once.
+            unsafe { set.put(slot, buffer) };
         }
     }
 
@@ -1210,9 +1245,11 @@ pub(super) mod tests {
 
         // Return taken test buffers so the freelist owns deallocation.
         for (slot, buffer) in taken {
-            set.put(slot, buffer);
+            // SAFETY: each entry was taken from this freelist and is returned exactly once.
+            unsafe { set.put(slot, buffer) };
         }
-        set.put(remaining.0, remaining.1);
+        // SAFETY: the entry was taken from this freelist and is returned exactly once.
+        unsafe { set.put(remaining.0, remaining.1) };
     }
 
     #[test]
@@ -1297,7 +1334,8 @@ pub(super) mod tests {
             let set = Arc::new(Freelist::new(NZU32!(1), NZUsize!(1), TEST_LAYOUT, false));
             let (slot, buffer) = set.try_create(false).unwrap();
             assert_eq!(slot, 0);
-            set.put(slot, buffer);
+            // SAFETY: this freelist just created the buffer for this slot.
+            unsafe { set.put(slot, buffer) };
 
             // Align the contenders so several can race on the same observed
             // word instead of serializing before `take`.
@@ -1330,7 +1368,8 @@ pub(super) mod tests {
             let claimed = claimed_rx.recv().expect("one thread claimed the slot");
             assert!(claimed_rx.try_recv().is_err());
             // Return the claimed buffer so the freelist owns deallocation.
-            set.put(claimed.0, claimed.1);
+            // SAFETY: the entry was taken from this freelist and is returned exactly once.
+            unsafe { set.put(claimed.0, claimed.1) };
         }
     }
 
@@ -1342,7 +1381,8 @@ pub(super) mod tests {
         for expected in [0, 1] {
             let (slot, buffer) = set.try_create(false).expect("slot");
             assert_eq!(slot, expected);
-            set.put(slot, buffer);
+            // SAFETY: this freelist just created the buffer for this slot.
+            unsafe { set.put(slot, buffer) };
         }
         drop(set);
     }
@@ -1514,7 +1554,8 @@ mod loom_tests {
     impl Drop for Leases {
         fn drop(&mut self) {
             for (slot, buffer) in self.buffers.lock().drain(..) {
-                self.freelist.put(slot, buffer);
+                // SAFETY: each leased entry came from this freelist and is returned exactly once.
+                unsafe { self.freelist.put(slot, buffer) };
             }
         }
     }
@@ -1534,7 +1575,8 @@ mod loom_tests {
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot, buffer)
+                // SAFETY: this freelist just created the buffer for this slot.
+                move || unsafe { freelist.put(slot, buffer) }
             });
 
             let reader = thread::spawn({
@@ -1574,12 +1616,14 @@ mod loom_tests {
 
             let first = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot0, buffer0)
+                // SAFETY: this freelist created the buffer for this slot; returned exactly once.
+                move || unsafe { freelist.put(slot0, buffer0) }
             });
 
             let second = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot1, buffer1)
+                // SAFETY: this freelist created the buffer for this slot; returned exactly once.
+                move || unsafe { freelist.put(slot1, buffer1) }
             });
 
             first.join().unwrap();
@@ -1611,12 +1655,14 @@ mod loom_tests {
 
             let first = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put_batch(entries)
+                // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+                move || unsafe { freelist.put_batch(entries) }
             });
 
             let second = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put_batch(second_entries)
+                // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+                move || unsafe { freelist.put_batch(second_entries) }
             });
 
             first.join().unwrap();
@@ -1646,14 +1692,16 @@ mod loom_tests {
             let initial_entry = entries.pop().unwrap();
             let writer_entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
+            // SAFETY: this freelist just created the buffer for this slot.
+            unsafe { freelist.put(initial_entry.0, initial_entry.1) };
 
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b11;
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(writer_entry.0, writer_entry.1)
+                // SAFETY: this freelist created the buffer for this slot; returned exactly once.
+                move || unsafe { freelist.put(writer_entry.0, writer_entry.1) }
             });
 
             let taker = thread::spawn({
@@ -1694,14 +1742,16 @@ mod loom_tests {
             let initial_entry = entries.pop().unwrap();
             let writer_entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
+            // SAFETY: this freelist just created the buffer for this slot.
+            unsafe { freelist.put(initial_entry.0, initial_entry.1) };
 
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b11;
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(writer_entry.0, writer_entry.1)
+                // SAFETY: this freelist created the buffer for this slot; returned exactly once.
+                move || unsafe { freelist.put(writer_entry.0, writer_entry.1) }
             });
 
             let batch_taker = thread::spawn({
@@ -1744,13 +1794,15 @@ mod loom_tests {
             let writer_entry1 = entries.pop().unwrap();
             let initial_entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(initial_entry.0, initial_entry.1);
+            // SAFETY: this freelist just created the buffer for this slot.
+            unsafe { freelist.put(initial_entry.0, initial_entry.1) };
 
             let drained = Arc::new(AtomicUsize::new(0));
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put_batch([writer_entry0, writer_entry1])
+                // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+                move || unsafe { freelist.put_batch([writer_entry0, writer_entry1]) }
             });
 
             let drainer = thread::spawn({
@@ -1783,7 +1835,8 @@ mod loom_tests {
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(2));
             let (_, buffer) = freelist.try_create(false).unwrap();
-            freelist.put(0, buffer);
+            // SAFETY: this freelist just created the buffer for slot 0.
+            unsafe { freelist.put(0, buffer) };
 
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b1;
@@ -1823,7 +1876,8 @@ mod loom_tests {
             let (leases, mut entries) = Leases::reserve(freelist.clone());
             let entry = entries.pop().unwrap();
             assert!(entries.pop().is_none());
-            freelist.put(entry.0, entry.1);
+            // SAFETY: this freelist just created the buffer for this slot.
+            unsafe { freelist.put(entry.0, entry.1) };
 
             let transfers = Arc::new(AtomicUsize::new(0));
             let mut handles = Vec::new();
@@ -1838,7 +1892,8 @@ mod loom_tests {
                             assert_eq!(slot, 0);
                             let transfer = transfers.fetch_add(1, Ordering::Relaxed) + 1;
                             if transfer == 1 {
-                                freelist.put(slot, buffer);
+                                // SAFETY: taken from this freelist; returned exactly once.
+                                unsafe { freelist.put(slot, buffer) };
                             } else {
                                 leases.push(slot, buffer);
                             }
@@ -1872,7 +1927,8 @@ mod loom_tests {
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(2));
             let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+            unsafe { freelist.put_batch(entries) };
 
             let seen = Arc::new(AtomicUsize::new(0));
             let expected = 0b11;
@@ -1912,7 +1968,8 @@ mod loom_tests {
             let slots = geometry.slots();
             let expected = geometry.slot_mask();
             let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+            unsafe { freelist.put_batch(entries) };
 
             let seen = Arc::new(AtomicUsize::new(0));
             let batch_count = Arc::new(AtomicUsize::new(0));
@@ -1965,7 +2022,8 @@ mod loom_tests {
             let slots = geometry.slots();
             let expected = geometry.slot_mask();
             let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+            unsafe { freelist.put_batch(entries) };
 
             let seen = Arc::new(AtomicUsize::new(0));
             let total = Arc::new(AtomicUsize::new(0));
@@ -2005,7 +2063,8 @@ mod loom_tests {
         loom::model(|| {
             let freelist = Arc::new(single_word_freelist(3));
             let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+            unsafe { freelist.put_batch(entries) };
 
             let seen = Arc::new(AtomicUsize::new(0));
             let total = Arc::new(AtomicUsize::new(0));
@@ -2055,7 +2114,8 @@ mod loom_tests {
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put_batch(entries)
+                // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+                move || unsafe { freelist.put_batch(entries) }
             });
 
             let reader = thread::spawn({
@@ -2098,7 +2158,8 @@ mod loom_tests {
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put(slot, buffer)
+                // SAFETY: this freelist just created the buffer for this slot.
+                move || unsafe { freelist.put(slot, buffer) }
             });
 
             let drainer = thread::spawn({
@@ -2144,7 +2205,8 @@ mod loom_tests {
 
             let writer = thread::spawn({
                 let freelist = freelist.clone();
-                move || freelist.put_batch(entries)
+                // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+                move || unsafe { freelist.put_batch(entries) }
             });
 
             let drainer = thread::spawn({
@@ -2188,7 +2250,8 @@ mod loom_tests {
                 let freelist = freelist.clone();
                 move || {
                     for (slot, buffer) in entries {
-                        freelist.put(slot, buffer);
+                        // SAFETY: this freelist created the buffer for this slot.
+                        unsafe { freelist.put(slot, buffer) };
                     }
                 }
             });
@@ -2229,7 +2292,8 @@ mod loom_tests {
             let expected = slots.len();
             let expected_mask = geometry.slot_mask();
             let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+            unsafe { freelist.put_batch(entries) };
 
             let drained = Arc::new(AtomicUsize::new(0));
             let taken = Arc::new(AtomicUsize::new(0));
@@ -2275,7 +2339,8 @@ mod loom_tests {
             let slots = geometry.slots();
             let expected = slots.len();
             let entries = Leases::entries(&freelist);
-            freelist.put_batch(entries);
+            // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+            unsafe { freelist.put_batch(entries) };
 
             let total = Arc::new(AtomicUsize::new(0));
             let mut handles = Vec::new();
@@ -2310,7 +2375,8 @@ mod loom_tests {
             let expected = slots.len();
             let expected_mask = geometry.slot_mask();
             let (leases, entries) = Leases::reserve(freelist.clone());
-            freelist.put_batch(entries);
+            // SAFETY: distinct slots created by this freelist; the iterator cannot panic.
+            unsafe { freelist.put_batch(entries) };
 
             let drained = Arc::new(AtomicUsize::new(0));
             let taken = Arc::new(AtomicUsize::new(0));
