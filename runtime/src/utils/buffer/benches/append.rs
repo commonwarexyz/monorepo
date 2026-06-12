@@ -2,7 +2,8 @@
 
 use super::{create_append, destroy_append, CACHE_SIZE, PAGE_SIZE};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Runner, Storage,
+    buffer::paged::CacheRef, deterministic, tokio, BufferPooler, Metrics, Runner, Storage,
+    Supervisor as _,
 };
 use commonware_utils::NZUsize;
 use criterion::Criterion;
@@ -11,7 +12,7 @@ use std::time::Instant;
 fn bench_backend<R>(c: &mut Criterion, backend: &str, chunk_size: usize)
 where
     R: Runner + Default,
-    R::Context: Storage + BufferPooler,
+    R::Context: Storage + BufferPooler + Metrics,
 {
     c.bench_function(
         &format!("{}/backend={backend} chunk={chunk_size}", module_path!()),
@@ -22,7 +23,8 @@ where
 
                 let executor = R::default();
                 executor.start(|ctx| async move {
-                    let cache_ref = CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(CACHE_SIZE));
+                    let cache_ref =
+                        CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, NZUsize!(CACHE_SIZE));
                     let append = create_append(&ctx, &name, cache_ref).await;
 
                     let start = Instant::now();

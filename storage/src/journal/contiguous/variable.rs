@@ -1525,7 +1525,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1567,7 +1571,11 @@ mod tests {
                 items_per_section: NZU64!(3),
                 compression: Some(1),
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, FixedBytes<32>>::init(context.child("journal"), cfg)
@@ -1600,7 +1608,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1621,7 +1633,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1652,7 +1668,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1666,7 +1686,11 @@ mod tests {
             drop(journal);
 
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 ..cfg
             };
             let journal = Journal::<_, u64>::init(context.child("second"), cfg)
@@ -1690,7 +1714,11 @@ mod tests {
                 items_per_section: NZU64!(20),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1704,7 +1732,11 @@ mod tests {
             drop(journal);
 
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 ..cfg
             };
             let journal = Journal::<_, u64>::init(context.child("second"), cfg)
@@ -1734,7 +1766,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1790,7 +1826,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1851,7 +1891,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -1966,7 +2010,11 @@ mod tests {
                         items_per_section: NZU64!(10),
                         compression: None,
                         codec_config: (),
-                        page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                        page_cache: CacheRef::new(
+                            context.child("page_cache"),
+                            LARGE_PAGE_SIZE,
+                            NZUsize!(10),
+                        ),
                         write_buffer: NZUsize!(1024),
                     };
                     Journal::<_, u64>::init(context, cfg).await
@@ -1987,7 +2035,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2073,7 +2125,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2160,7 +2216,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2223,7 +2283,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2260,7 +2324,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2294,7 +2362,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2329,7 +2401,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2367,7 +2443,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2409,7 +2489,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2464,7 +2548,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2496,7 +2584,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2533,7 +2625,11 @@ mod tests {
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
@@ -2560,7 +2656,11 @@ mod tests {
             // Recovery should trim only the empty trailing sections, preserving
             // the durable prefix.
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 ..cfg
             };
             let journal = Journal::<_, u64>::init(context.child("recovered"), cfg.clone())
@@ -2593,7 +2693,11 @@ mod tests {
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, u64>::init(context.child("journal"), cfg.clone())
@@ -2617,7 +2721,11 @@ mod tests {
             }
 
             let cfg = Config {
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 ..cfg
             };
             let journal = Journal::<_, u64>::init(context.child("recovered"), cfg)
@@ -2647,7 +2755,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2735,7 +2847,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2806,7 +2922,11 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2900,7 +3020,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -2973,7 +3097,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3041,7 +3169,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3097,13 +3229,21 @@ mod tests {
                 partition: "rebuild-anchor-outside-data".into(),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
             let offsets_cfg = fixed::Config {
                 partition: "rebuild-anchor-outside-offsets".into(),
                 items_per_blob: NZU64!(10),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3137,7 +3277,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3187,7 +3331,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3249,7 +3397,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3291,7 +3443,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3334,7 +3490,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3393,7 +3553,11 @@ mod tests {
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    page_cache: CacheRef::new(
+                        context.child("page_cache"),
+                        LARGE_PAGE_SIZE,
+                        NZUsize!(10),
+                    ),
                     write_buffer: NZUsize!(1024),
                 };
                 let offsets_blob_partition = format!("{}-blobs", cfg.offsets_partition());
@@ -3415,7 +3579,7 @@ mod tests {
                     blob,
                     raw_size,
                     2048,
-                    CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    CacheRef::new(context.child("page_cache"), LARGE_PAGE_SIZE, NZUsize!(10)),
                 )
                 .await
                 .unwrap();
@@ -3442,7 +3606,7 @@ mod tests {
                 blob,
                 raw_size,
                 2048,
-                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                CacheRef::new(context.child("page_cache"), LARGE_PAGE_SIZE, NZUsize!(10)),
             )
             .await
             .unwrap();
@@ -3460,7 +3624,11 @@ mod tests {
                     items_per_section: NZU64!(10),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    page_cache: CacheRef::new(
+                        context.child("page_cache"),
+                        LARGE_PAGE_SIZE,
+                        NZUsize!(10),
+                    ),
                     write_buffer: NZUsize!(1024),
                 };
                 let data_partition = cfg.data_partition();
@@ -3481,7 +3649,7 @@ mod tests {
                     blob,
                     raw_size,
                     2048,
-                    CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                    CacheRef::new(context.child("page_cache"), LARGE_PAGE_SIZE, NZUsize!(10)),
                 )
                 .await
                 .unwrap();
@@ -3508,7 +3676,7 @@ mod tests {
                 blob,
                 raw_size,
                 2048,
-                CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                CacheRef::new(context.child("page_cache"), LARGE_PAGE_SIZE, NZUsize!(10)),
             )
             .await
             .unwrap();
@@ -3527,7 +3695,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3597,7 +3769,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3639,7 +3815,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3676,7 +3856,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3709,7 +3893,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3750,7 +3938,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3785,7 +3977,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3838,7 +4034,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3881,7 +4081,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3929,7 +4133,11 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(
+                        context.child("page_cache"),
+                        SMALL_PAGE_SIZE,
+                        NZUsize!(2),
+                    ),
                     write_buffer: NZUsize!(1024),
                 };
 
@@ -3961,7 +4169,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -3989,7 +4201,11 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(
+                        context.child("page_cache"),
+                        SMALL_PAGE_SIZE,
+                        NZUsize!(2),
+                    ),
                     write_buffer: NZUsize!(1024),
                 };
 
@@ -4018,7 +4234,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4046,7 +4266,11 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(
+                        context.child("page_cache"),
+                        SMALL_PAGE_SIZE,
+                        NZUsize!(2),
+                    ),
                     write_buffer: NZUsize!(1024),
                 };
 
@@ -4076,7 +4300,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4110,7 +4338,11 @@ mod tests {
                     items_per_section: NZU64!(5),
                     compression: None,
                     codec_config: (),
-                    page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                    page_cache: CacheRef::new(
+                        context.child("page_cache"),
+                        SMALL_PAGE_SIZE,
+                        NZUsize!(2),
+                    ),
                     write_buffer: NZUsize!(1024),
                 };
 
@@ -4198,7 +4430,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4261,7 +4497,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4316,7 +4556,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4371,7 +4615,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4423,7 +4671,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4489,7 +4741,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4536,7 +4792,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4570,7 +4830,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4603,7 +4867,11 @@ mod tests {
                 items_per_section: NZU64!(5),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    SMALL_PAGE_SIZE,
+                    NZUsize!(2),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -4651,7 +4919,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             // Initialize journal with sync boundaries when no existing data exists
@@ -4693,7 +4965,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             // Create initial journal with data in multiple sections
@@ -4762,7 +5038,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             #[allow(clippy::reversed_empty_ranges)]
@@ -4787,7 +5067,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             // Create initial journal with data exactly matching sync range
@@ -4856,7 +5140,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             // Create initial journal with data beyond sync range
@@ -4899,7 +5187,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             let stale_size = 30;
@@ -4946,7 +5238,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             let journal = Journal::<deterministic::Context, u64>::init_at_size(
@@ -4997,7 +5293,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             // Create initial journal with stale data
@@ -5050,7 +5350,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             // Create journal with data at section boundaries
@@ -5118,7 +5422,11 @@ mod tests {
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    PAGE_SIZE,
+                    NZUsize!(PAGE_CACHE_SIZE),
+                ),
             };
 
             // Create journal with data in multiple sections
@@ -5188,7 +5496,11 @@ mod tests {
                 items_per_section: NZU64!(1),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -5378,7 +5690,11 @@ mod tests {
                 items_per_section: NZU64!(10),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(
+                    context.child("page_cache"),
+                    LARGE_PAGE_SIZE,
+                    NZUsize!(10),
+                ),
                 write_buffer: NZUsize!(1024),
             };
 
@@ -5461,7 +5777,7 @@ mod tests {
                 items_per_section: NZU64!(2),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, u64>::init(context.child("variable_metrics"), cfg)
@@ -5530,7 +5846,7 @@ mod tests {
                 items_per_section: NZU64!(50),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
+                page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, NZUsize!(10)),
                 write_buffer: NZUsize!(1024),
             };
             let journal = Journal::<_, u64>::init(context.child("miss"), cfg)

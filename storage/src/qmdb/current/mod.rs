@@ -523,7 +523,7 @@ pub mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Metrics, Runner as _, Supervisor as _,
     };
     use commonware_utils::{bitmap::Readable, NZUsize, NZU16, NZU64};
     use core::future::Future;
@@ -547,9 +547,9 @@ pub mod tests {
     /// Shared config factory for fixed-value Current QMDB tests.
     pub(crate) fn fixed_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
+        context: &(impl BufferPooler + Metrics),
     ) -> FixedConfig<T, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),
@@ -573,9 +573,9 @@ pub mod tests {
     /// Shared config factory for variable-value Current QMDB tests with unit codec config.
     pub(crate) fn variable_config<T: Translator + Default>(
         partition_prefix: &str,
-        pooler: &impl BufferPooler,
+        context: &(impl BufferPooler + Metrics),
     ) -> VariableConfig<T, ((), ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("{partition_prefix}-journal-partition"),

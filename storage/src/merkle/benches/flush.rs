@@ -16,7 +16,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _,
+    BufferPooler, Metrics, Supervisor as _,
 };
 use commonware_storage::merkle::{self, full, Bagging::ForwardFold, Family};
 use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -43,14 +43,14 @@ const N_LEAVES: [usize; 2] = [10_000, 100_000];
 #[cfg(full_bench)]
 const N_LEAVES: [usize; 3] = [10_000, 100_000, 1_000_000];
 
-fn merkle_cfg(ctx: &impl BufferPooler, family: &str) -> full::Config<Sequential> {
+fn merkle_cfg(ctx: &(impl BufferPooler + Metrics), family: &str) -> full::Config<Sequential> {
     full::Config {
         journal_partition: format!("journal-bench-flush-{family}"),
         metadata_partition: format!("metadata-bench-flush-{family}"),
         items_per_blob: ITEMS_PER_BLOB,
         write_buffer: WRITE_BUFFER_SIZE,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+        page_cache: CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
     }
 }
 

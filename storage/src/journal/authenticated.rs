@@ -854,7 +854,7 @@ mod tests {
     use commonware_runtime::{
         buffer::paged::CacheRef,
         deterministic::{self, Context},
-        BufferPooler, Runner as _, Supervisor as _,
+        BufferPooler, Metrics, Runner as _, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use futures::StreamExt as _;
@@ -898,24 +898,27 @@ mod tests {
     }
 
     /// Create Merkle configuration for tests.
-    fn merkle_config(suffix: &str, pooler: &impl BufferPooler) -> MerkleConfig<Sequential> {
+    fn merkle_config(
+        suffix: &str,
+        context: &(impl BufferPooler + Metrics),
+    ) -> MerkleConfig<Sequential> {
         MerkleConfig {
             journal_partition: format!("mmr-journal-{suffix}"),
             metadata_partition: format!("mmr-metadata-{suffix}"),
             items_per_blob: NZU64!(11),
             write_buffer: NZUsize!(1024),
             strategy: Sequential,
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 
     /// Create journal configuration for tests.
-    fn journal_config(suffix: &str, pooler: &impl BufferPooler) -> JConfig {
+    fn journal_config(suffix: &str, context: &(impl BufferPooler + Metrics)) -> JConfig {
         JConfig {
             partition: format!("journal-{suffix}"),
             items_per_blob: NZU64!(7),
             write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
         }
     }
 

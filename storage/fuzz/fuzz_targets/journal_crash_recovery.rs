@@ -42,7 +42,7 @@
 //! guarantees the success path is covered on every input; the raw value still tests rejection.
 
 use arbitrary::{Arbitrary, Unstructured};
-use commonware_runtime::{deterministic, BufferPooler, Runner, Supervisor as _};
+use commonware_runtime::{deterministic, BufferPooler, Metrics, Runner, Supervisor as _};
 use commonware_storage::journal::{
     contiguous::{
         fixed::{Config as FixedConfig, Journal as FixedJournal},
@@ -279,7 +279,11 @@ impl Expected {
 trait FuzzJournal: Sized {
     type Config;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config;
+    fn config(
+        partition: &str,
+        context: &(impl BufferPooler + Metrics),
+        params: &Params,
+    ) -> Self::Config;
 
     fn init(
         ctx: deterministic::Context,
@@ -323,12 +327,16 @@ async fn collect_replay<R: Reader<Item = Item>>(
 impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     type Config = FixedConfig;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
+    fn config(
+        partition: &str,
+        context: &(impl BufferPooler + Metrics),
+        params: &Params,
+    ) -> Self::Config {
         FixedConfig {
             partition: partition.into(),
             items_per_blob: NZU64!(params.items_per_section),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                pooler,
+            page_cache: commonware_runtime::buffer::paged::CacheRef::new(
+                context.child("page_cache"),
                 params.page_size,
                 params.page_cache_size,
             ),
@@ -394,14 +402,18 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
 impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     type Config = VariableConfig<()>;
 
-    fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
+    fn config(
+        partition: &str,
+        context: &(impl BufferPooler + Metrics),
+        params: &Params,
+    ) -> Self::Config {
         VariableConfig {
             partition: partition.into(),
             items_per_section: NZU64!(params.items_per_section),
             compression: None,
             codec_config: (),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                pooler,
+            page_cache: commonware_runtime::buffer::paged::CacheRef::new(
+                context.child("page_cache"),
                 params.page_size,
                 params.page_cache_size,
             ),

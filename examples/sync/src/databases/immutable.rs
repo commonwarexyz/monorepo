@@ -27,9 +27,11 @@ pub type Database<E> = fixed::Db<mmr::Family, E, Key, Value, Hasher, Translator,
 pub type Operation = fixed::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration with appropriate partitioning for Immutable.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, FConfig, Sequential> {
-    let page_cache = commonware_runtime::buffer::paged::CacheRef::from_pooler(
-        context,
+pub fn create_config(
+    context: &(impl BufferPooler + Metrics),
+) -> Config<Translator, FConfig, Sequential> {
+    let page_cache = commonware_runtime::buffer::paged::CacheRef::new(
+        context.child("page_cache"),
         NZU16!(2048),
         NZUsize!(10),
     );

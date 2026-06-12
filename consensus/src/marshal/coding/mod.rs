@@ -333,8 +333,8 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(
-                &context,
+            page_cache: CacheRef::new(
+                context.child("page_cache"),
                 harness::PAGE_SIZE,
                 harness::PAGE_CACHE_SIZE,
             ),

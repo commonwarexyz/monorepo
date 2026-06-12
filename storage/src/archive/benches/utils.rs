@@ -2,7 +2,7 @@
 
 use commonware_codec::config::RangeCfg;
 use commonware_macros::boxed;
-use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
+use commonware_runtime::{buffer::paged::CacheRef, tokio::Context, Supervisor as _};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
     translator::TwoCap,
@@ -70,7 +70,11 @@ impl Archive {
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
                     freezer_key_partition: "archive-bench-key".into(),
-                    freezer_key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    freezer_key_page_cache: CacheRef::new(
+                        ctx.child("page_cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                     freezer_value_partition: "archive-bench-value".into(),
                     freezer_value_target_size: 128 * 1024 * 1024,
                     freezer_value_compression: compression,
@@ -88,7 +92,11 @@ impl Archive {
                 let cfg = prunable::Config {
                     translator: TwoCap,
                     key_partition: "archive-bench-key".into(),
-                    key_page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    key_page_cache: CacheRef::new(
+                        ctx.child("page_cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                     value_partition: "archive-bench-value".into(),
                     compression,
                     codec_config: (RangeCfg::new(..), ()),

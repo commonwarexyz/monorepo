@@ -373,7 +373,7 @@ mod tests {
         blocks: &[B],
         finalizations: &[(Height, Finalization<S, D>)],
     ) {
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let replay_buffer = NonZeroUsize::new(1024).unwrap();
         let write_buffer = NonZeroUsize::new(1024).unwrap();
         let items_per_section = NonZeroU64::new(10).unwrap();
@@ -514,7 +514,7 @@ mod tests {
             .await
             .expect("failed to sync cache metadata");
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let mut notarized: prunable::Archive<TwoCap, deterministic::Context, D, B> =
             prunable::Archive::init(
                 context.child("seed_notarized"),
@@ -1223,13 +1223,13 @@ mod tests {
         let executor = deterministic::Runner::timed(Duration::from_secs(10));
         executor.start(|context| async move {
             let prefix = "test-cache";
-            let make_cfg = || cache::Config {
+            let make_cfg = |key_page_cache: CacheRef| cache::Config {
                 partition_prefix: prefix.to_string(),
                 prunable_items_per_section: NZU64!(10),
                 replay_buffer: NonZeroUsize::new(1024).unwrap(),
                 key_write_buffer: NonZeroUsize::new(1024).unwrap(),
                 value_write_buffer: NonZeroUsize::new(1024).unwrap(),
-                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                key_page_cache,
             };
 
             let block = make_raw_block(Sha256::hash(b""), Height::new(1), 100);
@@ -1240,7 +1240,11 @@ mod tests {
             {
                 let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
                     context.child("write"),
-                    make_cfg(),
+                    make_cfg(CacheRef::new(
+                        context.child("write_page_cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    )),
                     (),
                 )
                 .await;
@@ -1249,9 +1253,16 @@ mod tests {
 
             // Re-init the cache (simulating restart). find_block should fail
             // before loading persisted epochs.
-            let mut mgr =
-                cache::Manager::<_, Standard<B>, S>::init(context.child("read"), make_cfg(), ())
-                    .await;
+            let mut mgr = cache::Manager::<_, Standard<B>, S>::init(
+                context.child("read"),
+                make_cfg(CacheRef::new(
+                    context.child("read_page_cache"),
+                    PAGE_SIZE,
+                    PAGE_CACHE_SIZE,
+                )),
+                (),
+            )
+            .await;
             assert_eq!(
                 mgr.find_block(digest).await,
                 None,
@@ -3230,7 +3241,7 @@ mod tests {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
         let finalizations_by_height = immutable::Archive::init(
@@ -5747,7 +5758,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10));
+            let page_cache = CacheRef::new(context.child("page_cache"), NZU16!(1024), NZUsize!(10));
             let partition_prefix = "stale-finalized-test".to_string();
             let config = Config {
                 provider: EmptyProvider,

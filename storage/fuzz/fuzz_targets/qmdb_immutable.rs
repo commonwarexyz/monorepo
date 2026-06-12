@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::RangeCfg;
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
 use commonware_parallel::Sequential;
-use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Runner};
+use commonware_runtime::{buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner};
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
     merkle::{self, mmb, mmr, Bagging::BackwardFold, Family as MerkleFamily, Location},
@@ -97,9 +97,13 @@ fn generate_value(rng: &mut StdRng, size: usize) -> Vec<u8> {
 #[allow(clippy::type_complexity)]
 fn db_config(
     suffix: &str,
-    pooler: &impl BufferPooler,
+    context: &(impl BufferPooler + Metrics),
 ) -> Config<TwoCap, VConfig<((), (RangeCfg<usize>, ()))>, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+    let page_cache = CacheRef::new(
+        context.child("page_cache"),
+        PAGE_SIZE,
+        NZUsize!(PAGE_CACHE_SIZE),
+    );
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("journal-{suffix}"),

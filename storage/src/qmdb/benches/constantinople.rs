@@ -303,7 +303,7 @@ fn main() {
     );
 
     Runner::new(RConfig::default()).start(|ctx| async move {
-        let pc = CacheRef::from_pooler(&ctx, PAGE_SIZE, PAGE_CACHE_PAGES);
+        let pc = CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, PAGE_CACHE_PAGES);
         let pc_var = pc.clone();
         let merkle_config = full::Config {
             journal_partition: "constantinople-merkle-journal".into(),

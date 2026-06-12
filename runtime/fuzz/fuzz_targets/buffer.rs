@@ -6,7 +6,7 @@ use commonware_runtime::{
         paged::{Append, CacheRef},
         Read, Write,
     },
-    deterministic, Blob, BufferPooler, Runner, Storage,
+    deterministic, Blob, BufferPooler, Runner, Storage, Supervisor as _,
 };
 use commonware_utils::{NZUsize, NZU16};
 use libfuzzer_sys::fuzz_target;
@@ -181,8 +181,8 @@ fn fuzz(input: FuzzInput) {
                     // a different page size would corrupt reads since page size is embedded
                     // in the CRC records.
                     if cache_ref.is_none() {
-                        cache_ref = Some(CacheRef::from_pooler(
-                            &context,
+                        cache_ref = Some(CacheRef::new(
+                            context.child("page_cache"),
                             NZU16!(cache_page_size),
                             cache_capacity,
                         ));

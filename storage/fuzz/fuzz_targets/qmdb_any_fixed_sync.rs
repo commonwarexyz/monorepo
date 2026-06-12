@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::fixed::Config as FConfig,
@@ -93,8 +93,11 @@ impl<'a> Arbitrary<'a> for FuzzInput {
 
 const PAGE_SIZE: NonZeroU16 = NZU16!(129);
 
-fn test_config(test_name: &str, pooler: &impl BufferPooler) -> Config<TwoCap, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+fn test_config(
+    test_name: &str,
+    context: &(impl BufferPooler + Metrics),
+) -> Config<TwoCap, Sequential> {
+    let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),

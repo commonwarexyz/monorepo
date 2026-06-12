@@ -33,8 +33,9 @@ pub type Database<E> = fixed::Db<mmr::Family, E, Value, Hasher, Sequential>;
 pub type Operation = fixed::Operation<mmr::Family, Value>;
 
 /// Create a database configuration for the keyless variant.
-pub fn create_config(context: &impl BufferPooler) -> fixed::Config<Sequential> {
-    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
+pub fn create_config(context: &(impl BufferPooler + Metrics)) -> fixed::Config<Sequential> {
+    let page_cache =
+        buffer::paged::CacheRef::new(context.child("page_cache"), NZU16!(2048), NZUsize!(10));
     keyless::Config {
         merkle: MmrConfig {
             journal_partition: "mmr-journal".into(),

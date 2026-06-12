@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_cryptography::blake3::Digest;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -95,7 +95,7 @@ const PAGE_CACHE_SIZE: usize = 8;
 
 fn test_config(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    context: &(impl BufferPooler + Metrics),
 ) -> Config<TwoCap, ((), (commonware_codec::RangeCfg<usize>, ()))> {
     Config {
         log: VConfig {
@@ -104,7 +104,11 @@ fn test_config(
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             items_per_section: NZU64!(7),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+            page_cache: CacheRef::new(
+                context.child("page_cache"),
+                PAGE_SIZE,
+                NZUsize!(PAGE_CACHE_SIZE),
+            ),
         },
         translator: TwoCap,
     }

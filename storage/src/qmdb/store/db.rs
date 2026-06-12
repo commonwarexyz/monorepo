@@ -28,7 +28,7 @@
 //!             compression: None,
 //!             codec_config: ((), ()),
 //!             items_per_section: NZU64!(4),
-//!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+//!             page_cache: CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
 //!     };
@@ -524,7 +524,7 @@ mod test {
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 items_per_section: NZU64!(7),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
         };

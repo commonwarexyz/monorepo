@@ -1643,7 +1643,7 @@ impl TestHarness for StandardHarness {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
         let control = oracle.control(validator.clone());
@@ -2460,7 +2460,7 @@ impl TestHarness for CodingHarness {
             replay_buffer: NZUsize!(1024),
             key_write_buffer: NZUsize!(1024),
             value_write_buffer: NZUsize!(1024),
-            page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             strategy: Sequential,
         };
 
@@ -3439,7 +3439,7 @@ pub fn prune_finalized_archives<H: TestHarness>() {
 
         let validator = participants[0].clone();
         let partition_prefix = format!("prune-test-{}", validator.clone());
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
 
         let init_marshal = |ctx: deterministic::Context| {
             let validator = validator.clone();
@@ -3617,7 +3617,7 @@ pub fn reject_stale_block_delivery_after_floor_update<H: TestHarness>() {
             setup_network_with_participants(context.child("network"), NZUsize!(1), peers.clone())
                 .await;
 
-        let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         let (mut victim_mailbox, victim_extra, _victim_application) = H::setup_prunable_validator(
             context.child("victim"),
             &oracle,

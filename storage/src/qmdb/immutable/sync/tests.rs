@@ -876,7 +876,7 @@ pub(crate) mod harnesses {
     ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
         const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
 
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1174,7 +1174,7 @@ mod compact_variable_mmr {
     >;
 
     fn source_config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> SourceConfig {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1198,7 +1198,7 @@ mod compact_variable_mmr {
 
     fn client_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        pooler: &(impl BufferPooler + Metrics),
     ) -> immutable::variable::CompactConfig<((), (commonware_codec::RangeCfg<usize>, ())), Sequential>
     {
         immutable::CompactConfig {
@@ -1208,7 +1208,7 @@ mod compact_variable_mmr {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),
@@ -1880,7 +1880,7 @@ mod compact_variable_mmb {
     >;
 
     fn source_config(suffix: &str, pooler: &(impl BufferPooler + Metrics)) -> SourceConfig {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -1904,7 +1904,7 @@ mod compact_variable_mmb {
 
     fn client_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        pooler: &(impl BufferPooler + Metrics),
     ) -> immutable::variable::CompactConfig<((), (commonware_codec::RangeCfg<usize>, ())), Sequential>
     {
         immutable::CompactConfig {
@@ -1914,7 +1914,7 @@ mod compact_variable_mmb {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(pooler.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((), ((0..=10000).into(), ())),

@@ -22,7 +22,7 @@ pub type Database<E> = fixed::CompactDb<mmr::Family, E, Key, Value, Hasher, Sequ
 pub type Operation = fixed::Operation<mmr::Family, Key, Value>;
 
 /// Create a database configuration for the compact immutable variant.
-pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
+pub fn create_config(context: &(impl BufferPooler + Metrics)) -> CompactConfig<Sequential> {
     CompactConfig {
         strategy: Sequential,
         witness: variable::Config {
@@ -30,7 +30,7 @@ pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
             items_per_section: NZU64!(4096),
             compression: None,
             codec_config: (),
-            page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(64)),
+            page_cache: CacheRef::new(context.child("page_cache"), NZU16!(1024), NZUsize!(64)),
             write_buffer: NZUsize!(1024),
         },
         commit_codec_config: (),

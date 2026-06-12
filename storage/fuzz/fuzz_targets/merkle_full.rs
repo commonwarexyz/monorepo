@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, Supervisor as _,
 };
 use commonware_storage::merkle::{
     full::Config, hasher::Standard, mem::Mem, mmb, mmr, Bagging::ForwardFold, Error,
@@ -79,14 +79,21 @@ impl<'a> Arbitrary<'a> for FuzzInput {
     }
 }
 
-fn test_config(partition_suffix: &str, pooler: &impl BufferPooler) -> Config<Sequential> {
+fn test_config(
+    partition_suffix: &str,
+    context: &(impl BufferPooler + Metrics),
+) -> Config<Sequential> {
     Config {
         journal_partition: format!("journal-{partition_suffix}"),
         metadata_partition: format!("metadata-{partition_suffix}"),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(1024),
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
+        page_cache: CacheRef::new(
+            context.child("page_cache"),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        ),
     }
 }
 

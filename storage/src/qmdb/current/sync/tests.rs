@@ -22,7 +22,7 @@ use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_macros::test_traced;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    deterministic, deterministic::Context, BufferPooler, Runner as _, Supervisor as _,
+    deterministic, deterministic::Context, BufferPooler, Metrics, Runner as _, Supervisor as _,
 };
 use commonware_utils::non_empty_range;
 use rand::RngCore as _;
@@ -285,8 +285,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str, context: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::TwoCap>(suffix, context)
         }
 
         fn create_ops(
@@ -332,8 +332,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::TwoCap>(suffix, pooler)
+        fn config(suffix: &str, context: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
+            variable_config::<crate::translator::TwoCap>(suffix, context)
         }
 
         fn create_ops(
@@ -379,8 +379,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            fixed_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str, context: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
+            fixed_config::<crate::translator::OneCap>(suffix, context)
         }
 
         fn create_ops(
@@ -426,8 +426,8 @@ mod harnesses {
             SyncDatabase::root(db)
         }
 
-        fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self> {
-            variable_config::<crate::translator::OneCap>(suffix, pooler)
+        fn config(suffix: &str, context: &(impl BufferPooler + Metrics)) -> ConfigOf<Self> {
+            variable_config::<crate::translator::OneCap>(suffix, context)
         }
 
         fn create_ops(

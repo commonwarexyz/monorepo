@@ -23,7 +23,7 @@ use commonware_codec::Encode;
 use commonware_cryptography::sha256::Digest;
 use commonware_macros::select;
 use commonware_runtime::{
-    deterministic, BufferPooler, Clock, Metrics as _, Runner as _, Supervisor as _,
+    deterministic, BufferPooler, Clock, Metrics, Runner as _, Supervisor as _,
 };
 use commonware_utils::{
     channel::{mpsc, oneshot},
@@ -111,7 +111,7 @@ pub(crate) trait SyncTestHarness: Sized + 'static {
     fn sync_target_root(db: &Self::Db) -> Digest;
 
     /// Create a config with unique partition names
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> ConfigOf<Self>;
+    fn config(suffix: &str, context: &(impl BufferPooler + Metrics)) -> ConfigOf<Self>;
 
     /// Generate n test operations using the default seed (0)
     fn create_ops(n: usize) -> Vec<OpOf<Self>>;
@@ -2122,7 +2122,7 @@ mod harnesses {
     };
     use commonware_cryptography::sha256::Digest;
     use commonware_math::algebra::Random;
-    use commonware_runtime::{deterministic::Context, BufferPooler};
+    use commonware_runtime::{deterministic::Context, BufferPooler, Metrics};
     use commonware_utils::test_rng_seeded;
     use rand::RngCore;
 
@@ -2243,9 +2243,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, context)
         }
 
         fn create_ops(
@@ -2302,11 +2302,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                context,
             )
         }
 
@@ -2368,9 +2368,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, context)
         }
 
         fn create_ops_seeded(
@@ -2427,11 +2427,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                context,
             )
         }
 
@@ -2508,9 +2508,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, context)
         }
 
         fn create_ops(
@@ -2587,11 +2587,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::ordered::variable::test::VarConfig {
             crate::qmdb::any::ordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                context,
             )
         }
 
@@ -2675,9 +2675,9 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::FixedConfig<TwoCap, commonware_parallel::Sequential> {
-            crate::qmdb::any::test::fixed_db_config::<_>(suffix, pooler)
+            crate::qmdb::any::test::fixed_db_config::<_>(suffix, context)
         }
 
         fn create_ops(
@@ -2756,11 +2756,11 @@ mod harnesses {
 
         fn config(
             suffix: &str,
-            pooler: &impl BufferPooler,
+            context: &(impl BufferPooler + Metrics),
         ) -> crate::qmdb::any::unordered::variable::test::VarConfig {
             crate::qmdb::any::unordered::variable::test::create_test_config(
                 suffix.parse().unwrap_or(0),
-                pooler,
+                context,
             )
         }
 

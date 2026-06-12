@@ -295,7 +295,11 @@ mod tests {
                     journal_write_buffer: NZUsize!(4096),
                     journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                     journal_compression: Some(3),
-                    journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                    journal_page_cache: CacheRef::new(
+                        context.child("page_cache"),
+                        PAGE_SIZE,
+                        PAGE_CACHE_SIZE,
+                    ),
                     strategy: Sequential,
                 },
             );
@@ -767,8 +771,8 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
+                        journal_page_cache: CacheRef::new(
+                            context.child("page_cache"),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
@@ -924,8 +928,8 @@ mod tests {
                         journal_write_buffer: NZUsize!(4096),
                         journal_name_prefix: format!("ordered-broadcast-seq-{validator}-"),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
+                        journal_page_cache: CacheRef::new(
+                            context.child("page_cache"),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),
@@ -982,8 +986,8 @@ mod tests {
                             sequencer.public_key()
                         ),
                         journal_compression: Some(3),
-                        journal_page_cache: CacheRef::from_pooler(
-                            &context,
+                        journal_page_cache: CacheRef::new(
+                            context.child("page_cache"),
                             PAGE_SIZE,
                             PAGE_CACHE_SIZE,
                         ),

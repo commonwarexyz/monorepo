@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -141,9 +141,9 @@ type CodecConfig = ((), (commonware_codec::RangeCfg<usize>, ()));
 
 fn test_config(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    context: &(impl BufferPooler + Metrics),
 ) -> Config<TwoCap, CodecConfig, Sequential> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(1));
+    let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, NZUsize!(1));
     Config {
         merkle_config: MerkleConfig {
             journal_partition: format!("{test_name}-merkle"),
