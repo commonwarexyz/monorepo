@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_storage::{
-    index::{unordered::Index, Cursor as _, Unordered as _},
+    index::{partitioned, unordered::Index, Cursor as _, Factory, Unordered},
     translator::{Cap, FourCap, Hashed, Translator, TwoCap},
 };
 use commonware_utils::FuzzRng;
@@ -27,6 +27,9 @@ enum IndexOperation {
     },
     Get {
         key: Vec<u8>,
+    },
+    GetMany {
+        keys: Vec<Vec<u8>>,
     },
     GetMut {
         key: Vec<u8>,
@@ -82,12 +85,12 @@ struct FuzzInput {
     raw_bytes: Vec<u8>,
 }
 
-fn run<T: Translator>(
+fn run<T: Translator, I: Factory<T> + Unordered<Value = u64>>(
     context: deterministic::Context,
     translator: T,
     operations: &[IndexOperation],
 ) {
-    let mut index = Index::new(context.child("storage"), translator);
+    let mut index = I::new(context.child("storage"), translator);
 
     for op in operations {
         match op {
@@ -97,6 +100,16 @@ fn run<T: Translator>(
 
             IndexOperation::Get { key } => {
                 let _values: Vec<_> = index.get(key).collect();
+            }
+
+            IndexOperation::GetMany { keys } => {
+                let mut visited = 0usize;
+                index.get_many(keys, |key_idx, _value| {
+                    assert!(key_idx < keys.len(), "get_many visited invalid key index");
+                    visited += 1;
+                });
+                let expected: usize = keys.iter().map(|key| index.get(key).count()).sum();
+                assert_eq!(visited, expected, "get_many visit count mismatch");
             }
 
             IndexOperation::GetMut { key } => {
@@ -186,6 +199,20 @@ fn run<T: Translator>(
     }
 }
 
+/// Run the same operations against every index type sharing the [Unordered] API.
+fn run_all<T: Translator>(
+    context: deterministic::Context,
+    translator: T,
+    operations: &[IndexOperation],
+) {
+    run::<T, Index<T, u64>>(context.child("plain"), translator.clone(), operations);
+    run::<T, partitioned::unordered::Index<T, u64, 1>>(
+        context.child("partitioned"),
+        translator,
+        operations,
+    );
+}
+
 fn fuzz(input: FuzzInput) {
     let cfg =
         deterministic::Config::new().with_rng(Box::new(FuzzRng::new(input.raw_bytes.clone())));
@@ -193,24 +220,24 @@ fn fuzz(input: FuzzInput) {
     runner.start(|context| async move {
         let mut rng = FuzzRng::new(input.raw_bytes);
         match input.translator {
-            TranslatorChoice::TwoCap => run(context, TwoCap, &input.operations),
-            TranslatorChoice::FourCap => run(context, FourCap, &input.operations),
+            TranslatorChoice::TwoCap => run_all(context, TwoCap, &input.operations),
+            TranslatorChoice::FourCap => run_all(context, FourCap, &input.operations),
             TranslatorChoice::HashedFourCap => {
-                run(
+                run_all(
                     context,
                     Hashed::from_seed(rng.next_u64(), FourCap),
                     &input.operations,
                 );
             }
             TranslatorChoice::HashedCap3 => {
-                run(
+                run_all(
                     context,
                     Hashed::from_seed(rng.next_u64(), Cap::<3>::new()),
                     &input.operations,
                 );
             }
             TranslatorChoice::HashedTwoCap => {
-                run(
+                run_all(
                     context,
                     Hashed::from_seed(rng.next_u64(), TwoCap),
                     &input.operations,
