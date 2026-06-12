@@ -48,7 +48,7 @@ use commonware_utils::{
 use futures::{future::join_all, try_join};
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
-use tracing::{debug, warn};
+use tracing::{debug, info_span, warn, Instrument as _, Span};
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
@@ -427,6 +427,11 @@ where
                 debug!("mailbox closed, shutting down");
                 break;
             } => {
+                let span = info_span!(
+                    parent: message.span(),
+                    "marshal.actor.process",
+                    operation = message.name(),
+                );
                 self.handle_mailbox_message(
                     message,
                     &mut resolver,
@@ -434,6 +439,7 @@ where
                     &mut buffer,
                     &mut application,
                 )
+                .instrument(span)
                 .await;
             },
             // Handle resolver messages last (batched up to max_repair, sync once)
@@ -528,6 +534,7 @@ where
             Message::GetInfo {
                 identifier,
                 response,
+                ..
             } => {
                 let info = match identifier {
                     // TODO: Instead of pulling out the entire block, determine the
@@ -545,7 +552,9 @@ where
                 };
                 response.send_lossy(info);
             }
-            Message::GetVerified { round, response } => {
+            Message::GetVerified {
+                round, response, ..
+            } => {
                 let block = self.cache.get_verified(round).await.map(Into::into);
                 response.send_lossy(block);
             }
@@ -553,6 +562,7 @@ where
                 round,
                 commitment,
                 recipients,
+                ..
             } => {
                 if matches!(&recipients, Recipients::Some(peers) if peers.is_empty()) {
                     return;
@@ -570,7 +580,9 @@ where
                 };
                 buffer.send(round, block, recipients);
             }
-            Message::Proposed { round, block, ack } => {
+            Message::Proposed {
+                round, block, ack, ..
+            } => {
                 self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
@@ -588,7 +600,9 @@ where
                 self.last_proposed_block = Some((round, commitment, block));
                 ack.expect("durable ack present").send_lossy(());
             }
-            Message::Verified { round, block, ack } => {
+            Message::Verified {
+                round, block, ack, ..
+            } => {
                 self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
@@ -600,7 +614,9 @@ where
                     .await;
                 ack.expect("durable ack present").send_lossy(());
             }
-            Message::Certified { round, block, ack } => {
+            Message::Certified {
+                round, block, ack, ..
+            } => {
                 self.ingest(&block, buffer, application, resolver).await;
 
                 // If the round has already been pruned by tip advancement,
@@ -612,7 +628,7 @@ where
                     .await;
                 ack.expect("durable ack present").send_lossy(());
             }
-            Message::Notarization { notarization } => {
+            Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
                 let commitment = notarization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
@@ -632,7 +648,7 @@ where
                     debug!(?round, "notarized block unavailable locally");
                 }
             }
-            Message::Finalization { finalization } => {
+            Message::Finalization { finalization, .. } => {
                 let round = finalization.round();
                 let commitment = finalization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
@@ -679,6 +695,7 @@ where
             Message::GetBlock {
                 identifier,
                 response,
+                ..
             } => match identifier {
                 BlockID::Digest(digest) => {
                     let result = self.find_block_by_digest(buffer, digest).await;
@@ -696,14 +713,18 @@ where
                     response.send_lossy(block);
                 }
             },
-            Message::GetFinalization { height, response } => {
+            Message::GetFinalization {
+                height, response, ..
+            } => {
                 let finalization = self.get_finalization_by_height(height).await;
                 response.send_lossy(finalization);
             }
-            Message::GetProcessedHeight { response } => {
+            Message::GetProcessedHeight { response, .. } => {
                 response.send_lossy(self.stream.processed_height());
             }
-            Message::HintFinalized { height, targets } => {
+            Message::HintFinalized {
+                height, targets, ..
+            } => {
                 // Skip if finalization is already available locally.
                 if self.get_finalization_by_height(height).await.is_some() {
                     return;
@@ -714,11 +735,13 @@ where
                     .ignore();
             }
             Message::SubscribeByDigest {
+                span,
                 digest,
                 fallback,
                 response,
             } => {
                 self.handle_subscribe(
+                    span,
                     fallback.into(),
                     SubscriptionKey::Digest(digest),
                     response,
@@ -729,11 +752,13 @@ where
                 .await;
             }
             Message::SubscribeByCommitment {
+                span,
                 commitment,
                 fallback,
                 response,
             } => {
                 self.handle_subscribe(
+                    span,
                     fallback,
                     SubscriptionKey::Commitment(commitment),
                     response,
@@ -743,7 +768,9 @@ where
                 )
                 .await;
             }
-            Message::HintNotarized { round, commitment } => {
+            Message::HintNotarized {
+                round, commitment, ..
+            } => {
                 if self
                     .find_block_by_commitment(buffer, commitment)
                     .await
@@ -754,11 +781,11 @@ where
                         .ignore();
                 }
             }
-            Message::SetFloor { finalization } => {
+            Message::SetFloor { finalization, .. } => {
                 self.install_floor(finalization, true, resolver, buffer, application)
                     .await;
             }
-            Message::Prune { height } => {
+            Message::Prune { height, .. } => {
                 // Only allow pruning at or below the current floor.
                 if height > self.floor.processed_height() {
                     warn!(%height, floor = %self.floor.processed_height(), "prune height above floor, ignoring");
@@ -861,6 +888,7 @@ where
     }
 
     /// Handle a produce request from a remote peer.
+    #[tracing::instrument(name = "marshal.resolver.handle_produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
         key: ResolverRequestFor<V>,
@@ -902,8 +930,10 @@ where
     }
 
     /// Handle a local subscription request for a block.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_subscribe<Buf: Buffer<V>>(
         &mut self,
+        span: Span,
         fallback: CommitmentFallback,
         key: SubscriptionKeyFor<V>,
         response: oneshot::Sender<V::Block>,
@@ -987,7 +1017,7 @@ where
             }
         }
         self.block_subscriptions
-            .insert(key, response, waiters, buffer);
+            .insert(span, key, response, waiters, buffer);
     }
 
     /// Verifies and installs a floor, fetching the anchor block if needed.
@@ -1364,6 +1394,7 @@ where
 
     /// Batch verify pending certificates and process valid items. Returns true
     /// if finalization archives were written and need syncing.
+    #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len()))]
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,
@@ -1621,6 +1652,7 @@ where
     /// [`Self::try_dispatch_blocks`] must run only after this sync completes.
     /// It also ensures archives are durable before the ack handler advances
     /// the processed floor height. See [`Self::try_dispatch_blocks`] for details.
+    #[tracing::instrument(name = "marshal.actor.sync_finalized", level = "info", skip_all)]
     async fn sync_finalized(&mut self) {
         if let Err(e) = try_join!(
             async {
@@ -1861,6 +1893,7 @@ where
     ///
     /// Writes are buffered. Returns `true` if this call wrote repaired blocks and
     /// needs a subsequent [`sync_finalized`](Self::sync_finalized).
+    #[tracing::instrument(name = "marshal.actor.try_repair_gaps", level = "info", skip_all)]
     async fn try_repair_gaps<Buf: Buffer<V>>(
         &mut self,
         buffer: &mut Buf,

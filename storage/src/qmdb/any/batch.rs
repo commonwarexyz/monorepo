@@ -1078,13 +1078,10 @@ where
     /// before being written skip the journal re-read their resolution would otherwise require.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
-        name = "qmdb::any::batch::merkleize",
+        name = "qmdb.any.unordered.batch.merkleize",
         level = "info",
         skip_all,
-        fields(
-            variant = "unordered",
-            mutations = self.mutations.len() as u64,
-        ),
+        fields(mutations = self.mutations.len() as u64),
     )]
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
@@ -1296,13 +1293,10 @@ where
     /// must be scanned regardless and the cached location saves nothing.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(
-        name = "qmdb::any::batch::merkleize",
+        name = "qmdb.any.ordered.batch.merkleize",
         level = "info",
         skip_all,
-        fields(
-            variant = "ordered",
-            mutations = self.mutations.len() as u64,
-        ),
+        fields(mutations = self.mutations.len() as u64),
     )]
     pub async fn merkleize<E, C, I, const N: usize>(
         self,
@@ -1750,11 +1744,10 @@ where
     /// descendant) is merkleized. Dropping an uncommitted ancestor causes data
     /// loss detected at `apply_batch` time.
     #[tracing::instrument(
-        name = "qmdb::any::batch::new",
+        name = "qmdb.any.batch.new.from_batch",
         level = "debug",
         skip_all,
         fields(
-            source = "batch",
             base_size = self.bounds.base_size,
             total_size = self.bounds.total_size,
             ancestor_batches = self.ancestor_diffs.len() as u64,
@@ -1870,11 +1863,10 @@ where
 {
     /// Create a new speculative batch of operations with this database as its parent.
     #[tracing::instrument(
-        name = "qmdb::any::batch::new",
+        name = "qmdb.any.batch.new.from_db",
         level = "debug",
         skip_all,
         fields(
-            source = "db",
             base_size = *self.last_commit_loc + 1,
             inactivity_floor = *self.inactivity_floor_loc,
             active_keys = self.active_keys as u64,
@@ -1917,7 +1909,7 @@ where
     /// journal, but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to
     /// guarantee durability.
     #[tracing::instrument(
-        name = "qmdb::any::Db::apply_batch",
+        name = "qmdb.any.db.apply_batch",
         level = "info",
         skip_all,
         fields(
@@ -2022,7 +2014,7 @@ where
     ///
     /// This is the starting point for building owned batch chains.
     #[tracing::instrument(
-        name = "qmdb::any::Db::to_batch",
+        name = "qmdb.any.db.to_batch",
         level = "info",
         skip_all,
         fields(

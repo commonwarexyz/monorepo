@@ -349,6 +349,16 @@ where
     /// [`crate::merkle::Error::LocationOverflow`] if `start_loc` >
     /// [`crate::merkle::Family::MAX_LEAVES`]. Returns [`crate::merkle::Error::RangeOutOfBounds`] if
     /// `start_loc` >= number of leaves in the tree.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.current.db.range_proof",
+        level = "info",
+        skip_all,
+        fields(
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
     pub async fn range_proof(
         &self,
         hasher: &StandardHasher<H>,
@@ -515,6 +525,7 @@ where
     ///   [crate::merkle::Family::MAX_LEAVES].
     /// - Returns [Error::DataCorrupted] if internal grafted-tree state is inconsistent (a pinned
     ///   or retained node is missing, or the prune location overflows a [Position]).
+    #[tracing::instrument(name = "qmdb.current.db.prune", level = "info", skip_all)]
     pub async fn prune(&mut self, prune_loc: Location<F>) -> Result<(), Error<F>> {
         let _timer = self.metrics.prune_timer();
         self.metrics.prune_calls.inc();
@@ -560,6 +571,7 @@ where
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Db::commit`] or
     /// [`Db::sync`].
+    #[tracing::instrument(name = "qmdb.current.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.any.last_commit_loc + 1;
@@ -757,11 +769,13 @@ where
 {
     /// Durably commit the journal state published by prior [`Db::apply_batch`]
     /// calls.
+    #[tracing::instrument(name = "qmdb.current.db.commit", level = "info", skip_all)]
     pub async fn commit(&self) -> Result<(), Error<F>> {
         self.any.commit().await
     }
 
     /// Sync all database state to disk.
+    #[tracing::instrument(name = "qmdb.current.db.sync", level = "info", skip_all)]
     pub async fn sync(&self) -> Result<(), Error<F>> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
@@ -802,6 +816,7 @@ where
     /// This publishes the batch to the in-memory Current view and appends it to the journal,
     /// but does not durably persist it. Call [`Db::commit`] or [`Db::sync`] to guarantee
     /// durability.
+    #[tracing::instrument(name = "qmdb.current.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         &mut self,
         batch: Arc<super::batch::MerkleizedBatch<F, H::Digest, U, N, S>>,

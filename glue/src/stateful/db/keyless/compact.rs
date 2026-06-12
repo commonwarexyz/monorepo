@@ -24,11 +24,12 @@ use commonware_storage::{
         Error,
     },
 };
-use commonware_utils::{channel::mpsc, sync::AsyncRwLock};
+use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock};
 use futures::future::{pending, Either};
 use std::{ops::Deref, sync::Arc};
 
-type KeylessUnjournaledDbHandle<F, E, V, H, C, S> = Arc<AsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
+type KeylessUnjournaledDbHandle<F, E, V, H, C, S> =
+    Arc<TracedAsyncRwLock<CompactDb<F, E, V, H, C, S>>>;
 
 async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
     let mut latest = None;
@@ -224,7 +225,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         KeylessUnjournaledUnmerkleized {
             batch: inner.new_batch(),
@@ -283,7 +284,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         KeylessUnjournaledUnmerkleized {
             batch: inner.new_batch(),
@@ -624,7 +625,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await
@@ -658,7 +659,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("matches-sync-target", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let batch = <FixedDb as ManagedDb<_>>::new_batch(&db)
                 .await

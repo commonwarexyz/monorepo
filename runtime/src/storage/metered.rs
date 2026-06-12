@@ -6,6 +6,7 @@ use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
 };
+use tracing::{field::Empty, Span};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -13,6 +14,8 @@ pub struct Metrics {
     pub storage_read_bytes: Counter,
     pub storage_writes: Counter,
     pub storage_write_bytes: Counter,
+    pub storage_syncs: Counter,
+    pub storage_resizes: Counter,
 }
 
 impl Metrics {
@@ -42,6 +45,16 @@ impl Metrics {
             storage_write_bytes: registry.register(
                 "storage_write_bytes",
                 "Total amount of data written to disk",
+                raw::Counter::default(),
+            ),
+            storage_syncs: registry.register(
+                "storage_syncs",
+                "Total number of disk syncs",
+                raw::Counter::default(),
+            ),
+            storage_resizes: registry.register(
+                "storage_resizes",
+                "Total number of disk resizes",
                 raw::Counter::default(),
             ),
         }
@@ -78,13 +91,13 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
         name: &[u8],
         versions: RangeInclusive<u16>,
     ) -> Result<(Self::Blob, u64, u16), Error> {
-        self.metrics.open_blobs.inc();
         let (inner, len, blob_version) =
             self.inner.open_versioned(partition, name, versions).await?;
         Ok((
             Blob {
                 inner,
-                metrics: Arc::new(MetricsHandle(self.metrics.clone())),
+                partition: partition.into(),
+                metrics: Arc::new(MetricsHandle::new(self.metrics.clone())),
             },
             len,
             blob_version,
@@ -104,6 +117,7 @@ impl<S: crate::Storage> crate::Storage for Storage<S> {
 #[derive(Clone)]
 pub struct Blob<B> {
     inner: B,
+    partition: Arc<str>,
     metrics: Arc<MetricsHandle>,
 }
 
@@ -111,6 +125,14 @@ pub struct Blob<B> {
 /// metrics when a blob (that may have been cloned multiple times)
 /// is dropped.
 struct MetricsHandle(Arc<Metrics>);
+
+impl MetricsHandle {
+    /// Counts the blob as open until this handle is dropped.
+    fn new(metrics: Arc<Metrics>) -> Self {
+        metrics.open_blobs.inc();
+        Self(metrics)
+    }
+}
 
 impl Deref for MetricsHandle {
     type Target = Metrics;
@@ -129,10 +151,9 @@ impl Drop for MetricsHandle {
 
 impl<B: crate::Blob> crate::Blob for Blob<B> {
     async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-        let read = self.inner.read_at(offset, len).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
-        Ok(read)
+        self.inner.read_at(offset, len).await
     }
 
     async fn read_at_buf(
@@ -141,21 +162,32 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         len: usize,
         bufs: impl Into<IoBufsMut> + Send,
     ) -> Result<IoBufsMut, Error> {
-        let read = self.inner.read_at_buf(offset, len, bufs).await?;
         self.metrics.storage_reads.inc();
         self.metrics.storage_read_bytes.inc_by(len as u64);
-        Ok(read)
+        self.inner.read_at_buf(offset, len, bufs).await
     }
 
+    #[tracing::instrument(
+        name = "runtime.storage.blob.write_at",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, bytes = Empty)
+    )]
     async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         let bufs = bufs.into();
         let bufs_len = bufs.remaining();
-        self.inner.write_at(offset, bufs).await?;
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        Ok(())
+        Span::current().record("bytes", bufs_len as u64);
+        self.inner.write_at(offset, bufs).await
     }
 
+    #[tracing::instrument(
+        name = "runtime.storage.blob.write_at_sync",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, bytes = Empty)
+    )]
     async fn write_at_sync(
         &self,
         offset: u64,
@@ -163,17 +195,32 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     ) -> Result<(), Error> {
         let bufs = bufs.into();
         let bufs_len = bufs.remaining();
-        self.inner.write_at_sync(offset, bufs).await?;
         self.metrics.storage_writes.inc();
         self.metrics.storage_write_bytes.inc_by(bufs_len as u64);
-        Ok(())
+        self.metrics.storage_syncs.inc();
+        Span::current().record("bytes", bufs_len as u64);
+        self.inner.write_at_sync(offset, bufs).await
     }
 
+    #[tracing::instrument(
+        name = "runtime.storage.blob.resize",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition, len = len)
+    )]
     async fn resize(&self, len: u64) -> Result<(), Error> {
+        self.metrics.storage_resizes.inc();
         self.inner.resize(len).await
     }
 
+    #[tracing::instrument(
+        name = "runtime.storage.blob.sync",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition)
+    )]
     async fn sync(&self) -> Result<(), Error> {
+        self.metrics.storage_syncs.inc();
         self.inner.sync().await
     }
 }
@@ -198,6 +245,31 @@ mod tests {
         let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
 
         run_storage_tests(storage).await;
+    }
+
+    /// Test that a failed open does not count an open blob.
+    #[tokio::test]
+    async fn test_failed_open_does_not_count_open_blob() {
+        let mut registry = crate::telemetry::metrics::Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+
+        // Create a blob at the default version and release it
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        blob.sync().await.unwrap();
+        drop(blob);
+        assert_eq!(storage.metrics.open_blobs.get(), 0);
+
+        // Reopen with a disjoint version range
+        let result = storage
+            .open_versioned("partition", b"test_blob", 7..=7)
+            .await;
+        assert!(matches!(result, Err(Error::BlobVersionMismatch { .. })));
+        assert_eq!(
+            storage.metrics.open_blobs.get(),
+            0,
+            "failed open must not count an open blob"
+        );
     }
 
     /// Test that metrics are updated correctly for basic operations.
@@ -244,8 +316,36 @@ mod tests {
             "storage_read_bytes metric was not updated correctly after read"
         );
 
-        // Sync and drop the blob
+        // Sync the blob
         blob.sync().await.unwrap();
+        let syncs = storage.metrics.storage_syncs.get();
+        assert_eq!(
+            syncs, 1,
+            "storage_syncs metric was not incremented after sync"
+        );
+
+        // Write and sync in a single call
+        blob.write_at_sync(11, b" again").await.unwrap();
+        assert_eq!(
+            storage.metrics.storage_writes.get(),
+            2,
+            "storage_writes metric was not incremented after write_at_sync"
+        );
+        assert_eq!(
+            storage.metrics.storage_syncs.get(),
+            2,
+            "storage_syncs metric was not incremented after write_at_sync"
+        );
+
+        // Resize the blob
+        blob.resize(11).await.unwrap();
+        assert_eq!(
+            storage.metrics.storage_resizes.get(),
+            1,
+            "storage_resizes metric was not incremented after resize"
+        );
+
+        // Drop the blob
         drop(blob);
 
         // Verify that the open_blobs metric is decremented
