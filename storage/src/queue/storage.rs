@@ -7,6 +7,7 @@ use crate::{
     Context,
 };
 use commonware_codec::CodecShared;
+use commonware_macros::boxed;
 use commonware_runtime::{buffer::paged::CacheRef, telemetry::metrics::GaugeExt};
 use std::num::{NonZeroU64, NonZeroUsize};
 use tracing::debug;
@@ -105,7 +106,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     /// # Errors
     ///
     /// Returns an error if the underlying journal cannot be initialized.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize metrics before creating sub-contexts
         let metrics = metrics::Metrics::init(&context);
@@ -352,7 +353,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     }
 
     /// Destroy the queue, removing all data from disk.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub async fn destroy(self) -> Result<(), Error> {
         self.journal.destroy().await?;
         Ok(())

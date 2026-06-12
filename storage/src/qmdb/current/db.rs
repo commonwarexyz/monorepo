@@ -34,6 +34,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared, DecodeExt};
 use commonware_cryptography::{Digest, DigestOf, Hasher};
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::telemetry::metrics::{
     histogram::{duration_histogram, ScopedTimer, Timed},
@@ -774,7 +775,7 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.metadata.into_inner().destroy().await?;
         self.any.destroy().await

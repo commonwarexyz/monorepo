@@ -25,6 +25,7 @@ use alloc::{
 };
 use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use core::num::NonZeroU64;
 use futures::{try_join, TryFutureExt as _};
@@ -654,7 +655,7 @@ where
     S: Strategy,
 {
     /// Destroy the authenticated journal, removing all data from disk.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
         try_join!(
             self.journal.destroy().map_err(Error::Journal),
@@ -694,7 +695,7 @@ macro_rules! impl_journal_new {
             ///
             /// The inner journal will be rewound to the last item matching `rewind_predicate`,
             /// and the merkle structure will be aligned to match.
-            #[commonware_macros::boxed]
+            #[boxed]
             pub async fn new(
                 context: E,
                 merkle_cfg: merkle::full::Config<S>,

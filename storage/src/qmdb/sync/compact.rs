@@ -67,6 +67,7 @@ use commonware_codec::{
     Encode, EncodeSize, Error as CodecError, RangeCfg, Read, ReadExt as _, Write,
 };
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_runtime::{Buf, BufMut, Clock, Metrics, Storage, Supervisor};
 use commonware_utils::{channel::oneshot, sync::AsyncRwLock, Array};
@@ -371,7 +372,7 @@ where
 /// 5. Assert the db root still matches and persist the state.
 ///
 /// A failure before the final persist leaves on-disk state untouched.
-#[commonware_macros::boxed]
+#[boxed]
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>

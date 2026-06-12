@@ -1,6 +1,7 @@
 //! Helpers shared by the Archive benchmarks.
 
 use commonware_codec::config::RangeCfg;
+use commonware_macros::boxed;
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
 use commonware_storage::{
     archive::{immutable, prunable, Archive as ArchiveTrait, Identifier},
@@ -58,7 +59,7 @@ pub enum Archive {
 
 impl Archive {
     /// Initialize a new archive based on variant
-    #[commonware_macros::boxed]
+    #[boxed]
     pub async fn init(ctx: Context, variant: Variant, compression: Option<u8>) -> Self {
         match variant {
             Variant::Immutable => {

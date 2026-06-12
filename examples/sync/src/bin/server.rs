@@ -6,7 +6,7 @@
 
 use clap::{Arg, Command};
 use commonware_codec::{DecodeExt, Encode, Read};
-use commonware_macros::select_loop;
+use commonware_macros::{boxed, select_loop};
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     tokio as tokio_runtime, BufferPooler, Clock, Listener, Metrics, Network, Runner, SinkOf,
@@ -696,7 +696,7 @@ where
 }
 
 /// Run the Any database server.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -708,7 +708,7 @@ where
 }
 
 /// Run the Current database server.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -720,7 +720,7 @@ where
 }
 
 /// Run the Immutable database server.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -732,7 +732,7 @@ where
 }
 
 /// Run the full immutable database as a compact-sync source.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_immutable_full_source<E>(
     context: E,
     config: Config,
@@ -747,7 +747,7 @@ where
 }
 
 /// Run the Keyless database server.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -759,7 +759,7 @@ where
 }
 
 /// Run the full keyless database as a compact-sync source.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_keyless_full_source<E>(
     context: E,
     config: Config,

@@ -346,6 +346,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
 use std::sync::Arc;
@@ -394,7 +395,7 @@ pub type FixedConfig<T, S> = Config<T, FConfig, S>;
 pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 
 /// Initialize a `Current` authenticated db from the given config.
-#[commonware_macros::boxed]
+#[boxed]
 pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
     context: E,
     config: Config<T, J::Config, S>,
@@ -614,7 +615,7 @@ pub mod tests {
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
     /// `commit_changes` is true. Returns the db; callers should commit if needed.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub async fn apply_random_ops<F, C>(
         num_elements: u64,
         commit_changes: bool,
@@ -665,7 +666,7 @@ pub mod tests {
     }
 
     /// Build a random database, close and reopen it, and return the auditor state.
-    #[commonware_macros::boxed]
+    #[boxed]
     async fn build_random_close_reopen_round<M, C, F, Fut>(
         mut context: Context,
         mut open_db: F,
@@ -1126,7 +1127,7 @@ pub mod tests {
 
     use crate::translator::OneCap;
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
-    use commonware_macros::{test_group, test_traced};
+    use commonware_macros::{boxed, test_group, test_traced};
 
     type OrderedFixedDb =
         ordered::fixed::Db<mmr::Family, Context, Digest, Digest, Sha256, OneCap, 32, Sequential>;

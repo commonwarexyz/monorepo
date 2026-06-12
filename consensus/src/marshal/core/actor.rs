@@ -29,7 +29,7 @@ use commonware_cryptography::{
     certificate::{Provider, Verifier},
     Digestible,
 };
-use commonware_macros::select_loop;
+use commonware_macros::{boxed, select_loop};
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
@@ -155,7 +155,7 @@ where
     A: Acknowledgement,
 {
     /// Create a new application actor.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub async fn init(
         context: E,
         finalizations_by_height: FC,

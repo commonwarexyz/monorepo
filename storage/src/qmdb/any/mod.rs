@@ -81,6 +81,7 @@ use crate::{
 };
 use commonware_codec::CodecShared;
 use commonware_cryptography::Hasher;
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::sync::Arc;
 use tracing::warn;
@@ -138,7 +139,7 @@ where
 
 /// Like [`init`] but accepts a pre-allocated bitmap (used by `current::Db`, which sizes pruned
 /// chunks from grafted metadata). `bitmap = None` allocates internally.
-#[commonware_macros::boxed]
+#[boxed]
 pub(crate) async fn init_with_bitmap<F, E, U, H, T, I, J, S, const N: usize>(
     context: E,
     cfg: Config<T, J::Config, S>,
@@ -672,7 +673,7 @@ pub(crate) mod test {
     }
 
     /// Test that a large mixed workload can be authenticated and replayed correctly.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub(crate) async fn test_any_db_build_and_authenticate<D, V>(
         context: Context,
         mut db: D,

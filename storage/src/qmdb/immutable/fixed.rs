@@ -83,7 +83,7 @@ mod tests {
         translator::TwoCap,
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
@@ -384,7 +384,7 @@ mod tests {
         });
     }
 
-    #[commonware_macros::boxed]
+    #[boxed]
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
         let mut db = open_db::<F>(ctx.child("db")).await;
         let mut compact = open_compact::<F>(ctx.child("compact")).await;

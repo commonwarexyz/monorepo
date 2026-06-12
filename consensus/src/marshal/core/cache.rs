@@ -5,6 +5,7 @@ use crate::{
 };
 use commonware_codec::{CodecShared, Read};
 use commonware_cryptography::{certificate::Scheme, Digestible};
+use commonware_macros::boxed;
 use commonware_runtime::{buffer::paged::CacheRef, BufferPooler, Clock, Metrics, Spawner, Storage};
 use commonware_storage::{
     archive::{self, prunable, Archive as _, Identifier, MultiArchive as _},
@@ -124,7 +125,7 @@ where
     S: Scheme,
 {
     /// Initialize the cache manager and its metadata store.
-    #[commonware_macros::boxed]
+    #[boxed]
     pub(crate) async fn init(
         context: R,
         cfg: Config,
@@ -208,7 +209,7 @@ where
     }
 
     /// Helper to initialize the cache for a given epoch.
-    #[commonware_macros::boxed]
+    #[boxed]
     async fn init_epoch(&mut self, epoch: Epoch) {
         let context = self.context.child("cache").with_attribute("epoch", epoch);
         let (verified_blocks, notarized_blocks, certified_blocks, notarizations, finalizations) = futures::join!(

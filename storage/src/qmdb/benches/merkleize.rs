@@ -11,6 +11,7 @@
 
 use crate::common::{seed_db, write_random_updates, Digest, CHUNK_SIZE, WRITE_BUFFER_SIZE};
 use commonware_cryptography::Sha256;
+use commonware_macros::boxed;
 use commonware_parallel::Rayon;
 use commonware_runtime::{
     benchmarks::{context, tokio},
@@ -376,7 +377,7 @@ fn cur_var_cfg(
 /// value of `false` will exercise the DB in a state where lookups during merkleize may be satisfied
 /// by the `Append` wrapper's tip buffer, which may be more reflective of a real application that
 /// calls only `commit()` for durability.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     mut db: C,
     num_keys: u64,
@@ -405,7 +406,7 @@ async fn run_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>
 ///
 /// This leaves inactive update operations above the inactivity floor, matching
 /// the workload optimized by bitmap-backed floor raising.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = Digest>>(
     mut db: C,
     num_keys: u64,
@@ -441,7 +442,7 @@ async fn run_churned_bench<F: merkle::Family, C: DbAny<F, Key = Digest, Value = 
 ///
 /// `fork_child` bridges the gap between the generic trait and the concrete
 /// `MerkleizedBatch::new_batch` method.
-#[commonware_macros::boxed]
+#[boxed]
 async fn run_chained_bench<
     F: merkle::Family,
     C: DbAny<F, Key = Digest, Value = Digest>,

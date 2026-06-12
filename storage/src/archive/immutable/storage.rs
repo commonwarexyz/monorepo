@@ -6,6 +6,7 @@ use crate::{
     Context,
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Buf, BufMut, BufferPooler,
@@ -330,7 +331,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         self.ordinal.last_index()
     }
 
-    #[commonware_macros::boxed]
+    #[boxed]
     async fn destroy(self) -> Result<(), Error> {
         // Destroy ordinal
         self.ordinal.destroy().await?;
