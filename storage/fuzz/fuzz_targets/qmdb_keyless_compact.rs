@@ -73,7 +73,7 @@ enum Operation {
         metadata_bytes: Option<Vec<u8>>,
         floor_kind: FloorKind,
     },
-    /// Build a two-level batch chain (parent → child) and apply the child directly.
+    /// Build a two-level batch chain (parent -> child) and apply the child directly.
     ChainedCommit,
     /// Apply two batches built from the same DB state; the second must be rejected as stale.
     StaleBatch,
