@@ -271,3 +271,17 @@ path = "fuzz_targets/current_crash_recovery.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "queue_shared_operations"
+path = "fuzz_targets/queue_shared_operations.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "qmdb_keyless_compact"
+path = "fuzz_targets/qmdb_keyless_compact.rs"
+test = false
+doc = false
+bench = false
