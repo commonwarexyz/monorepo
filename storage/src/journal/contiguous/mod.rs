@@ -84,14 +84,13 @@ pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
-    /// An owned, consistent snapshot of the journal (see [Reader]).
+    /// An owned, consistent snapshot of the journal.
     type Reader: Reader<Item = Self::Item>;
 
     /// Acquire a reader that holds a consistent view of the journal.
     ///
-    /// The reader is independent of the journal: it may be stored, moved across tasks, and
-    /// remains valid across subsequent mutations. Any position within `reader.bounds()`
-    /// remains readable for the reader's lifetime (see [Reader]).
+    /// Any position within `reader.bounds()` remains readable for the
+    /// reader's lifetime (see [Reader]).
     fn reader(&self) -> impl Future<Output = Self::Reader> + Send;
 
     /// Return the total number of items that have been appended to the journal.

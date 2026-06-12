@@ -82,7 +82,7 @@
 
 use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
 use crate::journal::{
-    frame::{decode_item, decode_length_prefix, encode_item_into, find_item, ItemInfo},
+    frame::{decode_item, decode_length_prefix, encode_frame_into, find_frame, FrameInfo},
     Error,
 };
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
@@ -191,11 +191,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
             .await?;
         let buf = buf.freeze();
         let mut cursor = Cursor::new(buf.slice(..available));
-        let (next_offset, item_info) = find_item(&mut cursor, offset)?;
+        let (next_offset, item_info) = find_frame(&mut cursor, offset)?;
 
         // Decode item - either directly from buffer or by chaining prefix with remainder
         let (item_size, decoded) = match item_info {
-            ItemInfo::Complete {
+            FrameInfo::Complete {
                 varint_len,
                 data_len,
             } => {
@@ -204,7 +204,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
                 let decoded = decode_item::<V>(data, cfg, compressed)?;
                 (data_len as u32, decoded)
             }
-            ItemInfo::Incomplete {
+            FrameInfo::Incomplete {
                 varint_len,
                 prefix_len,
                 total_len,
@@ -450,7 +450,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// possibly compressed) payload, excluding the size prefix.
     fn encode_item(compression: Option<u8>, item: &V) -> Result<(Vec<u8>, u32), Error> {
         let mut buf = Vec::new();
-        let item_len = encode_item_into(compression, item, &mut buf)?;
+        let item_len = encode_frame_into(compression, item, &mut buf)?;
         Ok((buf, item_len))
     }
 

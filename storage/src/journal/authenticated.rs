@@ -819,7 +819,7 @@ where
     S: Strategy,
     H: Hasher,
 {
-    /// Test helper: Read the item at the given location.
+    /// Read the item at the given location.
     pub(crate) async fn read(&self, loc: Location<F>) -> Result<C::Item, Error<F>> {
         self.journal
             .reader()

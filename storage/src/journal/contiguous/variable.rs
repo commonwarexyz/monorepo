@@ -81,7 +81,7 @@ use super::{
 };
 use crate::{
     journal::{
-        frame::{decode_item, decode_length_prefix, encode_item_into, find_item, ItemInfo},
+        frame::{decode_item, decode_length_prefix, encode_frame_into, find_frame, FrameInfo},
         Error,
     },
     Context,
@@ -621,7 +621,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let mut item_starts = Vec::with_capacity(items.len());
         let mut encode = |item: &V| {
             item_starts.push(encoded.len());
-            encode_item_into(self.compression, item, &mut encoded)
+            encode_frame_into(self.compression, item, &mut encoded)
         };
         match items {
             Many::Flat(items) => {
@@ -756,12 +756,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Prune items at positions strictly less than `min_position`.
     ///
-    /// Returns `true` if any data was pruned, `false` otherwise. The journal may retain some
-    /// items below `min_position` to preserve section boundaries, but always fewer than
-    /// `items_per_section`.
-    ///
-    /// Readers holding earlier snapshots keep reading pruned blobs through their own handles;
-    /// later snapshots observe [Error::ItemPruned].
+    /// Returns `true` if any data was pruned, `false` otherwise.
     ///
     /// # Errors
     ///
@@ -1352,12 +1347,12 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
         // Read the varint header (max 5 bytes for u32).
         let (buf, available) = handle.read_up_to(offset, MAX_U32_VARINT_SIZE).await?;
         let mut cursor = Cursor::new(buf.slice(..available));
-        let (_, item_info) = find_item(&mut cursor, offset)?;
+        let (_, item_info) = find_frame(&mut cursor, offset)?;
 
         // Decode the item, either directly from the buffer or by chaining the prefix with the
         // remainder.
         match item_info {
-            ItemInfo::Complete {
+            FrameInfo::Complete {
                 varint_len,
                 data_len,
             } => decode_item::<V>(
@@ -1365,7 +1360,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
                 &self.codec_config,
                 self.compressed,
             ),
-            ItemInfo::Incomplete {
+            FrameInfo::Incomplete {
                 varint_len,
                 prefix_len,
                 total_len,
@@ -1464,14 +1459,14 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
             return None;
         }
         let mut cursor = Cursor::new(&header[..header_len]);
-        let (_, item_info) = find_item(&mut cursor, offset).ok()?;
+        let (_, item_info) = find_frame(&mut cursor, offset).ok()?;
 
         let (varint_len, data_len) = match item_info {
-            ItemInfo::Complete {
+            FrameInfo::Complete {
                 varint_len,
                 data_len,
             } => (varint_len, data_len),
-            ItemInfo::Incomplete {
+            FrameInfo::Incomplete {
                 varint_len,
                 total_len,
                 ..
@@ -2035,7 +2030,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         }
     }
 
-    /// Test helper: Append directly to the data blobs without indexing (simulates crash
+    /// Append directly to the data blobs without indexing (simulates crash
     /// scenario). The target must be the tail blob or a newer one (created as an orphan).
     pub(crate) async fn test_append_data(
         &mut self,
@@ -2043,7 +2038,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         item: V,
     ) -> Result<(u64, u32), Error> {
         let mut encoded = Vec::new();
-        encode_item_into(self.compression, &item, &mut encoded)?;
+        encode_frame_into(self.compression, &item, &mut encoded)?;
         let item_len = encoded.len() as u32;
 
         let tail_blob = self.blobs.tail_blob_index();
@@ -2054,19 +2049,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Ok((offset, item_len));
         }
         assert!(section > tail_blob, "cannot append to a sealed blob");
-        let writer = self.blobs.test_open_blob(section).await?;
+        let writer = self.blobs.open_blob(section).await?;
         let offset = writer.size().await;
         writer.append(&encoded).await.map_err(Error::Runtime)?;
         writer.sync().await.map_err(Error::Runtime)?;
         Ok((offset, item_len))
     }
 
-    /// Test helper: Sync the data tail.
+    /// Sync the data tail.
     pub(crate) async fn test_sync_data(&mut self) -> Result<(), Error> {
         self.blobs.sync_from(self.blobs.tail_blob_index()).await
     }
 
-    /// Test helper: Sync one data blob.
+    /// Sync one data blob.
     pub(crate) async fn test_sync_data_blob(&self, blob: u64) -> Result<(), Error> {
         self.blobs.sync_blob(blob).await
     }
@@ -3721,7 +3716,7 @@ mod tests {
                 .unwrap();
 
             let mut encoded = Vec::new();
-            encode_item_into(None, &100u64, &mut encoded).unwrap();
+            encode_frame_into(None, &100u64, &mut encoded).unwrap();
             pending[&0].append(&encoded).await.unwrap();
             offsets.append(&0).await.unwrap();
 

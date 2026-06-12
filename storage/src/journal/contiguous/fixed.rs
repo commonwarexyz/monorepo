@@ -1480,32 +1480,32 @@ mod tests {
     }
 
     impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
-        /// Test helper: Read the item at the given position.
+        /// Read the item at the given position.
         pub(crate) async fn read(&self, pos: u64) -> Result<A, Error> {
             self.reader().read(pos).await
         }
 
-        /// Test helper: Return the bounds of the journal.
+        /// Return the bounds of the journal.
         pub(crate) fn bounds(&self) -> Range<u64> {
             self.reader().bounds()
         }
 
-        /// Test helper: Get the oldest blob from the blob store.
+        /// Get the oldest blob from the blob store.
         pub(crate) const fn test_oldest_blob(&self) -> Option<u64> {
             Some(self.blobs.oldest_blob_index())
         }
 
-        /// Test helper: Get the newest blob from the blob store.
+        /// Get the newest blob from the blob store.
         pub(crate) fn test_newest_blob(&self) -> Option<u64> {
             Some(self.blobs.tail_blob_index())
         }
 
-        /// Test helper: Make one blob durable (sealed history or the tail).
+        /// Make one blob durable (sealed history or the tail).
         pub(crate) async fn test_sync_blob(&self, blob: u64) -> Result<(), Error> {
             self.blobs.sync_blob(blob).await
         }
 
-        /// Test helper: Set and persist the recovery watermark directly.
+        /// Set and persist the recovery watermark directly.
         pub(crate) async fn test_set_recovery_watermark(
             &mut self,
             watermark: u64,
@@ -1514,7 +1514,7 @@ mod tests {
             self.checkpoint.sync().await
         }
 
-        /// Test helper: Durably stage a clear intent in the journal's checkpoint.
+        /// Durably stage a clear intent in the journal's checkpoint.
         pub(crate) async fn test_stage_clear(
             context: E,
             partition: &str,

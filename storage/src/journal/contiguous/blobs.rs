@@ -423,28 +423,6 @@ impl<E: Context> Blobs<E> {
         }
         Partition::remove_all(&self.partition.context, &self.partition.name).await
     }
-
-    /// Test helper: open `blob` as an independent writer, outside this journal's tracking
-    /// (simulates a crash-artifact blob).
-    #[cfg(test)]
-    pub(super) async fn test_open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
-        self.partition.open(blob).await
-    }
-
-    /// Test helper: make one blob durable.
-    #[cfg(test)]
-    pub(super) async fn sync_blob(&self, blob: u64) -> Result<(), Error> {
-        if blob == self.tail_blob_index() {
-            return self.tail.sync().await.map_err(Error::Runtime);
-        }
-        match blob
-            .checked_sub(self.oldest_blob_index)
-            .and_then(|idx| self.sealed.get(idx as usize))
-        {
-            Some(sealed) => sealed.sync().await.map_err(Error::Runtime),
-            None => Ok(()),
-        }
-    }
 }
 
 /// A read handle for one blob, resolved from a [`Snapshot`].
@@ -592,5 +570,32 @@ impl<B: Blob> Snapshot<B> {
 impl<B: Blob> Drop for Snapshot<B> {
     fn drop(&mut self) {
         self.readers.fetch_sub(1, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl<E: Context> Blobs<E> {
+        /// Open `blob` as an independent writer, outside this journal's tracking
+        /// (simulates a crash-artifact blob).
+        pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
+            self.partition.open(blob).await
+        }
+
+        /// Make one blob durable.
+        pub(crate) async fn sync_blob(&self, blob: u64) -> Result<(), Error> {
+            if blob == self.tail_blob_index() {
+                return self.tail.sync().await.map_err(Error::Runtime);
+            }
+            match blob
+                .checked_sub(self.oldest_blob_index)
+                .and_then(|idx| self.sealed.get(idx as usize))
+            {
+                Some(sealed) => sealed.sync().await.map_err(Error::Runtime),
+                None => Ok(()),
+            }
+        }
     }
 }
