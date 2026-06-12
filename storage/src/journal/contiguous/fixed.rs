@@ -272,9 +272,9 @@ impl<E: Context, A: CodecFixedShared> Inner<E, A> {
 ///
 /// # Synchronous Reads
 ///
-/// Batched read paths opportunistically decode items in place from the page cache while holding
-/// its read lock (single-item reads decode after the lock is released). `A`'s `Read`
-/// implementation must therefore be cheap and parse-only: no blocking and no expensive work.
+/// Read paths opportunistically decode items in place from the page cache while holding its
+/// read lock. `A`'s `Read` implementation must therefore be cheap and parse-only: no blocking
+/// and no expensive work.
 ///
 /// # Repair
 ///

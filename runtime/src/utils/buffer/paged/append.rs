@@ -29,10 +29,11 @@
 //!
 //! The `try_decode_*` methods decode codec types directly from cached page bytes (or tip-buffer
 //! bytes) without performing I/O and without copying bytes into an intermediate buffer: only the
-//! decoded value itself is materialized. Bytes served from the page cache are gathered as
-//! refcounted page slices and decoded after the cache lock is released; bytes served from the
-//! tip buffer are decoded under the tip read guard, so `commonware_codec::Read` implementations
-//! used with these methods must still be cheap and parse-only. A `None` result always means
+//! decoded value itself is materialized. Bytes served from the page cache are decoded in place
+//! under the cache read lock when they lie within one page, or gathered as refcounted page
+//! slices and decoded after the lock is released when they span pages; bytes served from the
+//! tip buffer are decoded under the tip read guard. `commonware_codec::Read` implementations
+//! used with these methods must therefore be cheap and parse-only. A `None` result always means
 //! "retry via an async read"; a `Some(Err(_))` result means the bytes were fully available and
 //! are malformed.
 //!

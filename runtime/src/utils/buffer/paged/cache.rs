@@ -270,8 +270,9 @@ impl CacheRef {
     /// Decode a `T` from the resident prefix of `[offset, offset + max_len)` for `blob_id`,
     /// letting the decoder consume at most `max_len` bytes.
     ///
-    /// The resident prefix is gathered as refcounted page slices under the cache read lock, and
-    /// the decode runs after the lock is released, so `T::read_cfg` is unconstrained.
+    /// A prefix within a single page is decoded in place, borrowed, while the cache read lock
+    /// is held, so `T::read_cfg` must be cheap and parse-only. A prefix spanning pages is
+    /// gathered as refcounted page slices and decoded after the lock is released.
     ///
     /// `T`'s decoding must be driven solely by the bytes it consumes (fixed-size or
     /// length-prefixed encodings): the prefix may stop short of `max_len` at a non-resident
@@ -287,13 +288,14 @@ impl CacheRef {
             return CachedDecode::Missing;
         }
 
-        // Fast path: most items lie within a single page, where a refcounted slice of that
-        // page can be decoded contiguously without assembling a multi-slice view.
-        let Some(slice) = self.cache.read().resident_in_page(blob_id, offset, max_len) else {
+        // Fast path: most items lie within a single page, where the page's bytes can be
+        // decoded contiguously in place without cloning a page handle.
+        let guard = self.cache.read();
+        let Some(slice) = guard.resident_slice(blob_id, offset, max_len) else {
             return CachedDecode::Missing;
         };
         let in_page = slice.len();
-        let mut buf = slice.as_ref();
+        let mut buf = slice;
         match T::read_cfg(&mut buf, cfg) {
             Ok(value) => return CachedDecode::Decoded(value, in_page - buf.len()),
             // The whole requested range was available, so the failure is authoritative.
@@ -303,7 +305,8 @@ impl CacheRef {
             Err(_) => {}
         }
 
-        let (mut bufs, truncated) = self.cache.read().gather(blob_id, offset, max_len);
+        let (mut bufs, truncated) = guard.gather(blob_id, offset, max_len);
+        drop(guard);
         let gathered = bufs.remaining();
         if gathered == in_page {
             // No bytes beyond the already-tried page are resident, so the failure above was
@@ -334,13 +337,14 @@ impl CacheRef {
             return CachedDecode::Missing;
         }
 
-        // Fast path: the entire encoding lies within a single page, so a refcounted slice of
-        // that page can be decoded contiguously and every outcome is authoritative.
-        let Some(slice) = self.cache.read().resident_in_page(blob_id, offset, len) else {
+        // Fast path: the entire encoding lies within a single page, so the page's bytes can be
+        // decoded contiguously in place and every outcome is authoritative.
+        let guard = self.cache.read();
+        let Some(slice) = guard.resident_slice(blob_id, offset, len) else {
             return CachedDecode::Missing;
         };
         if slice.len() == len {
-            let mut buf = slice.as_ref();
+            let mut buf = slice;
             return match T::read_cfg(&mut buf, cfg) {
                 Ok(value) if buf.is_empty() => CachedDecode::Decoded(value, len),
                 // All `len` bytes were resident, so under-consumption means the encoding does
@@ -350,8 +354,10 @@ impl CacheRef {
             };
         }
 
-        // The encoding spans pages: gather and decode the multi-slice view.
-        let (mut bufs, truncated) = self.cache.read().gather(blob_id, offset, len);
+        // The encoding spans pages: gather the multi-slice view and decode it after the lock
+        // is released.
+        let (mut bufs, truncated) = guard.gather(blob_id, offset, len);
+        drop(guard);
         let gathered = bufs.remaining();
         match T::read_cfg(&mut bufs, cfg) {
             Ok(value) if gathered - bufs.remaining() == len => CachedDecode::Decoded(value, len),
@@ -373,9 +379,9 @@ impl CacheRef {
     /// be discarded.
     ///
     /// The page-cache read lock is taken once per chunk of offsets rather than once per item,
-    /// amortizing lock acquisition while bounding hold time. Unlike the single-item variants,
-    /// items are decoded while the lock is held, so `T::read_cfg` must be cheap and parse-only;
-    /// every caller decodes fixed-size items.
+    /// amortizing lock acquisition while bounding hold time. Items are decoded while the lock
+    /// is held, so `T::read_cfg` must be cheap and parse-only; every caller decodes fixed-size
+    /// items.
     pub(super) fn decode_cached_exact_many<T: CodecRead>(
         &self,
         blob_id: u64,
@@ -718,23 +724,24 @@ impl Cache {
         }
     }
 
-    /// Returns a refcounted slice of the resident page covering `[offset, offset + want)`
-    /// clamped to the page end, marking the page as referenced. Returns `None` if the page is
-    /// not resident. The slice remains valid after the cache lock is released.
+    /// Returns the bytes of the resident page covering `[offset, offset + want)` clamped to
+    /// the page end, marking the page as referenced. Returns `None` if the page is not
+    /// resident. The slice borrows from the cache entry, so it is only valid while the cache
+    /// lock is held.
     #[inline]
-    fn resident_in_page(&self, blob_id: u64, offset: u64, want: usize) -> Option<IoBuf> {
+    fn resident_slice(&self, blob_id: u64, offset: u64, want: usize) -> Option<&[u8]> {
         let (page_num, offset_in_page) = Self::offset_to_page(self.page_size as u64, offset);
         let &slot = self.index.get(&(blob_id, page_num))?;
         let entry = &self.entries[slot];
         entry.referenced.store(true, Ordering::Relaxed);
         let start = offset_in_page as usize;
         let end = self.page_size.min(start.saturating_add(want));
-        Some(entry.page.slice(start..end))
+        Some(&entry.page.as_ref()[start..end])
     }
 
-    /// Like [CacheRef::decode_cached_exact] but borrows resident bytes and decodes them while
-    /// the caller holds the cache read lock; used by the batch path to avoid a refcount bump
-    /// per item. `T::read_cfg` must be cheap and parse-only.
+    /// Like [CacheRef::decode_cached_exact] but runs entirely while the caller holds the cache
+    /// read lock; used by the batch path to amortize lock acquisition across items.
+    /// `T::read_cfg` must be cheap and parse-only.
     fn decode_exact<T: CodecRead>(
         &self,
         blob_id: u64,
@@ -748,11 +755,10 @@ impl Cache {
 
         // Fast path: the entire encoding lies within a single page, so it can be decoded from
         // the contiguous slice and every outcome is authoritative.
-        let Some(slice) = self.resident_in_page(blob_id, offset, len) else {
+        let Some(mut buf) = self.resident_slice(blob_id, offset, len) else {
             return CachedDecode::Missing;
         };
-        if slice.len() == len {
-            let mut buf = slice;
+        if buf.len() == len {
             return match T::read_cfg(&mut buf, cfg) {
                 Ok(value) if buf.is_empty() => CachedDecode::Decoded(value, len),
                 // All `len` bytes were resident, so under-consumption means the encoding does

@@ -229,10 +229,11 @@ impl<V: CodecRead> CodecRead for PrefixedItem<V> {
 ///
 /// # Synchronous Reads
 ///
-/// When compression is disabled, single-item synchronous reads decode in place from refcounted
-/// cached page bytes after the cache lock is released; bytes resident only in the tip buffer
-/// are decoded under the tip read guard, so `V`'s `Read` implementation must still be cheap and
-/// parse-only: no blocking and no expensive work.
+/// When compression is disabled, synchronous reads decode in place from cached page bytes
+/// while holding the cache read lock (items spanning pages decode from refcounted page slices
+/// after the lock is released); bytes resident only in the tip buffer are decoded under the
+/// tip read guard. `V`'s `Read` implementation must therefore be cheap and parse-only: no
+/// blocking and no expensive work.
 ///
 /// # Repair
 ///
