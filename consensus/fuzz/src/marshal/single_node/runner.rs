@@ -971,6 +971,17 @@ where
                                 }
                             }
                         }
+                        // Marshal holds a buffer subscription for a pending
+                        // floor anchor; the publish completes it and marshal
+                        // ingests the block as the durable floor anchor.
+                        repair_wake |= apply_pending_floor(
+                            &mut pending_floor,
+                            height,
+                            &mut durable_available,
+                            &mut finalized_available,
+                            &mut processed_height,
+                            &mut segment_starts,
+                        );
                     }
                 }
                 MarshalEvent::AckNext => {
