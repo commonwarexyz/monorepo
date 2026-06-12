@@ -1027,6 +1027,21 @@ async fn wait_for_reached_progress<F: merkle::Family>(
     }
 }
 
+fn assert_reached_progress<F: merkle::Family>(metrics: &str, target: &Target<F, Digest>) {
+    let target_end = *target.range.end();
+    let journal_size = format!("client_sync_journal_size {target_end}");
+    let target_end = format!("client_sync_target_end {target_end}");
+
+    assert!(
+        metrics.contains(&journal_size),
+        "missing sync journal size metric after completion: {metrics}"
+    );
+    assert!(
+        metrics.contains(&target_end),
+        "missing sync target end metric after completion: {metrics}"
+    );
+}
+
 /// Test progress metrics for reached targets across target updates and explicit finish.
 pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_finish<
     H: SyncTestHarness,
@@ -1140,6 +1155,7 @@ where
         assert_eq!(synced_db.root(), final_root);
         assert_eq!(synced_db.bounds().await.end, *second_update.range.end());
         assert_eq!(synced_db.sync_boundary().await, *second_update.range.start());
+        assert_reached_progress(&context.encode(), &second_update);
 
         synced_db.destroy().await.unwrap();
         Arc::try_unwrap(target_db)

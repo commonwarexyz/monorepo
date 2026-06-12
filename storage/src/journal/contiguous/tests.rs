@@ -79,6 +79,15 @@ pub(super) mod partition_sync_fault {
             self.inner.register(name, help, metric)
         }
 
+        fn register_persistent<N: Into<String>, H: Into<String>, M: metrics::Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> metrics::Registered<M> {
+            self.inner.register_persistent(name, help, metric)
+        }
+
         fn encode(&self) -> String {
             self.inner.encode()
         }

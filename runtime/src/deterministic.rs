@@ -1270,6 +1270,32 @@ impl crate::Metrics for Context {
         )
     }
 
+    fn register_persistent<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
+        let name = name.into();
+        let help = help.into();
+        let executor = self.executor();
+        executor.auditor.event(b"register_persistent", |hasher| {
+            hasher.update(name.as_bytes());
+            hasher.update(help.as_bytes());
+            for (k, v) in &self.attributes {
+                hasher.update(k.as_bytes());
+                hasher.update(v.as_bytes());
+            }
+        });
+        let metric = Arc::new(metric);
+        executor.registry.register_persistent(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
+    }
+
     fn encode(&self) -> String {
         let executor = self.executor();
         executor.auditor.event(b"encode", |_| {});

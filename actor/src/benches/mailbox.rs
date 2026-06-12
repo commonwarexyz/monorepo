@@ -46,6 +46,15 @@ impl Metrics for NoopMetrics {
         Registered::with_registration(metric, Registration::from(()))
     }
 
+    fn register_persistent<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        _name: N,
+        _help: H,
+        metric: M,
+    ) -> Registered<M> {
+        Registered::with_registration(metric, Registration::from(()))
+    }
+
     fn encode(&self) -> String {
         String::new()
     }

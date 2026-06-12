@@ -75,8 +75,8 @@ struct ProgressMetrics {
 impl ProgressMetrics {
     /// Register sync progress metrics on the provided context.
     fn new(context: &impl commonware_runtime::Metrics) -> Self {
-        let journal_size = context.gauge("journal_size", "Current sync journal size");
-        let target_end = context.gauge(
+        let journal_size = context.persistent_gauge("journal_size", "Current sync journal size");
+        let target_end = context.persistent_gauge(
             "target_end",
             "Exclusive target range end, equal to journal size when sync completes",
         );

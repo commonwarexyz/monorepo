@@ -729,6 +729,23 @@ impl crate::Metrics for Context {
         )
     }
 
+    fn register_persistent<N: Into<String>, H: Into<String>, M: Metric>(
+        &self,
+        name: N,
+        help: H,
+        metric: M,
+    ) -> Registered<M> {
+        let name = name.into();
+        let help = help.into();
+        let metric = Arc::new(metric);
+        self.executor.registry.register_persistent(
+            prefixed_name(&self.name, &name),
+            help,
+            self.attributes.clone(),
+            metric,
+        )
+    }
+
     fn encode(&self) -> String {
         self.executor.registry.encode()
     }
