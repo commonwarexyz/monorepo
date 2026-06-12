@@ -946,9 +946,10 @@ impl TlsSizeClassCache {
     /// Handles a push after the local stack fills.
     ///
     /// Very small caches return the incoming entry directly to the global
-    /// freelist. Larger caches spill older local entries in a batch, then keep
-    /// the incoming entry local so the dropping thread retains the freshest
-    /// buffer.
+    /// freelist. Larger caches spill the top half of the local stack (the
+    /// most recently returned entries, which are contiguous and cheap to
+    /// drain without shifting the rest), then keep the incoming entry local
+    /// so the dropping thread retains the freshest buffer.
     ///
     /// This is separate from [`Self::push`] so the steady-state return hot path
     /// can inline only the local cache push. We annotate with `inline(never)`
@@ -1004,6 +1005,21 @@ impl TlsSizeClassCache {
         // this function; the entry is only borrowed here.
         let token = unsafe { (*entries.add(start)).assume_init_ref().buffer.lease() }.token;
 
+        // Same-class check, done before the batch insert because put_batch's
+        // iterator must not panic after yielding an entry (a mid-iterator
+        // panic would strand parked-but-unpublished buffers).
+        #[cfg(debug_assertions)]
+        for index in start..end {
+            // SAFETY: `start..end` is initialized; the entry is only borrowed.
+            let entry = unsafe { (*entries.add(index)).assume_init_ref() };
+            // SAFETY: local cache entries keep a live lease in the header.
+            let entry_token = unsafe { entry.buffer.lease() }.token;
+            debug_assert_eq!(
+                entry_token, token,
+                "cache entries must share one size class"
+            );
+        }
+
         // SAFETY: the lease strong references consumed below are not released
         // until after the batch insert completes.
         let class = unsafe { token.as_ref() };
@@ -1013,9 +1029,9 @@ impl TlsSizeClassCache {
             let mut entry = unsafe { entries.add(index).read().assume_init() };
             // SAFETY: local cache entries keep a live lease in the pooled
             // header. The strong reference it owns is intentionally not
-            // released here; the token releases below settle it.
-            let _token = unsafe { entry.buffer.take_lease() }.into_token();
-            debug_assert_eq!(_token, token, "cache entries must share one size class");
+            // released here (leases have no drop glue); the token releases
+            // below settle it.
+            let _ = unsafe { entry.buffer.take_lease() }.into_token();
             // SAFETY: pooled buffers in this cache came from this class, so
             // their stable header fields are initialized.
             let slot = unsafe { entry.buffer.slot() };
@@ -1118,11 +1134,17 @@ impl TlsSizeClassCaches {
 
 impl Drop for TlsSizeClassCaches {
     fn drop(&mut self) {
-        let this = self as *mut Self;
+        // The registry lives only in `TLS_SIZE_CLASS_CACHES`' static storage
+        // (its const initializer is the sole constructor), and std destroys
+        // const-initialized TLS values in place, so a published fast pointer
+        // can only refer to this instance. Clear it unconditionally rather
+        // than comparing identities: a null fast pointer is always safe (the
+        // hot paths fall back to checked TLS access), while a stale one would
+        // be a use-after-destroy if std ever moved the value before dropping.
+        let this: *mut Self = self;
         BufferPoolThreadCache::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| {
-            if fast.get() == this {
-                fast.set(ptr::null_mut());
-            }
+            debug_assert!(fast.get().is_null() || fast.get() == this);
+            fast.set(ptr::null_mut());
         });
     }
 }
@@ -1657,7 +1679,6 @@ impl BufferPool {
             .try_alloc(class_index, true)
             .ok_or(PoolError::Exhausted)?;
 
-        // SAFETY: allocation components were returned by the same size class.
         // SAFETY: allocation buffer carries a live size-class lease.
         let mut buf = unsafe { IoBufMut::from_pooled_parts(allocation.buffer) };
         if allocation.is_new {
