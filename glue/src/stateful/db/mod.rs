@@ -82,7 +82,7 @@ use commonware_macros::select;
 use commonware_runtime::{reschedule, Metrics, Spawner};
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
-    sync::AsyncRwLock,
+    sync::TracedAsyncRwLock,
 };
 use futures::{
     future::{pending, Either},
@@ -103,6 +103,9 @@ pub mod current;
 pub mod immutable;
 pub mod keyless;
 pub mod p2p;
+
+/// A database wrapped for shared, lock-traced access.
+pub type Shared<DB> = Arc<TracedAsyncRwLock<DB>>;
 
 /// Mutable batch state before merkleization.
 ///
@@ -147,7 +150,7 @@ pub trait Merkleized: Sized + Send + Sync {
 /// Implementations create new batches from committed state and persist finalized
 /// batches back to storage.
 ///
-/// [`new_batch`](Self::new_batch) receives `Arc<AsyncRwLock<Self>>` so batch
+/// [`new_batch`](Self::new_batch) receives `Shared<Self>` so batch
 /// types can keep read-through access to committed state.
 ///
 /// `E` is a trait generic (not an associated type), so one database type can
@@ -183,10 +186,10 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     /// Create a new unmerkleized batch rooted at the database's committed
     /// state.
     ///
-    /// The `db` parameter is the `Arc<AsyncRwLock<Self>>` that wraps this
+    /// The `db` parameter is the [`Shared`] handle that wraps this
     /// database, allowing batch types to capture a shared reference for
     /// read-through to committed state.
-    fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> impl Future<Output = Self::Unmerkleized> + Send;
+    fn new_batch(db: &Shared<Self>) -> impl Future<Output = Self::Unmerkleized> + Send;
 
     /// Return true if a merkleized batch matches a committed sync target.
     fn matches_sync_target(batch: &Self::Merkleized, target: &Self::SyncTarget) -> bool;
@@ -228,7 +231,7 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
 
 /// A collection of individually locked [`ManagedDb`] instances.
 ///
-/// Each database is wrapped in `Arc<AsyncRwLock<...>>`, so the set is cheap to
+/// Each database is wrapped in [`Shared`], so the set is cheap to
 /// clone and each database can be shared without a global lock.
 ///
 /// `E` is a trait generic (not an associated type), so one set type can work
@@ -424,7 +427,7 @@ where
 }
 
 /// Implement [`DatabaseSet`] for a single [`ManagedDb`] behind a lock.
-impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLock<T>> {
+impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
     type Unmerkleized = T::Unmerkleized;
     type Merkleized = T::Merkleized;
     type Config = T::Config;
@@ -434,7 +437,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
         let db = T::init(context, config)
             .await
             .expect("database init failed");
-        Self::new(AsyncRwLock::new(db))
+        Self::new(TracedAsyncRwLock::new("stateful.db", db))
     }
 
     async fn new_batches(&self) -> Self::Unmerkleized {
@@ -473,7 +476,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Arc<AsyncRwLo
     }
 }
 
-impl<E, T, R, D> StateSyncSet<E, R, D> for Arc<AsyncRwLock<T>>
+impl<E, T, R, D> StateSyncSet<E, R, D> for Shared<T>
 where
     E: Send + Sync + Metrics,
     T: StateSyncDb<E, R> + 'static,
@@ -575,7 +578,10 @@ where
             T::sync_target(&database).await == converged_target,
             "state sync database target does not match the coordinator target",
         );
-        Ok((Self::new(AsyncRwLock::new(database)), converged_anchor))
+        Ok((
+            Self::new(TracedAsyncRwLock::new("stateful.db", database)),
+            converged_anchor,
+        ))
     }
 }
 
@@ -635,7 +641,7 @@ where
 macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
         impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
-            for ($(Arc<AsyncRwLock<$T>>,)+)
+            for ($(Shared<$T>,)+)
         {
             type Unmerkleized = ($($T::Unmerkleized,)+);
             type Merkleized = ($($T::Merkleized,)+);
@@ -657,7 +663,7 @@ macro_rules! impl_database_set {
                                 stringify!($T),
                                 ")",
                             ));
-                        Arc::new(AsyncRwLock::new(db))
+                        Arc::new(TracedAsyncRwLock::new(concat!("stateful.db.", stringify!($idx)), db))
                     },
                 )+);
                 result
@@ -764,7 +770,7 @@ struct CoordinatorSyncSenders<T> {
 
 macro_rules! impl_state_sync_set {
     ($($T:ident : $R:ident : $idx:tt),+) => {
-        impl<E, D, $($T, $R),+> StateSyncSet<E, ($($R,)+), D> for ($(Arc<AsyncRwLock<$T>>,)+)
+        impl<E, D, $($T, $R),+> StateSyncSet<E, ($($R,)+), D> for ($(Shared<$T>,)+)
         where
             E: Send + Sync + Spawner + Metrics + 'static,
             D: Digest + 'static,
@@ -1010,7 +1016,12 @@ macro_rules! impl_state_sync_set {
                                 };
                                 let (sync_result, _) = join!(sync, forward_reached);
                                 let result = sync_result
-                                    .map(|database| Arc::new(AsyncRwLock::new(database)))
+                                    .map(|database| {
+                                        Arc::new(TracedAsyncRwLock::new(
+                                            concat!("stateful.db.", stringify!($idx)),
+                                            database,
+                                        ))
+                                    })
                                     .map_err(|err| {
                                         format!(
                                             "state sync failed (index {}, db {}): {err:?}",
@@ -1323,6 +1334,7 @@ impl<D: Digest, T: Clone> CoordinatorState<D, T> {
     }
 }
 
+#[tracing::instrument(name = "stateful.db.finalize_or_panic", level = "info", skip_all, fields(index = index))]
 async fn finalize_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     batch: T::Merkleized,
@@ -1344,6 +1356,7 @@ async fn finalize_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
+#[tracing::instrument(name = "stateful.db.rewind_or_panic", level = "info", skip_all, fields(index = index))]
 async fn rewind_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: T::SyncTarget,
@@ -1365,6 +1378,7 @@ async fn rewind_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
+#[tracing::instrument(name = "stateful.db.prune_or_panic", level = "info", skip_all, fields(index = index))]
 async fn prune_or_panic<E, T: ManagedDb<E>>(
     database: &mut T,
     target: &T::SyncTarget,
@@ -1392,7 +1406,7 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
 /// serve incoming sync requests once the database is initialized.
 pub trait AttachableResolver<DB>: Clone + Send + Sync + 'static {
     /// Attach a database for serving incoming requests.
-    fn attach_database(&self, db: Arc<AsyncRwLock<DB>>) -> impl Future<Output = ()> + Send;
+    fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send;
 }
 
 /// Attach a database set to a resolver set with matching shape.
@@ -1401,26 +1415,26 @@ pub trait AttachableResolverSet<DBs>: Clone + Send + Sync + 'static {
     fn attach_databases(&self, databases: DBs) -> impl Future<Output = ()> + Send;
 }
 
-impl<R, DB> AttachableResolverSet<Arc<AsyncRwLock<DB>>> for R
+impl<R, DB> AttachableResolverSet<Shared<DB>> for R
 where
     R: AttachableResolver<DB>,
     DB: Send + Sync + 'static,
 {
-    async fn attach_databases(&self, db: Arc<AsyncRwLock<DB>>) {
+    async fn attach_databases(&self, db: Shared<DB>) {
         self.attach_database(db).await;
     }
 }
 
 macro_rules! impl_attachable_resolver_set {
     ($($R:ident : $DB:ident : $idx:tt),+) => {
-        impl<$($R, $DB),+> AttachableResolverSet<($(Arc<AsyncRwLock<$DB>>,)+)> for ($($R,)+)
+        impl<$($R, $DB),+> AttachableResolverSet<($(Shared<$DB>,)+)> for ($($R,)+)
         where
             $(
                 $R: AttachableResolver<$DB>,
                 $DB: Send + Sync + 'static,
             )+
         {
-            async fn attach_databases(&self, databases: ($(Arc<AsyncRwLock<$DB>>,)+)) {
+            async fn attach_databases(&self, databases: ($(Shared<$DB>,)+)) {
                 futures::join!($(
                     self.$idx.attach_database(databases.$idx),
                 )+);
@@ -1465,8 +1479,8 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         drain_single_tip_updates, Anchor, AttachableResolver, AttachableResolverSet,
-        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, StateSyncDb, StateSyncSet,
-        SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
+        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, Shared, StateSyncDb,
+        StateSyncSet, SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
     };
     use crate::stateful::tests::mocks::{anchor as mock_anchor, TestMerkleized, TestUnmerkleized};
     use commonware_cryptography::sha256;
@@ -1476,7 +1490,7 @@ mod tests {
     };
     use commonware_utils::{
         channel::{mpsc, oneshot, ring},
-        sync::AsyncRwLock,
+        sync::TracedAsyncRwLock,
     };
     use futures::{pin_mut, FutureExt, SinkExt};
     use std::{
@@ -1512,7 +1526,7 @@ mod tests {
             Ok(Self)
         }
 
-        async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(db: &Shared<Self>) -> Self::Unmerkleized {
             let _guard = db.read().await;
             TestUnmerkleized
         }
@@ -1543,7 +1557,7 @@ mod tests {
             unreachable!("CountingRewindDb is constructed directly in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1577,7 +1591,7 @@ mod tests {
             Ok(Self { prune_count })
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1682,7 +1696,7 @@ mod tests {
             Ok(Self)
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1704,19 +1718,22 @@ mod tests {
     #[test]
     fn tuple_rewind_to_targets_skips_already_aligned_databases() {
         deterministic::Runner::default().start(|_context| async move {
-            type DbSet = (
-                Arc<AsyncRwLock<CountingRewindDb>>,
-                Arc<AsyncRwLock<CountingRewindDb>>,
-            );
+            type DbSet = (Shared<CountingRewindDb>, Shared<CountingRewindDb>);
 
-            let left = Arc::new(AsyncRwLock::new(CountingRewindDb {
-                current_target: 2,
-                rewind_count: 0,
-            }));
-            let right = Arc::new(AsyncRwLock::new(CountingRewindDb {
-                current_target: 1,
-                rewind_count: 0,
-            }));
+            let left = Arc::new(TracedAsyncRwLock::new(
+                "test",
+                CountingRewindDb {
+                    current_target: 2,
+                    rewind_count: 0,
+                },
+            ));
+            let right = Arc::new(TracedAsyncRwLock::new(
+                "test",
+                CountingRewindDb {
+                    current_target: 1,
+                    rewind_count: 0,
+                },
+            ));
             let databases: DbSet = (left.clone(), right.clone());
 
             <DbSet as DatabaseSet<deterministic::Context>>::rewind_to_targets(&databases, (1, 1))
@@ -1736,15 +1753,15 @@ mod tests {
     fn database_set_prune_calls_managed_db_prune() {
         deterministic::Runner::default().start(|_context| async move {
             let prune_count = Arc::new(AtomicUsize::new(0));
-            let database = Arc::new(AsyncRwLock::new(PruneCountingDb {
-                prune_count: prune_count.clone(),
-            }));
+            let database = Arc::new(TracedAsyncRwLock::new(
+                "test",
+                PruneCountingDb {
+                    prune_count: prune_count.clone(),
+                },
+            ));
 
-            <Arc<AsyncRwLock<PruneCountingDb>> as DatabaseSet<deterministic::Context>>::prune(
-                &database,
-                &(),
-            )
-            .await;
+            <Shared<PruneCountingDb> as DatabaseSet<deterministic::Context>>::prune(&database, &())
+                .await;
 
             assert_eq!(prune_count.load(Ordering::SeqCst), 1);
         });
@@ -1761,7 +1778,7 @@ mod tests {
             unreachable!("BlockingFinalizeDb is constructed directly in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1797,7 +1814,7 @@ mod tests {
             unreachable!("SlowSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1831,7 +1848,7 @@ mod tests {
             )
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1863,7 +1880,7 @@ mod tests {
             unreachable!("FastSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1895,7 +1912,7 @@ mod tests {
             unreachable!("FailingStateSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1927,7 +1944,7 @@ mod tests {
             unreachable!("MismatchedTargetSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1959,7 +1976,7 @@ mod tests {
             unreachable!("ImmediateStateSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -1991,7 +2008,7 @@ mod tests {
             unreachable!("FinishClosedSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2023,7 +2040,7 @@ mod tests {
             unreachable!("ObservedSlowSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2055,7 +2072,7 @@ mod tests {
             unreachable!("ObservedFastSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2089,7 +2106,7 @@ mod tests {
             )
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2230,7 +2247,7 @@ mod tests {
             unreachable!("StaleReachedSyncDb is only constructed through state sync in tests")
         }
 
-        async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+        async fn new_batch(_db: &Shared<Self>) -> Self::Unmerkleized {
             TestUnmerkleized
         }
 
@@ -2674,17 +2691,16 @@ mod tests {
     #[test]
     fn tuple_new_batches_queues_reads_concurrently() {
         deterministic::Runner::default().start(|_context| async move {
-            let db1 = Arc::new(AsyncRwLock::new(TestDb));
-            let db2 = Arc::new(AsyncRwLock::new(TestDb));
+            let db1 = Arc::new(TracedAsyncRwLock::new("test", TestDb));
+            let db2 = Arc::new(TracedAsyncRwLock::new("test", TestDb));
             let databases = (db1.clone(), db2.clone());
 
             let writer1 = db1.write().await;
             let writer2 = db2.write().await;
 
-            let new_batches =
-                <(Arc<AsyncRwLock<TestDb>>, Arc<AsyncRwLock<TestDb>>) as DatabaseSet<
-                    deterministic::Context,
-                >>::new_batches(&databases);
+            let new_batches = <(Shared<TestDb>, Shared<TestDb>) as DatabaseSet<
+                deterministic::Context,
+            >>::new_batches(&databases);
             pin_mut!(new_batches);
             assert!(new_batches.as_mut().now_or_never().is_none());
 
@@ -2712,23 +2728,20 @@ mod tests {
             let (release2_tx, release2_rx) = oneshot::channel();
 
             let databases = (
-                Arc::new(AsyncRwLock::new(BlockingFinalizeDb::new(
-                    started1_tx,
-                    release1_rx,
-                ))),
-                Arc::new(AsyncRwLock::new(BlockingFinalizeDb::new(
-                    started2_tx,
-                    release2_rx,
-                ))),
+                Arc::new(TracedAsyncRwLock::new(
+                    "test",
+                    BlockingFinalizeDb::new(started1_tx, release1_rx),
+                )),
+                Arc::new(TracedAsyncRwLock::new(
+                    "test",
+                    BlockingFinalizeDb::new(started2_tx, release2_rx),
+                )),
             );
 
-            let finalize = <(
-                Arc<AsyncRwLock<BlockingFinalizeDb>>,
-                Arc<AsyncRwLock<BlockingFinalizeDb>>,
-            ) as DatabaseSet<deterministic::Context>>::finalize(
-                &databases,
-                (TestMerkleized, TestMerkleized),
-            );
+            let finalize =
+                <(Shared<BlockingFinalizeDb>, Shared<BlockingFinalizeDb>) as DatabaseSet<
+                    deterministic::Context,
+                >>::finalize(&databases, (TestMerkleized, TestMerkleized));
             pin_mut!(finalize);
             assert!(finalize.as_mut().now_or_never().is_none());
 
@@ -2755,12 +2768,12 @@ mod tests {
     fn tuple_finalize_panic_identifies_failing_database() {
         deterministic::Runner::default().start(|_context| async move {
             let databases = (
-                Arc::new(AsyncRwLock::new(TestDb)),
-                Arc::new(AsyncRwLock::new(FailingFinalizeDb)),
+                Arc::new(TracedAsyncRwLock::new("test", TestDb)),
+                Arc::new(TracedAsyncRwLock::new("test", FailingFinalizeDb)),
             );
             <(
-                Arc<AsyncRwLock<TestDb>>,
-                Arc<AsyncRwLock<FailingFinalizeDb>>,
+                Shared<TestDb>,
+                Shared<FailingFinalizeDb>,
             ) as DatabaseSet<deterministic::Context>>::finalize(
                 &databases,
                 (TestMerkleized, TestMerkleized),
@@ -2856,7 +2869,7 @@ mod tests {
 
             let sync = context.child("single_state_sync_closed_tip_updates").spawn(
                 move |context| async move {
-                    <Arc<AsyncRwLock<SlowSyncDb>> as StateSyncSet<
+                    <Shared<SlowSyncDb> as StateSyncSet<
                         deterministic::Context,
                         Arc<AtomicBool>,
                         sha256::Digest,
@@ -2895,7 +2908,7 @@ mod tests {
             let (mut tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let _ = tip_tx.send(TipUpdate::new(anchor(1), 1u64)).await;
 
-            let result = <Arc<AsyncRwLock<FailingStateSyncDb>> as StateSyncSet<
+            let result = <Shared<FailingStateSyncDb> as StateSyncSet<
                 deterministic::Context,
                 (),
                 sha256::Digest,
@@ -2932,7 +2945,7 @@ mod tests {
             let sync = context
                 .child("single_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
-                    <Arc<AsyncRwLock<ObservedSlowSyncDb>> as StateSyncSet<
+                    <Shared<ObservedSlowSyncDb> as StateSyncSet<
                         deterministic::Context,
                         SlowSyncController,
                         sha256::Digest,
@@ -2982,7 +2995,7 @@ mod tests {
 
             let sync = context.child("single_state_sync_noop_target_update").spawn(
                 move |context| async move {
-                    <Arc<AsyncRwLock<RejectDuplicateTargetSyncDb>> as StateSyncSet<
+                    <Shared<RejectDuplicateTargetSyncDb> as StateSyncSet<
                         deterministic::Context,
                         Arc<AtomicBool>,
                         sha256::Digest,
@@ -3029,7 +3042,7 @@ mod tests {
                 context
                     .child("single_state_sync_stale_reached")
                     .spawn(move |context| async move {
-                        <Arc<AsyncRwLock<StaleReachedSyncDb>> as StateSyncSet<
+                        <Shared<StaleReachedSyncDb> as StateSyncSet<
                             deterministic::Context,
                             (),
                             sha256::Digest,
@@ -3080,7 +3093,7 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync")
                 .spawn(move |context| async move {
-                    <(Arc<AsyncRwLock<SlowSyncDb>>, Arc<AsyncRwLock<FastSyncDb>>) as StateSyncSet<
+                    <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, Arc<AtomicBool>),
                         sha256::Digest,
@@ -3139,7 +3152,7 @@ mod tests {
             let sync = context
                 .child("tuple_state_sync_ignores_backward_tip_updates")
                 .spawn(move |context| async move {
-                    <(Arc<AsyncRwLock<SlowSyncDb>>, Arc<AsyncRwLock<FastSyncDb>>) as StateSyncSet<
+                    <(Shared<SlowSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, Arc<AtomicBool>),
                         sha256::Digest,
@@ -3197,10 +3210,7 @@ mod tests {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let fast_done = Arc::new(AtomicBool::new(false));
 
-            let result = <(
-                Arc<AsyncRwLock<MismatchedTargetSyncDb>>,
-                Arc<AsyncRwLock<FastSyncDb>>,
-            ) as StateSyncSet<
+            let result = <(Shared<MismatchedTargetSyncDb>, Shared<FastSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 ((), Arc<AtomicBool>),
                 sha256::Digest,
@@ -3237,25 +3247,27 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(5)).start(|context| async move {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
 
-            let result = <(
-                Arc<AsyncRwLock<ImmediateStateSyncDb>>,
-                Arc<AsyncRwLock<FailingStateSyncDb>>,
-            ) as StateSyncSet<deterministic::Context, ((), ()), sha256::Digest>>::sync(
-                context,
-                ((), ()),
-                ((), ()),
-                anchor(0),
-                (0, 0),
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
-                    max_outstanding_requests: 1,
-                    update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
-                },
-            )
-            .await;
+            let result =
+                <(Shared<ImmediateStateSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
+                    deterministic::Context,
+                    ((), ()),
+                    sha256::Digest,
+                >>::sync(
+                    context,
+                    ((), ()),
+                    ((), ()),
+                    anchor(0),
+                    (0, 0),
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: 1,
+                        max_outstanding_requests: 1,
+                        update_channel_size: NonZeroUsize::new(1).unwrap(),
+                        max_retained_roots: 0,
+                    },
+                )
+                .await;
 
             let err = match result {
                 Ok(_) => panic!("tuple state sync should return the database sync error"),
@@ -3278,10 +3290,7 @@ mod tests {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
             let release = Arc::new(AtomicBool::new(true));
 
-            let result = <(
-                Arc<AsyncRwLock<SlowSyncDb>>,
-                Arc<AsyncRwLock<FailingStateSyncDb>>,
-            ) as StateSyncSet<
+            let result = <(Shared<SlowSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
                 deterministic::Context,
                 (Arc<AtomicBool>, ()),
                 sha256::Digest,
@@ -3322,25 +3331,27 @@ mod tests {
         deterministic::Runner::timed(Duration::from_secs(1)).start(|context| async move {
             let (_tip_tx, tip_rx) = ring::channel(NonZeroUsize::new(1).unwrap());
 
-            let result = <(
-                Arc<AsyncRwLock<FinishClosedSyncDb>>,
-                Arc<AsyncRwLock<FailingStateSyncDb>>,
-            ) as StateSyncSet<deterministic::Context, ((), ()), sha256::Digest>>::sync(
-                context,
-                ((), ()),
-                ((), ()),
-                anchor(0),
-                (0, 0),
-                tip_rx,
-                SyncEngineConfig {
-                    fetch_batch_size: NonZeroU64::new(1).unwrap(),
-                    apply_batch_size: 1,
-                    max_outstanding_requests: 1,
-                    update_channel_size: NonZeroUsize::new(1).unwrap(),
-                    max_retained_roots: 0,
-                },
-            )
-            .await;
+            let result =
+                <(Shared<FinishClosedSyncDb>, Shared<FailingStateSyncDb>) as StateSyncSet<
+                    deterministic::Context,
+                    ((), ()),
+                    sha256::Digest,
+                >>::sync(
+                    context,
+                    ((), ()),
+                    ((), ()),
+                    anchor(0),
+                    (0, 0),
+                    tip_rx,
+                    SyncEngineConfig {
+                        fetch_batch_size: NonZeroU64::new(1).unwrap(),
+                        apply_batch_size: 1,
+                        max_outstanding_requests: 1,
+                        update_channel_size: NonZeroUsize::new(1).unwrap(),
+                        max_retained_roots: 0,
+                    },
+                )
+                .await;
 
             let err = match result {
                 Ok(_) => panic!("tuple state sync should return the database sync error"),
@@ -3452,8 +3463,8 @@ mod tests {
             let sync = context.child("tuple_state_sync_algorithm").spawn(
                 move |context| async move {
                     <(
-                        Arc<AsyncRwLock<ObservedSlowSyncDb>>,
-                        Arc<AsyncRwLock<ObservedFastSyncDb>>,
+                        Shared<ObservedSlowSyncDb>,
+                        Shared<ObservedFastSyncDb>,
                     ) as StateSyncSet<
                         deterministic::Context,
                         (SlowSyncController, FastSyncObserver),
@@ -3523,10 +3534,7 @@ mod tests {
                     update_count: fast_update_count.clone(),
                 };
                 move |context| async move {
-                    <(
-                        Arc<AsyncRwLock<SlowSyncDb>>,
-                        Arc<AsyncRwLock<ObservedFastSyncDb>>,
-                    ) as StateSyncSet<
+                    <(Shared<SlowSyncDb>, Shared<ObservedFastSyncDb>) as StateSyncSet<
                         deterministic::Context,
                         (Arc<AtomicBool>, FastSyncObserver),
                         sha256::Digest,
@@ -3589,10 +3597,7 @@ mod tests {
                         update_count: fast_update_count.clone(),
                     };
                     move |context| async move {
-                        <(
-                            Arc<AsyncRwLock<SlowSyncDb>>,
-                            Arc<AsyncRwLock<DistinctObservedFastSyncDb>>,
-                        ) as StateSyncSet<
+                        <(Shared<SlowSyncDb>, Shared<DistinctObservedFastSyncDb>) as StateSyncSet<
                             deterministic::Context,
                             (Arc<AtomicBool>, FastSyncObserver),
                             sha256::Digest,
@@ -3662,7 +3667,7 @@ mod tests {
     }
 
     impl<DB: Send + Sync + 'static> AttachableResolver<DB> for RecordingResolver {
-        async fn attach_database(&self, _db: Arc<AsyncRwLock<DB>>) {
+        async fn attach_database(&self, _db: Shared<DB>) {
             self.log.lock().push(self.id);
         }
     }
@@ -3672,7 +3677,7 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let log = Arc::new(commonware_utils::sync::Mutex::new(Vec::new()));
             let resolver = RecordingResolver::new("db1", log.clone());
-            let db = Arc::new(AsyncRwLock::new(AttachDb1));
+            let db = Arc::new(TracedAsyncRwLock::new("test", AttachDb1));
 
             resolver.attach_databases(db).await;
             assert_eq!(&*log.lock(), &["db1"]);
@@ -3688,8 +3693,8 @@ mod tests {
                 RecordingResolver::new("resolver_1", log.clone()),
             );
             let databases = (
-                Arc::new(AsyncRwLock::new(AttachDb1)),
-                Arc::new(AsyncRwLock::new(AttachDb2)),
+                Arc::new(TracedAsyncRwLock::new("test", AttachDb1)),
+                Arc::new(TracedAsyncRwLock::new("test", AttachDb2)),
             );
 
             resolvers.attach_databases(databases).await;
@@ -3706,8 +3711,8 @@ mod tests {
                 RecordingResolver::new("db2", log.clone()),
             );
             let databases = (
-                Arc::new(AsyncRwLock::new(AttachDb1)),
-                Arc::new(AsyncRwLock::new(AttachDb2)),
+                Arc::new(TracedAsyncRwLock::new("test", AttachDb1)),
+                Arc::new(TracedAsyncRwLock::new("test", AttachDb2)),
             );
 
             resolvers.attach_databases(databases).await;

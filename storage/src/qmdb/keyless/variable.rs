@@ -92,7 +92,7 @@ mod test {
         qmdb::keyless::tests,
     };
     use commonware_cryptography::Sha256;
-    use commonware_macros::test_traced;
+    use commonware_macros::{boxed, test_traced};
     use commonware_parallel::Sequential;
     use commonware_runtime::{
         buffer::paged::CacheRef, deterministic, BufferPooler, Runner as _, Supervisor as _,
@@ -334,6 +334,7 @@ mod test {
         });
     }
 
+    #[boxed]
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {

@@ -11,6 +11,7 @@
 //! **Core Operations:**
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
 //! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
+//! - [`sort_by`](Strategy::sort_by): Sorts a slice with a comparator
 //!
 //! **Convenience Methods:**
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
@@ -62,12 +63,13 @@
 
 commonware_macros::stability_scope!(BETA {
     use cfg_if::cfg_if;
-    use core::fmt;
+    use core::{cmp::Ordering, fmt};
 
     cfg_if! {
         if #[cfg(feature = "std")] {
             use rayon::{
                 iter::{IntoParallelIterator, ParallelIterator},
+                slice::ParallelSliceMut,
                 ThreadPool as RThreadPool, ThreadPoolBuildError, ThreadPoolBuilder,
             };
             use std::{num::NonZeroUsize, sync::Arc};
@@ -378,6 +380,23 @@ commonware_macros::stability_scope!(BETA {
             RA: Send,
             RB: Send;
 
+        /// Sorts a slice with a comparator, preserving the order of equal elements.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Strategy, Sequential};
+        ///
+        /// let strategy = Sequential;
+        /// let mut data = vec![3, 1, 2];
+        /// strategy.sort_by(&mut data, |a, b| a.cmp(b));
+        /// assert_eq!(data, vec![1, 2, 3]);
+        /// ```
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync;
+
         /// Return the number of threads that are available, as a hint to chunking.
         fn parallelism_hint(&self) -> usize;
     }
@@ -439,6 +458,14 @@ commonware_macros::stability_scope!(BETA {
             (a(), b())
         }
 
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            items.sort_by(compare);
+        }
+
         fn parallelism_hint(&self) -> usize {
             1
         }
@@ -447,6 +474,12 @@ commonware_macros::stability_scope!(BETA {
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     /// A clone-able wrapper around a [rayon]-compatible thread pool.
     pub type ThreadPool = Arc<RThreadPool>;
+
+    /// Minimum slice length before [`Rayon::sort_by`] dispatches to the thread pool.
+    ///
+    /// Mirrors rayon's `CHUNK_LENGTH`: `par_sort_by` sorts slices of up to one chunk
+    /// sequentially, so dispatching them pays the pool handoff for no parallelism.
+    const MIN_PARALLEL_SORT: usize = 2000;
 
     /// A parallel execution strategy backed by a rayon thread pool.
     ///
@@ -556,6 +589,23 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             RB: Send,
         {
             self.thread_pool.install(|| rayon::join(a, b))
+        }
+
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            // install() from a non-worker thread injects the job and parks the caller until
+            // a pool worker runs it. rayon's small-slice sequential fallback only applies
+            // after that handoff, so small slices skip the dispatch and sort on the calling
+            // thread instead.
+            if items.len() < MIN_PARALLEL_SORT {
+                items.sort_by(compare);
+                return;
+            }
+
+            self.thread_pool.install(|| items.par_sort_by(compare));
         }
 
         fn parallelism_hint(&self) -> usize {

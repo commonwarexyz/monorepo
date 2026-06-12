@@ -58,7 +58,7 @@ use commonware_storage::{
 use commonware_utils::{
     non_empty_range,
     range::NonEmptyRange,
-    sync::{AsyncRwLock, Mutex},
+    sync::{Mutex, TracedAsyncRwLock},
     test_rng, NZDuration, NZUsize, NZU64,
 };
 use futures::{Stream, StreamExt};
@@ -69,7 +69,7 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 type Qmdb<E> =
     fixed::Db<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, TwoCap, Sequential>;
 
-pub(crate) type SingleDatabaseSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+pub(crate) type SingleDatabaseSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
 
 /// A block carrying key-value mutations with embedded consensus context.
 #[derive(Clone, Debug, PartialEq, Eq)]

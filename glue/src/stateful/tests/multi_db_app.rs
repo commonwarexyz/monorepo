@@ -60,7 +60,7 @@ use commonware_storage::{
 use commonware_utils::{
     non_empty_range,
     range::NonEmptyRange,
-    sync::{AsyncRwLock, Mutex},
+    sync::{Mutex, TracedAsyncRwLock},
     test_rng, NZDuration, NZUsize, NZU64,
 };
 use futures::{Stream, StreamExt};
@@ -77,8 +77,8 @@ type QmdbB<E> =
     immutable::fixed::CompactDb<mmr::Family, E, sha256::Digest, sha256::Digest, Sha256, Sequential>;
 
 /// A single QMDB database behind a lock.
-type DbA<E> = Arc<AsyncRwLock<QmdbA<E>>>;
-type DbB<E> = Arc<AsyncRwLock<QmdbB<E>>>;
+type DbA<E> = Arc<TracedAsyncRwLock<QmdbA<E>>>;
+type DbB<E> = Arc<TracedAsyncRwLock<QmdbB<E>>>;
 
 /// A full and a compact QMDB as a tuple.
 pub(crate) type MultiDatabaseSet<E> = (DbA<E>, DbB<E>);
