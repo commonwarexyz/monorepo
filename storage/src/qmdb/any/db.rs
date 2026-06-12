@@ -22,6 +22,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_cryptography::Hasher;
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use commonware_utils::bitmap;
 use core::num::NonZeroU64;
@@ -782,6 +783,7 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
+    #[boxed]
     pub async fn destroy(self) -> Result<(), crate::qmdb::Error<F>> {
         self.log.destroy().await.map_err(Into::into)
     }
