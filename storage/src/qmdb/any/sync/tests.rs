@@ -376,6 +376,7 @@ where
     executor.start(|mut context| async move {
         let original_ops_data = H::create_ops(original_ops);
 
+        // Initialize databases
         let mut target_db = H::init_db(context.child("target")).await;
         let sync_db_config = H::config(&context.next_u64().to_string(), &context);
         let client_context = context.child("client");
@@ -385,7 +386,6 @@ where
         // Apply the same operations to both databases
         target_db = H::apply_ops(target_db, original_ops_data.clone()).await;
         sync_db = H::apply_ops(sync_db, original_ops_data.clone()).await;
-        // commit already done in apply_ops
         // commit already done in apply_ops
 
         drop(sync_db);
@@ -481,7 +481,6 @@ where
         // Apply the same operations to both databases
         target_db = H::apply_ops(target_db, target_ops.clone()).await;
         sync_db = H::apply_ops(sync_db, target_ops.clone()).await;
-        // commit already done in apply_ops
         // commit already done in apply_ops
 
         target_db
