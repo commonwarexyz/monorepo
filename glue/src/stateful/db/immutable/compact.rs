@@ -25,12 +25,12 @@ use commonware_storage::{
         Error,
     },
 };
-use commonware_utils::{channel::mpsc, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, Array};
 use futures::future::{pending, Either};
 use std::{ops::Deref, sync::Arc};
 
 type ImmutableUnjournaledDbHandle<F, E, K, V, H, C, S> =
-    Arc<AsyncRwLock<CompactDb<F, E, K, V, H, C, S>>>;
+    Arc<TracedAsyncRwLock<CompactDb<F, E, K, V, H, C, S>>>;
 
 async fn drain_latest_target<T>(tip_updates: &mut mpsc::Receiver<T>) -> Option<T> {
     let mut latest = None;
@@ -235,7 +235,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnjournaledUnmerkleized {
             batch: inner.new_batch(),
@@ -295,7 +295,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnjournaledUnmerkleized {
             batch: inner.new_batch(),
@@ -645,7 +645,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let config = fixed_config("managed-db", &context);
             let db = FixedDb::init(context.child("db"), config).await.unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
             let key = Sha256::hash(&[1]);
             let value = Sha256::hash(&[2]);
             let metadata = Sha256::hash(&[3]);
