@@ -874,6 +874,84 @@ fn foo() -> usize {
 - Add comprehensive context to errors for better debugging
 - Write a failing test case for a suspected bug before claiming it is a bug
 
+### Tracing Spans
+
+Spans represent discrete, time-limited units of work and are exported to OTLP in
+production. Follow these rules when adding instrumentation:
+
+#### Spans are not part of the runtime context
+
+Tracing is deliberately decoupled from the runtime context (`Supervisor::child`,
+`Supervisor::with_attribute`). Context identity feeds metrics and supervision; spans
+are created independently at the work site. A trace follows a request as it hops
+between actors. A span's parent is whoever asked for the work, which is usually a
+different task on the other side of a mailbox. The context tree only records who
+spawned whom, so it cannot describe that relationship.
+
+#### Naming
+
+- Span names are dot-separated paths (e.g. `component.module.operation`). Never use `::`
+  in span names.
+- The operation segment matches the instrumented function's name.
+- A variant that qualifies the type an operation runs on sits with the type's path
+  segment (e.g. `qmdb.any.unordered.batch.merkleize`). A variant of an operation follows
+  it, using the operation's span name as a prefix so variants group under their
+  instrumented parent (e.g. `marshal.coding.certify.embedded` under
+  `marshal.coding.certify`, `new.from_db`).
+- The name should identify the crate/component and the operation, not the call site.
+- Spans are viewed stand-alone (in search results, span lists, and metrics), so every name
+  must be fully descriptive on its own. Unlike runtime context labels
+  (`context.child("verify")`), span names do not inherit a parent prefix: `verify` is a
+  useless span name; `component.processor.verify` is not.
+
+#### `#[instrument]` vs manual spans
+
+- Prefer `#[tracing::instrument(name = "...", level = "info", skip_all)]` on the function
+  performing the work. Always use `skip_all` and opt fields in explicitly; never capture
+  parameters implicitly.
+- In `#[instrument(fields(...))]` a bare name declares an empty field: `fields(index)`
+  records nothing. Write `fields(index = index)` to capture the variable. This is the
+  opposite of the span macros, where a bare `info_span!("...", index)` is shorthand for
+  `index = index`.
+- As a rule of thumb, a span name should never be declared twice. If the same name appears
+  at two or more call sites, that is a good sign the span belongs as `#[instrument]` on a
+  re-usable function.
+- When the underlying function cannot carry the attribute (e.g. a bare lock acquisition),
+  create a small instrumented wrapper function instead of repeating `info_span!` at each
+  call site.
+- Reserve manual `.instrument(info_span!(...))` for one-off spans whose name or fields
+  depend on call-site context (e.g. per-variant names), and
+  `info_span!(...).entered()`/`in_scope` for synchronous sections within an async fn.
+  Never hold an `entered()` guard across an `.await`.
+
+#### Span design
+
+- A span is a unit of work with a clear start and end, expected to last well under a
+  minute. Do not wrap long-lived task loops in a single span; create one span per
+  iteration.
+- Spans measure boundaries; events record moments within them. Do not emit log events
+  solely to mark progress inside a span (e.g. "dequeued"); create a child span instead so
+  the gap is visible in the trace without polluting logs.
+- For latency-sensitive paths, instrument waits separately from work: lock acquisition,
+  channel/stream pulls, and fsyncs should each get their own span so contention is
+  attributable.
+
+#### Crossing actor boundaries
+
+- `tracing`'s implicit context is task-local and does not survive a mailbox channel. When
+  a request crosses an actor boundary, the message must carry its `Span` as a field
+  (created at enqueue with the caller as parent) and the actor must re-enter it with
+  `.instrument(span)` when processing.
+- At dequeue, open a child span so queue wait and processing time are distinguishable.
+- A span carried across a boundary measures enqueue-to-completion; that is intentional.
+
+#### Levels and errors
+
+- Use `level = "info"` for lifecycle and per-block work; `debug`/`trace` for chatty or
+  large-data spans.
+- Only record errors (`err`) at root spans to avoid logging the same failure at every
+  level of the stack.
+
 ### Safety Guidelines
 
 - Minimize unsafe blocks with clear `// SAFETY:` comments

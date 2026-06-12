@@ -324,6 +324,7 @@ mod test {
         qmdb::any::traits::{DbAny, UnmerkleizedBatch as _},
     };
     use commonware_cryptography::{sha256::Digest, Sha256};
+    use commonware_macros::boxed;
     use commonware_runtime::{deterministic::Context, Supervisor as _};
     use commonware_utils::{sequence::FixedBytes, test_rng};
     use core::{future::Future, pin::Pin};
@@ -367,6 +368,7 @@ mod test {
         find_next_key_ascending(&1, &candidates, &mut idx);
     }
 
+    #[boxed]
     pub(crate) async fn test_ordered_any_db_empty<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
@@ -418,6 +420,7 @@ mod test {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_ordered_any_db_basic<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
@@ -621,6 +624,7 @@ mod test {
 
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
+    #[boxed]
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,

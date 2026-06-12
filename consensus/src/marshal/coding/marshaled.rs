@@ -115,11 +115,11 @@ use commonware_runtime::{
 };
 use commonware_utils::{
     channel::{fallible::OneshotExt, oneshot},
-    sync::AsyncMutex,
+    sync::TracedAsyncMutex,
 };
 use rand::Rng;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::{debug, info_span, warn, Instrument as _};
 
 /// Configuration for initializing [`Marshaled`].
 #[allow(clippy::type_complexity)]
@@ -163,7 +163,7 @@ where
     S: Strategy,
     ES: Epocher,
 {
-    context: Arc<AsyncMutex<E>>,
+    context: Arc<TracedAsyncMutex<E>>,
     application: A,
     marshal: core::Mailbox<Z::Scheme, Coding<B, C, H, <Z::Scheme as Verifier>::PublicKey>>,
     shards: shards::Mailbox<B, C, H, <Z::Scheme as Verifier>::PublicKey>,
@@ -276,7 +276,7 @@ where
         let erasure_encode_duration = Timed::new(erasure_histogram);
 
         Self {
-            context: Arc::new(AsyncMutex::new(context)),
+            context: Arc::new(TracedAsyncMutex::new("marshal.context", context)),
             application,
             marshal,
             shards,
@@ -330,19 +330,52 @@ where
             .await
             .child("deferred_verify")
             .with_attribute("round", consensus_context.round);
-        context.spawn(move |runtime_context| async move {
-            let round = consensus_context.round;
-            let (parent_view, parent_commitment) = consensus_context.parent;
+        let span = info_span!(
+            "marshal.coding.verify.deferred",
+            round = %consensus_context.round,
+            commitment = %commitment
+        );
+        context.spawn(move |runtime_context| {
+            async move {
+                let round = consensus_context.round;
+                let (parent_view, parent_commitment) = consensus_context.parent;
 
-            // Get the candidate block either from the caller or by waiting for
-            // local reconstruction. Candidate data remains local-only: a
-            // notarization is not sufficient reason to request it from peers.
-            let block = if let Some(block) = prefetched_block {
-                block
-            } else {
-                let block_request =
-                    marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
-                select! {
+                // Get the candidate block either from the caller or by waiting for
+                // local reconstruction. Candidate data remains local-only: a
+                // notarization is not sufficient reason to request it from peers.
+                let block = if let Some(block) = prefetched_block {
+                    block
+                } else {
+                    let block_request =
+                        marshal.subscribe_by_commitment(commitment, core::CommitmentFallback::Wait);
+                    select! {
+                        _ = tx.closed() => {
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping verification"
+                            );
+                            return;
+                        },
+                        result = block_request => match result {
+                            Ok(block) => block,
+                            Err(_) => {
+                                debug!(
+                                    reason = "block unavailable",
+                                    "skipping verification"
+                                );
+                                return;
+                            }
+                        },
+                    }
+                };
+
+                // The context supplies the certified parent round. Do not derive a
+                // height from the unverified child block for this lookup.
+                let fallback = core::CommitmentFallback::FetchByRound {
+                    round: Round::new(consensus_context.epoch(), parent_view),
+                };
+                let parent_request = marshal.subscribe_by_commitment(parent_commitment, fallback);
+                let parent = select! {
                     _ = tx.closed() => {
                         debug!(
                             reason = "consensus dropped receiver",
@@ -350,97 +383,80 @@ where
                         );
                         return;
                     },
-                    result = block_request => match result {
-                        Ok(block) => block,
+                    result = parent_request => match result {
+                        Ok(parent) => parent,
                         Err(_) => {
-                            debug!(
-                                reason = "block unavailable",
-                                "skipping verification"
-                            );
+                            debug!(reason = "failed to fetch parent", "skipping verification");
                             return;
                         }
                     },
+                };
+
+                if let Err(err) = validate_block::<H, _, _>(
+                    &epocher,
+                    &block,
+                    &parent,
+                    &consensus_context,
+                    commitment,
+                    parent_commitment,
+                ) {
+                    debug!(
+                        ?err,
+                        expected_commitment = %commitment,
+                        block_commitment = %block.commitment(),
+                        expected_parent_commitment = %parent_commitment,
+                        parent_commitment = %parent.commitment(),
+                        expected_parent = %parent.digest(),
+                        block_parent = %block.parent(),
+                        parent_height = %parent.height(),
+                        block_height = %block.height(),
+                        "block failed coded invariant validation"
+                    );
+                    tx.send_lossy(false);
+                    return;
                 }
-            };
 
-            // The context supplies the certified parent round. Do not derive a
-            // height from the unverified child block for this lookup.
-            let fallback = core::CommitmentFallback::FetchByRound {
-                round: Round::new(consensus_context.epoch(), parent_view),
-            };
-            let parent_request = marshal.subscribe_by_commitment(parent_commitment, fallback);
-            let parent = select! {
-                _ = tx.closed() => {
-                    debug!(
-                        reason = "consensus dropped receiver",
-                        "skipping verification"
-                    );
-                    return;
-                },
-                result = parent_request => match result {
-                    Ok(parent) => parent,
-                    Err(_) => {
-                        debug!(reason = "failed to fetch parent", "skipping verification");
-                        return;
-                    }
-                },
-            };
-
-            if let Err(err) = validate_block::<H, _, _>(
-                &epocher,
-                &block,
-                &parent,
-                &consensus_context,
-                commitment,
-                parent_commitment,
-            ) {
-                debug!(
-                    ?err,
-                    expected_commitment = %commitment,
-                    block_commitment = %block.commitment(),
-                    expected_parent_commitment = %parent_commitment,
-                    parent_commitment = %parent.commitment(),
-                    expected_parent = %parent.digest(),
-                    block_parent = %block.parent(),
-                    parent_height = %parent.height(),
-                    block_height = %block.height(),
-                    "block failed coded invariant validation"
+                let ancestry_stream = marshal.ancestor_stream(
+                    Arc::new(runtime_context.child("ancestor_stream")),
+                    [block.clone(), parent],
+                    ancestor_fetch_duration,
                 );
-                tx.send_lossy(false);
-                return;
-            }
+                let validity_request = application
+                    .verify(
+                        (
+                            runtime_context.child("app_verify"),
+                            consensus_context.clone(),
+                        ),
+                        ancestry_stream,
+                    )
+                    .instrument(info_span!(
+                        "marshal.coding.application.verify",
+                        round = %consensus_context.round,
+                        commitment = %commitment,
+                        parent_view = %parent_view,
+                        parent = %parent_commitment
+                    ));
 
-            let ancestry_stream = marshal.ancestor_stream(
-                Arc::new(runtime_context.child("ancestor_stream")),
-                [block.clone(), parent],
-                ancestor_fetch_duration,
-            );
-            let validity_request = application.verify(
-                (
-                    runtime_context.child("app_verify"),
-                    consensus_context.clone(),
-                ),
-                ancestry_stream,
-            );
-
-            // If consensus drops the receiver, we can stop work early.
-            let timer = verify_duration.timer(&runtime_context);
-            let application_valid = select! {
-                _ = tx.closed() => {
-                    debug!(
-                        reason = "consensus dropped receiver",
-                        "skipping verification"
-                    );
+                // If consensus drops the receiver, we can stop work early.
+                let timer = verify_duration.timer(&runtime_context);
+                let application_valid = select! {
+                    _ = tx.closed() => {
+                        debug!(
+                            reason = "consensus dropped receiver",
+                            "skipping verification"
+                        );
+                        return;
+                    },
+                    is_valid = validity_request => is_valid,
+                };
+                timer.observe(&runtime_context);
+                if application_valid && !stage.store(&mut marshal, round, block).await {
+                    debug!(?round, "marshal unable to accept block");
                     return;
-                },
-                is_valid = validity_request => is_valid,
-            };
-            timer.observe(&runtime_context);
-            if application_valid && !stage.store(&mut marshal, round, block).await {
-                debug!(?round, "marshal unable to accept block");
-                return;
+                }
+                tx.send_lossy(application_valid);
             }
-            tx.send_lossy(application_valid);
+            .instrument(span)
         });
 
         rx
@@ -488,70 +504,77 @@ where
             .await
             .child("certify")
             .with_attribute("round", round);
-        context.spawn(move |_| async move {
-            let block = select! {
-                _ = tx.closed() => {
-                    debug!(
-                        reason = "consensus dropped receiver",
-                        "skipping certification"
-                    );
-                    return;
-                },
-                result = block_rx => match result {
-                    Ok(block) => block,
-                    Err(_) => {
+        context.spawn(move |_| {
+            async move {
+                let block = select! {
+                    _ = tx.closed() => {
                         debug!(
-                            ?payload,
-                            reason = "failed to fetch block for certification",
+                            reason = "consensus dropped receiver",
                             "skipping certification"
                         );
                         return;
-                    }
-                },
-            };
+                    },
+                    result = block_rx => match result {
+                        Ok(block) => block,
+                        Err(_) => {
+                            debug!(
+                                ?payload,
+                                reason = "failed to fetch block for certification",
+                                "skipping certification"
+                            );
+                            return;
+                        }
+                    },
+                };
 
-            // Re-proposal detection for certify path: we don't have the consensus
-            // context, only the block's embedded context from original proposal.
-            // Infer re-proposal from:
-            // 1. Block is at epoch boundary (only boundary blocks can be re-proposed)
-            // 2. Certification round's view > embedded context's view (re-proposals
-            //    retain their original embedded context, so a later view indicates
-            //    the block was re-proposed)
-            // 3. Same epoch (re-proposals don't cross epoch boundaries)
-            let embedded_context = block.context();
-            let is_reproposal = is_inferred_reproposal_at_certify(
-                &marshaled.epocher,
-                block.height(),
-                embedded_context.round,
-                round,
-            );
-            if is_reproposal {
-                // Certifier holds a notarization for this block, so route
-                // the write to the notarized cache. `certified` is
-                // idempotent, so crash-recovery double-invocation is safe.
-                if !marshaled.marshal.certified(round, block).await {
-                    debug!(?round, "marshal unable to accept block");
+                // Re-proposal detection for certify path: we don't have the consensus
+                // context, only the block's embedded context from original proposal.
+                // Infer re-proposal from:
+                // 1. Block is at epoch boundary (only boundary blocks can be re-proposed)
+                // 2. Certification round's view > embedded context's view (re-proposals
+                //    retain their original embedded context, so a later view indicates
+                //    the block was re-proposed)
+                // 3. Same epoch (re-proposals don't cross epoch boundaries)
+                let embedded_context = block.context();
+                let is_reproposal = is_inferred_reproposal_at_certify(
+                    &marshaled.epocher,
+                    block.height(),
+                    embedded_context.round,
+                    round,
+                );
+                if is_reproposal {
+                    // Certifier holds a notarization for this block, so route
+                    // the write to the notarized cache. `certified` is
+                    // idempotent, so crash-recovery double-invocation is safe.
+                    if !marshaled.marshal.certified(round, block).await {
+                        debug!(?round, "marshal unable to accept block");
+                        return;
+                    }
+                    tx.send_lossy(true);
                     return;
                 }
-                tx.send_lossy(true);
-                return;
-            }
 
-            // Inform the shard engine of an externally proposed commitment.
-            shards.discovered(
-                payload,
-                embedded_context.leader.clone(),
-                embedded_context.round,
-            );
+                // Inform the shard engine of an externally proposed commitment.
+                shards.discovered(
+                    payload,
+                    embedded_context.leader.clone(),
+                    embedded_context.round,
+                );
 
-            // Use the block's embedded context for verification, passing the
-            // prefetched block to avoid fetching it again inside deferred_verify.
-            let verify_rx = marshaled
-                .deferred_verify(embedded_context, payload, Some(block), Stage::Certified)
-                .await;
-            if let Ok(result) = verify_rx.await {
-                tx.send_lossy(result);
+                // Use the block's embedded context for verification, passing the
+                // prefetched block to avoid fetching it again inside deferred_verify.
+                let verify_rx = marshaled
+                    .deferred_verify(embedded_context, payload, Some(block), Stage::Certified)
+                    .await;
+                if let Ok(result) = verify_rx.await {
+                    tx.send_lossy(result);
+                }
             }
+            .instrument(info_span!(
+                "marshal.coding.certify.embedded",
+                round = %round,
+                commitment = %payload
+            ))
         });
         rx
     }
@@ -577,7 +600,8 @@ where
             .await
             .child("certify_existing")
             .with_attribute("round", round);
-        context.spawn(move |_| async move {
+        context.spawn(move |_| {
+            async move {
             let result = select! {
                 _ = tx.closed() => {
                     debug!(
@@ -614,6 +638,12 @@ where
                     }
                 }
             }
+            }
+            .instrument(info_span!(
+                "marshal.coding.certify.existing",
+                round = %round,
+                commitment = %payload
+            ))
         });
         rx
     }
@@ -648,6 +678,8 @@ where
     /// contain the proposed block's commitment when ready. The built block is persisted via
     /// [`core::Mailbox::verified`] before the commitment is delivered, so consensus can rely
     /// on the block surviving restart.
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
         &mut self,
         consensus_context: Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
@@ -685,151 +717,165 @@ where
             .await
             .child("propose")
             .with_attribute("round", consensus_context.round);
-        context.spawn(move |runtime_context| async move {
-            // On leader recovery, marshal may already hold a verified block
-            // for this round (persisted before voting in consensus).
-            //
-            // Building a fresh block would land on the same prunable
-            // archive index and be silently dropped, so the stored block
-            // is the only proposal we can broadcast for this round.
-            //
-            // The recovered block is safe to reuse only if its embedded
-            // context matches the context simplex just recovered.
-            // Otherwise the cached block was built against a different
-            // parent and cannot be broadcast under the current header, so
-            // drop the receiver and let the voter nullify the view via
-            // timeout.
-            if let Some(block) = marshal.get_verified(consensus_context.round).await {
-                let block_context = block.context();
-                if block_context != consensus_context {
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?consensus_context,
-                        ?block_context,
-                        "skipping proposal: cached verified block context no longer matches"
-                    );
-                    return;
-                }
-                let commitment = block.commitment();
-                let round = consensus_context.round;
-                let success = tx.send_lossy(commitment);
-                debug!(
-                    ?round,
-                    ?commitment,
-                    success,
-                    "reused verified block from marshal on leader recovery"
-                );
-                return;
-            }
-
-            // The parent for any consensus context is in the same epoch: the
-            // boundary block of the previous epoch is the genesis block of the
-            // current epoch.
-            //
-            // Proposal context carries the certified parent view/commitment but
-            // not the parent height. The parent may be certified above the
-            // finalized tip, so this must stay round-bound until the block is
-            // returned.
-            let (parent_view, parent_commitment) = consensus_context.parent;
-            let parent_request = marshal.subscribe_by_commitment(
-                parent_commitment,
-                core::CommitmentFallback::FetchByRound {
-                    round: Round::new(consensus_context.epoch(), parent_view),
-                },
-            );
-
-            let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
-            let parent = select! {
-                _ = tx.closed() => {
-                    debug!(reason = "consensus dropped receiver", "skipping proposal");
-                    return;
-                },
-                result = parent_request => match result {
-                    Ok(parent) => parent,
-                    Err(_) => {
+        let span = info_span!(
+            "marshal.coding.propose.task",
+            round = %consensus_context.round
+        );
+        context.spawn(move |runtime_context| {
+            async move {
+                // On leader recovery, marshal may already hold a verified block
+                // for this round (persisted before voting in consensus).
+                //
+                // Building a fresh block would land on the same prunable
+                // archive index and be silently dropped, so the stored block
+                // is the only proposal we can broadcast for this round.
+                //
+                // The recovered block is safe to reuse only if its embedded
+                // context matches the context simplex just recovered.
+                // Otherwise the cached block was built against a different
+                // parent and cannot be broadcast under the current header, so
+                // drop the receiver and let the voter nullify the view via
+                // timeout.
+                if let Some(block) = marshal.get_verified(consensus_context.round).await {
+                    let block_context = block.context();
+                    if block_context != consensus_context {
                         debug!(
-                            ?parent_commitment,
-                            reason = "failed to fetch parent block",
-                            "skipping proposal"
+                            round = ?consensus_context.round,
+                            ?consensus_context,
+                            ?block_context,
+                            "skipping proposal: cached verified block context no longer matches"
                         );
                         return;
                     }
-                },
-            };
-            parent_timer.observe(&runtime_context);
-
-            // Special case: If the parent block is the last block in the epoch,
-            // re-propose it as to not produce any blocks that will be cut out
-            // by the epoch transition.
-            let last_in_epoch = epocher
-                .last(consensus_context.epoch())
-                .expect("current epoch should exist");
-            if parent.height() == last_in_epoch {
-                let commitment = parent.commitment();
-                let round = consensus_context.round;
-                if !marshal.verified(round, parent).await {
+                    let commitment = block.commitment();
+                    let round = consensus_context.round;
+                    let success = tx.send_lossy(commitment);
                     debug!(
                         ?round,
                         ?commitment,
-                        "marshal rejected re-proposed boundary block"
+                        success,
+                        "reused verified block from marshal on leader recovery"
                     );
                     return;
                 }
-                let success = tx.send_lossy(commitment);
-                debug!(
-                    ?round,
-                    ?commitment,
-                    success,
-                    "re-proposed parent block at epoch boundary"
+
+                // The parent for any consensus context is in the same epoch: the
+                // boundary block of the previous epoch is the genesis block of the
+                // current epoch.
+                //
+                // Proposal context carries the certified parent view/commitment but
+                // not the parent height. The parent may be certified above the
+                // finalized tip, so this must stay round-bound until the block is
+                // returned.
+                let (parent_view, parent_commitment) = consensus_context.parent;
+                let parent_request = marshal.subscribe_by_commitment(
+                    parent_commitment,
+                    core::CommitmentFallback::FetchByRound {
+                        round: Round::new(consensus_context.epoch(), parent_view),
+                    },
                 );
-                return;
-            }
 
-            let ancestor_stream = marshal.ancestor_stream(
-                Arc::new(runtime_context.child("ancestor_stream")),
-                [parent],
-                ancestor_fetch_duration,
-            );
-            let build_request = application.propose(
-                (
-                    runtime_context.child("app_propose"),
-                    consensus_context.clone(),
-                ),
-                ancestor_stream,
-            );
+                let parent_timer = proposal_parent_fetch_duration.timer(&runtime_context);
+                let parent = select! {
+                    _ = tx.closed() => {
+                        debug!(reason = "consensus dropped receiver", "skipping proposal");
+                        return;
+                    },
+                    result = parent_request => match result {
+                        Ok(parent) => parent,
+                        Err(_) => {
+                            debug!(
+                                ?parent_commitment,
+                                reason = "failed to fetch parent block",
+                                "skipping proposal"
+                            );
+                            return;
+                        }
+                    },
+                };
+                parent_timer.observe(&runtime_context);
 
-            let build_timer = build_duration.timer(&runtime_context);
-            let built_block = select! {
-                _ = tx.closed() => {
-                    debug!(reason = "consensus dropped receiver", "skipping proposal");
-                    return;
-                },
-                result = build_request => match result {
-                    Some(block) => block,
-                    None => {
+                // Special case: If the parent block is the last block in the epoch,
+                // re-propose it as to not produce any blocks that will be cut out
+                // by the epoch transition.
+                let last_in_epoch = epocher
+                    .last(consensus_context.epoch())
+                    .expect("current epoch should exist");
+                if parent.height() == last_in_epoch {
+                    let commitment = parent.commitment();
+                    let round = consensus_context.round;
+                    if !marshal.verified(round, parent).await {
                         debug!(
-                            ?parent_commitment,
-                            reason = "block building failed",
-                            "skipping proposal"
+                            ?round,
+                            ?commitment,
+                            "marshal rejected re-proposed boundary block"
                         );
                         return;
                     }
-                },
-            };
-            build_timer.observe(&runtime_context);
+                    let success = tx.send_lossy(commitment);
+                    debug!(
+                        ?round,
+                        ?commitment,
+                        success,
+                        "re-proposed parent block at epoch boundary"
+                    );
+                    return;
+                }
 
-            let erasure_timer = erasure_encode_duration.timer(&runtime_context);
-            let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
-            erasure_timer.observe(&runtime_context);
+                let ancestor_stream = marshal.ancestor_stream(
+                    Arc::new(runtime_context.child("ancestor_stream")),
+                    [parent],
+                    ancestor_fetch_duration,
+                );
+                let build_request = application
+                    .propose(
+                        (
+                            runtime_context.child("app_propose"),
+                            consensus_context.clone(),
+                        ),
+                        ancestor_stream,
+                    )
+                    .instrument(info_span!(
+                        "marshal.coding.application.propose",
+                        round = %consensus_context.round,
+                        parent_view = %parent_view,
+                        parent = %parent_commitment
+                    ));
 
-            let commitment = coded_block.commitment();
-            let round = consensus_context.round;
-            if !marshal.proposed(round, coded_block).await {
-                debug!(?round, ?commitment, "marshal rejected proposed block");
-                return;
+                let build_timer = build_duration.timer(&runtime_context);
+                let built_block = select! {
+                    _ = tx.closed() => {
+                        debug!(reason = "consensus dropped receiver", "skipping proposal");
+                        return;
+                    },
+                    result = build_request => match result {
+                        Some(block) => block,
+                        None => {
+                            debug!(
+                                ?parent_commitment,
+                                reason = "block building failed",
+                                "skipping proposal"
+                            );
+                            return;
+                        }
+                    },
+                };
+                build_timer.observe(&runtime_context);
+
+                let erasure_timer = erasure_encode_duration.timer(&runtime_context);
+                let coded_block = CodedBlock::<B, C, H>::new(built_block, coding_config, &strategy);
+                erasure_timer.observe(&runtime_context);
+
+                let commitment = coded_block.commitment();
+                let round = consensus_context.round;
+                if !marshal.proposed(round, coded_block).await {
+                    debug!(?round, ?commitment, "marshal rejected proposed block");
+                    return;
+                }
+                let success = tx.send_lossy(commitment);
+                debug!(?round, ?commitment, success, "proposed new block");
             }
-            let success = tx.send_lossy(commitment);
-            debug!(?round, ?commitment, success, "proposed new block");
+            .instrument(span)
         });
         rx
     }
@@ -844,6 +890,8 @@ where
     /// Verification is spawned in a background task and returns a receiver that will contain
     /// the verification result. Additionally, this method kicks off deferred verification to
     /// start block verification early (hidden behind shard validity and network latency).
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.coding.verify", level = "info", skip_all, fields(round = %consensus_context.round, commitment = %payload))]
     async fn verify(
         &mut self,
         consensus_context: Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>,
@@ -971,6 +1019,11 @@ where
                     task_tx.send_lossy(true);
                     tx.send_lossy(true);
                 }
+                .instrument(info_span!(
+                    "marshal.coding.verify.reproposal",
+                    round = %round,
+                    commitment = %payload
+                ))
             });
             return rx;
         }
@@ -1005,10 +1058,17 @@ where
                     .await
                     .child("shard_validity_wait")
                     .with_attribute("round", round);
-                context.spawn(|_| async move {
-                    if validity_rx.await.is_ok() {
-                        tx.send_lossy(true);
+                context.spawn(move |_| {
+                    async move {
+                        if validity_rx.await.is_ok() {
+                            tx.send_lossy(true);
+                        }
                     }
+                    .instrument(info_span!(
+                        "marshal.coding.verify.shard_validity",
+                        round = %round,
+                        commitment = %payload
+                    ))
                 });
                 rx
             }
@@ -1040,6 +1100,8 @@ where
     S: Strategy,
     ES: Epocher,
 {
+    #[allow(clippy::async_yields_async)]
+    #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
         // First, check for an in-progress verification task from `verify()`.
         let task = self.verification_tasks.take(round, payload);
