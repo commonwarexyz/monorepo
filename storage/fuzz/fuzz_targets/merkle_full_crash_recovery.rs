@@ -7,7 +7,7 @@ use arbitrary::{Arbitrary, Result, Unstructured};
 use commonware_cryptography::{sha256::Digest, Sha256};
 use commonware_parallel::Sequential;
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, Supervisor as _,
 };
 use commonware_storage::merkle::{
     full::Config, hasher::Standard as StandardHasher, mmb, mmr, Bagging::ForwardFold,
@@ -89,7 +89,7 @@ struct FuzzInput {
 
 fn merkle_config(
     partition_suffix: &str,
-    pooler: &impl BufferPooler,
+    context: &(impl BufferPooler + Metrics),
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
     items_per_blob: u64,
@@ -101,7 +101,7 @@ fn merkle_config(
         items_per_blob: NZU64!(items_per_blob),
         write_buffer,
         strategy: Sequential,
-        page_cache: CacheRef::from_pooler(pooler, page_size, page_cache_size),
+        page_cache: CacheRef::new(context.child("page_cache"), page_size, page_cache_size),
     }
 }
 

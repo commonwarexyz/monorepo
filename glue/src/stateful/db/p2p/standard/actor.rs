@@ -488,8 +488,11 @@ mod tests {
         oneshot::channel()
     }
 
-    fn db_config(suffix: &str, pooler: &impl BufferPooler) -> FixedConfig<TwoCap, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
+    fn db_config(
+        suffix: &str,
+        context: &(impl BufferPooler + Metrics),
+    ) -> FixedConfig<TwoCap, Sequential> {
+        let page_cache = CacheRef::new(context.child("page_cache"), NZU16!(101), NZUsize!(11));
         FixedConfig {
             merkle_config: MmrJournalConfig {
                 journal_partition: format!("{suffix}-mmr-journal"),

@@ -393,7 +393,7 @@ mod tests {
             let provider = ConstantProvider::new(fixture.schemes[0].clone());
             let finalization = build_finalization(&fixture, Sha256Digest::from([7; 32]));
 
-            let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+            let page_cache = CacheRef::new(context.child("page_cache"), NZU16!(1024), NZUsize!(8));
             let finalizations_by_height = immutable::Archive::init(
                 context.child("finalizations_by_height"),
                 archive_config(page_cache.clone(), "pending-floor-finalizations"),

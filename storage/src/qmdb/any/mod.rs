@@ -192,7 +192,7 @@ pub(crate) mod test {
     use commonware_codec::{Codec, CodecShared};
     use commonware_cryptography::{sha256::Digest, Hasher, Sha256};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Supervisor as _,
+        buffer::paged::CacheRef, deterministic::Context, BufferPooler, Metrics, Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
     use core::{future::Future, pin::Pin};
@@ -214,9 +214,9 @@ pub(crate) mod test {
 
     pub(crate) fn fixed_db_config<T: Translator + Default>(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        context: &(impl BufferPooler + Metrics),
     ) -> FixedConfig<T, Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         FixedConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -238,9 +238,9 @@ pub(crate) mod test {
 
     pub(crate) fn variable_db_config<T: Translator + Default>(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        context: &(impl BufferPooler + Metrics),
     ) -> VariableConfig<T, ((), ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         VariableConfig {
             merkle_config: MerkleConfig {
                 journal_partition: format!("journal-{suffix}"),

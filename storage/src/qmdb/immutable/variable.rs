@@ -115,8 +115,11 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(77);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
-    fn config(suffix: &str, pooler: &impl BufferPooler) -> Config<TwoCap, ((), ()), Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
+    fn config(
+        suffix: &str,
+        context: &(impl BufferPooler + Metrics),
+    ) -> Config<TwoCap, ((), ()), Sequential> {
+        let page_cache = CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE);
         super::BaseConfig {
             merkle_config: MmrConfig {
                 journal_partition: format!("journal-{suffix}"),
@@ -155,7 +158,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: ((), ()),
@@ -209,9 +212,9 @@ mod tests {
 
     fn small_sections_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        context: &(impl BufferPooler + Metrics),
     ) -> Config<TwoCap, ((), ()), Sequential> {
-        let mut cfg = config(suffix, pooler);
+        let mut cfg = config(suffix, context);
         cfg.log.items_per_section = NZU64!(1);
         cfg
     }

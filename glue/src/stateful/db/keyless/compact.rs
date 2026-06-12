@@ -556,7 +556,10 @@ mod tests {
         }
     }
 
-    fn fixed_config(suffix: &str, pooler: &impl BufferPooler) -> fixed::CompactConfig<Sequential> {
+    fn fixed_config(
+        suffix: &str,
+        context: &(impl BufferPooler + Metrics),
+    ) -> fixed::CompactConfig<Sequential> {
         fixed::CompactConfig {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
@@ -564,7 +567,7 @@ mod tests {
                 items_per_section: NZU64!(64),
                 compression: None,
                 codec_config: (),
-                page_cache: CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11)),
+                page_cache: CacheRef::new(context.child("page_cache"), NZU16!(101), NZUsize!(11)),
                 write_buffer: NZUsize!(1024),
             },
             commit_codec_config: (),
@@ -573,9 +576,9 @@ mod tests {
 
     fn full_fixed_config(
         suffix: &str,
-        pooler: &impl BufferPooler,
+        context: &(impl BufferPooler + Metrics),
     ) -> storage_keyless::fixed::Config<Sequential> {
-        let page_cache = CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11));
+        let page_cache = CacheRef::new(context.child("page_cache"), NZU16!(101), NZUsize!(11));
         storage_keyless::fixed::Config {
             merkle: MerkleConfig {
                 journal_partition: format!("stateful-keyless-full-journal-{suffix}"),

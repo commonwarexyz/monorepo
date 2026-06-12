@@ -428,7 +428,7 @@ mod tests {
     ) -> commonware_consensus::marshal::core::Mailbox<TestScheme, TestVariant> {
         let fixture = scheme_mocks::fixture(&mut context, b"syncing-harness", 1);
         let provider = ConstantProvider::new(fixture.schemes[0].clone());
-        let page_cache = CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(8));
+        let page_cache = CacheRef::new(context.child("page_cache"), NZU16!(1024), NZUsize!(8));
         let finalizations_by_height = immutable::Archive::init(
             context.child("finalizations_by_height"),
             archive_config(page_cache.clone(), "syncing-finalizations"),

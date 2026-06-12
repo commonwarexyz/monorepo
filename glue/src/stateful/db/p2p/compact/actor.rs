@@ -428,8 +428,8 @@ mod tests {
             items_per_section: commonware_utils::NZU64!(64),
             compression: None,
             codec_config: (),
-            page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
-                &context,
+            page_cache: commonware_runtime::buffer::paged::CacheRef::new(
+                context.child("page_cache"),
                 commonware_utils::NZU16!(1024),
                 NZUsize!(64),
             ),

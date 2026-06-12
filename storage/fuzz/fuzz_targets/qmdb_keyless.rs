@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_cryptography::Sha256;
 use commonware_parallel::{Rayon, Sequential, Strategy};
 use commonware_runtime::{
-    buffer::paged::CacheRef, deterministic, BufferPooler, Runner, Supervisor as _,
+    buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner, Supervisor as _,
 };
 use commonware_storage::{
     journal::contiguous::variable::Config as VConfig,
@@ -194,10 +194,14 @@ type Db<F, S> = Keyless<F, deterministic::Context, Vec<u8>, Sha256, S>;
 
 fn test_config<S: Strategy>(
     test_name: &str,
-    pooler: &impl BufferPooler,
+    context: &(impl BufferPooler + Metrics),
     strategy: S,
 ) -> Config<CodecConfig, S> {
-    let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+    let page_cache = CacheRef::new(
+        context.child("page_cache"),
+        PAGE_SIZE,
+        NZUsize!(PAGE_CACHE_SIZE),
+    );
     Config {
         merkle: MerkleConfig {
             journal_partition: format!("{test_name}-journal"),

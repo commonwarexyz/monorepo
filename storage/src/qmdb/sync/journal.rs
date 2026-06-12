@@ -164,7 +164,7 @@ mod tests {
     use commonware_cryptography::sha256::Digest;
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, Blob, BufferPooler, Runner, Storage,
+        buffer::paged::CacheRef, deterministic, Blob, BufferPooler, Metrics, Runner, Storage,
         Supervisor as _,
     };
     use commonware_utils::{non_empty_range, NZUsize, NZU16, NZU64};
@@ -172,11 +172,11 @@ mod tests {
     type FixedJournal = fixed::Journal<deterministic::Context, Digest>;
     type F = crate::merkle::mmr::Family;
 
-    fn test_cfg(pooler: &impl BufferPooler) -> fixed::Config {
+    fn test_cfg(context: &(impl BufferPooler + Metrics)) -> fixed::Config {
         fixed::Config {
             partition: "sync-journal-test".into(),
             items_per_blob: NZU64!(5),
-            page_cache: CacheRef::from_pooler(pooler, NZU16!(44), NZUsize!(3)),
+            page_cache: CacheRef::new(context.child("page_cache"), NZU16!(44), NZUsize!(3)),
             write_buffer: NZUsize!(2048),
         }
     }

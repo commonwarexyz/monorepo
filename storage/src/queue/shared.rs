@@ -247,7 +247,7 @@ mod tests {
     use commonware_codec::RangeCfg;
     use commonware_macros::{select, test_traced};
     use commonware_runtime::{
-        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Runner, Spawner,
+        buffer::paged::CacheRef, deterministic, BufferPooler, Clock, Metrics, Runner, Spawner,
         Supervisor as _,
     };
     use commonware_utils::{NZUsize, NZU16, NZU64};
@@ -256,13 +256,16 @@ mod tests {
     const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
     const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
-    fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
+    fn test_config(
+        partition: &str,
+        context: &(impl BufferPooler + Metrics),
+    ) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.into(),
             items_per_section: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
-            page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
+            page_cache: CacheRef::new(context.child("page_cache"), PAGE_SIZE, PAGE_CACHE_SIZE),
             write_buffer: NZUsize!(4096),
         }
     }

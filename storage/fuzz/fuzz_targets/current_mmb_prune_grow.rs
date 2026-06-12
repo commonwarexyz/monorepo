@@ -366,16 +366,22 @@ fn fuzz(data: FuzzInput) {
 
     runner.start(|context| async move {
         let pruned_context = context.child("pruned");
-        let pruned_cache =
-            CacheRef::from_pooler(&pruned_context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+        let pruned_cache = CacheRef::new(
+            pruned_context.child("page_cache"),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let pruned_config = test_config("pruned", pruned_cache);
         let mut db = Db::init(pruned_context, pruned_config.clone())
             .await
             .expect("init pruned current db");
 
         let reference_context = context.child("reference");
-        let reference_cache =
-            CacheRef::from_pooler(&reference_context, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE));
+        let reference_cache = CacheRef::new(
+            reference_context.child("page_cache"),
+            PAGE_SIZE,
+            NZUsize!(PAGE_CACHE_SIZE),
+        );
         let mut reference_db =
             Db::init(reference_context, test_config("reference", reference_cache))
                 .await

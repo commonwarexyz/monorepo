@@ -52,8 +52,9 @@ pub type Database<E> = current::unordered::fixed::Db<
 pub type Operation = FixedOperation<mmr::Family, Key, Value>;
 
 /// Create a database configuration.
-pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequential> {
-    let page_cache = buffer::paged::CacheRef::from_pooler(context, NZU16!(2048), NZUsize!(10));
+pub fn create_config(context: &(impl BufferPooler + Metrics)) -> Config<Translator, Sequential> {
+    let page_cache =
+        buffer::paged::CacheRef::new(context.child("page_cache"), NZU16!(2048), NZUsize!(10));
     Config {
         merkle_config: MmrConfig {
             journal_partition: "mmr-journal".into(),

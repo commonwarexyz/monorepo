@@ -17,7 +17,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     buffer::paged::CacheRef,
     tokio::{Config, Context},
-    BufferPooler, Supervisor as _, ThreadPooler,
+    BufferPooler, Metrics, Supervisor as _, ThreadPooler,
 };
 use commonware_storage::{
     journal::contiguous::{fixed::Config as FConfig, variable::Config as VConfig},
@@ -320,10 +320,10 @@ fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
 // -- DB constructors (eliminates repeated config boilerplate in match arms) --
 
 fn any_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler + Metrics),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::FixedConfig<EightCap, Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
@@ -332,10 +332,10 @@ fn any_fix_cfg(
 }
 
 fn any_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler + Metrics),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::any::VariableConfig<EightCap, ((), ()), Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, cache_size);
     commonware_storage::qmdb::any::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
@@ -344,10 +344,10 @@ fn any_var_cfg(
 }
 
 fn cur_fix_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler + Metrics),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::FixedConfig<EightCap, Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::FixedConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: fix_log_cfg(pc),
@@ -357,10 +357,10 @@ fn cur_fix_cfg(
 }
 
 fn cur_var_cfg(
-    ctx: &(impl BufferPooler + ThreadPooler),
+    ctx: &(impl BufferPooler + ThreadPooler + Metrics),
     cache_size: NonZeroUsize,
 ) -> commonware_storage::qmdb::current::VariableConfig<EightCap, ((), ()), Rayon> {
-    let pc = CacheRef::from_pooler(ctx, PAGE_SIZE, cache_size);
+    let pc = CacheRef::new(ctx.child("page_cache"), PAGE_SIZE, cache_size);
     commonware_storage::qmdb::current::VariableConfig {
         merkle_config: merkle_cfg(ctx, pc.clone()),
         journal_config: var_log_cfg(pc),
