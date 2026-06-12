@@ -16,7 +16,7 @@ use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics, S
 use commonware_utils::channel::oneshot;
 use rand::Rng;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::{debug, info_span, Instrument as _};
 
 /// Validation failures for standard verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,10 +182,18 @@ where
         [block.clone(), parent],
         ancestor_fetch_duration,
     );
-    let validity_request = application.verify(
-        (runtime_context.child("app_verify"), context.clone()),
-        ancestry_stream,
-    );
+    let validity_request = application
+        .verify(
+            (runtime_context.child("app_verify"), context.clone()),
+            ancestry_stream,
+        )
+        .instrument(info_span!(
+            "marshal.standard.application.verify",
+            round = %context.round,
+            digest = %block.digest(),
+            parent_view = %parent_view,
+            parent = %parent_commitment
+        ));
     // If consensus drops the receiver, we can stop work early.
     let application_valid = select! {
         _ = tx.closed() => {

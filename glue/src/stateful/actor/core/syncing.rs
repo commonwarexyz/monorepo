@@ -4,7 +4,8 @@ use crate::stateful::{
             mailbox::{ErasedAncestorStream, Message},
             processing::Processing,
         },
-        processor::{FinalizeStatus, Processor, ProcessorMetrics},
+        metrics::Metrics as StatefulMetrics,
+        processor::{FinalizeStatus, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
     db::{Anchor, AttachableResolverSet},
@@ -20,7 +21,9 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
-use commonware_runtime::{Clock, ContextCell, Metrics, Spawner, Storage};
+use commonware_runtime::{
+    telemetry::metrics::GaugeExt, Clock, ContextCell, Metrics, Spawner, Storage,
+};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
@@ -29,10 +32,11 @@ use commonware_utils::{
 };
 use rand::Rng;
 use std::sync::Arc;
-use tracing::{debug, error};
+use tracing::{debug, error, info_span, Instrument as _, Span};
 
 /// Verify request buffered while state sync is still in progress.
 pub(super) struct HeldVerify<C, B> {
+    span: Span,
     context: C,
     ancestry: ErasedAncestorStream<B>,
     response: oneshot::Sender<bool>,
@@ -93,6 +97,9 @@ where
 
     /// Periodic prune configuration.
     pub(super) prune_config: Option<PruneConfig>,
+
+    /// Metrics shared across syncing and processing.
+    pub(super) metrics: StatefulMetrics,
 }
 
 impl<E, A, S, V, R> Syncing<E, A, S, V, R>
@@ -129,35 +136,49 @@ where
                 break;
             } => match message {
                 Message::Propose {
+                    span,
                     context: (_, context),
                     response,
                     ..
                 } => {
-                    debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
-                    response.send_lossy(None);
+                    span.in_scope(|| {
+                        debug!(epoch = %context.epoch(), view = %context.view(), "proposal rejected: state sync in progress");
+                        response.send_lossy(None);
+                    });
                 }
                 Message::Verify {
+                    span,
                     context,
                     ancestry,
                     response,
                 } => {
+                    let process = info_span!(parent: &span, "stateful.actor.hold_verify");
                     self.held_verify_requests
                         .retain(|request| !request.response.is_closed());
                     self.held_verify_requests.push(HeldVerify {
+                        span,
                         context,
                         ancestry,
                         response,
                     });
-                    debug!(
-                        held_verify_requests = self.held_verify_requests.len(),
-                        "verify held: state sync in progress"
-                    );
+                    process.in_scope(|| {
+                        debug!(
+                            held_verify_requests = self.held_verify_requests.len(),
+                            "verify held: state sync in progress"
+                        );
+                    });
                 }
                 Message::Finalized {
+                    span,
                     block,
                     acknowledgement,
                 } => {
-                    if let Some(handoff) = self.process_finalized(block, acknowledgement).await {
+                    let process = info_span!(parent: &span, "stateful.actor.syncing_finalized");
+                    let handoff = self
+                        .process_finalized(block, acknowledgement)
+                        .instrument(process)
+                        .await;
+                    if let Some(handoff) = handoff {
                         self.transition(Some(handoff)).await;
                         return;
                     }
@@ -223,12 +244,12 @@ where
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
 
-        let metrics = ProcessorMetrics::new(self.context.child("processor_metrics"));
+        let _ = self.metrics.sync_done.try_set(1);
         let mut processor = Processor::new(
             self.application,
             artifact.databases,
             artifact.anchor,
-            metrics,
+            self.metrics,
             self.prune_config,
         );
 
@@ -276,6 +297,7 @@ where
         }
 
         for request in self.held_verify_requests.drain(..) {
+            let process = info_span!(parent: &request.span, "stateful.actor.replay_verify");
             processor
                 .verify(
                     self.context.as_present(),
@@ -284,6 +306,7 @@ where
                     request.ancestry,
                     request.response,
                 )
+                .instrument(process)
                 .await;
         }
 
@@ -292,7 +315,6 @@ where
             mailbox: self.mailbox,
             input_provider: self.input_provider,
             marshal: self.marshal,
-            resolvers: self.resolvers,
             processor,
             skip_finalized_until: Some(synced_height),
         }
@@ -305,7 +327,10 @@ where
 mod tests {
     use super::{FinalizedHandoff, Syncing};
     use crate::stateful::{
-        actor::syncer::{self, StateSyncMetadata, SyncResult},
+        actor::{
+            metrics::Metrics as StatefulMetrics,
+            syncer::{self, StateSyncMetadata, SyncResult},
+        },
         db::{Anchor, AttachableResolver},
         tests::mocks::{anchor, test_databases, TestApp, TestBlock, TestScheme, TestVariant},
     };
@@ -325,7 +350,7 @@ mod tests {
     use commonware_utils::{
         acknowledgement::Exact,
         channel::oneshot,
-        sync::{AsyncMutex, AsyncRwLock},
+        sync::{AsyncMutex, TracedAsyncRwLock},
         Acknowledgement, NZUsize, NZU16, NZU64,
     };
     use futures::{pin_mut, poll, FutureExt};
@@ -335,7 +360,7 @@ mod tests {
     struct NoopResolver;
 
     impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<AsyncRwLock<DB>>) {}
+        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<DB>>) {}
     }
 
     struct TestHarness {
@@ -370,6 +395,7 @@ mod tests {
                     resolvers: NoopResolver,
                     sync_completed,
                     prune_config: None,
+                    metrics: StatefulMetrics::new(&context),
                 },
             }
         }
