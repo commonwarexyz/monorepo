@@ -7,7 +7,7 @@
 //! any optimization must reproduce identical roots).
 //!
 //! Usage:
-//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates]
+//!   cargo bench -p commonware-storage --bench constantinople -- <db> [depth] [iters] [keys] [updates] [threads]
 //!
 //! - db: one of "any::unordered::fixed::mmb", "any::ordered::fixed::mmb",
 //!   "any::unordered::variable::mmb", "current::unordered::fixed::mmb", or
@@ -18,6 +18,7 @@
 //! - iters: timed iterations (default 15)
 //! - keys: total seeded keys (default 1,000,000)
 //! - updates: keys written per batch (default 32,768)
+//! - threads: strategy pool threads (default 8)
 
 use commonware_cryptography::{Hasher, Sha256};
 use commonware_parallel::Rayon;
@@ -137,7 +138,6 @@ const PAGE_SIZE: NonZeroU16 = NZU16!(4096);
 const PAGE_CACHE_PAGES: NonZeroUsize = NZUsize!(131_072);
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
-const THREADS: NonZeroUsize = NZUsize!(8);
 const CHURN_BATCHES: u64 = 4;
 
 struct Args {
@@ -277,6 +277,10 @@ fn main() {
         num_keys: raw.get(4).and_then(|s| s.parse().ok()).unwrap_or(1_000_000),
         num_updates: raw.get(5).and_then(|s| s.parse().ok()).unwrap_or(32_768),
     };
+    let threads: NonZeroUsize = raw
+        .get(6)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(NZUsize!(8));
     assert!(
         matches!(
             db_kind.as_str(),
@@ -294,7 +298,7 @@ fn main() {
     );
 
     eprintln!(
-        "constantinople db={db_kind} depth={} iters={} keys={} updates={}",
+        "constantinople db={db_kind} depth={} iters={} keys={} updates={} threads={threads}",
         args.depth, args.iters, args.num_keys, args.num_updates
     );
 
@@ -306,7 +310,7 @@ fn main() {
             metadata_partition: "constantinople-merkle-metadata".into(),
             items_per_blob: ITEMS_PER_BLOB,
             write_buffer: WRITE_BUFFER,
-            strategy: ctx.create_strategy(THREADS).unwrap(),
+            strategy: ctx.create_strategy(threads).unwrap(),
             page_cache: pc.clone(),
         };
         let journal_config = FConfig {

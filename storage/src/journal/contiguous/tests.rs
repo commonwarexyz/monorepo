@@ -2,6 +2,7 @@
 
 use super::{Contiguous, Many, Reader as _};
 use crate::journal::{contiguous::Mutable, Error};
+use commonware_macros::boxed;
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -198,6 +199,7 @@ async fn read_item<J: Contiguous>(journal: &J, position: u64) -> Result<J::Item,
 /// These tests assume the journal is configured with **`items_per_section = 10`**
 /// (or `items_per_blob = 10` for fixed journals). Some tests rely on this value
 /// for section boundary calculations and pruning behavior.
+#[boxed]
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String, usize) -> BoxFuture<'static, Result<J, Error>>,
