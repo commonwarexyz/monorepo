@@ -742,8 +742,8 @@ pub mod tests {
 
         // Run again on a fresh runner to verify determinism.
         let executor = deterministic::Runner::default();
-        let state2 =
-            executor.start(|context| build_random_close_reopen_round::<M, C, F, Fut>(context, open_db));
+        let state2 = executor
+            .start(|context| build_random_close_reopen_round::<M, C, F, Fut>(context, open_db));
 
         assert_eq!(state1, state2);
     }
