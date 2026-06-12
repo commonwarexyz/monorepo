@@ -5,12 +5,17 @@ use commonware_actor::{
     mailbox::{Overflow, Policy, Sender},
     Feedback,
 };
-use commonware_consensus::{marshal::Update, Application as ConsensusApplication, Reporter};
+use commonware_consensus::{
+    marshal::Update, Application as ConsensusApplication, CertifiableBlock, Epochable, Reporter,
+    Viewable,
+};
+use commonware_cryptography::Digestible;
 use commonware_runtime::{Clock, Metrics, Spawner};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
 use rand::Rng;
 use std::{collections::VecDeque, pin::Pin};
+use tracing::{info_span, Span};
 
 /// Type alias for an ancestor stream sent through the actor mailbox.
 pub(crate) type ErasedAncestorStream<B> = Pin<Box<dyn Stream<Item = B> + Send>>;
@@ -23,6 +28,7 @@ where
 {
     /// A request to propose a block.
     Propose {
+        span: Span,
         context: (E, A::Context),
         ancestry: ErasedAncestorStream<A::Block>,
         response: oneshot::Sender<Option<A::Block>>,
@@ -30,6 +36,7 @@ where
 
     /// A request to verify a block.
     Verify {
+        span: Span,
         context: (E, A::Context),
         ancestry: ErasedAncestorStream<A::Block>,
         response: oneshot::Sender<bool>,
@@ -37,6 +44,7 @@ where
 
     /// A reporting of a new finalized block.
     Finalized {
+        span: Span,
         block: A::Block,
         acknowledgement: Exact,
     },
@@ -201,7 +209,13 @@ where
         ancestry: impl Stream<Item = Self::Block> + Send + 'static,
     ) -> Option<Self::Block> {
         let (response, receiver) = oneshot::channel();
+        let span = info_span!(
+            "stateful.mailbox.propose",
+            epoch = %context.1.epoch(),
+            view = %context.1.view()
+        );
         let _ = self.sender.enqueue(Message::Propose {
+            span,
             context,
             ancestry: Box::pin(ancestry),
             response,
@@ -217,7 +231,13 @@ where
         // We must panic if we don't get a response; We cannot override the decision
         // of the application based on the availabilitiy of the actor.
         let (response, receiver) = oneshot::channel();
+        let span = info_span!(
+            "stateful.mailbox.verify",
+            epoch = %context.1.epoch(),
+            view = %context.1.view()
+        );
         let _ = self.sender.enqueue(Message::Verify {
+            span,
             context,
             ancestry: Box::pin(ancestry),
             response,
@@ -238,10 +258,20 @@ where
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
             Update::Tip(_, _, _) => return Feedback::Ok,
-            Update::Block(block, acknowledgement) => Message::Finalized {
-                block,
-                acknowledgement,
-            },
+            Update::Block(block, acknowledgement) => {
+                let context = block.context();
+                let span = info_span!(
+                    "stateful.mailbox.finalized",
+                    epoch = %context.epoch(),
+                    view = %context.view(),
+                    digest = %block.digest()
+                );
+                Message::Finalized {
+                    span,
+                    block,
+                    acknowledgement,
+                }
+            }
         };
 
         self.sender.enqueue(message)

@@ -59,6 +59,7 @@ use crate::{
 };
 use commonware_codec::EncodeShared;
 use commonware_cryptography::Hasher;
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use std::{num::NonZeroU64, sync::Arc};
 use tracing::{debug, warn};
@@ -145,6 +146,7 @@ where
     S: Strategy,
     Operation<F, V>: EncodeShared,
 {
+    #[boxed]
     pub(crate) async fn init_from_journal(
         mut journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
@@ -342,6 +344,17 @@ where
     ///   been pruned.
     /// - Returns [`Error::HistoricalFloorPruned`] if `op_count - 1` is retained but is not a commit
     ///   op.
+    #[allow(clippy::type_complexity)]
+    #[tracing::instrument(
+        name = "qmdb.keyless.db.historical_proof",
+        level = "info",
+        skip_all,
+        fields(
+            op_count = *op_count,
+            start_loc = *start_loc,
+            max_ops = max_ops.get(),
+        ),
+    )]
     pub async fn historical_proof(
         &self,
         op_count: Location<F>,
@@ -377,6 +390,7 @@ where
     ///
     /// - Returns [`Error::PruneBeyondMinRequired`] if `loc` > the inactivity floor declared by
     ///   the last committed batch.
+    #[tracing::instrument(name = "qmdb.keyless.db.prune", level = "info", skip_all)]
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.prune_timer();
         self.metrics.operations.prune_calls.inc();
@@ -411,6 +425,7 @@ where
     ///
     /// A successful rewind is not restart-stable until a subsequent [`Self::commit`] or
     /// [`Self::sync`].
+    #[tracing::instrument(name = "qmdb.keyless.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, size: Location<F>) -> Result<(), Error<F>> {
         let rewind_size = *size;
         let current_size = *self.last_commit_loc + 1;
@@ -453,6 +468,7 @@ where
     /// Sync all database state to disk. While this isn't necessary to ensure durability of
     /// committed operations, periodic invocation may reduce memory usage and the time required to
     /// recover the database on restart.
+    #[tracing::instrument(name = "qmdb.keyless.db.sync", level = "info", skip_all)]
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.sync_timer();
         self.metrics.operations.sync_calls.inc();
@@ -461,6 +477,7 @@ where
     }
 
     /// Durably commit the journal state published by prior [`Keyless::apply_batch`] calls.
+    #[tracing::instrument(name = "qmdb.keyless.db.commit", level = "info", skip_all)]
     pub async fn commit(&mut self) -> Result<(), Error<F>> {
         let _timer = self.metrics.operations.commit_timer();
         self.metrics.operations.commit_calls.inc();
@@ -469,6 +486,7 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
+    #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
         Ok(self.journal.destroy().await?)
     }
@@ -521,6 +539,7 @@ where
     /// This publishes the batch to the in-memory database state and appends it to the
     /// journal, but does not durably commit it. Call [`Keyless::commit`] or
     /// [`Keyless::sync`] to guarantee durability.
+    #[tracing::instrument(name = "qmdb.keyless.db.apply_batch", level = "info", skip_all)]
     pub async fn apply_batch(
         &mut self,
         batch: Arc<batch::MerkleizedBatch<F, H::Digest, V, S>>,
@@ -585,6 +604,7 @@ pub(crate) mod tests {
         }
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_empty<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
@@ -639,6 +659,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_commit_after_sync_recovery<
         F: Family,
         V,
@@ -689,6 +710,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_build_basic<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
@@ -739,6 +761,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
@@ -813,6 +836,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_proof<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -851,6 +875,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_metadata<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -877,6 +902,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_pruning<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -929,6 +955,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_empty_db_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         db: TestKeyless<F, V, C, H, S>,
@@ -1005,6 +1032,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_replay_with_trailing_appends<
         F: Family,
         V,
@@ -1110,6 +1138,7 @@ pub(crate) mod tests {
 
     /// `get_many` on the DB and on unmerkleized/merkleized batches returns
     /// results consistent with individual `get` calls.
+    #[boxed]
     pub(crate) async fn test_keyless_get_many<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1159,6 +1188,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_chained<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1194,6 +1224,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_stale_batch<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -1221,6 +1252,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_partial_ancestor_commit<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -1258,6 +1290,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_to_batch<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1288,6 +1321,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_non_empty_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
@@ -1379,6 +1413,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_proof_comprehensive<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1453,6 +1488,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_proof_with_pruning<F: Family, V, C, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, Sha256, S>,
@@ -1535,6 +1571,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_get_out_of_bounds<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -1566,6 +1603,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_get<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -1608,6 +1646,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_stacked_get<F: Family, V, C, S: Strategy>(
         db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1634,6 +1673,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_speculative_root<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -1663,6 +1703,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_merkleized_batch_get<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1696,6 +1737,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_chained_apply_sequential<
         F: Family,
         V,
@@ -1735,6 +1777,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_many_sequential<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1774,6 +1817,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_empty<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -1804,6 +1848,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_chained_merkleized_get<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1845,6 +1890,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_batch_large<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1879,6 +1925,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_stale_batch_chained<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1909,6 +1956,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_sequential_commit_parent_then_child<
         F: Family,
         V,
@@ -1937,6 +1985,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_stale_batch_child_before_parent<F: Family, V, C, S: Strategy>(
         mut db: TestKeyless<F, V, C, Sha256, S>,
     ) where
@@ -1963,6 +2012,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_child_root_matches_pending_and_committed<
         F: Family,
         V,
@@ -2031,6 +2081,7 @@ pub(crate) mod tests {
         range
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_rewind_recovery<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
@@ -2131,6 +2182,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_rewind_pruned_target_errors<
         F: Family,
         V,
@@ -2187,6 +2239,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_floor_tracking<F: Family, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
@@ -2236,6 +2289,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_floor_regression_rejected<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -2274,6 +2328,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_floor_beyond_commit_loc_rejected<
         F: Family,
         V,
@@ -2317,6 +2372,7 @@ pub(crate) mod tests {
         db.destroy().await.unwrap();
     }
 
+    #[boxed]
     pub(crate) async fn test_keyless_db_rewind_restores_floor<F: Family, V, C, H, S: Strategy>(
         mut db: TestKeyless<F, V, C, H, S>,
     ) where
@@ -2364,6 +2420,7 @@ pub(crate) mod tests {
 
     /// Floor is embedded in the Commit operation and therefore in the Merkle root: two databases
     /// with identical appends but different floors must produce different roots.
+    #[boxed]
     pub(crate) async fn test_keyless_db_floor_changes_root<F: Family, V, C, H, S: Strategy>(
         mut db_a: TestKeyless<F, V, C, H, S>,
         mut db_b: TestKeyless<F, V, C, H, S>,
@@ -2400,6 +2457,7 @@ pub(crate) mod tests {
     }
 
     /// A floor equal to the commit operation's location is on the tight boundary of acceptance.
+    #[boxed]
     pub(crate) async fn test_keyless_db_floor_at_commit_loc_accepted<
         F: Family,
         V,
@@ -2431,6 +2489,7 @@ pub(crate) mod tests {
     }
 
     /// End-to-end: commit → drop → reopen → rewind → verify floor restored after a crash.
+    #[boxed]
     pub(crate) async fn test_keyless_db_rewind_after_reopen_with_floor<
         F: Family,
         V,
@@ -2495,6 +2554,7 @@ pub(crate) mod tests {
     /// be rejected — the parent's `Commit` is written to the journal by the same
     /// `journal.apply_batch` call, so its floor participates in the per-commit monotonicity
     /// invariant.
+    #[boxed]
     pub(crate) async fn test_keyless_db_ancestor_floor_regression_rejected<
         F,
         V,
@@ -2542,6 +2602,7 @@ pub(crate) mod tests {
 
     /// A chained batch where an *ancestor's* floor exceeds its own commit location must be
     /// rejected — identifying the ancestor's bound, not the tip's.
+    #[boxed]
     pub(crate) async fn test_keyless_db_ancestor_floor_beyond_commit_loc_rejected<
         F,
         V,
@@ -2584,6 +2645,7 @@ pub(crate) mod tests {
     /// achievable under the per-commit bound. The DB must remain fully usable: the commit is
     /// readable, the root is preserved, reopen recovers `inactivity_floor_loc` from the sole
     /// remaining op, and a follow-on batch applies cleanly on top.
+    #[boxed]
     pub(crate) async fn test_keyless_db_single_commit_live_set<F, V, C, H, S: Strategy>(
         context: deterministic::Context,
         mut db: TestKeyless<F, V, C, H, S>,
@@ -2678,6 +2740,7 @@ pub(crate) mod tests {
     }
 
     /// A multi-level chain with strictly-monotonic, within-bounds floors applies cleanly.
+    #[boxed]
     pub(crate) async fn test_keyless_db_chained_apply_with_valid_floors_succeeds<
         F,
         V,

@@ -435,10 +435,14 @@ macro_rules! impl_current_resolver {
                 .await
             }
         }
+        impl_current_resolver!(@locked AsyncRwLock, $db, $op, $val_bound, $key_bound $(; $($where_extra)+)?);
+        impl_current_resolver!(@locked TracedAsyncRwLock, $db, $op, $val_bound, $key_bound $(; $($where_extra)+)?);
+    };
+    (@locked $lock:ident, $db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {
 
         impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
-                commonware_utils::sync::AsyncRwLock<
+                commonware_utils::sync::$lock<
                     $db<F, E, K, V, H, T, N, S>,
                 >,
             >
@@ -483,7 +487,7 @@ macro_rules! impl_current_resolver {
 
         impl<F, E, K, V, H, T, const N: usize, S> crate::qmdb::sync::Resolver
             for std::sync::Arc<
-                commonware_utils::sync::AsyncRwLock<
+                commonware_utils::sync::$lock<
                     Option<$db<F, E, K, V, H, T, N, S>>,
                 >,
             >

@@ -15,7 +15,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::Digest;
-use commonware_macros::select;
+use commonware_macros::{boxed, select};
 use commonware_runtime::{
     telemetry::metrics::{Gauge, GaugeExt, MetricsExt},
     Supervisor as _,
@@ -777,12 +777,8 @@ where
     ///
     /// Returns `NextStep::Complete(database)` when sync is finished, or
     /// `NextStep::Continue(self)` when more work remains.
-    pub(crate) async fn step(self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
-        Box::pin(Self::step_inner(self)).await
-    }
-
-    /// Implements one sync step behind a boxed future boundary.
-    async fn step_inner(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
+    #[boxed]
+    pub(crate) async fn step(mut self) -> Result<NextStep<Self, DB>, Error<DB, R>> {
         self.drain_finish_requests()?;
 
         // Check if sync is complete

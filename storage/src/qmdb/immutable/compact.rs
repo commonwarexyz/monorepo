@@ -42,6 +42,7 @@ use crate::{
 };
 use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
+use commonware_macros::boxed;
 use commonware_parallel::Strategy;
 use core::marker::PhantomData;
 use std::{
@@ -187,6 +188,11 @@ where
     /// (monotonically non-decreasing) and at most the batch's commit location
     /// (`total_size - 1`); these bounds are validated, but the floor does not drive any local
     /// pruning or retention in this variant.
+    #[tracing::instrument(
+        name = "qmdb.immutable.compact.batch.merkleize",
+        level = "info",
+        skip_all
+    )]
     pub fn merkleize<E, C>(
         self,
         db: &Db<F, E, K, V, H, C, S>,
@@ -322,6 +328,7 @@ where
     ///
     /// On first open, this bootstraps the initial commit and its witness so every later reopen and
     /// rewind can assume the journal tip is a complete compact witness.
+    #[boxed]
     pub(crate) async fn init_from_merkle(
         mut merkle: compact_merkle::Merkle<F, H::Digest, S>,
         witness_context: E,
@@ -486,6 +493,11 @@ where
     ///   previous commit's floor.
     /// - [`Error::FloorBeyondSize`] if any commit in the chain declares a floor beyond its own
     ///   commit location.
+    #[tracing::instrument(
+        name = "qmdb.immutable.compact.db.apply_batch",
+        level = "info",
+        skip_all
+    )]
     pub fn apply_batch(
         &mut self,
         batch: Arc<MerkleizedBatch<F, H::Digest, K, V, S>>,
@@ -504,6 +516,7 @@ where
     }
 
     /// Durably persist the current db state to disk.
+    #[tracing::instrument(name = "qmdb.immutable.compact.db.sync", level = "info", skip_all)]
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         self.witness
             .persist::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
@@ -521,6 +534,7 @@ where
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
     /// no retained commit has exactly `target` operations (never synced, or pruned). Any error
     /// is fatal for this handle: drop it and reopen from storage.
+    #[tracing::instrument(name = "qmdb.immutable.compact.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, target: Location<F>) -> Result<(), Error<F>>
     where
         F: Family,
@@ -566,6 +580,7 @@ where
     }
 
     /// Destroy all persisted state associated with this database.
+    #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.witness.destroy().await?;
         Ok(())

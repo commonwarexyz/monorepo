@@ -304,7 +304,7 @@ mod tests {
     use commonware_parallel::{Sequential, Strategy};
     use commonware_runtime::{deterministic, Clock as _, IoBuf, Quota, Runner, Supervisor as _};
     use commonware_utils::{channel::mpsc, ordered::Set, NZUsize};
-    use std::{io, num::NonZeroU32, time::Duration};
+    use std::{cmp::Ordering, io, num::NonZeroU32, time::Duration};
 
     const LINK: Link = Link {
         latency: Duration::from_millis(0),
@@ -381,6 +381,14 @@ mod tests {
             RB: Send,
         {
             (a(), b())
+        }
+
+        fn sort_by<T, C>(&self, items: &mut [T], compare: C)
+        where
+            T: Send,
+            C: Fn(&T, &T) -> Ordering + Send + Sync,
+        {
+            items.sort_by(compare);
         }
 
         fn parallelism_hint(&self) -> usize {

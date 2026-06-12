@@ -2,7 +2,7 @@
 //! [`immutable`](commonware_storage::qmdb::immutable) databases.
 //!
 //! Immutable databases support adding new keyed values but not updates or
-//! deletions. The wrapper types here capture `Arc<AsyncRwLock<Immutable>>`
+//! deletions. The wrapper types here capture `Arc<TracedAsyncRwLock<Immutable>>`
 //! so the batch API can read through to committed state.
 
 use crate::stateful::db::{
@@ -30,11 +30,11 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 type ImmutableDbHandle<F, E, K, V, C, H, T, S> =
-    Arc<AsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
+    Arc<TracedAsyncRwLock<Immutable<F, E, K, V, C, H, T, S>>>;
 
 /// Wraps an immutable [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](crate::stateful::db::Unmerkleized) trait.
@@ -283,7 +283,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),
@@ -368,7 +368,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         ImmutableUnmerkleized {
             batch: inner.new_batch(),

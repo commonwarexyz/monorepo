@@ -2,7 +2,7 @@
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to committed state. This module provides wrapper types
-//! that capture `Arc<AsyncRwLock<Db>>` alongside the raw batch so the
+//! that capture `Arc<TracedAsyncRwLock<Db>>` alongside the raw batch so the
 //! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
 //! traits can be implemented without a DB parameter.
 
@@ -37,14 +37,14 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 // Matches commonware_storage::qmdb::any::BITMAP_CHUNK_BYTES, which is crate-private.
 const ANY_BITMAP_CHUNK_BYTES: usize = 64;
 
 type AnyDbHandle<F, E, C, I, H, U, S> =
-    Arc<AsyncRwLock<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>>;
+    Arc<TracedAsyncRwLock<Db<F, E, C, I, H, U, ANY_BITMAP_CHUNK_BYTES, S>>>;
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -312,7 +312,7 @@ where
 
 /// Implement [`ManagedDb`] for unordered QMDB databases with fixed-size values.
 ///
-/// `new_batch` captures the `Arc<AsyncRwLock<Db>>` in the returned
+/// `new_batch` captures the `Arc<TracedAsyncRwLock<Db>>` in the returned
 /// wrapper so that `get()` and `merkleize()` can read through to
 /// committed state.
 ///
@@ -364,7 +364,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         AnyUnmerkleized {
             batch: inner.new_batch(),
@@ -461,7 +461,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         AnyUnmerkleized {
             batch: inner.new_batch(),
