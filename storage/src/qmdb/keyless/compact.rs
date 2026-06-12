@@ -309,6 +309,7 @@ where
     ///
     /// On first open, this bootstraps the initial commit and its witness so every later reopen and
     /// rewind can assume the journal tip is a complete compact witness.
+    #[commonware_macros::boxed]
     pub(crate) async fn init_from_merkle(
         mut merkle: compact_merkle::Merkle<F, H::Digest, S>,
         witness_context: E,
@@ -551,6 +552,7 @@ where
     }
 
     /// Destroy all persisted state associated with this database.
+    #[commonware_macros::boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.witness.destroy().await?;
         Ok(())

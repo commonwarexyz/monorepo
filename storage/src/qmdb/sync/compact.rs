@@ -371,6 +371,7 @@ where
 /// 5. Assert the db root still matches and persist the state.
 ///
 /// A failure before the final persist leaves on-disk state untouched.
+#[commonware_macros::boxed]
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>

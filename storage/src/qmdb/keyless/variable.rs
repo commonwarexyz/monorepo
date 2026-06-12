@@ -334,6 +334,7 @@ mod test {
         });
     }
 
+    #[commonware_macros::boxed]
     async fn assert_compact_root_compatibility<F: crate::merkle::Family>(
         ctx: deterministic::Context,
     ) {

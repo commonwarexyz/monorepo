@@ -911,6 +911,7 @@ pub(crate) mod harnesses {
         ops
     }
 
+    #[commonware_macros::boxed]
     async fn variable_apply_ops<F: Family>(
         db: VariableDb<F>,
         ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,

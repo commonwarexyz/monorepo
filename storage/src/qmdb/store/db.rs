@@ -399,6 +399,7 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
+    #[commonware_macros::boxed]
     pub async fn destroy(self) -> Result<(), Error> {
         self.log.destroy().await.map_err(Into::into)
     }

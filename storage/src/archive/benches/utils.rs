@@ -58,6 +58,7 @@ pub enum Archive {
 
 impl Archive {
     /// Initialize a new archive based on variant
+    #[commonware_macros::boxed]
     pub async fn init(ctx: Context, variant: Variant, compression: Option<u8>) -> Self {
         match variant {
             Variant::Immutable => {

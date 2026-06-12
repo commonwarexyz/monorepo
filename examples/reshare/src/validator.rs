@@ -35,6 +35,7 @@ const MESSAGE_BACKLOG: usize = 10;
 const MAX_MESSAGE_SIZE: u32 = 1024 * 1024;
 
 /// Run the validator node service.
+#[commonware_macros::boxed]
 pub async fn run<S, L>(
     context: tokio::Context,
     args: super::ParticipantArgs,

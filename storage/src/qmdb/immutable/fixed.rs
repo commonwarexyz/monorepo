@@ -384,6 +384,7 @@ mod tests {
         });
     }
 
+    #[commonware_macros::boxed]
     async fn assert_compact_root_compatibility<F: Family>(ctx: deterministic::Context) {
         let mut db = open_db::<F>(ctx.child("db")).await;
         let mut compact = open_compact::<F>(ctx.child("compact")).await;

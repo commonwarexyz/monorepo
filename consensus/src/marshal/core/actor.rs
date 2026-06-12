@@ -155,6 +155,7 @@ where
     A: Acknowledgement,
 {
     /// Create a new application actor.
+    #[commonware_macros::boxed]
     pub async fn init(
         context: E,
         finalizations_by_height: FC,

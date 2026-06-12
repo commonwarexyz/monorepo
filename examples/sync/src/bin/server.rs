@@ -696,6 +696,7 @@ where
 }
 
 /// Run the Any database server.
+#[commonware_macros::boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -707,6 +708,7 @@ where
 }
 
 /// Run the Current database server.
+#[commonware_macros::boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -718,6 +720,7 @@ where
 }
 
 /// Run the Immutable database server.
+#[commonware_macros::boxed]
 async fn run_immutable<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -729,6 +732,7 @@ where
 }
 
 /// Run the full immutable database as a compact-sync source.
+#[commonware_macros::boxed]
 async fn run_immutable_full_source<E>(
     context: E,
     config: Config,
@@ -743,6 +747,7 @@ where
 }
 
 /// Run the Keyless database server.
+#[commonware_macros::boxed]
 async fn run_keyless<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner + RngCore + Send,
@@ -754,6 +759,7 @@ where
 }
 
 /// Run the full keyless database as a compact-sync source.
+#[commonware_macros::boxed]
 async fn run_keyless_full_source<E>(
     context: E,
     config: Config,

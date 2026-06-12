@@ -330,6 +330,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
         self.ordinal.last_index()
     }
 
+    #[commonware_macros::boxed]
     async fn destroy(self) -> Result<(), Error> {
         // Destroy ordinal
         self.ordinal.destroy().await?;

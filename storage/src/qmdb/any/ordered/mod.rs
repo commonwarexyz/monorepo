@@ -367,6 +367,7 @@ mod test {
         find_next_key_ascending(&1, &candidates, &mut idx);
     }
 
+    #[commonware_macros::boxed]
     pub(crate) async fn test_ordered_any_db_empty<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
@@ -418,6 +419,7 @@ mod test {
         db.destroy().await.unwrap();
     }
 
+    #[commonware_macros::boxed]
     pub(crate) async fn test_ordered_any_db_basic<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,
@@ -621,6 +623,7 @@ mod test {
 
     /// Builds a db with colliding keys to make sure the "cycle around when there are translated
     /// key collisions" edge case is exercised.
+    #[commonware_macros::boxed]
     pub(crate) async fn test_ordered_any_update_collision_edge_case<
         F: Family,
         D: DbAny<F, Key = FixedBytes<4>, Value = Digest, Digest = Digest>,

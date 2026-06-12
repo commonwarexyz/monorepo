@@ -475,6 +475,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// The data journal is the source of truth. If the offsets journal is inconsistent
     /// it will be updated to match the data journal.
+    #[commonware_macros::boxed]
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         let items_per_section = cfg.items_per_section.get();
         let data_partition = cfg.data_partition();

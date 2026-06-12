@@ -124,6 +124,7 @@ where
     S: Scheme,
 {
     /// Initialize the cache manager and its metadata store.
+    #[commonware_macros::boxed]
     pub(crate) async fn init(
         context: R,
         cfg: Config,
@@ -207,6 +208,7 @@ where
     }
 
     /// Helper to initialize the cache for a given epoch.
+    #[commonware_macros::boxed]
     async fn init_epoch(&mut self, epoch: Epoch) {
         let context = self.context.child("cache").with_attribute("epoch", epoch);
         let (verified_blocks, notarized_blocks, certified_blocks, notarizations, finalizations) = futures::join!(

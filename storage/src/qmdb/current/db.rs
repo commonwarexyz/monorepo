@@ -774,6 +774,7 @@ where
     }
 
     /// Destroy the db, removing all data from disk.
+    #[commonware_macros::boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
         self.metadata.into_inner().destroy().await?;
         self.any.destroy().await

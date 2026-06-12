@@ -394,6 +394,7 @@ pub type FixedConfig<T, S> = Config<T, FConfig, S>;
 pub type VariableConfig<T, C, S> = Config<T, VConfig<C>, S>;
 
 /// Initialize a `Current` authenticated db from the given config.
+#[commonware_macros::boxed]
 pub(super) async fn init<F, E, U, H, T, I, J, const N: usize, S>(
     context: E,
     config: Config<T, J::Config, S>,
@@ -684,11 +685,49 @@ pub mod tests {
         ))
     }
 
+    /// Build a random database, close and reopen it, and return the auditor state.
+    #[commonware_macros::boxed]
+    async fn build_random_close_reopen_round<M, C, F, Fut>(
+        mut context: Context,
+        mut open_db: F,
+    ) -> String
+    where
+        M: merkle::Graftable + 'static,
+        C: DbAny<M> + 'static,
+        C::Key: TestKey,
+        <C as DbAny<M>>::Value: TestValue,
+        F: FnMut(Context, String) -> Fut,
+        Fut: Future<Output = C>,
+    {
+        const ELEMENTS: u64 = 1000;
+
+        let partition = "build-random".to_string();
+        let rng_seed = context.next_u64();
+        let mut db: C = open_db(context.child("first"), partition.clone()).await;
+        db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
+            .await
+            .unwrap();
+        let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
+        db.apply_batch(merkleized).await.unwrap();
+        db.sync().await.unwrap();
+
+        // Drop and reopen the db
+        let root = db.root();
+        drop(db);
+        let db: C = open_db(context.child("second"), partition).await;
+
+        // Ensure the root matches
+        assert_eq!(db.root(), root);
+
+        db.destroy().await.unwrap();
+        context.auditor().state()
+    }
+
     /// Run `test_build_random_close_reopen` against a database factory.
     ///
     /// The factory should return a database when given a context and partition name.
     /// The factory will be called multiple times to test reopening.
-    pub async fn test_build_random_close_reopen<M, C, F, Fut>(mut context: Context, mut open_db: F)
+    pub async fn test_build_random_close_reopen<M, C, F, Fut>(context: Context, open_db: F)
     where
         M: merkle::Graftable + 'static,
         C: DbAny<M> + 'static,
@@ -697,54 +736,14 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut + Clone,
         Fut: Future<Output = C>,
     {
-        const ELEMENTS: u64 = 1000;
-
         // Run on the provided runner.
-        let mut open_db_clone = open_db.clone();
-        let state1 = {
-            let partition = "build-random".to_string();
-            let rng_seed = context.next_u64();
-            let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
-            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-                .await
-                .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.sync().await.unwrap();
-
-            // Drop and reopen the db
-            let root = db.root();
-            drop(db);
-            let db: C = open_db_clone(context.child("second"), partition).await;
-
-            // Ensure the root matches
-            assert_eq!(db.root(), root);
-
-            db.destroy().await.unwrap();
-            context.auditor().state()
-        };
+        let state1 =
+            build_random_close_reopen_round::<M, C, F, Fut>(context, open_db.clone()).await;
 
         // Run again on a fresh runner to verify determinism.
         let executor = deterministic::Runner::default();
-        let state2 = executor.start(|mut context| async move {
-            let partition = "build-random".to_string();
-            let rng_seed = context.next_u64();
-            let mut db: C = open_db(context.child("first"), partition.clone()).await;
-            db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
-                .await
-                .unwrap();
-            let merkleized = db.new_batch().merkleize(&db, None).await.unwrap();
-            db.apply_batch(merkleized).await.unwrap();
-            db.sync().await.unwrap();
-
-            let root = db.root();
-            drop(db);
-            let db: C = open_db(context.child("second"), partition).await;
-            assert_eq!(db.root(), root);
-
-            db.destroy().await.unwrap();
-            context.auditor().state()
-        });
+        let state2 =
+            executor.start(|context| build_random_close_reopen_round::<M, C, F, Fut>(context, open_db));
 
         assert_eq!(state1, state2);
     }

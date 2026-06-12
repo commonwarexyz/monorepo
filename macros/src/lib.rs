@@ -1,6 +1,7 @@
 //! Augment the development of primitives with procedural macros.
 //!
 //! This crate provides:
+//! - [`boxed`] - Heap-allocate an async function's state machine
 //! - [`select!`] - Biased async select over multiple futures (requires `std` feature)
 //! - [`select_loop!`] - Continuous select loop with shutdown handling (requires `std` feature)
 //! - [`stability`], [`stability_mod!`], [`stability_scope!`] - API stability annotations
@@ -13,6 +14,35 @@
 )]
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
+/// Heap-allocate an async function's state machine.
+///
+/// An async function's future embeds every nested future and all locals held across
+/// awaits, so deep call chains compound into large values that bloat every caller
+/// that stores or polls them. Annotating a function with `#[boxed]` moves its state
+/// machine to the heap, reducing the returned future to the size of a pointer.
+///
+/// Use this on cold entry points with large state machines (initialization,
+/// teardown, recovery). Hot paths should avoid it: each call performs a heap
+/// allocation.
+///
+/// # Example
+///
+/// ```rust
+/// use commonware_macros::boxed;
+///
+/// #[boxed]
+/// async fn init() -> u64 {
+///     let buffer = [0u8; 1024];
+///     async {}.await;
+///     buffer.len() as u64
+/// }
+///
+/// let fut = init();
+/// assert!(std::mem::size_of_val(&fut) <= 16);
+/// # futures::executor::block_on(async { assert_eq!(init().await, 1024) });
+/// ```
+#[cfg(feature = "std")]
+pub use commonware_macros_impl::boxed;
 /// Select the first future that completes (biased by order).
 ///
 /// This macro is powered by [tokio::select!](https://docs.rs/tokio/latest/tokio/macro.select.html)

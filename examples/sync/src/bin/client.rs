@@ -178,6 +178,7 @@ where
 }
 
 /// Repeatedly sync an Any database to the server's state.
+#[commonware_macros::boxed]
 async fn run_any<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,
@@ -219,6 +220,7 @@ where
 ///
 /// The sync engine targets the ops root (not the canonical root). After sync completes,
 /// the bitmap and grafted MMR are reconstructed from the synced operations.
+#[commonware_macros::boxed]
 async fn run_current<E>(context: E, config: Config) -> Result<(), Box<dyn std::error::Error>>
 where
     E: BufferPooler + Storage + Clock + Metrics + Network + Spawner,

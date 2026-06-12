@@ -27,6 +27,7 @@ const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
 
 /// Benchmark a populated database: generate data, prune, sync. Returns elapsed time (excluding
 /// destroy).
+#[commonware_macros::boxed]
 async fn bench_db<F: Family, C: DbAny<F, Key = Digest>>(
     mut db: C,
     elements: u64,

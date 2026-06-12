@@ -35,6 +35,14 @@ runs:
       shell: bash
       run: echo "CARGO_NET_RETRY=30" >> "$GITHUB_ENV"
 
+    # Doubles libtest's default test-thread stack and applies the same headroom to
+    # all spawned threads (std, rayon, runtime-owned) on every platform. Coverage
+    # instrumentation inflates async poll frames severalfold, which has overflowed
+    # the default on deep storage call chains.
+    - name: Configure thread stack size
+      shell: bash
+      run: echo "RUST_MIN_STACK=16777216" >> "$GITHUB_ENV"
+
     # Use /mnt for Cargo builds on Linux (has ~70GB vs ~14GB on /)
     - name: Relocate Cargo directories to /mnt on Linux
       if: runner.os == 'Linux'

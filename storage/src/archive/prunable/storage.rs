@@ -464,6 +464,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         self.intervals.last_index()
     }
 
+    #[commonware_macros::boxed]
     async fn destroy(self) -> Result<(), Error> {
         Ok(self.oversized.destroy().await?)
     }

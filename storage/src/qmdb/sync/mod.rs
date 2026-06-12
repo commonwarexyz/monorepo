@@ -42,6 +42,7 @@ where
 }
 
 /// Create/open a database and sync it to a target state
+#[commonware_macros::boxed]
 pub async fn sync<DB, R>(
     config: Config<DB, R>,
 ) -> Result<DB, Error<DB::Family, R::Error, DB::Digest>>
