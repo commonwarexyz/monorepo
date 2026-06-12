@@ -79,6 +79,7 @@ bench = false
 [features]
 default = [ "std" ]
 blake3-parallel = [ "blake3/rayon", "std" ]
+sha2-asm = [ "sha2-v010/asm" ]
 mocks = [ "std" ]
 arbitrary = [
 	"commonware-codec/arbitrary",
