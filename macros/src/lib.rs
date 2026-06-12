@@ -16,14 +16,13 @@
 
 /// Heap-allocate an async function's state machine.
 ///
-/// An async function's future embeds every nested future and all locals held across
-/// awaits, so deep call chains compound into large values that bloat every caller
-/// that stores or polls them. Annotating a function with `#[boxed]` moves its state
-/// machine to the heap, reducing the returned future to the size of a pointer.
+/// An async function's future embeds every nested future and all locals held
+/// across awaits, so deep call chains compound into futures that bloat every
+/// caller. `#[boxed]` moves the state machine to the heap, shrinking the
+/// returned future to a pointer.
 ///
-/// Use this on cold entry points with large state machines (initialization,
-/// teardown, recovery). Hot paths should avoid it: each call performs a heap
-/// allocation.
+/// Use on cold entry points with large state machines (initialization,
+/// teardown, recovery). Avoid on hot paths: each call allocates.
 ///
 /// # Example
 ///
