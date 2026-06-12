@@ -545,11 +545,6 @@ where
             .await
             .child("inline_certify")
             .with_attribute("round", round);
-        let span = info_span!(
-            "marshal.inline.certify.task",
-            round = %round,
-            digest = %digest
-        );
         context.spawn(move |_| {
             async move {
                 let Some(block) =
@@ -567,7 +562,11 @@ where
                     tx.send_lossy(true);
                 }
             }
-            .instrument(span)
+            .instrument(info_span!(
+                "marshal.inline.certify.task",
+                round = %round,
+                digest = %digest
+            ))
         });
 
         // We don't need to verify the block here because we could not have

@@ -679,9 +679,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// storage. It is not an indication to go fetch the [Finalization] from the network.
     pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
         let (response, receiver) = oneshot::channel();
-        let span = info_span!("marshal.mailbox.get_finalization", height = %height);
         let _ = self.sender.enqueue(Message::GetFinalization {
-            span,
+            span: info_span!("marshal.mailbox.get_finalization", height = %height),
             height,
             response,
         });
@@ -718,9 +717,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// epocher cannot map the height to an epoch, or the provider cannot supply
     /// a scheme for that epoch, the hint is silently dropped.
     pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
-        let span = info_span!("marshal.mailbox.hint_finalized", height = %height);
         let _ = self.sender.enqueue(Message::HintFinalized {
-            span,
+            span: info_span!("marshal.mailbox.hint_finalized", height = %height),
             height,
             targets,
         });
@@ -748,9 +746,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         fallback: DigestFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
-        let span = info_span!("marshal.mailbox.subscribe_by_digest", digest = %digest);
         let _ = self.sender.enqueue(Message::SubscribeByDigest {
-            span,
+            span: info_span!("marshal.mailbox.subscribe_by_digest", digest = %digest),
             digest,
             fallback,
             response: tx,
@@ -779,9 +776,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         fallback: CommitmentFallback,
     ) -> oneshot::Receiver<V::Block> {
         let (tx, rx) = oneshot::channel();
-        let span = info_span!("marshal.mailbox.subscribe_by_commitment", commitment = %commitment);
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
-            span,
+            span: info_span!("marshal.mailbox.subscribe_by_commitment", commitment = %commitment),
             fallback,
             commitment,
             response: tx,
@@ -798,10 +794,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// This is useful when a local-only waiter already exists and later
     /// certification makes a network fetch by notarized round valid.
     pub fn hint_notarized(&self, round: Round, commitment: V::Commitment) {
-        let span =
-            info_span!("marshal.mailbox.hint_notarized", round = %round, commitment = %commitment);
         let _ = self.sender.enqueue(Message::HintNotarized {
-            span,
+            span: info_span!(
+                "marshal.mailbox.hint_notarized",
+                round = %round,
+                commitment = %commitment
+            ),
             round,
             commitment,
         });
@@ -834,9 +832,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns the verified block previously persisted for `round`, if any.
     pub async fn get_verified(&self, round: Round) -> Option<V::Block> {
         let (response, receiver) = oneshot::channel();
-        let span = info_span!("marshal.mailbox.get_verified", round = %round);
         let _ = self.sender.enqueue(Message::GetVerified {
-            span,
+            span: info_span!("marshal.mailbox.get_verified", round = %round),
             round,
             response,
         });
@@ -849,9 +846,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let span = info_span!("marshal.mailbox.proposed", round = %round);
         let _ = self.sender.enqueue(Message::Proposed {
-            span,
+            span: info_span!("marshal.mailbox.proposed", round = %round),
             round,
             block,
             ack: Some(ack),
@@ -865,9 +861,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let span = info_span!("marshal.mailbox.verified", round = %round);
         let _ = self.sender.enqueue(Message::Verified {
-            span,
+            span: info_span!("marshal.mailbox.verified", round = %round),
             round,
             block,
             ack: Some(ack),
@@ -881,9 +876,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn certified(&self, round: Round, block: V::Block) -> bool {
         let (ack, receiver) = oneshot::channel();
-        let span = info_span!("marshal.mailbox.certified", round = %round);
         let _ = self.sender.enqueue(Message::Certified {
-            span,
+            span: info_span!("marshal.mailbox.certified", round = %round),
             round,
             block,
             ack: Some(ack),
@@ -901,10 +895,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// [Self::prune] instead.
     /// Use [`crate::marshal::Config::start`] to provide the startup anchor.
     pub fn set_floor(&self, finalization: Finalization<S, V::Commitment>) {
-        let span = info_span!("marshal.mailbox.set_floor", round = %finalization.round());
-        let _ = self
-            .sender
-            .enqueue(Message::SetFloor { span, finalization });
+        let _ = self.sender.enqueue(Message::SetFloor {
+            span: info_span!("marshal.mailbox.set_floor", round = %finalization.round()),
+            finalization,
+        });
     }
 
     /// Requests pruning finalized blocks and certificates below the given height.
@@ -912,8 +906,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Unlike [Self::set_floor], this does not affect the sync starting point.
     /// Requests above marshal's current floor are ignored.
     pub fn prune(&self, height: Height) {
-        let span = info_span!("marshal.mailbox.prune", height = %height);
-        let _ = self.sender.enqueue(Message::Prune { span, height });
+        let _ = self.sender.enqueue(Message::Prune {
+            span: info_span!("marshal.mailbox.prune", height = %height),
+            height,
+        });
     }
 
     /// Forward a block to a set of recipients.
@@ -923,9 +919,8 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         commitment: V::Commitment,
         recipients: Recipients<S::PublicKey>,
     ) -> Feedback {
-        let span = info_span!("marshal.mailbox.forward", round = %round, commitment = %commitment);
         self.sender.enqueue(Message::Forward {
-            span,
+            span: info_span!("marshal.mailbox.forward", round = %round, commitment = %commitment),
             round,
             commitment,
             recipients,
@@ -938,16 +933,14 @@ impl<S: Scheme, V: Variant> Reporter for Mailbox<S, V> {
 
     fn report(&mut self, activity: Self::Activity) -> Feedback {
         let message = match activity {
-            Activity::Notarization(notarization) => {
-                let span =
-                    info_span!("marshal.mailbox.notarization", round = %notarization.round());
-                Message::Notarization { span, notarization }
-            }
-            Activity::Finalization(finalization) => {
-                let span =
-                    info_span!("marshal.mailbox.finalization", round = %finalization.round());
-                Message::Finalization { span, finalization }
-            }
+            Activity::Notarization(notarization) => Message::Notarization {
+                span: info_span!("marshal.mailbox.notarization", round = %notarization.round()),
+                notarization,
+            },
+            Activity::Finalization(finalization) => Message::Finalization {
+                span: info_span!("marshal.mailbox.finalization", round = %finalization.round()),
+                finalization,
+            },
             _ => return Feedback::Ok,
         };
         self.sender.enqueue(message)

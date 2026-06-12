@@ -504,11 +504,6 @@ where
             .await
             .child("certify")
             .with_attribute("round", round);
-        let span = info_span!(
-            "marshal.coding.certify.embedded",
-            round = %round,
-            commitment = %payload
-        );
         context.spawn(move |_| {
             async move {
                 let block = select! {
@@ -575,7 +570,11 @@ where
                     tx.send_lossy(result);
                 }
             }
-            .instrument(span)
+            .instrument(info_span!(
+                "marshal.coding.certify.embedded",
+                round = %round,
+                commitment = %payload
+            ))
         });
         rx
     }
@@ -601,11 +600,6 @@ where
             .await
             .child("certify_existing")
             .with_attribute("round", round);
-        let span = info_span!(
-            "marshal.coding.certify.existing",
-            round = %round,
-            commitment = %payload
-        );
         context.spawn(move |_| {
             async move {
             let result = select! {
@@ -645,7 +639,11 @@ where
                 }
             }
             }
-            .instrument(span)
+            .instrument(info_span!(
+                "marshal.coding.certify.existing",
+                round = %round,
+                commitment = %payload
+            ))
         });
         rx
     }
@@ -977,11 +975,6 @@ where
                 .await
                 .child("verify_reproposal")
                 .with_attribute("round", round);
-            let span = info_span!(
-                "marshal.coding.verify.reproposal",
-                round = %round,
-                commitment = %payload
-            );
             context.spawn(move |_| {
                 async move {
                     let block = select! {
@@ -1026,7 +1019,11 @@ where
                     task_tx.send_lossy(true);
                     tx.send_lossy(true);
                 }
-                .instrument(span)
+                .instrument(info_span!(
+                    "marshal.coding.verify.reproposal",
+                    round = %round,
+                    commitment = %payload
+                ))
             });
             return rx;
         }
@@ -1061,18 +1058,17 @@ where
                     .await
                     .child("shard_validity_wait")
                     .with_attribute("round", round);
-                let span = info_span!(
-                    "marshal.coding.verify.shard_validity",
-                    round = %round,
-                    commitment = %payload
-                );
-                context.spawn(|_| {
+                context.spawn(move |_| {
                     async move {
                         if validity_rx.await.is_ok() {
                             tx.send_lossy(true);
                         }
                     }
-                    .instrument(span)
+                    .instrument(info_span!(
+                        "marshal.coding.verify.shard_validity",
+                        round = %round,
+                        commitment = %payload
+                    ))
                 });
                 rx
             }

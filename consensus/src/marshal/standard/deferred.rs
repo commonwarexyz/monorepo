@@ -316,11 +316,6 @@ where
             .await
             .child("certify")
             .with_attribute("round", round);
-        let span = info_span!(
-            "marshal.deferred.certify.embedded",
-            round = %round,
-            digest = %digest
-        );
         context.spawn(move |_| {
             async move {
                 let block = select! {
@@ -376,7 +371,11 @@ where
                     tx.send_lossy(result);
                 }
             }
-            .instrument(span)
+            .instrument(info_span!(
+                "marshal.deferred.certify.embedded",
+                round = %round,
+                digest = %digest
+            ))
         });
         rx
     }
@@ -401,11 +400,6 @@ where
             .await
             .child("certify_existing")
             .with_attribute("round", round);
-        let span = info_span!(
-            "marshal.deferred.certify.existing",
-            round = %round,
-            digest = %digest
-        );
         context.spawn(move |_| {
             async move {
             let result = select! {
@@ -445,7 +439,11 @@ where
                 }
             }
             }
-            .instrument(span)
+            .instrument(info_span!(
+                "marshal.deferred.certify.existing",
+                round = %round,
+                digest = %digest
+            ))
         });
         rx
     }
@@ -684,11 +682,6 @@ where
             .await
             .child("optimistic_verify")
             .with_attribute("round", round);
-        let span = info_span!(
-            "marshal.deferred.verify.optimistic",
-            round = %round,
-            digest = %digest
-        );
         runtime_context.spawn(move |_| {
             async move {
                 let block_request = marshal.subscribe_by_digest(digest, DigestFallback::Wait);
@@ -773,7 +766,11 @@ where
                     task_tx.send_lossy(result);
                 }
             }
-            .instrument(span)
+            .instrument(info_span!(
+                "marshal.deferred.verify.optimistic",
+                round = %round,
+                digest = %digest
+            ))
         });
         rx
     }
