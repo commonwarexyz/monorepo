@@ -2,7 +2,7 @@
 //!
 //! The QMDB batch API passes `&db` to `get()` and `merkleize()` for
 //! read-through to committed state. This module provides wrapper types
-//! that capture `Arc<AsyncRwLock<Db>>` alongside the raw batch so the
+//! that capture `Arc<TracedAsyncRwLock<Db>>` alongside the raw batch so the
 //! [`Unmerkleized`](super::Unmerkleized) and [`Merkleized`](super::Merkleized)
 //! traits can be implemented without a DB parameter.
 
@@ -40,11 +40,11 @@ use commonware_storage::{
     },
     translator::Translator,
 };
-use commonware_utils::{channel::mpsc, non_empty_range, sync::AsyncRwLock, Array};
+use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 
 type CurrentDbHandle<F, E, C, I, H, U, const N: usize, S> =
-    Arc<AsyncRwLock<Db<F, E, C, I, H, U, N, S>>>;
+    Arc<TracedAsyncRwLock<Db<F, E, C, I, H, U, N, S>>>;
 
 /// Wraps a QMDB [`UnmerkleizedBatch`] with a reference to the parent
 /// database, implementing the [`Unmerkleized`](super::Unmerkleized) trait.
@@ -362,7 +362,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
             batch: inner.new_batch(),
@@ -456,7 +456,7 @@ where
         <Self>::init(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
             batch: inner.new_batch(),
@@ -627,7 +627,7 @@ where
         open::variable(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
             batch: inner.new_batch(),
@@ -726,7 +726,7 @@ where
         open::ordered_variable(context, config).await
     }
 
-    async fn new_batch(db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         let inner = db.read().await;
         CurrentUnmerkleized {
             batch: inner.new_batch(),
@@ -1114,8 +1114,8 @@ mod tests {
         assert_managed_db::<OrderedVariableDb>();
         assert_state_sync_db::<OrderedFixedDb, Arc<OrderedFixedDb>>();
         assert_state_sync_db::<OrderedVariableDb, Arc<OrderedVariableDb>>();
-        assert_database_set::<Arc<AsyncRwLock<OrderedFixedDb>>>();
-        assert_database_set::<Arc<AsyncRwLock<OrderedVariableDb>>>();
+        assert_database_set::<Arc<TracedAsyncRwLock<OrderedFixedDb>>>();
+        assert_database_set::<Arc<TracedAsyncRwLock<OrderedVariableDb>>>();
     }
 
     #[test]
@@ -1125,7 +1125,7 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
             let key = Sha256::hash(b"key");
             let value = Sha256::hash(b"value");
             let metadata = Sha256::hash(b"metadata");
@@ -1169,7 +1169,7 @@ mod tests {
             let db = <OrderedVariableDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
             let key = Sha256::hash(b"key");
             let value = Sha256::hash(b"value");
             let metadata = Sha256::hash(b"metadata");
@@ -1213,7 +1213,7 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let key = Sha256::hash(b"key");
             let value = Sha256::hash(b"value");
@@ -1270,7 +1270,7 @@ mod tests {
             let db = <OrderedFixedDb as ManagedDb<_>>::init(context.child("db"), config)
                 .await
                 .unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let key1 = Sha256::hash(b"key1");
             let value1 = Sha256::hash(b"value1");
@@ -1334,7 +1334,7 @@ mod tests {
             let db = FixedDb::init(context.child("db"), config.clone())
                 .await
                 .unwrap();
-            let db = Arc::new(AsyncRwLock::new(db));
+            let db = Arc::new(TracedAsyncRwLock::new("test", db));
 
             let key = Sha256::hash(b"key");
             let value = Sha256::hash(b"value");

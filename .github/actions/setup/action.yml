@@ -31,9 +31,13 @@ inputs:
 runs:
   using: composite
   steps:
+    # Disabling HTTP/2 multiplexing avoids spurious connection resets fetching the sparse
+    # registry index, at the cost of slower index fetches when the cache is cold.
     - name: Configure Cargo network
       shell: bash
-      run: echo "CARGO_NET_RETRY=30" >> "$GITHUB_ENV"
+      run: |
+        echo "CARGO_NET_RETRY=30" >> "$GITHUB_ENV"
+        echo "CARGO_HTTP_MULTIPLEXING=false" >> "$GITHUB_ENV"
 
     # Use /mnt for Cargo builds on Linux (has ~70GB vs ~14GB on /)
     - name: Relocate Cargo directories to /mnt on Linux

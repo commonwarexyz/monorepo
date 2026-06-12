@@ -47,8 +47,7 @@ pub fn init(
     let log_layer = tracing_subscriber::fmt::layer()
         .with_line_number(true)
         .with_thread_ids(true)
-        .with_file(true)
-        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE);
+        .with_file(true);
 
     // Set the format to JSON (if specified)
     let log_layer = if logging.json {

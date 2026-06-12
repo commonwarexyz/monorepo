@@ -22,6 +22,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_cryptography::{sha256, Sha256};
+use commonware_macros::boxed;
 use commonware_math::algebra::Random;
 use commonware_runtime::{
     buffer::paged::CacheRef, deterministic, BufferPooler, Metrics, Runner as _, Supervisor as _,
@@ -911,6 +912,7 @@ pub(crate) mod harnesses {
         ops
     }
 
+    #[boxed]
     async fn variable_apply_ops<F: Family>(
         db: VariableDb<F>,
         ops: Vec<Operation<F, sha256::Digest, sha256::Digest>>,
