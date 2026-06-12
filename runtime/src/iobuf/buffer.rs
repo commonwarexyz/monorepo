@@ -676,9 +676,16 @@ impl PooledBuffer {
     }
 
     /// Returns the usable data base pointer.
+    #[cfg(any(test, feature = "bench"))]
     #[inline(always)]
     pub const fn as_ptr(&self) -> *mut u8 {
         self.ptr.as_ptr()
+    }
+
+    /// Returns the usable data base pointer without discarding non-nullness.
+    #[inline(always)]
+    pub(crate) const fn data_ptr(&self) -> NonNull<u8> {
+        self.ptr
     }
 
     /// Returns the usable data capacity for this size-class buffer.
@@ -803,7 +810,7 @@ impl PooledBuffer {
 
 /// Allocates an untracked aligned buffer with a tail [`HeapHeader`].
 ///
-/// The header is placed at `round_up(capacity, align_of::<HeapHeader>())`
+/// The header is placed at `capacity` rounded up to `align_of::<HeapHeader>()`
 /// past the base, and the layout alignment is raised to at least the header
 /// alignment so both the data base and the header are aligned.
 ///
@@ -841,61 +848,75 @@ pub(crate) fn allocate_aligned(
     (data, owner)
 }
 
-/// Converts `vec` into owned handle fields, adopting its allocation if it can
-/// host a tail [`HeapHeader`] in spare capacity.
+/// Tries to adopt `vec`'s allocation as a native heap buffer.
 ///
-/// Adoption produces a fully native heap buffer with zero copies and zero
-/// extra allocations: the header is placed at the highest header-aligned
-/// address that fits below `base + cap`, and succeeds iff that address is at
-/// or above `base + len` (see the module docs for the layout diagram).
+/// Adoption places a tail [`HeapHeader`] at the highest header-aligned
+/// address inside the vec's own spare capacity and succeeds iff that address
+/// is at or above `base + len` (see the module docs for the layout diagram):
+/// zero copies and zero extra allocations. The vec's allocation layout
+/// `(cap, align = 1)` is recorded exactly so release deallocates with the
+/// same layout. On success, returns the data pointer, readable length,
+/// usable capacity (the prefix below the header), and the owner.
 ///
 /// Exactly-sized vecs (`len == cap`, the common case for `vec![0; n]` and
-/// `collect()`) have no spare room; reallocating could copy, so they fall back
-/// to the external owner path, which for `len == cap` is also `bytes`'
-/// allocation-free promotable path.
+/// `collect()`) have no spare room; reallocating could copy, so they are
+/// returned unchanged for the caller to convert another way.
+pub(crate) fn try_adopt_vec(
+    vec: Vec<u8>,
+) -> Result<(NonNull<u8>, usize, usize, OwnerRef), Vec<u8>> {
+    let len = vec.len();
+    let cap = vec.capacity();
+    if cap < size_of::<HeapHeader>() {
+        return Err(vec);
+    }
+    let base_addr = vec.as_ptr() as usize;
+    let header_offset = round_down(
+        base_addr + cap - size_of::<HeapHeader>(),
+        align_of::<HeapHeader>(),
+    ) - base_addr;
+    if header_offset < len {
+        return Err(vec);
+    }
+
+    // Adopt: dismantle the vec and place the header in its spare capacity.
+    let mut vec = ManuallyDrop::new(vec);
+    let base = vec.as_mut_ptr();
+    // SAFETY: `base..base+cap` is one live allocation (`cap > 0`) owned by
+    // the dismantled vec; `base + header_offset` is header-aligned and
+    // `header_offset + size_of::<HeapHeader>() <= cap`, so the header write
+    // is in bounds.
+    unsafe {
+        let header = base.add(header_offset).cast::<HeapHeader>();
+        header.write(HeapHeader {
+            refs: AtomicUsize::new(1),
+            data_base: NonNull::new_unchecked(base),
+            alloc_size: cap,
+            alloc_align: 1,
+        });
+        Ok((
+            NonNull::new_unchecked(base),
+            len,
+            header_offset,
+            OwnerRef::from_heap(NonNull::new_unchecked(header)),
+        ))
+    }
+}
+
+/// Converts `vec` into immutable handle fields, adopting its allocation if it
+/// can host a tail [`HeapHeader`] in spare capacity.
+///
+/// Empty vecs detach entirely (empty immutable buffers never pin an
+/// allocation). Non-adoptable vecs move into `Bytes` (zero-copy for any
+/// `Vec<u8>`; for `len == cap` also `bytes`' allocation-free promotable
+/// path) behind an external owner.
 pub(crate) fn owner_from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, OwnerRef) {
     if vec.is_empty() {
         return (NonNull::dangling(), 0, OwnerRef::empty());
     }
-
-    let len = vec.len();
-    let cap = vec.capacity();
-    if cap >= size_of::<HeapHeader>() {
-        let base_addr = vec.as_ptr() as usize;
-        let header_addr = round_down(
-            base_addr + cap - size_of::<HeapHeader>(),
-            align_of::<HeapHeader>(),
-        );
-        if header_addr >= base_addr + len {
-            // Adopt: dismantle the vec and place the header in its spare
-            // capacity. The vec's allocation layout is `(cap, align = 1)`,
-            // recorded exactly so release deallocates with the same layout.
-            let mut vec = ManuallyDrop::new(vec);
-            let base = vec.as_mut_ptr();
-            // SAFETY: `base..base+cap` is one live allocation owned by the
-            // dismantled vec; `header_addr` is header-aligned and
-            // `header_addr + size_of::<HeapHeader>() <= base + cap`, so the
-            // header write is in bounds. `base` is non-null (`len > 0`).
-            unsafe {
-                let header = base.add(header_addr - base_addr).cast::<HeapHeader>();
-                header.write(HeapHeader {
-                    refs: AtomicUsize::new(1),
-                    data_base: NonNull::new_unchecked(base),
-                    alloc_size: cap,
-                    alloc_align: 1,
-                });
-                return (
-                    NonNull::new_unchecked(base),
-                    len,
-                    OwnerRef::from_heap(NonNull::new_unchecked(header)),
-                );
-            }
-        }
+    match try_adopt_vec(vec) {
+        Ok((ptr, len, _, owner)) => (ptr, len, owner),
+        Err(vec) => owner_from_bytes(Bytes::from(vec)),
     }
-
-    // No room for the header: hand the allocation to `Bytes` (zero-copy for
-    // any `Vec<u8>`) behind an external owner.
-    owner_from_bytes(Bytes::from(vec))
 }
 
 /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
@@ -931,7 +952,9 @@ pub(crate) fn owner_from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, OwnerRef) {
 /// and the [`PooledHeader`].
 #[inline]
 pub(crate) fn pooled_layout(size: usize, alignment: usize) -> Layout {
-    let header_offset = round_up(size, align_of::<PooledHeader>());
+    let header_offset = size
+        .checked_next_multiple_of(align_of::<PooledHeader>())
+        .expect("layout size overflow");
     let total = header_offset
         .checked_add(size_of::<PooledHeader>())
         .expect("pooled layout size overflow");
@@ -942,7 +965,9 @@ pub(crate) fn pooled_layout(size: usize, alignment: usize) -> Layout {
 /// Returns the full layout and header offset for a native aligned allocation.
 #[inline]
 fn heap_layout(capacity: usize, alignment: usize) -> (Layout, usize) {
-    let header_offset = round_up(capacity, align_of::<HeapHeader>());
+    let header_offset = capacity
+        .checked_next_multiple_of(align_of::<HeapHeader>())
+        .expect("layout size overflow");
     let total = header_offset
         .checked_add(size_of::<HeapHeader>())
         .expect("heap layout size overflow");
@@ -994,12 +1019,6 @@ const unsafe fn pooled_header_for_layout(
     let header = unsafe { ptr.as_ptr().add(header_offset).cast::<PooledHeader>() };
     // SAFETY: pooled headers are placed within non-null allocations.
     unsafe { NonNull::new_unchecked(header) }
-}
-
-#[inline(always)]
-fn round_up(value: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    value.checked_add(align - 1).expect("layout size overflow") & !(align - 1)
 }
 
 #[inline(always)]
@@ -1128,7 +1147,7 @@ mod tests {
         let (_, owner) = allocate_aligned(10, 1, false);
         // SAFETY: owner is unique and live.
         let capacity = unsafe { owner.usable_capacity() };
-        assert_eq!(capacity, round_up(10, align_of::<HeapHeader>()));
+        assert_eq!(capacity, 10usize.next_multiple_of(align_of::<HeapHeader>()));
         // SAFETY: owner is unique and must be released by this test.
         unsafe { owner.release_unique() };
     }

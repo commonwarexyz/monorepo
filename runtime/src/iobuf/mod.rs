@@ -20,7 +20,9 @@ mod buffer;
 mod freelist;
 mod pool;
 
-use buffer::{allocate_aligned, owner_from_bytes, owner_from_vec, OwnerRef, PooledBuffer};
+use buffer::{
+    allocate_aligned, owner_from_bytes, owner_from_vec, try_adopt_vec, OwnerRef, PooledBuffer,
+};
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 use crossbeam_utils::CachePadded;
@@ -193,7 +195,7 @@ impl IoBuf {
         }
 
         // SAFETY: range resolution bounds `start <= self.len`.
-        let ptr = unsafe { NonNull::new_unchecked(self.ptr.as_ptr().add(start)) };
+        let ptr = unsafe { self.ptr.add(start) };
         // SAFETY: the returned view aliases immutable bytes and retains the
         // owner while it is live.
         unsafe { self.owner.clone_shared() };
@@ -238,7 +240,7 @@ impl IoBuf {
         };
         // SAFETY: `at < self.len`, so advancing within the current readable region is in bounds.
         unsafe {
-            self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(at));
+            self.ptr = self.ptr.add(at);
         }
         self.len -= at;
         prefix
@@ -372,7 +374,7 @@ impl Buf for IoBuf {
         // SAFETY: `cnt <= self.len`, so the new pointer remains in or one byte
         // past the readable region.
         unsafe {
-            self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(cnt));
+            self.ptr = self.ptr.add(cnt);
         }
         self.len -= cnt;
     }
@@ -397,7 +399,7 @@ impl Buf for IoBuf {
         // immutable buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), dst.as_mut_ptr(), dst.len());
-            self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(dst.len()));
+            self.ptr = self.ptr.add(dst.len());
         }
         self.len -= dst.len();
         Ok(())
@@ -685,7 +687,7 @@ impl IoBufMut {
         // SAFETY: pooled buffers returned by the pool have initialized stable
         // header fields.
         let cap = unsafe { buffer.capacity() };
-        let ptr = NonNull::new(buffer.as_ptr()).unwrap_or_else(NonNull::dangling);
+        let ptr = buffer.data_ptr();
         // SAFETY: guaranteed by the caller.
         let owner = unsafe { buffer.owner_ref() };
         Self {
@@ -847,7 +849,7 @@ impl Buf for IoBufMut {
         // (zero-length pointer adds are always valid, so `cnt == 0` needs no
         // special case).
         unsafe {
-            self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(cnt));
+            self.ptr = self.ptr.add(cnt);
         }
         self.len -= cnt;
         self.cap -= cnt;
@@ -874,7 +876,7 @@ impl Buf for IoBufMut {
         // case).
         unsafe {
             std::ptr::copy_nonoverlapping(self.ptr.as_ptr(), dst.as_mut_ptr(), dst.len());
-            self.ptr = NonNull::new_unchecked(self.ptr.as_ptr().add(dst.len()));
+            self.ptr = self.ptr.add(dst.len());
         }
         self.len -= dst.len();
         self.cap -= dst.len();
@@ -1033,6 +1035,29 @@ impl From<IoBuf> for IoBufMut {
         match buf.try_into_mut() {
             Ok(buf) => buf,
             Err(buf) => Self::from(buf.as_ref()),
+        }
+    }
+}
+
+/// Converts a vec into a mutable handle, preserving the caller's capacity.
+///
+/// Adopts the vec's allocation zero-copy when its spare capacity can host
+/// the owner header (including empty vecs with reserved capacity); otherwise
+/// copies the readable bytes into a fresh buffer with at least the vec's
+/// capacity. Unlike `From<Vec<u8>> for IoBuf`, an empty vec keeps its
+/// reserved capacity instead of detaching.
+fn iobuf_mut_from_vec(vec: Vec<u8>) -> IoBufMut {
+    match try_adopt_vec(vec) {
+        Ok((ptr, len, cap, owner)) => IoBufMut {
+            ptr,
+            len,
+            cap,
+            owner,
+        },
+        Err(vec) => {
+            let mut out = IoBufMut::with_capacity(vec.capacity());
+            out.put_slice(&vec);
+            out
         }
     }
 }
@@ -1690,10 +1715,17 @@ pub struct IoBufsMut {
 
 /// Internal mutable representation.
 ///
-/// - Construction from caller-provided writable chunks keeps chunks with
-///   non-zero capacity, even when `remaining() == 0`.
-/// - Read-canonicalization paths remove drained chunks (`remaining() == 0`)
-///   and collapse shape as readable chunk count shrinks.
+/// Construction and canonicalization keep every chunk that still owns
+/// storage (`capacity() > 0`), readable or not, so caller-reserved write
+/// capacity survives read operations. Only fully-drained chunks (capacity
+/// consumed by `advance`) and empty defaults are removed as the shape
+/// collapses.
+///
+/// Limitation: the deque-backed read paths (four or more chunks) skip past
+/// a chunk with no readable bytes by popping it, so a never-filled chunk
+/// ordered before readable data loses its capacity when a read crosses it.
+/// Fills are front-to-back in practice (`set_len`, `read_at_buf`), which
+/// does not produce that ordering.
 #[derive(Debug)]
 enum IoBufsMutInner {
     /// Single buffer (common case, no allocation).
@@ -1717,10 +1749,8 @@ impl Default for IoBufsMut {
 impl IoBufsMut {
     /// Build mutable chunk storage from already-filtered chunks.
     ///
-    /// This helper intentionally does not filter.
-    /// Callers choose filter policy first:
-    /// - [`Self::from_writable_chunks_iter`] for construction from writable chunks (`capacity() > 0`)
-    /// - [`Self::from_readable_chunks_iter`] for read-canonicalization (`remaining() > 0`)
+    /// This helper intentionally does not filter; callers route through
+    /// [`Self::from_writable_chunks_iter`] so storage-owning chunks are kept.
     fn from_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
         let mut iter = chunks.into_iter();
         let first = match iter.next() {
@@ -1765,27 +1795,26 @@ impl IoBufsMut {
 
     /// Build canonical mutable chunk storage from writable chunks.
     ///
-    /// Chunks with zero capacity are removed.
+    /// Keeps chunks that still own storage, readable or not (`capacity()`
+    /// covers both readable bytes and the writable tail), so a never-filled
+    /// chunk's reserved capacity is not discarded. Fully-drained chunks
+    /// (capacity consumed by `advance`) and empty defaults are removed.
     fn from_writable_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
-        // Keep chunks that can hold data (including len == 0 writable buffers).
         Self::from_chunks_iter(chunks.into_iter().filter(|buf| buf.capacity() > 0))
     }
 
-    /// Build canonical mutable chunk storage from readable chunks.
-    ///
-    /// Chunks with no remaining readable bytes are removed.
-    fn from_readable_chunks_iter(chunks: impl IntoIterator<Item = IoBufMut>) -> Self {
-        Self::from_chunks_iter(chunks.into_iter().filter(|buf| buf.remaining() > 0))
-    }
-
     /// Re-establish canonical mutable representation invariants.
+    ///
+    /// Uses the same storage-keeping filter as construction: read operations
+    /// must not change `remaining_mut()`, so chunks that were drained of
+    /// readable bytes but still own writable capacity survive.
     fn canonicalize(&mut self) {
         let inner = std::mem::replace(&mut self.inner, IoBufsMutInner::Single(IoBufMut::default()));
         self.inner = match inner {
             IoBufsMutInner::Single(buf) => IoBufsMutInner::Single(buf),
-            IoBufsMutInner::Pair([a, b]) => Self::from_readable_chunks_iter([a, b]).inner,
-            IoBufsMutInner::Triple([a, b, c]) => Self::from_readable_chunks_iter([a, b, c]).inner,
-            IoBufsMutInner::Chunked(bufs) => Self::from_readable_chunks_iter(bufs).inner,
+            IoBufsMutInner::Pair([a, b]) => Self::from_writable_chunks_iter([a, b]).inner,
+            IoBufsMutInner::Triple([a, b, c]) => Self::from_writable_chunks_iter([a, b, c]).inner,
+            IoBufsMutInner::Chunked(bufs) => Self::from_writable_chunks_iter(bufs).inner,
         };
     }
 
@@ -2118,6 +2147,12 @@ impl Buf for IoBufsMut {
     }
 
     fn copy_to_bytes(&mut self, len: usize) -> Bytes {
+        // Zero-length drains must not disturb chunk state: the deque-backed
+        // path skips readable-empty chunks by popping them, which would
+        // discard a never-filled chunk's reserved capacity.
+        if len == 0 {
+            return Bytes::new();
+        }
         let (result, needs_canonicalize) = match &mut self.inner {
             IoBufsMutInner::Single(buf) => return buf.copy_to_bytes(len),
             IoBufsMutInner::Pair(pair) => {
@@ -2159,32 +2194,25 @@ unsafe impl BufMut for IoBufsMut {
 
     #[inline]
     unsafe fn advance_mut(&mut self, cnt: usize) {
-        match &mut self.inner {
-            IoBufsMutInner::Single(buf) => buf.advance_mut(cnt),
-            IoBufsMutInner::Pair(pair) => {
-                let mut remaining = cnt;
-                if advance_mut_in_chunks(pair, &mut remaining) {
-                    return;
-                }
-                panic!("cannot advance past end of buffer");
+        // On failure, every writable byte was consumed before the chunks ran
+        // out, so the advanced amount (`cnt - remaining`) is exactly what was
+        // available.
+        let mut remaining = cnt;
+        let advanced = match &mut self.inner {
+            IoBufsMutInner::Single(buf) => {
+                buf.advance_mut(cnt);
+                return;
             }
-            IoBufsMutInner::Triple(triple) => {
-                let mut remaining = cnt;
-                if advance_mut_in_chunks(triple, &mut remaining) {
-                    return;
-                }
-                panic!("cannot advance past end of buffer");
-            }
+            IoBufsMutInner::Pair(pair) => advance_mut_in_chunks(pair, &mut remaining),
+            IoBufsMutInner::Triple(triple) => advance_mut_in_chunks(triple, &mut remaining),
             IoBufsMutInner::Chunked(bufs) => {
-                let mut remaining = cnt;
                 let (first, second) = bufs.as_mut_slices();
-                if advance_mut_in_chunks(first, &mut remaining)
+                advance_mut_in_chunks(first, &mut remaining)
                     || advance_mut_in_chunks(second, &mut remaining)
-                {
-                    return;
-                }
-                panic!("cannot advance past end of buffer");
             }
+        };
+        if !advanced {
+            panic_advance(cnt, cnt - remaining);
         }
     }
 
@@ -2235,13 +2263,18 @@ impl From<IoBufMut> for IoBufsMut {
 /// Convert a [`Vec<u8>`] into a single-buffer [`IoBufsMut`].
 ///
 /// Zero-copy when the vec's allocation can be adopted as a native buffer
-/// (spare capacity hosts the owner header); copies otherwise. There is no
-/// `From<Vec<u8>> for IoBufMut` because a single-handle `From` must be
-/// non-copy, and exactly-sized vecs have no zero-copy mutable representation.
+/// (spare capacity hosts the owner header); otherwise copies into a fresh
+/// buffer with at least the vec's capacity. The caller's reserved capacity
+/// is preserved either way, so reuse patterns like passing
+/// `Vec::with_capacity(len)` to [`Blob::read_at_buf`](crate::Blob)
+/// work. There is no `From<Vec<u8>> for IoBufMut` because that impl had no
+/// production users and exactly-sized vecs have no zero-copy mutable
+/// representation (`IoBuf::from(vec).try_into_mut()` covers the zero-copy
+/// cases).
 impl From<Vec<u8>> for IoBufsMut {
     fn from(vec: Vec<u8>) -> Self {
         Self {
-            inner: IoBufsMutInner::Single(IoBufMut::from(IoBuf::from(vec))),
+            inner: IoBufsMutInner::Single(iobuf_mut_from_vec(vec)),
         }
     }
 }
@@ -2319,7 +2352,9 @@ fn copy_to_bytes_chunked<B: Buf>(
 
     if bufs.front().is_none() {
         assert_eq!(len, 0, "{not_enough_data_msg}");
-        return (Bytes::new(), false);
+        // The deque is empty now, so the container must collapse back to the
+        // canonical Single representation.
+        return (Bytes::new(), true);
     }
 
     if bufs.front().is_some_and(|front| front.remaining() >= len) {
@@ -3655,6 +3690,71 @@ mod tests {
     }
 
     #[test]
+    fn test_iobufsmut_read_ops_preserve_writable_capacity() {
+        // Draining the filled first chunk must not discard the never-filled
+        // second chunk's reserved capacity: remaining_mut only changes via
+        // advance_mut per the BufMut contract.
+        let mut a = IoBufMut::with_capacity(8);
+        a.put_slice(&[1u8; 8]);
+        let b = IoBufMut::with_capacity(8);
+        let mut bufs = IoBufsMut::from(vec![a, b]);
+        assert_eq!(bufs.remaining(), 8);
+        assert_eq!(bufs.remaining_mut(), 8);
+        bufs.advance(8);
+        assert_eq!(bufs.remaining(), 0);
+        assert_eq!(bufs.remaining_mut(), 8);
+        bufs.put_slice(&[2u8; 8]);
+        assert_eq!(bufs.copy_to_bytes(8).as_ref(), &[2u8; 8]);
+
+        // copy_to_bytes drains must preserve capacity the same way.
+        let mut a = IoBufMut::with_capacity(8);
+        a.put_slice(&[3u8; 8]);
+        let b = IoBufMut::with_capacity(8);
+        let mut bufs = IoBufsMut::from(vec![a, b]);
+        assert_eq!(bufs.copy_to_bytes(8).as_ref(), &[3u8; 8]);
+        assert_eq!(bufs.remaining_mut(), 8);
+
+        // Zero-length drains do not disturb chunk state at all.
+        assert!(bufs.copy_to_bytes(0).is_empty());
+        assert_eq!(bufs.remaining_mut(), 8);
+    }
+
+    #[test]
+    fn test_iobufsmut_from_vec_u8_preserves_capacity() {
+        // Spare capacity for the header: the vec's allocation is adopted
+        // zero-copy and stays writable.
+        let mut vec = Vec::with_capacity(128);
+        vec.extend_from_slice(b"abc");
+        let base = vec.as_ptr() as usize;
+        let mut bufs = IoBufsMut::from(vec);
+        assert_eq!(bufs.remaining(), 3);
+        assert!(bufs.remaining_mut() > 0);
+        assert_eq!(bufs.chunk().as_ptr() as usize, base);
+        bufs.put_slice(b"d");
+        assert_eq!(bufs.copy_to_bytes(4).as_ref(), b"abcd");
+
+        // Empty vec with reserved capacity adopts and stays writable.
+        let mut bufs = IoBufsMut::from(Vec::<u8>::with_capacity(64));
+        assert!(bufs.is_empty());
+        assert!(bufs.remaining_mut() > 0);
+        bufs.put_slice(b"z");
+        assert_eq!(bufs.remaining(), 1);
+
+        // Too small to host the header: copied, but the reserved capacity is
+        // still honored.
+        let mut bufs = IoBufsMut::from(Vec::<u8>::with_capacity(20));
+        assert!(bufs.is_empty());
+        assert!(bufs.remaining_mut() >= 20);
+        bufs.put_slice(&[7u8; 20]);
+        assert_eq!(bufs.remaining(), 20);
+
+        // Exactly-sized vec: copied with contents intact.
+        let bufs = IoBufsMut::from(vec![1u8, 2, 3]);
+        assert_eq!(bufs.remaining(), 3);
+        assert_eq!(bufs.chunk(), &[1, 2, 3]);
+    }
+
+    #[test]
     fn test_iobufsmut_coalesce_after_advance() {
         // Advance mid-chunk: advance 3 of 11 bytes
         let buf1 = IoBufMut::from(b"hello");
@@ -4666,11 +4766,13 @@ mod tests {
 
     #[test]
     fn test_iobuf_internal_chunk_helpers() {
-        // `copy_to_bytes_chunked` should drop leading empties on zero-length reads.
+        // `copy_to_bytes_chunked` drops leading empties on zero-length reads
+        // and asks for canonicalization so the emptied deque collapses back
+        // to the Single representation.
         let mut empty_with_leading = VecDeque::from([IoBuf::default()]);
         let (bytes, needs_canonicalize) = copy_to_bytes_chunked(&mut empty_with_leading, 0, "x");
         assert!(bytes.is_empty());
-        assert!(!needs_canonicalize);
+        assert!(needs_canonicalize);
         assert!(empty_with_leading.is_empty());
 
         // Fast path: front chunk can fully satisfy the request.
@@ -4700,7 +4802,7 @@ mod tests {
         let (bytes, needs_canonicalize) =
             copy_to_bytes_chunked(&mut empty_with_leading_mut, 0, "x");
         assert!(bytes.is_empty());
-        assert!(!needs_canonicalize);
+        assert!(needs_canonicalize);
         assert!(empty_with_leading_mut.is_empty());
 
         // Mirror the fast/slow chunked helper paths for mutable chunks too.

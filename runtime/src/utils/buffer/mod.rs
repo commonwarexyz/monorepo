@@ -12,9 +12,9 @@ pub use write::Write;
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, Buf, Clock, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
-        Runner, Spawner,
-        Storage, Supervisor as _,
+        deterministic, Blob as _, Buf, Clock, Error, Handle, IoBufs, IoBufsMut,
+        Runner, Spawner, Storage,
+        Supervisor as _,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
@@ -67,11 +67,6 @@ mod tests {
     }
 
     impl crate::Blob for BlockingReadBlob {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
-                .await
-        }
-
         async fn read_at_buf(
             &self,
             offset: u64,
@@ -204,11 +199,6 @@ mod tests {
     }
 
     impl crate::Blob for SyncTrackingBlob {
-        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
-            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
-                .await
-        }
-
         async fn read_at_buf(
             &self,
             offset: u64,
