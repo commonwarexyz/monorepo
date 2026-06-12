@@ -80,7 +80,6 @@ use commonware_utils::{
 #[cfg(feature = "external")]
 use futures::task::noop_waker;
 use futures::{
-    future::Either,
     task::{waker, ArcWake},
     Future,
 };
@@ -102,8 +101,7 @@ use std::{
     task::{self, Poll, Waker},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tracing::{info_span, trace, Instrument};
-use tracing_opentelemetry::OpenTelemetrySpanExt;
+use tracing::trace;
 
 #[derive(Debug)]
 struct Metrics {
@@ -880,7 +878,6 @@ pub struct Context {
     storage_buffer_pool: BufferPool,
     tree: Arc<Tree>,
     execution: Execution,
-    traced: bool,
 }
 
 impl Context {
@@ -957,7 +954,6 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                traced: false,
             },
             executor,
             panicked,
@@ -1027,7 +1023,6 @@ impl Context {
                 storage_buffer_pool,
                 tree: Tree::root(),
                 execution: Execution::default(),
-                traced: false,
             },
             executor,
             panicked,
@@ -1111,9 +1106,7 @@ impl crate::Spawner for Context {
 
         // Track supervision before resetting configuration
         let parent = Arc::clone(&self.tree);
-        let traced = self.traced;
         self.execution = Execution::default();
-        self.traced = false;
         let (child, aborted) = Tree::child(&parent);
         if aborted {
             return Handle::closed(metric);
@@ -1122,15 +1115,7 @@ impl crate::Spawner for Context {
 
         // Spawn the task (we don't care about Model)
         let executor = self.executor();
-        let future = if traced {
-            let span = info_span!(parent: None, "task", name = %label.name());
-            for (key, value) in &self.attributes {
-                span.set_attribute(key.clone(), value.clone());
-            }
-            Either::Left(f(self).instrument(span))
-        } else {
-            Either::Right(f(self))
-        };
+        let future = f(self);
         let (f, handle) = Handle::init(
             future,
             metric,
@@ -1215,7 +1200,6 @@ impl crate::Supervisor for Context {
             storage_buffer_pool: self.storage_buffer_pool.clone(),
             tree,
             execution: Execution::default(),
-            traced: false,
         }
     }
 
@@ -1233,13 +1217,6 @@ impl crate::Supervisor for Context {
             label: self.name.clone(),
             attributes: self.attributes.clone(),
         }
-    }
-}
-
-impl crate::Tracing for Context {
-    fn with_span(mut self) -> Self {
-        self.traced = true;
-        self
     }
 }
 

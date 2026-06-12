@@ -13,11 +13,11 @@ use commonware_cryptography::{
     ed25519, sha256::Digest as Sha256Digest, Digest as _, Digestible, Signer as _,
 };
 use commonware_runtime::{deterministic, Buf, BufMut};
-use commonware_utils::sync::AsyncRwLock;
+use commonware_utils::sync::TracedAsyncRwLock;
 use futures::Stream;
 use std::{convert::Infallible, sync::Arc};
 
-pub(crate) type TestDatabases = Arc<AsyncRwLock<TestDb>>;
+pub(crate) type TestDatabases = Arc<TracedAsyncRwLock<TestDb>>;
 pub(crate) type TestScheme = scheme_mocks::Scheme<ed25519::PublicKey>;
 pub(crate) type TestVariant = Standard<TestBlock>;
 
@@ -63,7 +63,7 @@ impl<E: Send> ManagedDb<E> for TestDb {
         Ok(Self)
     }
 
-    async fn new_batch(_db: &Arc<AsyncRwLock<Self>>) -> Self::Unmerkleized {
+    async fn new_batch(_db: &Arc<TracedAsyncRwLock<Self>>) -> Self::Unmerkleized {
         TestUnmerkleized
     }
 
@@ -213,7 +213,7 @@ impl Application<deterministic::Context> for TestApp {
 }
 
 pub(crate) fn test_databases() -> TestDatabases {
-    Arc::new(AsyncRwLock::new(TestDb))
+    Arc::new(TracedAsyncRwLock::new("test", TestDb))
 }
 
 pub(crate) fn anchor(height: u64, digest_byte: u8) -> crate::stateful::db::Anchor<Sha256Digest> {

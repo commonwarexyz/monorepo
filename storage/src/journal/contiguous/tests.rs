@@ -2,6 +2,7 @@
 
 use super::{Contiguous, Many, Reader as _};
 use crate::journal::{contiguous::Mutable, Error};
+use commonware_macros::boxed;
 use commonware_utils::NZUsize;
 use futures::{future::BoxFuture, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -9,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
         deterministic, telemetry::metrics, Blob, Clock, Error, IoBufs, IoBufsMut, Metrics, Name,
-        Storage, Supervisor, Tracing,
+        Storage, Supervisor,
     };
     use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
     use std::{
@@ -57,13 +58,6 @@ pub(super) mod partition_sync_fault {
 
         fn with_attribute(mut self, key: &'static str, value: impl std::fmt::Display) -> Self {
             self.inner = self.inner.with_attribute(key, value);
-            self
-        }
-    }
-
-    impl Tracing for Context {
-        fn with_span(mut self) -> Self {
-            self.inner = self.inner.with_span();
             self
         }
     }
@@ -198,6 +192,7 @@ async fn read_item<J: Contiguous>(journal: &J, position: u64) -> Result<J::Item,
 /// These tests assume the journal is configured with **`items_per_section = 10`**
 /// (or `items_per_blob = 10` for fixed journals). Some tests rely on this value
 /// for section boundary calculations and pruning behavior.
+#[boxed]
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String, usize) -> BoxFuture<'static, Result<J, Error>>,

@@ -23,6 +23,7 @@
 //! [`await_or_cancel`].
 
 use crate::stateful::{
+    actor::metrics::Metrics as StatefulMetrics,
     db::{Anchor, DatabaseSet},
     Application, Proposed, PruneConfig,
 };
@@ -46,10 +47,7 @@ use std::{
     future::Future,
     num::NonZeroUsize,
 };
-use tracing::{debug, warn};
-
-mod metrics;
-pub(crate) use metrics::Metrics as ProcessorMetrics;
+use tracing::{debug, info_span, warn};
 
 type PendingDigest<A, E> = <<A as Application<E>>::Block as Digestible>::Digest;
 type PendingBatches<A, E> = <<A as Application<E>>::Databases as DatabaseSet<E>>::Merkleized;
@@ -199,7 +197,7 @@ where
     databases: A::Databases,
     pending: PendingMap<A, E>,
     last_processed: Anchor<PendingDigest<A, E>>,
-    metrics: ProcessorMetrics,
+    metrics: StatefulMetrics,
     pruning: Option<Pruning<PendingSyncTargets<A, E>>>,
 }
 
@@ -214,7 +212,7 @@ where
         app: A,
         databases: A::Databases,
         last_processed: Anchor<PendingDigest<A, E>>,
-        metrics: ProcessorMetrics,
+        metrics: StatefulMetrics,
         prune_config: Option<PruneConfig>,
     ) -> Self {
         Self {
@@ -257,7 +255,7 @@ where
         let timer = self.metrics.propose_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 response.send_lossy(None);
@@ -348,7 +346,7 @@ where
         let timer = self.metrics.verify_duration.timer(context);
 
         let mut ancestry = Box::pin(ancestry);
-        let block = match next_or_cancel(&mut response, &mut ancestry).await {
+        let block = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(block)) => block,
             Some(None) => {
                 debug!("verification request waiting on incomplete block ancestry");
@@ -414,7 +412,7 @@ where
         }
 
         let round = consensus_context.round();
-        let parent = match next_or_cancel(&mut response, &mut ancestry).await {
+        let parent = match fetch_ancestor(&mut response, &mut ancestry).await {
             Some(Some(parent)) => parent,
             Some(None) => {
                 debug!(
@@ -494,6 +492,12 @@ where
             response.send_lossy(false);
             return;
         };
+        let tail = info_span!(
+            "stateful.processor.match_commitments",
+            block = %block_digest,
+            parent = %parent_digest,
+        )
+        .entered();
         if !A::Databases::matches_sync_targets(&merkleized, &A::sync_targets(&block)) {
             warn!(
                 ?parent_digest,
@@ -505,11 +509,19 @@ where
         }
         self.cache_pending(block_digest, parent_digest, round, merkleized);
         let _ = self.metrics.pending_blocks.try_set(self.pending.len());
+        drop(block);
+        drop(tail);
         timer.observe(context);
         response.send_lossy(true);
     }
 
     /// Ensure parent state exists, then prepare unmerkleized batches for execution.
+    #[tracing::instrument(
+        name = "stateful.processor.prepare_batches",
+        level = "info",
+        skip_all,
+        fields(parent = %parent.digest())
+    )]
     pub(super) async fn prepare_batches<S, V, Response>(
         &mut self,
         context: &E,
@@ -825,6 +837,12 @@ where
 }
 
 /// Returns true when `block` is already covered by committed state.
+#[tracing::instrument(
+    name = "stateful.processor.is_already_processed",
+    level = "info",
+    skip_all,
+    fields(height = %block.height(), digest = %block.digest())
+)]
 async fn is_already_processed<S, V, Response>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,
     marshal: MarshalMailbox<S, V>,
@@ -865,7 +883,8 @@ where
 }
 
 /// Read the next ancestry item unless the response receiver is dropped.
-pub(super) async fn next_or_cancel<R, T, S>(
+#[tracing::instrument(name = "stateful.processor.fetch_ancestor", level = "info", skip_all)]
+pub(super) async fn fetch_ancestor<R, T, S>(
     response: &mut oneshot::Sender<R>,
     stream: &mut S,
 ) -> Option<Option<T>>
@@ -892,11 +911,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        await_or_cancel, next_or_cancel, FinalizeStatus, PrepareBatchesError, Processor, Prune,
+        await_or_cancel, fetch_ancestor, FinalizeStatus, PrepareBatchesError, Processor, Prune,
         Pruning,
     };
     use crate::stateful::{
-        actor::processor::ProcessorMetrics,
+        actor::metrics::Metrics as StatefulMetrics,
         db::{Anchor, DatabaseSet, Merkleized as _, Unmerkleized as _},
         Application, Proposed, PruneConfig,
     };
@@ -924,7 +943,7 @@ mod tests {
         channel::oneshot,
         non_empty_range,
         range::NonEmptyRange,
-        sync::{AsyncRwLock, Mutex},
+        sync::{Mutex, TracedAsyncRwLock},
         NZUsize, NZU16, NZU64,
     };
     use futures::{Stream, StreamExt};
@@ -946,7 +965,7 @@ mod tests {
 
     type Qmdb<E> =
         any::unordered::fixed::Db<mmr::Family, E, Digest, Digest, Sha256, TwoCap, Sequential>;
-    type DbSet<E> = Arc<AsyncRwLock<Qmdb<E>>>;
+    type DbSet<E> = Arc<TracedAsyncRwLock<Qmdb<E>>>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct Block {
@@ -1325,7 +1344,7 @@ mod tests {
                 deterministic::Context,
             >>::init(context.child("db_set"), config.clone())
             .await;
-            let metrics = ProcessorMetrics::new(context.child("processor_metrics"));
+            let metrics = StatefulMetrics::new(&context);
             Self {
                 context_cell: ContextCell::new(context),
                 processor: Processor::new(
@@ -1696,7 +1715,7 @@ mod tests {
                     round: Block::genesis().context().round,
                     digest: Block::genesis().digest(),
                 },
-                ProcessorMetrics::new(harness.context_cell.child("staged_processor_metrics")),
+                StatefulMetrics::new(harness.context_cell.as_present()),
                 Some(PruneConfig {
                     max_pending_acks: NZUsize!(1),
                     maintenance_interval: NZUsize!(1),
@@ -2117,7 +2136,7 @@ mod tests {
             let mut ancestry = Box::pin(futures::stream::pending::<Block>());
             drop(receiver);
 
-            assert_eq!(next_or_cancel(&mut response, &mut ancestry).await, None);
+            assert_eq!(fetch_ancestor(&mut response, &mut ancestry).await, None);
         });
     }
 
