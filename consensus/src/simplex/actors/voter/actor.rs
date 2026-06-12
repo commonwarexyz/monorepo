@@ -998,7 +998,13 @@ impl<
             .state
             .leader_index(observed_view)
             .expect("leader not set");
-        batcher.update(observed_view, leader, self.state.last_finalized(), None);
+        batcher.update(
+            self.state.view_span(observed_view),
+            observed_view,
+            leader,
+            self.state.last_finalized(),
+            None,
+        );
 
         // Process messages
         let mut pending_propose: Option<Request<Context<D, S::PublicKey>, D>> = None;
@@ -1171,14 +1177,13 @@ impl<
 
                     // If the leader nullified or is inactive, reduce leader
                     // timeout to now
-                    self.state.view_span(current_view).in_scope(|| {
-                        batcher.update(
-                            current_view,
-                            leader,
-                            self.state.last_finalized(),
-                            forwardable_proposal,
-                        );
-                    });
+                    batcher.update(
+                        self.state.view_span(current_view),
+                        current_view,
+                        leader,
+                        self.state.last_finalized(),
+                        forwardable_proposal,
+                    );
                 }
             },
         }

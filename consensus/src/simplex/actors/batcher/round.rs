@@ -51,7 +51,9 @@ pub struct Round<
     nullification: Option<Nullification<S>>,
     finalization: Option<Finalization<S, D>>,
 
-    /// Root span for all work attributed to this view.
+    /// Root span of the view, shared with the voter's round.
+    ///
+    /// Disabled until the voter announces the view via an update.
     span: Span,
 }
 
@@ -62,13 +64,7 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<S, B, D, R>
 {
-    pub fn new(
-        participants: Set<S::PublicKey>,
-        scheme: S,
-        blocker: B,
-        reporter: R,
-        span: Span,
-    ) -> Self {
+    pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
         let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {
@@ -87,13 +83,18 @@ impl<
             nullification: None,
             finalization: None,
 
-            span,
+            span: Span::none(),
         }
     }
 
-    /// Returns the root span for all work attributed to this view.
+    /// Returns the root span of the view.
     pub const fn span(&self) -> &Span {
         &self.span
+    }
+
+    /// Adopts the root span of the view from the voter.
+    pub fn set_span(&mut self, span: Span) {
+        self.span = span;
     }
 
     /// Returns true if we already have a notarization certificate for this view.

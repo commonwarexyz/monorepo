@@ -144,19 +144,12 @@ where
         )
     }
 
-    fn new_round(&self, view: View) -> Round<S, B, D, Re> {
-        let span = info_span!(
-            parent: None,
-            "simplex.batcher.view",
-            epoch = %self.epoch,
-            view = %view
-        );
+    fn new_round(&self) -> Round<S, B, D, Re> {
         Round::new(
             self.participants.clone(),
             self.scheme.clone(),
             self.blocker.clone(),
             self.reporter.clone(),
-            span,
         )
     }
 
@@ -292,14 +285,14 @@ where
             },
             Some(message) = self.mailbox_receiver.recv() else break => match message {
                 Message::Update {
-                    span,
+                    view_span,
                     current: new_current,
                     leader,
                     finalized: new_finalized,
                     forwardable_proposal,
                 } => {
                     let process = info_span!(
-                        parent: &span,
+                        parent: &view_span,
                         "simplex.batcher.process",
                         operation = "update",
                         view = %new_current
@@ -312,9 +305,9 @@ where
                         timed_out: false,
                     };
                     finalized = new_finalized;
-                    work.entry(current.view)
-                        .or_insert_with(|| self.new_round(new_current))
-                        .set_leader(leader);
+                    let round = work.entry(current.view).or_insert_with(|| self.new_round());
+                    round.set_span(view_span);
+                    round.set_leader(leader);
 
                     // If the leader nullified this view or has not been active
                     // recently, tell the voter to reduce the leader timeout to now
@@ -361,7 +354,7 @@ where
 
                     // Add the message to the verifier
                     work.entry(view)
-                        .or_insert_with(|| self.new_round(view))
+                        .or_insert_with(|| self.new_round())
                         .add_constructed(message);
                     self.added.inc();
                     updated_view = view;
@@ -438,7 +431,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
+                            .or_insert_with(|| self.new_round())
                             .set_notarization(notarization.clone());
                         voter.recovered(Certificate::Notarization(notarization));
                     }
@@ -461,7 +454,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
+                            .or_insert_with(|| self.new_round())
                             .set_nullification(nullification.clone());
                         voter.recovered(Certificate::Nullification(nullification));
                     }
@@ -481,7 +474,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round(view))
+                            .or_insert_with(|| self.new_round())
                             .set_finalization(finalization.clone());
                         voter.recovered(Certificate::Finalization(finalization));
                     }
@@ -522,7 +515,7 @@ where
                 // Add the vote to the verifier
                 if work
                     .entry(view)
-                    .or_insert_with(|| self.new_round(view))
+                    .or_insert_with(|| self.new_round())
                     .add_network(sender.clone(), message)
                 {
                     self.added.inc();
