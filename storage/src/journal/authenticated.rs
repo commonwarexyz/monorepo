@@ -736,8 +736,9 @@ where
     S: Strategy,
 {
     type Item = C::Item;
+    type Reader = C::Reader;
 
-    async fn reader(&self) -> impl Reader<Item = C::Item> + '_ {
+    async fn reader(&self) -> C::Reader {
         self.journal.reader().await
     }
 

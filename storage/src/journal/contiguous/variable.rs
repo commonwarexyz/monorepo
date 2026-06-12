@@ -1906,8 +1906,9 @@ async fn drain_tail<B: Blob, V: CodecShared>(
 // Implement Contiguous trait for variable-length items
 impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
     type Item = V;
+    type Reader = Reader<E, V>;
 
-    async fn reader(&self) -> impl super::Reader<Item = V> + '_ {
+    async fn reader(&self) -> Reader<E, V> {
         Self::reader(self)
     }
 

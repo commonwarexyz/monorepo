@@ -1371,8 +1371,9 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
 // Implement Contiguous trait for fixed-length journals
 impl<E: Context, A: CodecFixedShared> super::Contiguous for Journal<E, A> {
     type Item = A;
+    type Reader = Reader<E, A>;
 
-    async fn reader(&self) -> impl super::Reader<Item = A> + '_ {
+    async fn reader(&self) -> Reader<E, A> {
         Self::reader(self)
     }
 
