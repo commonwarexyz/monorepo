@@ -48,7 +48,7 @@ use curve25519_dalek::{
     traits::{IsIdentity, VartimeMultiscalarMul},
 };
 use rand_core::{CryptoRng, RngCore};
-use sha2_v010::{digest::Update, Sha512};
+use sha2::{digest::Update, Sha512};
 #[cfg(feature = "std")]
 use std::collections::HashMap;
 #[cfg(feature = "std")]
@@ -78,7 +78,7 @@ pub struct Item {
 impl<'msg, M: AsRef<[u8]> + ?Sized> From<(VerificationKey, Signature, &'msg M)> for Item {
     fn from(tup: (VerificationKey, Signature, &'msg M)) -> Self {
         let (vk, sig, msg) = tup;
-        let k = Scalar::from_hash(
+        let k = super::scalar_from_hash(
             Sha512::default()
                 .chain(&sig.R_bytes[..])
                 .chain(vk.as_bytes())

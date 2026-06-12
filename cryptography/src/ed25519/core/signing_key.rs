@@ -1,9 +1,9 @@
-use super::{Error, Signature, VerificationKey, VerificationKeyBytes};
+use super::{scalar_from_hash, Error, Signature, VerificationKey, VerificationKeyBytes};
 use commonware_formatting::Hex;
 use core::convert::TryFrom;
 use curve25519_dalek::{constants, scalar::Scalar};
 use rand_core::{CryptoRng, RngCore};
-use sha2_v010::{digest::Update, Digest, Sha512};
+use sha2::{digest::Update, Digest, Sha512};
 
 /// An Ed25519 signing key.
 ///
@@ -140,13 +140,13 @@ impl SigningKey {
     /// Create a signature on `msg` using this key.
     #[allow(non_snake_case)]
     pub fn sign(&self, msg: &[u8]) -> Signature {
-        let r = Scalar::from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
+        let r = scalar_from_hash(Sha512::default().chain(&self.prefix[..]).chain(msg));
 
         let R_bytes = (&r * constants::ED25519_BASEPOINT_TABLE)
             .compress()
             .to_bytes();
 
-        let k = Scalar::from_hash(
+        let k = scalar_from_hash(
             Sha512::default()
                 .chain(&R_bytes[..])
                 .chain(&self.vk.A_bytes.0[..])
