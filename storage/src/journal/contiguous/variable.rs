@@ -956,13 +956,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(())
     }
 
-    /// Persist dirty data and offsets sections so committed data survives a crash.
+    /// Persist dirty data sections so committed data survives a crash.
+    ///
+    /// Does not advance the recovery watermark, so reopen may need to replay entries beyond
+    /// the previous `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         let _op_guard = self.op_lock.lock().await;
         self.flush_dirty_data().await?;
-        self.offsets.commit().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
         Ok(())
@@ -3623,6 +3625,42 @@ mod tests {
             // Data should be intact and offsets rebuilt
             assert_eq!(journal.size().await, 15);
             for i in 0..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_commit_only_durability_across_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "commit-only-durability".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Append items one commit at a time, never syncing, spanning several sections.
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..23u64 {
+                journal.append(&(i * 100)).await.unwrap();
+                journal.commit().await.unwrap();
+            }
+            drop(journal);
+
+            // Reopen recovers every committed item by rebuilding offsets from the data journal.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..23);
+            for i in 0..23u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
 
