@@ -1459,12 +1459,19 @@ impl IoBufs {
 
     /// Coalesce all remaining bytes into a single contiguous [`IoBuf`].
     ///
-    /// Zero-copy if only one buffer. Copies if multiple buffers.
+    /// Zero-copy if only one buffer. Copies into one native aligned
+    /// allocation if multiple buffers, so the result supports zero-copy
+    /// [`IoBuf::try_into_mut`].
     #[inline]
-    pub fn coalesce(mut self) -> IoBuf {
+    pub fn coalesce(self) -> IoBuf {
         match self.inner {
             IoBufsInner::Single(buf) => buf,
-            _ => IoBuf::from(self.copy_to_bytes(self.remaining())),
+            inner => {
+                let bufs = Self { inner };
+                let mut out = IoBufMut::with_capacity(bufs.remaining());
+                bufs.for_each_chunk(|chunk| out.put_slice(chunk));
+                out.freeze()
+            }
         }
     }
 

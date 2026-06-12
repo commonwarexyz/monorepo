@@ -12,8 +12,9 @@ pub use write::Write;
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, Buf, BufMut, Clock, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
-        Runner, Spawner, Storage, Supervisor as _,
+        deterministic, Blob as _, Buf, Clock, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
+        Runner, Spawner,
+        Storage, Supervisor as _,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
@@ -86,8 +87,13 @@ mod tests {
                 return Err(Error::BlobInsufficientLength);
             }
 
+            // Overwrite from the start of the caller's storage, like real
+            // Blob impls, so reused (non-empty) buffers work per the
+            // read_at_buf contract.
             let mut out = buf.into();
-            out.put_slice(&data[start..end]);
+            // SAFETY: `len` bytes are filled by copy_from_slice below.
+            unsafe { out.set_len(len) };
+            out.copy_from_slice(&data[start..end]);
             Ok(out)
         }
 
@@ -216,8 +222,13 @@ mod tests {
                 return Err(Error::BlobInsufficientLength);
             }
 
+            // Overwrite from the start of the caller's storage, like real
+            // Blob impls, so reused (non-empty) buffers work per the
+            // read_at_buf contract.
             let mut out = buf.into();
-            out.put_slice(&state.data[start..end]);
+            // SAFETY: `len` bytes are filled by copy_from_slice below.
+            unsafe { out.set_len(len) };
+            out.copy_from_slice(&state.data[start..end]);
             Ok(out)
         }
 

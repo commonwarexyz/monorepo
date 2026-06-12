@@ -563,11 +563,13 @@ struct ExternalOwner {
 
 /// A raw pooled allocation handle whose layout is stored by its size class.
 ///
-/// This handle carries the allocation base pointer and its tail-header pointer.
-/// While a buffer is parked in the global freelist or a thread-local cache, its
-/// tail header has a stable refcount sentinel, data base pointer, capacity, and
-/// slot id, but its lease is not live. Checkout initializes only the lease
-/// field in place and returns an [`OwnerRef`] to that header.
+/// This handle carries the allocation base pointer and its tail-header
+/// pointer. The tail header's stable fields (refcount sentinel, data base,
+/// capacity, slot, class routing) are always initialized; the lease is live
+/// exactly while the buffer is outside the global freelist (checked out or
+/// parked in a thread-local cache). Checkout initializes only the lease field
+/// in place and returns an [`OwnerRef`] to that header; return to the global
+/// freelist consumes it.
 ///
 /// `PooledBuffer` has no `Drop`: callers must return it to the originating
 /// freelist or deallocate it with the exact layout used for allocation.
@@ -596,26 +598,39 @@ impl PooledBuffer {
     /// Creates a new uninitialized pooled allocation for `layout`.
     ///
     /// `layout` must be the full size-class layout, including usable bytes,
-    /// tail padding, and [`PooledHeader`].
+    /// tail padding, and [`PooledHeader`] (see [`pooled_layout`]).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `layout` cannot host an aligned tail [`PooledHeader`]: the
+    /// size must cover the header, the header must land on its alignment, and
+    /// the layout alignment must be at least the header alignment. This is a
+    /// safety boundary, not a convenience check: a misaligned header would
+    /// make the later field writes undefined behavior, and a header address
+    /// with nonzero low tag bits would be corrupted by owner-tag packing.
     #[inline]
     pub fn new(layout: Layout) -> Self {
-        assert!(layout.size() > 0, "layout size must be non-zero");
-        // SAFETY: layout is valid and non-zero sized.
+        assert_valid_pooled_layout(layout);
+        // SAFETY: layout is valid and non-zero sized (asserted above).
         let ptr = unsafe { alloc(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        // SAFETY: layout is the full pooled allocation layout.
+        // SAFETY: layout is a valid full pooled layout (asserted above).
         let header = unsafe { pooled_header_for_layout(ptr, layout) };
         Self { ptr, header }
     }
 
     /// Creates a new zero-initialized pooled allocation for `layout`.
+    ///
+    /// # Panics
+    ///
+    /// Panics under the same conditions as [`Self::new`].
     #[inline]
     pub fn new_zeroed(layout: Layout) -> Self {
-        assert!(layout.size() > 0, "layout size must be non-zero");
-        // SAFETY: layout is valid and non-zero sized.
+        assert_valid_pooled_layout(layout);
+        // SAFETY: layout is valid and non-zero sized (asserted above).
         let ptr = unsafe { alloc_zeroed(layout) };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        // SAFETY: layout is the full pooled allocation layout.
+        // SAFETY: layout is a valid full pooled layout (asserted above).
         let header = unsafe { pooled_header_for_layout(ptr, layout) };
         Self { ptr, header }
     }
@@ -935,6 +950,29 @@ fn heap_layout(capacity: usize, alignment: usize) -> (Layout, usize) {
     let layout =
         Layout::from_size_align(total, layout_alignment).expect("alignment is a power of two");
     (layout, header_offset)
+}
+
+/// Asserts that `layout` can host an aligned tail [`PooledHeader`].
+///
+/// [`PooledBuffer`] construction is safe and (with the `bench` feature)
+/// public, so the header placement preconditions must be enforced here rather
+/// than assumed: every layout produced by [`pooled_layout`] passes, while a
+/// hand-built layout that would misalign the header (undefined behavior to
+/// write through) or set its low tag bits (corrupted by owner-tag packing)
+/// panics instead.
+fn assert_valid_pooled_layout(layout: Layout) {
+    assert!(
+        layout.size() >= size_of::<PooledHeader>(),
+        "layout must include the pooled header"
+    );
+    assert!(
+        (layout.size() - size_of::<PooledHeader>()).is_multiple_of(align_of::<PooledHeader>()),
+        "pooled header must land on its alignment"
+    );
+    assert!(
+        layout.align() >= align_of::<PooledHeader>(),
+        "layout alignment must cover the pooled header"
+    );
 }
 
 /// Locates the pooled tail header within a full size-class allocation.
@@ -1303,6 +1341,66 @@ mod loom_tests {
 
             // Exactly one drop released the payload, whichever interleaving
             // won the final-owner race.
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn loom_clone_races_concurrent_drop() {
+        loom::model(|| {
+            let released = Arc::new(AtomicUsize::new(0));
+            let bytes = Bytes::from_owner(Tracker(released.clone()));
+            let (_, _, owner) = owner_from_bytes(bytes);
+
+            // Two handles: this thread and the spawned thread. The spawned
+            // thread clones from its own live handle while this thread drops,
+            // racing clone_shared's Relaxed fetch_add against the drop
+            // protocol's Acquire load and Release decrement.
+            // SAFETY: `owner` is live with one reference owned here.
+            unsafe { owner.clone_shared() };
+            let t1 = thread::spawn(move || {
+                // SAFETY: this thread owns one live reference to clone from.
+                unsafe { owner.clone_shared() };
+                // SAFETY: this thread owns two references; drop both.
+                unsafe { owner.drop_shared() };
+                // SAFETY: as above.
+                unsafe { owner.drop_shared() };
+            });
+            // SAFETY: the main thread owns one reference.
+            unsafe { owner.drop_shared() };
+            t1.join().unwrap();
+
+            assert_eq!(released.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn loom_is_unique_races_final_drop() {
+        loom::model(|| {
+            let released = Arc::new(AtomicUsize::new(0));
+            let bytes = Bytes::from_owner(Tracker(released.clone()));
+            let (_, _, owner) = owner_from_bytes(bytes);
+
+            // Two handles: this thread checks uniqueness (the try_into_mut
+            // gate) while the other drops. Observing unique must mean the
+            // other drop fully happened-before (its Release decrement pairs
+            // with is_unique's Acquire load) and did not release the payload.
+            // SAFETY: `owner` is live with one reference owned here.
+            unsafe { owner.clone_shared() };
+            let t1 = thread::spawn(move || {
+                // SAFETY: this thread owns one reference.
+                unsafe { owner.drop_shared() };
+            });
+            // SAFETY: the main thread owns one reference.
+            if unsafe { owner.is_unique() } {
+                // The other handle is gone, so this thread holds the only
+                // reference and the payload must still be live.
+                assert_eq!(released.load(Ordering::SeqCst), 0);
+            }
+            // SAFETY: the main thread owns the remaining reference.
+            unsafe { owner.drop_shared() };
+            t1.join().unwrap();
+
             assert_eq!(released.load(Ordering::SeqCst), 1);
         });
     }
