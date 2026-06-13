@@ -247,7 +247,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     pub(crate) async fn prune(&mut self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.check_import_persisted()?;
 
-        let reader = self.journal.reader().await;
+        let reader = self.journal.reader();
         let bounds = reader.bounds();
         if bounds.is_empty() {
             return Ok(());
@@ -283,7 +283,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         &self,
         target: Location<F>,
     ) -> Result<Option<(u64, Witness<F, D>)>, Error<F>> {
-        let reader = self.journal.reader().await;
+        let reader = self.journal.reader();
         let pos = Self::first_at_or_above(&reader, target).await?;
         if pos >= reader.bounds().end {
             return Ok(None);
@@ -295,7 +295,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Binary search for the first retained position whose entry commits at least `leaf_count`
     /// leaves, or the end of the journal if none does.
     async fn first_at_or_above(
-        reader: &variable::Reader<'_, E, Witness<F, D>>,
+        reader: &variable::Reader<E, Witness<F, D>>,
         leaf_count: Location<F>,
     ) -> Result<u64, Error<F>> {
         let bounds = reader.bounds();
@@ -318,7 +318,7 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Clears to a nonzero size: if a crash interrupts the import, reopen sees a non-empty
     /// journal with an unreadable tip and fails, instead of mistaking it for a fresh db.
     async fn clear_for_import(&mut self) -> Result<(), Error<F>> {
-        let size = self.journal.size().await;
+        let size = self.journal.size();
         self.journal.clear_to_size(size.max(1)).await?;
         Ok(())
     }
@@ -406,12 +406,12 @@ where
     S: Strategy,
     Op: Read,
 {
-    let size = journal.size().await;
+    let size = journal.size();
     if size == 0 {
         return Err(Error::DataCorrupted("missing compact witness"));
     }
     let entry = {
-        let reader = journal.reader().await;
+        let reader = journal.reader();
         reader.read(size - 1).await?
     };
     rebuild_and_verify::<F, H::Digest, H, S, Op>(
@@ -493,7 +493,7 @@ where
     S: Strategy,
     Op: Read,
 {
-    if journal.size().await == 0 {
+    if journal.size() == 0 {
         bootstrap_initial_commit::<E, F, H, S>(&mut journal, merkle, initial_commit_op_bytes)
             .await?;
     }
@@ -558,7 +558,7 @@ pub(crate) mod tests {
     {
         let mut entries = Vec::new();
         {
-            let reader = journal.reader().await;
+            let reader = journal.reader();
             for p in pos..reader.bounds().end {
                 entries.push(reader.read(p).await.unwrap());
             }
@@ -578,9 +578,9 @@ pub(crate) mod tests {
         F: Family,
         D: Digest,
     {
-        let size = journal.size().await;
+        let size = journal.size();
         let entry = {
-            let reader = journal.reader().await;
+            let reader = journal.reader();
             reader.read(size - 1).await.unwrap()
         };
         (entry.op_bytes, entry.proof, entry.pinned_nodes)
@@ -618,7 +618,7 @@ pub(crate) mod tests {
         F: Family,
         D: Digest,
     {
-        let size = journal.size().await;
+        let size = journal.size();
         journal.rewind(size - 1).await.unwrap();
         journal
             .append(&Witness {
