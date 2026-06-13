@@ -166,6 +166,14 @@ fn fuzz(input: FuzzInput) {
                     .await
                     .unwrap();
                     restarts += 1;
+                    // Refresh the crash-recovery model from the checkpoint we just
+                    // reopened from: it is now the latest persisted baseline, paired
+                    // with the current state, so a later crash can validly restore it.
+                    // Mode 0 reopens from the table (no checkpoint), which cannot serve
+                    // as a restore point, so it leaves no synced checkpoint. A stale
+                    // pre-restart checkpoint would otherwise be recovered past, dropping
+                    // re-put keys the rolled-back model still expects.
+                    synced = checkpoint.map(|cp| (cp, expected_state.clone(), cursors.clone()));
                 }
                 Op::Close => {
                     freezer.close().await.unwrap();
