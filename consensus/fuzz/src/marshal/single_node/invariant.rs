@@ -24,7 +24,7 @@ pub fn check_all<H: TestHarness>(
     application_delivered: &[(Height, D)],
     canonical: &[H::TestBlock],
 ) {
-    check_ready_prefix_delivered(ready_prefix, delivery_log);
+    check_ready_prefix_delivered(ready_prefix, application_delivered);
     check_segment_ordering(segment_bounds, segment_starts, delivery_log);
     check_redelivery_after_restart(expected_redeliveries, segment_bounds, delivery_log);
     check_digest_fidelity::<H>(application_delivered, canonical);
@@ -32,12 +32,15 @@ pub fn check_all<H: TestHarness>(
 
 /// Invariant: ready-prefix delivery.
 ///
-/// Every height in `1..=ready_prefix` must appear at least once in
-/// `delivery_log`. The driver advances `ready_prefix` only when mirrored
-/// repair makes marshal's finalized archive contiguous from height 1, which is
-/// precisely when marshal is obliged to deliver the prefix.
-pub fn check_ready_prefix_delivered(ready_prefix: u64, delivery_log: &[Height]) {
-    let delivered_set: BTreeSet<u64> = delivery_log.iter().map(|h| h.get()).collect();
+/// Every height in `1..=ready_prefix` must appear at least once in the
+/// application's delivery record. The driver advances `ready_prefix` only when
+/// mirrored repair makes marshal's finalized archive contiguous from height 1,
+/// which is precisely when marshal is obliged to deliver the prefix. This
+/// checks `application_delivered` (the ground truth of what reached the
+/// application) rather than the ack-derived `delivery_log`, which omits stale
+/// redeliveries skipped at restart boundaries.
+pub fn check_ready_prefix_delivered(ready_prefix: u64, application_delivered: &[(Height, D)]) {
+    let delivered_set: BTreeSet<u64> = application_delivered.iter().map(|(h, _)| h.get()).collect();
     for h in 1..=ready_prefix {
         assert!(
             delivered_set.contains(&h),

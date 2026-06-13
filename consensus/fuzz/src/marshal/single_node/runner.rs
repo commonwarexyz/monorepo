@@ -347,6 +347,13 @@ where
         let mut durable_available: HashSet<u64> = HashSet::new();
         let mut variant_available: HashSet<u64> = HashSet::new();
         let mut finalized_available: HashSet<u64> = HashSet::new();
+        // Heights for which marshal holds a live buffer waiter, created by a
+        // Subscribe for a block it does not yet have. Only such a waiter makes a
+        // later PublishViaVariant actor-observable: it fires the subscription,
+        // marshal ingests the block, and a pending floor anchored on it
+        // completes. Without a waiter a publish only populates the variant cache
+        // and marshal never re-checks it. Cleared on Restart with the actor.
+        let mut subscribed_heights: HashSet<u64> = HashSet::new();
         // Publish order backing `variant_available`'s FIFO eviction.
         let mut variant_order: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
         // ready_prefix is monotone non-decreasing. It advances when the
@@ -662,6 +669,11 @@ where
                     let block = &canonical[block_index(block_idx)];
                     let height = H::height(block);
                     let round = round_for_height(height);
+                    // Marshal registers a buffer waiter only when it lacks the
+                    // block; a hit answers the subscription inline without one.
+                    if !block_available(&durable_available, &variant_available, height.get()) {
+                        subscribed_heights.insert(height.get());
+                    }
                     if by_commitment {
                         subscriptions.push(handle.mailbox.subscribe_by_commitment(
                             H::commitment(block),
@@ -843,6 +855,11 @@ where
                             height: fresh_height,
                         },
                     ));
+                    // The live (non-closed) subscriptions above leave marshal a
+                    // waiter for the fresh block when it is missing locally.
+                    if !block_available(&durable_available, &variant_available, fresh_height.get()) {
+                        subscribed_heights.insert(fresh_height.get());
+                    }
                     handle.mailbox.hint_notarized(fresh_round, fresh_commitment);
 
                     // Only report consensus certificates for a locally missing
@@ -971,17 +988,28 @@ where
                                 }
                             }
                         }
-                        // Marshal holds a buffer subscription for a pending
-                        // floor anchor; the publish completes it and marshal
-                        // ingests the block as the durable floor anchor.
-                        repair_wake |= apply_pending_floor(
-                            &mut pending_floor,
-                            height,
-                            &mut durable_available,
-                            &mut finalized_available,
-                            &mut processed_height,
-                            &mut segment_starts,
-                        );
+                        // A publish only completes a pending floor anchor when
+                        // marshal holds a live waiter for this block (from a
+                        // prior Subscribe): the publish fires the subscription
+                        // and marshal ingests it. Without a waiter the block
+                        // only lands in the variant cache, which marshal does
+                        // not re-check, so the floor stays parked on the
+                        // resolver. This is independent of the variant.
+                        //
+                        // Marshal subscriptions are one-shot: ingest notifies and
+                        // removes them. Consume the waiter here unconditionally so
+                        // a later republish (after the block is FIFO-evicted) does
+                        // not wake a floor that real marshal can no longer serve.
+                        if subscribed_heights.remove(&h) {
+                            repair_wake |= apply_pending_floor(
+                                &mut pending_floor,
+                                height,
+                                &mut durable_available,
+                                &mut finalized_available,
+                                &mut processed_height,
+                                &mut segment_starts,
+                            );
+                        }
                     }
                 }
                 MarshalEvent::AckNext => {
@@ -1070,6 +1098,9 @@ where
                     // visible to marshal.
                     variant_available.clear();
                     variant_order.clear();
+                    // The new actor starts with no buffer waiters; any
+                    // subscription registered by the prior instance died with it.
+                    subscribed_heights.clear();
                     // Marshal's processed_height for the new instance
                     // comes from its persistent metadata, which
                     // setup.height reflects. Pending deliveries that
