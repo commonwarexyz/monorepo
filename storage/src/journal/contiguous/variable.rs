@@ -48,7 +48,7 @@ pub struct PreparedAppend<V> {
 const REPLAY_BUFFER_SIZE: NonZeroUsize = NZUsize!(1024);
 
 /// Maximum positions resolved per replay batch (bounds the offsets read per step).
-const REPLAY_BATCH_POSITIONS: u64 = 1024;
+const REPLAY_BATCH_SIZE: u64 = 1024;
 
 /// Suffix appended to the base partition name for the data journal.
 const DATA_SUFFIX: &str = "_data";
@@ -201,10 +201,10 @@ pub struct Journal<E: Context, V: Codec> {
     /// Optional compression level when encoding items.
     compression: Option<u8>,
 
-    /// [Codec] configuration for decoding items, shared with [Reader]s.
+    /// [Codec] configuration for decoding items.
     codec_config: V::Cfg,
 
-    /// Metrics for monitoring journal state and activity, shared with [Reader]s.
+    /// Journal and Reader metrics.
     metrics: Arc<Metrics<E>>,
 
     /// Number of live [Reader]s. Gates rewind, which would truncate bytes a reader can see.
@@ -220,16 +220,30 @@ impl Drop for ReadersGuard {
     }
 }
 
-/// An owned reader that holds a consistent snapshot of the variable journal.
+/// A reader over a snapshot of the variable journal.
 pub struct Reader<E: Context, V: Codec> {
+    /// Journal bounds at snapshot time.
     bounds: std::ops::Range<u64>,
+
     /// Owned read handles for each retained data section at snapshot time.
-    sections: BTreeMap<u64, paged::Reader<E::Blob>>,
+    sections: Arc<BTreeMap<u64, paged::Reader<E::Blob>>>,
+
+    /// Maps positions to byte offsets within the data sections.
     offsets: fixed::Reader<E, u64>,
+
+    /// The number of items in each section.
     items_per_section: u64,
+
+    /// [Codec] configuration for decoding items.
     codec_config: V::Cfg,
+
+    /// Whether items are zstd-compressed.
     compressed: bool,
+
+    /// Journal and Reader metrics.
     metrics: Arc<Metrics<E>>,
+
+    /// Decrements the journal's reader count on drop.
     _guard: ReadersGuard,
 }
 
@@ -249,7 +263,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
     ///
     /// The snapshot's sections contiguously cover its bounds, so every section containing an
     /// in-bounds position is present.
-    fn get_section(&self, section: u64) -> &paged::Reader<E::Blob> {
+    fn section_handle(&self, section: u64) -> &paged::Reader<E::Blob> {
         self.sections
             .get(&section)
             .expect("section within bounds must be in snapshot")
@@ -312,9 +326,8 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
         section: u64,
         offsets: &[u64],
     ) -> Result<Vec<V>, Error> {
-        // Fall back to per-item reads for trivial spans (per-item reads surface decode errors
-        // for corrupt offsets data).
-        if offsets.len() <= 1 || offsets[offsets.len() - 1] <= offsets[0] {
+        // Trivial spans take the single-item path directly.
+        if offsets.len() <= 1 {
             let mut items = Vec::with_capacity(offsets.len());
             for &offset in offsets {
                 items.push(self.read_at_offset(handle, offset).await?);
@@ -323,10 +336,14 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
         }
 
         // Read the byte span covering every item but the last in one operation; the last item's
-        // length is unknown, so it goes through the single-item path.
+        // length is unknown, so it goes through the single-item path. Corrupt offsets data may
+        // not be strictly increasing, so the span is computed checked.
         let start = offsets[0];
         let end = offsets[offsets.len() - 1];
-        let range_len = usize::try_from(end - start).map_err(|_| Error::OffsetOverflow)?;
+        let range_len = end
+            .checked_sub(start)
+            .and_then(|len| usize::try_from(len).ok())
+            .ok_or(Error::OffsetOverflow)?;
         let bytes = handle
             .read_at(start, range_len)
             .await
@@ -449,7 +466,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
             .and_then(|next| next.checked_mul(self.items_per_section))
             .ok_or(Error::OffsetOverflow)?
             .min(self.bounds.end);
-        let window_end = section_end.min(start.saturating_add(REPLAY_BATCH_POSITIONS));
+        let window_end = section_end.min(start.saturating_add(REPLAY_BATCH_SIZE));
         let positions: Vec<u64> = (start..window_end).collect();
         let offsets = self
             .offsets
@@ -473,7 +490,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
             run_len += 1;
         }
 
-        let handle = self.get_section(section);
+        let handle = self.section_handle(section);
         let items = self
             .read_consecutive(handle, section, &offsets[..run_len])
             .await?;
@@ -503,7 +520,7 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<E, V> {
         let _timer = self.metrics.read_timer();
         self.validate_readable(position)?;
         let offset = self.offsets.read(position).await?;
-        let handle = self.get_section(position_to_section(position, self.items_per_section));
+        let handle = self.section_handle(position_to_section(position, self.items_per_section));
         let item = self.read_at_offset(handle, offset).await?;
         self.metrics.items_read.inc();
         Ok(item)
@@ -572,7 +589,7 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<E, V> {
                 group_end += 1;
             }
 
-            let handle = self.get_section(section);
+            let handle = self.section_handle(section);
             let mut run_start = group_start;
             while run_start < group_end {
                 let mut run_end = run_start + 1;
@@ -619,8 +636,8 @@ impl<E: Context, V: CodecShared> super::Reader for Reader<E, V> {
             return Err(Error::ItemOutOfRange(start_pos));
         }
 
-        // Stream batches of consecutive items via the existing batched read path. The state is
-        // the next position to emit; an error pins it to `bounds.end`, terminating the stream.
+        // Stream items in batches. The unfold state is the next position to emit; an error
+        // pins it to `bounds.end`, terminating the stream.
         let stream = stream::unfold(start_pos, move |next_pos| async move {
             if next_pos >= self.bounds.end {
                 return None;

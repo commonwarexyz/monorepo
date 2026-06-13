@@ -91,7 +91,7 @@ use commonware_runtime::{
     Blob, Buf, IoBuf, IoBufMut, Metrics, Storage,
 };
 use futures::stream::{self, Stream, StreamExt};
-use std::{collections::BTreeMap, io::Cursor, num::NonZeroUsize};
+use std::{collections::BTreeMap, io::Cursor, num::NonZeroUsize, sync::Arc};
 use tracing::{trace, warn};
 use zstd::{bulk::compress, decode_all};
 
@@ -219,6 +219,10 @@ pub(crate) fn decode_item<V: Codec>(
 pub struct Journal<E: Storage + Metrics, V: Codec> {
     manager: Manager<E, AppendFactory>,
 
+    /// Owned read handles for every retained section, shared with snapshot readers. Replaced
+    /// wholesale whenever the section set changes, so held clones stay consistent.
+    section_readers: Arc<BTreeMap<u64, Reader<E::Blob>>>,
+
     /// Compression level (if enabled).
     compression: Option<u8>,
 
@@ -242,11 +246,24 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
         };
         let manager = Manager::init(context, manager_cfg).await?;
 
-        Ok(Self {
+        let mut journal = Self {
             manager,
+            section_readers: Arc::new(BTreeMap::new()),
             compression: cfg.compression,
             codec_config: cfg.codec_config,
-        })
+        };
+        journal.refresh_section_readers();
+        Ok(journal)
+    }
+
+    /// Rebuild the shared section read handles after a change to the section set.
+    fn refresh_section_readers(&mut self) {
+        self.section_readers = Arc::new(
+            self.manager
+                .sections_from(0)
+                .map(|(&section, writer)| (section, writer.reader()))
+                .collect(),
+        );
     }
 
     /// Reads an item from the blob at the given offset.
@@ -595,9 +612,13 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// The buffer must be in the on-disk format produced by [Self::encode_item].
     pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
+        let created = self.manager.get(section)?.is_none();
         let blob = self.manager.get_or_create(section).await?;
         let offset = blob.size().await;
         blob.append(buf).await?;
+        if created {
+            self.refresh_section_readers();
+        }
         trace!(blob = section, offset, "appended item");
         Ok(offset)
     }
@@ -723,7 +744,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind_to_offset(&mut self, section: u64, offset: u64) -> Result<(), Error> {
-        self.manager.rewind(section, offset).await
+        self.manager.rewind(section, offset).await?;
+        self.refresh_section_readers();
+        Ok(())
     }
 
     /// Rewinds the journal to the given `section` and `size`.
@@ -736,7 +759,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// * This operation is not atomic, but it will always leave the journal in a consistent state
     ///   in the event of failure since blobs are always removed in reverse order of section.
     pub async fn rewind(&mut self, section: u64, size: u64) -> Result<(), Error> {
-        self.manager.rewind(section, size).await
+        self.manager.rewind(section, size).await?;
+        self.refresh_section_readers();
+        Ok(())
     }
 
     /// Rewinds the `section` to the given `size`.
@@ -764,7 +789,11 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
 
     /// Prunes all `sections` less than `min`. Returns true if any sections were pruned.
     pub async fn prune(&mut self, min: u64) -> Result<bool, Error> {
-        self.manager.prune(min).await
+        let pruned = self.manager.prune(min).await?;
+        if pruned {
+            self.refresh_section_readers();
+        }
+        Ok(pruned)
     }
 
     /// Returns the number of the oldest section in the journal.
@@ -778,11 +807,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     }
 
     /// Returns owned read handles for every retained section, for snapshot readers.
-    pub(crate) fn section_readers(&self) -> BTreeMap<u64, Reader<E::Blob>> {
-        self.manager
-            .sections_from(0)
-            .map(|(&section, writer)| (section, writer.reader()))
-            .collect()
+    pub(crate) fn section_readers(&self) -> Arc<BTreeMap<u64, Reader<E::Blob>>> {
+        self.section_readers.clone()
     }
 
     /// Returns true if no sections exist.
@@ -804,7 +830,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     ///
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
-        self.manager.clear().await
+        self.manager.clear().await?;
+        self.refresh_section_readers();
+        Ok(())
     }
 }
 
