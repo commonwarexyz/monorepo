@@ -215,7 +215,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
 ///         result = reader.recv() => {
 ///             let Some((pos, item)) = result? else { break };
 ///             // Process item...
-///             reader.ack(pos)?;
+///             reader.ack(pos).await?;
 ///         }
 ///         _ = shutdown => break,
 ///     }

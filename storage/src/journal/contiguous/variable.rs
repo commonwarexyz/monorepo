@@ -380,6 +380,15 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
             let data_end = local_offset
                 .checked_add(item_len)
                 .ok_or(Error::OffsetOverflow)?;
+            // data_end should never exceed the read span, but guard the slice defensively.
+            if data_end > bytes.len() {
+                return Err(Error::OffsetDataMismatch {
+                    section,
+                    offset,
+                    expected_len: item_len,
+                    actual_len,
+                });
+            }
 
             items.push(decode_item::<V>(
                 &bytes[data_start..data_end],
@@ -461,12 +470,10 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
         // Bound the batch to `start`'s section (consecutive positions are only byte-adjacent
         // within one section) and to a fixed position count (bounds offsets-read memory).
         let section = position_to_section(start, self.items_per_section);
-        let section_end = section
-            .checked_add(1)
-            .and_then(|next| next.checked_mul(self.items_per_section))
-            .ok_or(Error::OffsetOverflow)?
+        let remaining_in_section = self.items_per_section - (start % self.items_per_section);
+        let window_end = start
+            .saturating_add(remaining_in_section.min(REPLAY_BATCH_SIZE))
             .min(self.bounds.end);
-        let window_end = section_end.min(start.saturating_add(REPLAY_BATCH_SIZE));
         let positions: Vec<u64> = (start..window_end).collect();
         let offsets = self
             .offsets
