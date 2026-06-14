@@ -11,14 +11,17 @@ use commonware_storage::{
     merkle::{mmb, mmr, Error as MerkleError, Family, Location},
     qmdb::{
         keyless::variable::{CompactConfig, CompactDb},
+        sync::compact as compact_sync,
         Error,
     },
 };
 use commonware_utils::{FuzzRng, NZUsize, NZU16, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroU16;
+use std::{num::NonZeroU16, sync::Arc};
 
 const MAX_OPERATIONS: usize = 50;
+const MAX_VALUE_LEN: usize = 10000;
+const MAX_METADATA_LEN: usize = 1000;
 type CodecConfig = (commonware_codec::RangeCfg<usize>, ());
 
 /// Which error variant a bad-floor commit should produce.
@@ -101,7 +104,7 @@ impl<'a> Arbitrary<'a> for Operation {
         match choice % 12 {
             0 => {
                 let value_len: u16 = u.arbitrary()?;
-                let actual_len = ((value_len as usize) % 10000) + 1;
+                let actual_len = (((value_len as usize) % MAX_VALUE_LEN) + 1).min(u.len());
                 let value_bytes = u.bytes(actual_len)?.to_vec();
                 Ok(Operation::Append { value_bytes })
             }
@@ -109,7 +112,8 @@ impl<'a> Arbitrary<'a> for Operation {
                 let has_metadata: bool = u.arbitrary()?;
                 let metadata_bytes = if has_metadata {
                     let metadata_len: u16 = u.arbitrary()?;
-                    let actual_len = ((metadata_len as usize) % 1000) + 1;
+                    let actual_len =
+                        (((metadata_len as usize) % MAX_METADATA_LEN) + 1).min(u.len());
                     Some(u.bytes(actual_len)?.to_vec())
                 } else {
                     None
@@ -397,6 +401,33 @@ fn fuzz_family<F: Family, S: Strategy>(input: &FuzzInput, suffix: &str, strategy
             }
         }
 
+        // Compact-sync round-trip: rebuild a fresh db from the source's persisted compact witness,
+        // exercising compact_state, init_from_validated_state, and Store::from_import.
+        db.sync().await.expect("Sync should not fail");
+        let target = db.target();
+        let source = Arc::new(db);
+        let client_cfg = test_config(&format!("{suffix}-client"), &context, strategy.clone());
+        let client: Db<F, S> = compact_sync::sync(compact_sync::Config {
+            context: context.child("client"),
+            resolver: source.clone(),
+            target: target.clone(),
+            db_config: client_cfg.clone(),
+        })
+        .await
+        .expect("Compact sync should not fail");
+        assert_eq!(client.root(), target.root);
+        assert_eq!(client.get_metadata(), source.get_metadata());
+        drop(client);
+
+        // Reopen from disk: the imported witness must persist across a restart.
+        let reopened: Db<F, S> = Db::init(context.child("client_reopen"), client_cfg)
+            .await
+            .expect("Failed to reopen imported client");
+        assert_eq!(reopened.root(), target.root);
+        assert_eq!(reopened.get_metadata(), source.get_metadata());
+        reopened.destroy().await.expect("Destroy should not fail");
+
+        let db = Arc::try_unwrap(source).unwrap_or_else(|_| panic!("single source ref"));
         db.destroy().await.expect("Destroy should not fail");
     });
 }
