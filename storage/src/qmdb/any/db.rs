@@ -250,8 +250,6 @@ where
         self.metrics.reads.get_many_calls.inc();
         self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
 
-        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
-
         // Phase 1: Collect candidate locations from the in-memory index. Each key may map to
         // multiple locations due to hash collisions. The index is read-only and Send+Sync, so
         // for large batches the probe is sharded across the strategy pool; each candidate carries
@@ -283,6 +281,7 @@ where
                 .collect()
         };
 
+        let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         if candidates.is_empty() {
             return Ok(results);
         }
