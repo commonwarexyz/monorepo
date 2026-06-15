@@ -180,21 +180,29 @@ impl FixedSize for Checkpoint {
 /// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
 
-/// Metadata key for the committed logical table size.
-const TABLE_SIZE_KEY: MetadataKey = MetadataKey::new(0);
+/// Metadata key for committed table resize state.
+const TABLE_STATE_KEY: MetadataKey = MetadataKey::new(0);
 
 /// Item stored in [Metadata] for [Freezer].
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MetadataValue {
-    TableSize(u32),
+    State {
+        table_size: u32,
+        resize_progress: Option<u32>,
+    },
 }
 
 impl CodecWrite for MetadataValue {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::TableSize(table_size) => {
+            Self::State {
+                table_size,
+                resize_progress,
+            } => {
                 0u8.write(buf);
                 table_size.write(buf);
+                resize_progress.write(buf);
             }
         }
     }
@@ -205,7 +213,10 @@ impl Read for MetadataValue {
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
-            0 => Ok(Self::TableSize(u32::read(buf)?)),
+            0 => Ok(Self::State {
+                table_size: u32::read(buf)?,
+                resize_progress: Option::<u32>::read(buf)?,
+            }),
             _ => Err(commonware_codec::Error::InvalidEnum(tag)),
         }
     }
@@ -214,7 +225,10 @@ impl Read for MetadataValue {
 impl EncodeSize for MetadataValue {
     fn encode_size(&self) -> usize {
         1 + match self {
-            Self::TableSize(_) => u32::SIZE,
+            Self::State {
+                table_size: _,
+                resize_progress,
+            } => u32::SIZE + resize_progress.encode_size(),
         }
     }
 }
@@ -494,40 +508,38 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Self::parse_entries(read_buf)
     }
 
-    /// Determine if an expanded table completed resizing from `table_size`.
-    async fn table_resize_complete(blob: &E::Blob, table_size: u32) -> Result<bool, Error> {
-        for table_index in 0..table_size {
-            let old = Self::read_table(blob, table_index).await?;
-            let new = Self::read_table(blob, table_size + table_index).await?;
-            if old != new {
-                return Ok(false);
-            }
+    /// Validate committed table resize state from metadata.
+    fn metadata_state(value: Option<&MetadataValue>, table_len: u64) -> Option<MetadataValue> {
+        let value = *value?;
+        let MetadataValue::State {
+            table_size,
+            resize_progress,
+        } = value;
+        if table_size == 0 || !table_size.is_power_of_two() {
+            return None;
         }
 
-        Ok(true)
+        let physical_table_size = match resize_progress {
+            Some(progress) if progress < table_size => table_size.checked_mul(2)?,
+            Some(_) => return None,
+            None => table_size,
+        };
+        (Self::table_offset(physical_table_size) <= table_len).then_some(value)
     }
 
-    /// Determine the committed logical table size from metadata and the physical table.
-    async fn recover_table_size(
-        table: &E::Blob,
-        table_len: u64,
-        metadata_table_size: Option<u32>,
-    ) -> Result<u32, Error> {
-        let physical_table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
-        let Some(metadata_table_size) =
-            metadata_table_size.filter(|table_size| Self::table_offset(*table_size) <= table_len)
-        else {
-            return Ok(physical_table_size);
-        };
-
-        let completed_resize = metadata_table_size
-            .checked_mul(2)
-            .is_some_and(|expanded| expanded == physical_table_size)
-            && Self::table_resize_complete(table, metadata_table_size).await?;
-        if completed_resize {
-            Ok(physical_table_size)
-        } else {
-            Ok(metadata_table_size)
+    /// Determine if metadata should override a caller-provided checkpoint.
+    fn metadata_state_supersedes_checkpoint(
+        state: MetadataValue,
+        checkpoint: &Checkpoint,
+    ) -> bool {
+        match state {
+            MetadataValue::State {
+                table_size,
+                resize_progress,
+            } => {
+                table_size > checkpoint.table_size
+                    || (table_size == checkpoint.table_size && resize_progress.is_some())
+            }
         }
     }
 
@@ -537,12 +549,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         table: &E::Blob,
         oversized: &Oversized<E, Record<K>, V>,
         table_len: u64,
-        metadata_table_size: Option<u32>,
+        table_size: u32,
+        resize_progress: Option<u32>,
         table_resize_frequency: u8,
         table_replay_buffer: NonZeroUsize,
-    ) -> Result<(Checkpoint, u32), Error> {
-        let table_size = Self::recover_table_size(table, table_len, metadata_table_size).await?;
-        let expected_table_len = Self::table_offset(table_size);
+    ) -> Result<(Checkpoint, u32, Option<u32>), Error> {
+        let physical_table_size = if resize_progress.is_some() {
+            table_size.checked_mul(2).expect("table size overflow")
+        } else {
+            table_size
+        };
+        let expected_table_len = Self::table_offset(physical_table_size);
         let mut modified = if table_len != expected_table_len {
             table.resize(expected_table_len).await?;
             true
@@ -577,6 +594,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 table_size,
             },
             resizable,
+            resize_progress,
         ))
     }
 
@@ -796,24 +814,19 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             metadata_cfg,
         )
         .await?;
-        let metadata_table_size = metadata
-            .get(&TABLE_SIZE_KEY)
-            .map(|metadata| match metadata {
-                MetadataValue::TableSize(table_size) => *table_size,
-            })
-            .filter(|table_size| *table_size > 0 && table_size.is_power_of_two());
 
         // Open table blob
         let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
+        let metadata_state = Self::metadata_state(metadata.get(&TABLE_STATE_KEY), table_len);
 
         // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable) = match (table_len, checkpoint) {
+        let (checkpoint, resizable, resize_progress) = match (table_len, checkpoint) {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
+                (Checkpoint::init(config.table_initial_size), 0, None)
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -824,7 +837,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 assert_eq!(checkpoint.table_size, 0);
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
+                (Checkpoint::init(config.table_initial_size), 0, None)
             }
 
             // Existing table with checkpoint
@@ -834,80 +847,96 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                if metadata_table_size.is_some_and(|table_size| {
-                    table_size > checkpoint.table_size && Self::table_offset(table_size) <= table_len
-                }) {
-                    Self::recover_durable_checkpoint(
-                        &context,
-                        &table,
-                        &oversized,
-                        table_len,
-                        metadata_table_size,
-                        config.table_resize_frequency,
-                        config.table_replay_buffer,
-                    )
-                    .await?
-                } else {
-                    // Rewind oversized to the committed section and key size
-                    oversized
-                        .rewind(checkpoint.section, checkpoint.oversized_size)
+                match metadata_state
+                    .filter(|state| Self::metadata_state_supersedes_checkpoint(*state, &checkpoint))
+                {
+                    Some(MetadataValue::State {
+                        table_size,
+                        resize_progress,
+                    }) => {
+                        Self::recover_durable_checkpoint(
+                            &context,
+                            &table,
+                            &oversized,
+                            table_len,
+                            table_size,
+                            resize_progress,
+                            config.table_resize_frequency,
+                            config.table_replay_buffer,
+                        )
+                        .await?
+                    }
+                    _ => {
+                        // Rewind oversized to the committed section and key size
+                        oversized
+                            .rewind(checkpoint.section, checkpoint.oversized_size)
+                            .await?;
+
+                        // Sync oversized
+                        oversized.sync(checkpoint.section).await?;
+
+                        // Resize table if needed
+                        let expected_table_len = Self::table_offset(checkpoint.table_size);
+                        let mut modified = if table_len != expected_table_len {
+                            table.resize(expected_table_len).await?;
+                            true
+                        } else {
+                            false
+                        };
+
+                        // Validate and clean invalid entries
+                        let (table_modified, _, _, resizable) = Self::recover_table(
+                            &context,
+                            &table,
+                            checkpoint.table_size,
+                            config.table_resize_frequency,
+                            Some(checkpoint.epoch),
+                            config.table_replay_buffer,
+                        )
                         .await?;
+                        if table_modified {
+                            modified = true;
+                        }
 
-                    // Sync oversized
-                    oversized.sync(checkpoint.section).await?;
+                        // Sync table if needed
+                        if modified {
+                            table.sync().await?;
+                        }
 
-                    // Resize table if needed
-                    let expected_table_len = Self::table_offset(checkpoint.table_size);
-                    let mut modified = if table_len != expected_table_len {
-                        table.resize(expected_table_len).await?;
-                        true
-                    } else {
-                        false
-                    };
-
-                    // Validate and clean invalid entries
-                    let (table_modified, _, _, resizable) = Self::recover_table(
-                        &context,
-                        &table,
-                        checkpoint.table_size,
-                        config.table_resize_frequency,
-                        Some(checkpoint.epoch),
-                        config.table_replay_buffer,
-                    )
-                    .await?;
-                    if table_modified {
-                        modified = true;
+                        (checkpoint, resizable, None)
                     }
-
-                    // Sync table if needed
-                    if modified {
-                        table.sync().await?;
-                    }
-
-                    (checkpoint, resizable)
                 }
             }
 
             // Existing table without checkpoint
             (_, None) => {
-                // Find max epoch/section and clean invalid entries in a single pass
+                let (table_size, resize_progress) = match metadata_state {
+                    Some(MetadataValue::State {
+                        table_size,
+                        resize_progress,
+                    }) => (table_size, resize_progress),
+                    None => ((table_len / Entry::FULL_SIZE as u64) as u32, None),
+                };
+
                 Self::recover_durable_checkpoint(
                     &context,
                     &table,
                     &oversized,
                     table_len,
-                    metadata_table_size,
+                    table_size,
+                    resize_progress,
                     config.table_resize_frequency,
                     config.table_replay_buffer,
                 )
                 .await?
             }
         };
-        if metadata_table_size != Some(checkpoint.table_size) {
-            metadata.put(
-                TABLE_SIZE_KEY.clone(),
-                MetadataValue::TableSize(checkpoint.table_size),
-            );
+        let recovered_state = MetadataValue::State {
+            table_size: checkpoint.table_size,
+            resize_progress,
+        };
+        if metadata_state != Some(recovered_state) {
+            metadata.put(TABLE_STATE_KEY.clone(), recovered_state);
             metadata.sync().await?;
         }
 
@@ -939,7 +968,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
             resizable,
-            resize_progress: None,
+            resize_progress,
             puts,
             gets,
             unnecessary_reads,
@@ -1256,17 +1285,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Sync updated table entries
         self.table.sync().await?;
-        let metadata_table_size =
-            self.metadata
-                .get(&TABLE_SIZE_KEY)
-                .map(|metadata| match metadata {
-                    MetadataValue::TableSize(table_size) => *table_size,
-                });
-        if metadata_table_size != Some(self.table_size) {
-            self.metadata.put(
-                TABLE_SIZE_KEY.clone(),
-                MetadataValue::TableSize(self.table_size),
-            );
+        let metadata_state = MetadataValue::State {
+            table_size: self.table_size,
+            resize_progress: self.resize_progress,
+        };
+        if self.metadata.get(&TABLE_STATE_KEY).copied() != Some(metadata_state) {
+            self.metadata.put(TABLE_STATE_KEY.clone(), metadata_state);
             self.metadata.sync().await?;
         }
         let stored_epoch = self.next_epoch;
@@ -1551,6 +1575,8 @@ mod tests {
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
+            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.resizing(), Some(1));
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
         });
     }
@@ -1591,12 +1617,14 @@ mod tests {
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
+            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.resizing(), Some(1));
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
         });
     }
 
     #[test_traced]
-    fn stale_metadata_does_not_shrink_completed_resize() {
+    fn metadata_state_preserves_completed_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1630,21 +1658,6 @@ mod tests {
                 assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             }
 
-            {
-                let metadata_cfg = MetadataConfig {
-                    partition: cfg.metadata_partition.clone(),
-                    codec_config: (),
-                };
-                let mut metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
-                    context.child("stale"),
-                    metadata_cfg,
-                )
-                .await
-                .unwrap();
-                metadata.put(TABLE_SIZE_KEY.clone(), MetadataValue::TableSize(2));
-                metadata.sync().await.unwrap();
-            }
-
             let freezer =
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
                     .await
@@ -1663,10 +1676,13 @@ mod tests {
             )
             .await
             .unwrap();
-            let Some(MetadataValue::TableSize(table_size)) = metadata.get(&TABLE_SIZE_KEY) else {
-                panic!("missing table size metadata");
-            };
-            assert_eq!(*table_size, 4);
+            assert_eq!(
+                metadata.get(&TABLE_STATE_KEY),
+                Some(&MetadataValue::State {
+                    table_size: 4,
+                    resize_progress: None
+                })
+            );
         });
     }
 
@@ -1730,10 +1746,13 @@ mod tests {
             )
             .await
             .unwrap();
-            let Some(MetadataValue::TableSize(table_size)) = metadata.get(&TABLE_SIZE_KEY) else {
-                panic!("missing table size metadata");
-            };
-            assert_eq!(*table_size, 4);
+            assert_eq!(
+                metadata.get(&TABLE_STATE_KEY),
+                Some(&MetadataValue::State {
+                    table_size: 4,
+                    resize_progress: None
+                })
+            );
         });
     }
 }

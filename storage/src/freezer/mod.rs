@@ -1145,11 +1145,11 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(freezer.resizable(), 1);
+            assert_eq!(freezer.resizing(), Some(1));
 
-            // Verify resize starts immediately (1 key will have 0 added but 1
-            // will still have 1)
+            // Verify resize resumes from the remaining entry.
             freezer.sync().await.unwrap();
-            assert!(freezer.resizing().is_some());
+            assert!(freezer.resizing().is_none());
 
             // Run until resize completes
             while freezer.resizing().is_some() {

@@ -28,7 +28,7 @@ hash = "9add8634d4f06c3fb7f6dfd80630f38013ecb20849c18accd0579d7eb2ca11d5"
 
 ["commonware_storage::freezer::conformance::Freezer"]
 n_cases = 512
-hash = "ae77c30689412162863cfe5123a0b8777ef9cca95f193d4c595fa98b32a7a19f"
+hash = "a8cef21ec801b2aee390b367be8816d8ffbc3109fea72d4cb5aa044fde1bd7b6"
 
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Checkpoint>"]
 n_cases = 65536
@@ -44,7 +44,7 @@ hash = "572cd3da262e0bb13d2c6780c5be7bbadb21f93e4dbf2c787febecdba62671df"
 
 ["commonware_storage::freezer::storage::conformance::CodecConformance<MetadataValue>"]
 n_cases = 65536
-hash = "41aca42ff6078f7d5ad68ac8d433121b829575b8416a60250d5bd75e6c07587b"
+hash = "51969eae45125ee2a8a20903fce05face542dfc5d0a070cc473c7534848b6eba"
 
 ["commonware_storage::freezer::storage::conformance::CodecConformance<Record<U64>>"]
 n_cases = 65536
