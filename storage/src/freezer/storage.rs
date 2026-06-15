@@ -16,7 +16,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, IoBuf,
 };
-use commonware_utils::{sequence::U64 as MetadataKey, Array, Span};
+use commonware_utils::{sequence::U64, Array, Span};
 use futures::future::{try_join, try_join_all};
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
@@ -181,22 +181,22 @@ impl FixedSize for Checkpoint {
 const TABLE_BLOB_NAME: &[u8] = b"table";
 
 /// Metadata key for committed table resize state.
-const TABLE_STATE_KEY: MetadataKey = MetadataKey::new(0);
+const TABLE_STATE_KEY: U64 = U64::new(0);
 
-/// Item stored in [Metadata] for [Freezer].
+/// State stored in [Metadata] for [Freezer].
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MetadataValue {
-    State {
+enum State {
+    Resize {
         table_size: u32,
         resize_progress: Option<u32>,
     },
 }
 
-impl CodecWrite for MetadataValue {
+impl CodecWrite for State {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
-            Self::State {
+            Self::Resize {
                 table_size,
                 resize_progress,
             } => {
@@ -208,12 +208,12 @@ impl CodecWrite for MetadataValue {
     }
 }
 
-impl Read for MetadataValue {
+impl Read for State {
     type Cfg = ();
     fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
         let tag = u8::read(buf)?;
         match tag {
-            0 => Ok(Self::State {
+            0 => Ok(Self::Resize {
                 table_size: u32::read(buf)?,
                 resize_progress: Option::<u32>::read(buf)?,
             }),
@@ -222,14 +222,15 @@ impl Read for MetadataValue {
     }
 }
 
-impl EncodeSize for MetadataValue {
+impl EncodeSize for State {
     fn encode_size(&self) -> usize {
-        1 + match self {
-            Self::State {
-                table_size: _,
-                resize_progress,
-            } => u32::SIZE + resize_progress.encode_size(),
-        }
+        u8::SIZE
+            + match self {
+                Self::Resize {
+                    table_size: _,
+                    resize_progress,
+                } => u32::SIZE + resize_progress.encode_size(),
+            }
     }
 }
 
@@ -451,7 +452,7 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     context: E,
 
     // Metadata that tracks the committed logical table size
-    metadata: Metadata<E, MetadataKey, MetadataValue>,
+    metadata: Metadata<E, U64, State>,
 
     // Table configuration
     table_partition: String,
@@ -509,9 +510,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Validate committed table resize state from metadata.
-    fn metadata_state(value: Option<&MetadataValue>, table_len: u64) -> Option<MetadataValue> {
+    fn metadata_state(value: Option<&State>, table_len: u64) -> Option<State> {
         let value = *value?;
-        let MetadataValue::State {
+        let State::Resize {
             table_size,
             resize_progress,
         } = value;
@@ -528,9 +529,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Determine if metadata should override a caller-provided checkpoint.
-    fn metadata_state_supersedes_checkpoint(state: MetadataValue, checkpoint: &Checkpoint) -> bool {
+    fn metadata_state_supersedes_checkpoint(state: State, checkpoint: &Checkpoint) -> bool {
         match state {
-            MetadataValue::State {
+            State::Resize {
                 table_size,
                 resize_progress,
             } => {
@@ -806,11 +807,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             partition: config.metadata_partition.clone(),
             codec_config: (),
         };
-        let mut metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
-            context.child("metadata"),
-            metadata_cfg,
-        )
-        .await?;
+        let mut metadata =
+            Metadata::<_, U64, State>::init(context.child("metadata"), metadata_cfg).await?;
 
         // Open table blob
         let (table, table_len) = context
@@ -847,7 +845,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 match metadata_state
                     .filter(|state| Self::metadata_state_supersedes_checkpoint(*state, &checkpoint))
                 {
-                    Some(MetadataValue::State {
+                    Some(State::Resize {
                         table_size,
                         resize_progress,
                     }) => {
@@ -908,7 +906,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             // Existing table without checkpoint
             (_, None) => {
                 let (table_size, resize_progress) = match metadata_state {
-                    Some(MetadataValue::State {
+                    Some(State::Resize {
                         table_size,
                         resize_progress,
                     }) => (table_size, resize_progress),
@@ -928,7 +926,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 .await?
             }
         };
-        let recovered_state = MetadataValue::State {
+        let recovered_state = State::Resize {
             table_size: checkpoint.table_size,
             resize_progress,
         };
@@ -1282,11 +1280,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Sync updated table entries
         self.table.sync().await?;
-        let metadata_state = MetadataValue::State {
+        let metadata_state = State::Resize {
             table_size: self.table_size,
             resize_progress: self.resize_progress,
         };
-        if self.metadata.get(&TABLE_STATE_KEY).copied() != Some(metadata_state) {
+        if self.metadata.get(&TABLE_STATE_KEY) != Some(&metadata_state) {
             self.metadata.put(TABLE_STATE_KEY.clone(), metadata_state);
             self.metadata.sync().await?;
         }
@@ -1354,12 +1352,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 mod conformance {
     use super::*;
     use commonware_codec::conformance::CodecConformance;
-    use commonware_utils::sequence::U64;
-
     commonware_conformance::conformance_tests! {
         CodecConformance<Cursor>,
         CodecConformance<Checkpoint>,
-        CodecConformance<MetadataValue>,
+        CodecConformance<State>,
         CodecConformance<Entry>,
         CodecConformance<Record<U64>>
     }
@@ -1667,15 +1663,12 @@ mod tests {
                 partition: cfg.metadata_partition,
                 codec_config: (),
             };
-            let metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
-                context.child("metadata"),
-                metadata_cfg,
-            )
-            .await
-            .unwrap();
+            let metadata = Metadata::<_, U64, State>::init(context.child("metadata"), metadata_cfg)
+                .await
+                .unwrap();
             assert_eq!(
                 metadata.get(&TABLE_STATE_KEY),
-                Some(&MetadataValue::State {
+                Some(&State::Resize {
                     table_size: 4,
                     resize_progress: None
                 })
@@ -1737,15 +1730,12 @@ mod tests {
                 partition: cfg.metadata_partition,
                 codec_config: (),
             };
-            let metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
-                context.child("metadata"),
-                metadata_cfg,
-            )
-            .await
-            .unwrap();
+            let metadata = Metadata::<_, U64, State>::init(context.child("metadata"), metadata_cfg)
+                .await
+                .unwrap();
             assert_eq!(
                 metadata.get(&TABLE_STATE_KEY),
-                Some(&MetadataValue::State {
+                Some(&State::Resize {
                     table_size: 4,
                     resize_progress: None
                 })

@@ -42,7 +42,7 @@ hash = "fa5e588e9074776440c9d7e46729cc60c8d0cea87e5afc4326640106abcea7ba"
 n_cases = 65536
 hash = "572cd3da262e0bb13d2c6780c5be7bbadb21f93e4dbf2c787febecdba62671df"
 
-["commonware_storage::freezer::storage::conformance::CodecConformance<MetadataValue>"]
+["commonware_storage::freezer::storage::conformance::CodecConformance<State>"]
 n_cases = 65536
 hash = "51969eae45125ee2a8a20903fce05face542dfc5d0a070cc473c7534848b6eba"
 
