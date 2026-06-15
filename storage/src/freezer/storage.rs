@@ -718,9 +718,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             partition: config.metadata_partition.clone(),
             codec_config: (),
         };
-        let mut metadata =
-            Metadata::<_, MetadataKey, MetadataValue>::init(context.child("metadata"), metadata_cfg)
-                .await?;
+        let mut metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
+            context.child("metadata"),
+            metadata_cfg,
+        )
+        .await?;
         let metadata_table_size = metadata
             .get(&TABLE_SIZE_KEY)
             .map(|metadata| match metadata {
@@ -1210,15 +1212,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Sync updated table entries
         self.table.sync().await?;
-        let metadata_table_size = self
-            .metadata
-            .get(&TABLE_SIZE_KEY)
-            .map(|metadata| match metadata {
-                MetadataValue::TableSize(table_size) => *table_size,
-            });
-        if metadata_table_size != Some(self.table_size) {
+        let metadata_table_size =
             self.metadata
-                .put(TABLE_SIZE_KEY.clone(), MetadataValue::TableSize(self.table_size));
+                .get(&TABLE_SIZE_KEY)
+                .map(|metadata| match metadata {
+                    MetadataValue::TableSize(table_size) => *table_size,
+                });
+        if metadata_table_size != Some(self.table_size) {
+            self.metadata.put(
+                TABLE_SIZE_KEY.clone(),
+                MetadataValue::TableSize(self.table_size),
+            );
             self.metadata.sync().await?;
         }
         let stored_epoch = self.next_epoch;
@@ -1587,10 +1591,12 @@ mod tests {
                     partition: cfg.metadata_partition.clone(),
                     codec_config: (),
                 };
-                let mut metadata =
-                    Metadata::<_, MetadataKey, MetadataValue>::init(context.child("stale"), metadata_cfg)
-                        .await
-                        .unwrap();
+                let mut metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
+                    context.child("stale"),
+                    metadata_cfg,
+                )
+                .await
+                .unwrap();
                 metadata.put(TABLE_SIZE_KEY.clone(), MetadataValue::TableSize(2));
                 metadata.sync().await.unwrap();
             }
@@ -1607,10 +1613,12 @@ mod tests {
                 partition: cfg.metadata_partition,
                 codec_config: (),
             };
-            let metadata =
-                Metadata::<_, MetadataKey, MetadataValue>::init(context.child("metadata"), metadata_cfg)
-                    .await
-                    .unwrap();
+            let metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
+                context.child("metadata"),
+                metadata_cfg,
+            )
+            .await
+            .unwrap();
             let Some(MetadataValue::TableSize(table_size)) = metadata.get(&TABLE_SIZE_KEY) else {
                 panic!("missing table size metadata");
             };
