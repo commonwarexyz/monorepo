@@ -745,7 +745,7 @@ impl<
                 // This can happen after a nullification for the same view because
                 // certification is asynchronous; finalization is the boundary that
                 // cancels in-flight certification and suppresses late reporting.
-                resolver.certified(view, certified);
+                resolver.certified(round, certified);
                 if certified {
                     self.reporter.report(Activity::Certification(notarization));
                 }
@@ -827,7 +827,8 @@ impl<
                 }
                 Some((view, resolved))
             }
-            Message::Timeout { view, reason, .. } => {
+            Message::Timeout { round, reason, .. } => {
+                let view = round.view();
                 debug!(target_view = %view, ?reason, "timing out view");
                 self.state.trigger_timeout(view, reason);
                 Some((view, Resolved::None))
@@ -948,7 +949,7 @@ impl<
                         else {
                             continue;
                         };
-                        resolver.certified(round.view(), success);
+                        resolver.certified(round, success);
                         if success {
                             self.reporter.report(Activity::Certification(notarization));
                         }

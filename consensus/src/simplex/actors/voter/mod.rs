@@ -2436,7 +2436,7 @@ mod tests {
                 } => {
                     assert_eq!(current, target_view);
                     assert_eq!(finalized, target_view.previous().unwrap());
-                    mailbox.timeout(current, TimeoutReason::LeaderNullify);
+                    mailbox.timeout(Round::new(Epoch::new(333), current), TimeoutReason::LeaderNullify);
                 }
                 _ => panic!("expected startup update after restart"),
             }
@@ -3027,7 +3027,7 @@ mod tests {
             }
 
             let target_view = current_view;
-            mailbox.timeout(target_view, TimeoutReason::LeaderNullify);
+            mailbox.timeout(Round::new(Epoch::new(333), target_view), TimeoutReason::LeaderNullify);
 
             // Expect local nullify quickly despite 10s timeouts.
             loop {
@@ -3051,7 +3051,7 @@ mod tests {
             }
 
             // Send the same expire signal again. Duplicates should not retrigger the fast-path.
-            mailbox.timeout(target_view, TimeoutReason::LeaderNullify);
+            mailbox.timeout(Round::new(Epoch::new(333), target_view), TimeoutReason::LeaderNullify);
 
             let duplicate_window = context.current() + Duration::from_millis(300);
             loop {
@@ -6080,7 +6080,7 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == view5 =>
+                        MailboxMessage::Certified { round, success, .. } if round.view() == view5 =>
                             break Some(success),
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
                     },
@@ -6187,7 +6187,7 @@ mod tests {
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
@@ -7114,7 +7114,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
@@ -8367,7 +8367,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(success, "expected successful certification");
                             break;
                         }
@@ -8462,7 +8462,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(success, "replayed certification should be successful");
                             replayed_certified = true;
                         }
@@ -8635,7 +8635,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(!success, "expected failed certification");
                             break;
                         }
@@ -8720,7 +8720,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success, .. } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;
                         }
@@ -9144,7 +9144,7 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Update { current, .. } if current > target_view => {
                             // Signal leader inactivity to trigger the timeout path.
-                            mailbox.timeout(current, TimeoutReason::Inactivity);
+                            mailbox.timeout(Round::new(Epoch::new(333), current), TimeoutReason::Inactivity);
                             break;
                         }
                         batcher::Message::Update { .. } => {}

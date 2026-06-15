@@ -1,4 +1,8 @@
-use crate::{simplex::types::Certificate, types::View, Epochable, Viewable};
+use crate::{
+    simplex::types::Certificate,
+    types::{Round as Rnd, View},
+    Epochable, Viewable,
+};
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -16,12 +20,12 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
         /// The certificate.
         certificate: Certificate<S, D>,
     },
-    /// Certification result for a view.
+    /// Certification result for a round.
     Certified {
         /// The span carried with this message.
         span: Span,
-        /// The certified view.
-        view: View,
+        /// The certified round.
+        round: Rnd,
         /// Whether certification succeeded.
         success: bool,
     },
@@ -32,7 +36,7 @@ impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
     pub(crate) fn view(&self) -> View {
         match self {
             Self::Certificate { certificate, .. } => certificate.view(),
-            Self::Certified { view, .. } => *view,
+            Self::Certified { round, .. } => round.view(),
         }
     }
 
@@ -146,9 +150,9 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                         )
                 }
                 (
-                    Self::Certified { view: new_view, .. },
-                    Self::Certified { view: old_view, .. },
-                ) => new_view == old_view,
+                    Self::Certified { round: new_round, .. },
+                    Self::Certified { round: old_round, .. },
+                ) => new_round.view() == old_round.view(),
                 _ => false,
             })
         {
@@ -178,10 +182,10 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Notify the resolver of a certification result.
-    pub fn certified(&mut self, view: View, success: bool) {
+    pub fn certified(&mut self, round: Rnd, success: bool) {
         let _ = self.sender.enqueue(MailboxMessage::Certified {
-            span: info_span!("simplex.resolver.mailbox.certified", view = %view, success),
-            view,
+            span: info_span!("simplex.resolver.mailbox.certified", epoch = %round.epoch(), view = %round.view(), success),
+            round,
             success,
         });
     }
@@ -373,7 +377,7 @@ mod tests {
     fn certified_msg(view: View, success: bool) -> MailboxMessage<TestScheme, Sha256Digest> {
         MailboxMessage::Certified {
             span: Span::none(),
-            view,
+            round: Round::new(EPOCH, view),
             success,
         }
     }
@@ -438,10 +442,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                round,
                 success: false,
                 ..
-            }) if view == View::new(5)
+            }) if round.view() == View::new(5)
         ));
     }
 
@@ -456,10 +460,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                round,
                 success: false,
                 ..
-            }) if view == View::new(4)
+            }) if round.view() == View::new(4)
         ));
     }
 
@@ -536,10 +540,10 @@ mod tests {
         assert!(matches!(
             overflow.pop_front(),
             Some(MailboxMessage::Certified {
-                view,
+                round,
                 success: true,
                 ..
-            }) if view == View::new(4)
+            }) if round.view() == View::new(4)
         ));
     }
 }

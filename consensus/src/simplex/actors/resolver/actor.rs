@@ -142,8 +142,9 @@ impl<
                         // Certificates from mailbox have no associated request view
                         self.state.handle(certificate, None, &mut resolver);
                     }
-                    MailboxMessage::Certified { view, success, .. } => {
-                        self.state.handle_certified(view, success, &mut resolver)
+                    MailboxMessage::Certified { round, success, .. } => {
+                        self.state
+                            .handle_certified(round.view(), success, &mut resolver)
                     }
                 }
             },

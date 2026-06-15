@@ -3,7 +3,7 @@ use crate::{
         metrics::TimeoutReason,
         types::{Certificate, Proposal},
     },
-    types::View,
+    types::{Round as Rnd, View},
     Epochable, Viewable,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -24,8 +24,8 @@ pub enum Message<S: Scheme, D: Digest> {
     Timeout {
         /// The span carried with this message.
         span: Span,
-        /// The view to timeout.
-        view: View,
+        /// The round to timeout.
+        round: Rnd,
         /// The reason for the timeout.
         reason: TimeoutReason,
     },
@@ -46,7 +46,7 @@ impl<S: Scheme, D: Digest> Message<S, D> {
     pub(crate) fn view(&self) -> View {
         match self {
             Self::Proposal { proposal, .. } => proposal.view(),
-            Self::Timeout { view, .. } => *view,
+            Self::Timeout { round, .. } => round.view(),
             Self::Verified { certificate, .. } => certificate.view(),
         }
     }
@@ -155,8 +155,8 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                         ..
                     },
                 ) => new_proposal.view() == old_proposal.view(),
-                (Self::Timeout { view: new_view, .. }, Self::Timeout { view: old_view, .. }) => {
-                    new_view == old_view // only retain the first queued timeout reason
+                (Self::Timeout { round: new_round, .. }, Self::Timeout { round: old_round, .. }) => {
+                    new_round.view() == old_round.view() // only retain the first queued timeout reason
                 }
                 (
                     Self::Verified {
@@ -204,11 +204,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
         });
     }
 
-    /// Signal that the current view should timeout (if not already).
-    pub fn timeout(&mut self, view: View, reason: TimeoutReason) {
+    /// Signal that the given round should timeout (if not already).
+    pub fn timeout(&mut self, round: Rnd, reason: TimeoutReason) {
         let _ = self.sender.enqueue(Message::Timeout {
-            span: info_span!("simplex.voter.mailbox.timeout", view = %view),
-            view,
+            span: info_span!("simplex.voter.mailbox.timeout", epoch = %round.epoch(), view = %round.view()),
+            round,
             reason,
         });
     }
@@ -301,7 +301,7 @@ mod tests {
     fn timeout_msg(view: View, reason: TimeoutReason) -> Message<TestScheme, Sha256Digest> {
         Message::Timeout {
             span: Span::none(),
-            view,
+            round: Round::new(EPOCH, view),
             reason,
         }
     }

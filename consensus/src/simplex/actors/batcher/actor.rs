@@ -340,7 +340,7 @@ where
                     };
                     if let Some(timeout_reason) = timeout_reason {
                         current.timed_out = true;
-                        voter.timeout(current.view, timeout_reason);
+                        voter.timeout(Rnd::new(self.epoch, current.view), timeout_reason);
                     }
 
                     // Forward the proposal, if enabled and we have something to forward
@@ -544,7 +544,7 @@ where
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
-                        voter.timeout(current.view, TimeoutReason::LeaderNullify);
+                        voter.timeout(Rnd::new(self.epoch, current.view), TimeoutReason::LeaderNullify);
                     }
                 }
                 updated_view = view;

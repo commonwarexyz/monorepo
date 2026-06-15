@@ -166,8 +166,8 @@ mod tests {
         loop {
             select! {
                 message = voter_receiver.recv() => match message {
-                    Some(voter::Message::Timeout { view, reason, .. }) => {
-                        assert_eq!(view, expected_view);
+                    Some(voter::Message::Timeout { round, reason, .. }) => {
+                        assert_eq!(round.view(), expected_view);
                         assert_eq!(reason, expected_reason);
                         break;
                     }
@@ -188,8 +188,8 @@ mod tests {
         loop {
             select! {
                 message = voter_receiver.recv() => match message {
-                    Some(voter::Message::Timeout { view, reason, .. }) => {
-                        panic!("unexpected voter timeout for view {view}: {reason:?}");
+                    Some(voter::Message::Timeout { round, reason, .. }) => {
+                        panic!("unexpected voter timeout for view {}: {reason:?}", round.view());
                     }
                     Some(_) => {}
                     None => panic!("voter receiver closed"),
