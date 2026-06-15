@@ -436,6 +436,9 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
+    // Metadata that tracks the committed logical table size
+    metadata: Metadata<E, MetadataKey, MetadataValue>,
+
     // Table configuration
     table_partition: String,
     table_size: u32,
@@ -445,9 +448,6 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
 
     // Table blob that maps slots to key index chain heads
     table: E::Blob,
-
-    // Metadata that tracks the committed logical table size
-    metadata: Metadata<E, MetadataKey, MetadataValue>,
 
     // Combined key index + value storage with crash recovery
     oversized: Oversized<E, Record<K>, V>,
@@ -505,6 +505,30 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         }
 
         Ok(true)
+    }
+
+    /// Determine the committed logical table size from metadata and the physical table.
+    async fn recover_table_size(
+        table: &E::Blob,
+        table_len: u64,
+        metadata_table_size: Option<u32>,
+    ) -> Result<u32, Error> {
+        let physical_table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
+        let Some(metadata_table_size) =
+            metadata_table_size.filter(|table_size| Self::table_offset(*table_size) <= table_len)
+        else {
+            return Ok(physical_table_size);
+        };
+
+        let completed_resize = metadata_table_size
+            .checked_mul(2)
+            .is_some_and(|expanded| expanded == physical_table_size)
+            && Self::table_resize_complete(table, metadata_table_size).await?;
+        if completed_resize {
+            Ok(physical_table_size)
+        } else {
+            Ok(metadata_table_size)
+        }
     }
 
     /// Recover a single table entry and update tracking.
@@ -761,64 +785,93 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                // Rewind oversized to the committed section and key size
-                oversized
-                    .rewind(checkpoint.section, checkpoint.oversized_size)
+                if metadata_table_size.is_some_and(|table_size| {
+                    table_size > checkpoint.table_size && Self::table_offset(table_size) <= table_len
+                }) {
+                    let table_size =
+                        Self::recover_table_size(&table, table_len, metadata_table_size).await?;
+                    let expected_table_len = Self::table_offset(table_size);
+                    let mut modified = if table_len != expected_table_len {
+                        table.resize(expected_table_len).await?;
+                        true
+                    } else {
+                        false
+                    };
+
+                    let (table_modified, max_epoch, max_section, resizable) = Self::recover_table(
+                        &context,
+                        &table,
+                        table_size,
+                        config.table_resize_frequency,
+                        None,
+                        config.table_replay_buffer,
+                    )
                     .await?;
+                    if table_modified {
+                        modified = true;
+                    }
 
-                // Sync oversized
-                oversized.sync(checkpoint.section).await?;
+                    if modified {
+                        table.sync().await?;
+                    }
 
-                // Resize table if needed
-                let expected_table_len = Self::table_offset(checkpoint.table_size);
-                let mut modified = if table_len != expected_table_len {
-                    table.resize(expected_table_len).await?;
-                    true
+                    let oversized_size = oversized.size(max_section).await?;
+
+                    (
+                        Checkpoint {
+                            epoch: max_epoch,
+                            section: max_section,
+                            oversized_size,
+                            table_size,
+                        },
+                        resizable,
+                    )
                 } else {
-                    false
-                };
+                    // Rewind oversized to the committed section and key size
+                    oversized
+                        .rewind(checkpoint.section, checkpoint.oversized_size)
+                        .await?;
 
-                // Validate and clean invalid entries
-                let (table_modified, _, _, resizable) = Self::recover_table(
-                    &context,
-                    &table,
-                    checkpoint.table_size,
-                    config.table_resize_frequency,
-                    Some(checkpoint.epoch),
-                    config.table_replay_buffer,
-                )
-                .await?;
-                if table_modified {
-                    modified = true;
+                    // Sync oversized
+                    oversized.sync(checkpoint.section).await?;
+
+                    // Resize table if needed
+                    let expected_table_len = Self::table_offset(checkpoint.table_size);
+                    let mut modified = if table_len != expected_table_len {
+                        table.resize(expected_table_len).await?;
+                        true
+                    } else {
+                        false
+                    };
+
+                    // Validate and clean invalid entries
+                    let (table_modified, _, _, resizable) = Self::recover_table(
+                        &context,
+                        &table,
+                        checkpoint.table_size,
+                        config.table_resize_frequency,
+                        Some(checkpoint.epoch),
+                        config.table_replay_buffer,
+                    )
+                    .await?;
+                    if table_modified {
+                        modified = true;
+                    }
+
+                    // Sync table if needed
+                    if modified {
+                        table.sync().await?;
+                    }
+
+                    (checkpoint, resizable)
                 }
-
-                // Sync table if needed
-                if modified {
-                    table.sync().await?;
-                }
-
-                (checkpoint, resizable)
             }
 
             // Existing table without checkpoint
             (_, None) => {
                 // Find max epoch/section and clean invalid entries in a single pass
-                let physical_table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
-                let table_size = if let Some(metadata_table_size) = metadata_table_size
-                    .filter(|table_size| Self::table_offset(*table_size) <= table_len)
-                {
-                    let completed_resize = metadata_table_size
-                        .checked_mul(2)
-                        .is_some_and(|expanded| expanded == physical_table_size)
-                        && Self::table_resize_complete(&table, metadata_table_size).await?;
-                    if completed_resize {
-                        physical_table_size
-                    } else {
-                        metadata_table_size
-                    }
-                } else {
-                    physical_table_size
-                };
+                let table_size =
+                    Self::recover_table_size(&table, table_len, metadata_table_size).await?;
                 let expected_table_len = Self::table_offset(table_size);
                 let mut modified = if table_len != expected_table_len {
                     table.resize(expected_table_len).await?;
@@ -882,13 +935,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         Ok(Self {
             context,
+            metadata,
             table_partition: config.table_partition,
             table_size: checkpoint.table_size,
             table_resize_threshold: checkpoint.table_size as u64 * RESIZE_THRESHOLD / 100,
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
-            metadata,
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
@@ -1605,6 +1658,73 @@ mod tests {
                 Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
                     .await
                     .unwrap();
+            assert_eq!(freezer.table_size, 4);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            drop(freezer);
+
+            let metadata_cfg = MetadataConfig {
+                partition: cfg.metadata_partition,
+                codec_config: (),
+            };
+            let metadata = Metadata::<_, MetadataKey, MetadataValue>::init(
+                context.child("metadata"),
+                metadata_cfg,
+            )
+            .await
+            .unwrap();
+            let Some(MetadataValue::TableSize(table_size)) = metadata.get(&TABLE_SIZE_KEY) else {
+                panic!("missing table size metadata");
+            };
+            assert_eq!(*table_size, 4);
+        });
+    }
+
+    #[test_traced]
+    fn stale_checkpoint_does_not_shrink_completed_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                metadata_partition: "test-table-metadata".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 2,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+            let key = test_key_at_index(4, 3);
+
+            let stale_checkpoint = {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                let stale_checkpoint = freezer.sync().await.unwrap();
+                assert_eq!(stale_checkpoint.table_size, 2);
+
+                freezer.put(key.clone(), 42).await.unwrap();
+                let checkpoint = freezer.sync().await.unwrap();
+                assert_eq!(checkpoint.table_size, 4);
+                assert_eq!(freezer.resizing(), None);
+                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+
+                stale_checkpoint
+            };
+
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+                context.child("second"),
+                cfg.clone(),
+                Some(stale_checkpoint),
+            )
+            .await
+            .unwrap();
             assert_eq!(freezer.table_size, 4);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
             drop(freezer);
