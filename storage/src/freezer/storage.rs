@@ -143,6 +143,11 @@ impl Checkpoint {
             oversized_size: 0,
         }
     }
+
+    /// Return true if this checkpoint represents a fresh [Freezer].
+    const fn is_empty(&self) -> bool {
+        self.epoch == 0 && self.section == 0 && self.oversized_size == 0 && self.table_size == 0
+    }
 }
 
 impl Read for Checkpoint {
@@ -638,12 +643,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        let empty_checkpoint = checkpoint.is_some_and(|checkpoint| {
-            checkpoint.epoch == 0
-                && checkpoint.section == 0
-                && checkpoint.oversized_size == 0
-                && checkpoint.table_size == 0
-        });
+        let empty_checkpoint = checkpoint.is_some_and(|checkpoint| checkpoint.is_empty());
         let reset = checkpoint.is_none() || empty_checkpoint;
         if reset {
             for partition in [
@@ -685,11 +685,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
             // New table with explicit checkpoint (must be empty)
             (0, Some(checkpoint)) => {
-                if checkpoint.epoch != 0
-                    || checkpoint.section != 0
-                    || checkpoint.oversized_size != 0
-                    || checkpoint.table_size != 0
-                {
+                if !checkpoint.is_empty() {
                     return Err(Error::CheckpointMismatch);
                 }
 
