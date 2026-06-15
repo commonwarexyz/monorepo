@@ -769,6 +769,7 @@ mod test {
         immutable::Config {
             metadata_partition: format!("{prefix}-{name}-metadata"),
             freezer_table_partition: format!("{prefix}-{name}-freezer-table"),
+            freezer_metadata_partition: format!("{prefix}-{name}-freezer-table-metadata"),
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 10,
             freezer_table_resize_chunk_size: 10,

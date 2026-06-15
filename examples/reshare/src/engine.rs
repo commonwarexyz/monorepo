@@ -180,6 +180,10 @@ where
                     "{}-finalizations-by-height-freezer-table",
                     config.partition_prefix
                 ),
+                freezer_metadata_partition: format!(
+                    "{}-finalizations-by-height-freezer-table-metadata",
+                    config.partition_prefix
+                ),
                 freezer_table_initial_size: config.freezer_table_initial_size,
                 freezer_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
                 freezer_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
@@ -221,6 +225,10 @@ where
                 ),
                 freezer_table_partition: format!(
                     "{}-finalized_blocks-freezer-table",
+                    config.partition_prefix
+                ),
+                freezer_metadata_partition: format!(
+                    "{}-finalized_blocks-freezer-table-metadata",
                     config.partition_prefix
                 ),
                 freezer_table_initial_size: config.freezer_table_initial_size,

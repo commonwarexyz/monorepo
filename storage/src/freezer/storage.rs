@@ -448,7 +448,6 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
 
     // Metadata that tracks the committed logical table size
     metadata: Metadata<E, MetadataKey, MetadataValue>,
-    metadata_table_size: u32,
 
     // Combined key index + value storage with crash recovery
     oversized: Oversized<E, Record<K>, V>,
@@ -493,6 +492,19 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
 
         Self::parse_entries(read_buf)
+    }
+
+    /// Determine if an expanded table completed resizing from `table_size`.
+    async fn table_resize_complete(blob: &E::Blob, table_size: u32) -> Result<bool, Error> {
+        for table_index in 0..table_size {
+            let old = Self::read_table(blob, table_index).await?;
+            let new = Self::read_table(blob, table_size + table_index).await?;
+            if old != new {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     /// Recover a single table entry and update tracking.
@@ -703,7 +715,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Initialize metadata for committed table state
         let metadata_cfg = MetadataConfig {
-            partition: format!("{}-metadata", config.table_partition),
+            partition: config.metadata_partition.clone(),
             codec_config: (),
         };
         let mut metadata =
@@ -790,9 +802,21 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             (_, None) => {
                 // Find max epoch/section and clean invalid entries in a single pass
                 let physical_table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
-                let table_size = metadata_table_size
+                let table_size = if let Some(metadata_table_size) = metadata_table_size
                     .filter(|table_size| Self::table_offset(*table_size) <= table_len)
-                    .unwrap_or(physical_table_size);
+                {
+                    let completed_resize = metadata_table_size
+                        .checked_mul(2)
+                        .is_some_and(|expanded| expanded == physical_table_size)
+                        && Self::table_resize_complete(&table, metadata_table_size).await?;
+                    if completed_resize {
+                        physical_table_size
+                    } else {
+                        metadata_table_size
+                    }
+                } else {
+                    physical_table_size
+                };
                 let expected_table_len = Self::table_offset(table_size);
                 let mut modified = if table_len != expected_table_len {
                     table.resize(expected_table_len).await?;
@@ -863,7 +887,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
             metadata,
-            metadata_table_size: checkpoint.table_size,
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
@@ -1187,11 +1210,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Sync updated table entries
         self.table.sync().await?;
-        if self.metadata_table_size != self.table_size {
+        let metadata_table_size = self
+            .metadata
+            .get(&TABLE_SIZE_KEY)
+            .map(|metadata| match metadata {
+                MetadataValue::TableSize(table_size) => *table_size,
+            });
+        if metadata_table_size != Some(self.table_size) {
             self.metadata
                 .put(TABLE_SIZE_KEY.clone(), MetadataValue::TableSize(self.table_size));
             self.metadata.sync().await?;
-            self.metadata_table_size = self.table_size;
         }
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
@@ -1335,6 +1363,7 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
+                metadata_partition: "test-table-metadata".into(),
                 // Use 4 entries but only insert to 2, leaving 2 empty
                 table_initial_size: 4,
                 table_resize_frequency: 1,
@@ -1390,6 +1419,7 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
+                metadata_partition: "test-table-metadata".into(),
                 table_initial_size: 4,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 4,
@@ -1448,6 +1478,7 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
+                metadata_partition: "test-table-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1,
@@ -1489,6 +1520,7 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
+                metadata_partition: "test-table-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1,
@@ -1512,6 +1544,77 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+        });
+    }
+
+    #[test_traced]
+    fn stale_metadata_does_not_shrink_completed_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                metadata_partition: "test-table-metadata".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 2,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+            let key = test_key_at_index(4, 3);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(key.clone(), 42).await.unwrap();
+                let checkpoint = freezer.sync().await.unwrap();
+
+                assert_eq!(checkpoint.table_size, 4);
+                assert_eq!(freezer.resizing(), None);
+                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            }
+
+            {
+                let metadata_cfg = MetadataConfig {
+                    partition: cfg.metadata_partition.clone(),
+                    codec_config: (),
+                };
+                let mut metadata =
+                    Metadata::<_, MetadataKey, MetadataValue>::init(context.child("stale"), metadata_cfg)
+                        .await
+                        .unwrap();
+                metadata.put(TABLE_SIZE_KEY.clone(), MetadataValue::TableSize(2));
+                metadata.sync().await.unwrap();
+            }
+
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(freezer.table_size, 4);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            drop(freezer);
+
+            let metadata_cfg = MetadataConfig {
+                partition: cfg.metadata_partition,
+                codec_config: (),
+            };
+            let metadata =
+                Metadata::<_, MetadataKey, MetadataValue>::init(context.child("metadata"), metadata_cfg)
+                    .await
+                    .unwrap();
+            let Some(MetadataValue::TableSize(table_size)) = metadata.get(&TABLE_SIZE_KEY) else {
+                panic!("missing table size metadata");
+            };
+            assert_eq!(*table_size, 4);
         });
     }
 }
