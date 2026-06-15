@@ -12,8 +12,7 @@ use tracing::Span;
 pub enum Message<S: Scheme, D: Digest> {
     /// View update with leader info.
     Update {
-        /// The root span of the view, shared with the voter's round.
-        view_span: Span,
+        span: Span,
         current: View,
         leader: Participant,
         finalized: View,
@@ -172,18 +171,16 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 
     /// Send an update message.
-    ///
-    /// `view_span` is the root span of `current`, shared with the voter's round.
     pub fn update(
         &mut self,
-        view_span: Span,
+        span: Span,
         current: View,
         leader: Participant,
         finalized: View,
         forwardable_proposal: Option<Proposal<D>>,
     ) {
         let _ = self.sender.enqueue(Message::Update {
-            view_span,
+            span,
             current,
             leader,
             finalized,
@@ -245,7 +242,7 @@ mod tests {
 
     fn update(current: View, finalized: View) -> Message<TestScheme, Sha256Digest> {
         Message::Update {
-            view_span: Span::none(),
+            span: Span::none(),
             current,
             leader: Participant::new(0),
             finalized,

@@ -299,13 +299,13 @@ where
                 };
                 match message {
                     Message::Update {
-                        view_span,
+                        span,
                         current: new_current,
                         leader,
                         finalized: new_finalized,
                         forwardable_proposal,
                     } => {
-                        let process = process_span(view_span.clone());
+                        let process = process_span(span.clone());
                         let _guard = process.entered();
                         let am_leader = self.scheme.me().is_some_and(|me| me == leader);
                         current = Current {
@@ -325,7 +325,7 @@ where
                         let round = work
                             .entry(current.view)
                             .or_insert_with(|| self.new_round(current.view));
-                        round.set_span(view_span);
+                        round.set_span(span);
                         round.set_leader(leader);
 
                         // If the leader nullified this view or has not been active

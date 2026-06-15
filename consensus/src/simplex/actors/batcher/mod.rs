@@ -648,9 +648,9 @@ mod tests {
             // (so we can test leader proposal forwarding when vote arrives from network)
             let view = View::new(1);
             let leader = Participant::new(1);
-            let view_span =
+            let span =
                 tracing::info_span!(parent: None, "simplex.voter.view", %epoch, %view);
-            batcher_mailbox.update(view_span, view, leader, View::zero(), None);
+            batcher_mailbox.update(span, view, leader, View::zero(), None);
 
             // Build proposal and votes
             let round = Round::new(epoch, view);
