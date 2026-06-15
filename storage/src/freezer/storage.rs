@@ -528,19 +528,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         (Self::table_offset(physical_table_size) <= table_len).then_some(value)
     }
 
-    /// Determine if metadata should override a caller-provided checkpoint.
-    const fn metadata_state_supersedes_checkpoint(state: State, checkpoint: &Checkpoint) -> bool {
-        match state {
-            State::Resize {
-                table_size,
-                resize_progress,
-            } => {
-                table_size > checkpoint.table_size
-                    || (table_size == checkpoint.table_size && resize_progress.is_some())
-            }
-        }
-    }
-
     /// Recover checkpoint and resize state from the durable table and oversized journal.
     async fn recover_durable_checkpoint(
         pooler: &impl BufferPooler,
@@ -845,61 +832,43 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     "table_size must be a power of 2"
                 );
 
-                match metadata_state
-                    .filter(|state| Self::metadata_state_supersedes_checkpoint(*state, &checkpoint))
-                {
-                    Some(state) => {
-                        Self::recover_durable_checkpoint(
-                            &context,
-                            &table,
-                            &oversized,
-                            table_len,
-                            state,
-                            config.table_resize_frequency,
-                            config.table_replay_buffer,
-                        )
-                        .await?
-                    }
-                    _ => {
-                        // Rewind oversized to the committed section and key size
-                        oversized
-                            .rewind(checkpoint.section, checkpoint.oversized_size)
-                            .await?;
+                // Rewind oversized to the committed section and key size
+                oversized
+                    .rewind(checkpoint.section, checkpoint.oversized_size)
+                    .await?;
 
-                        // Sync oversized
-                        oversized.sync(checkpoint.section).await?;
+                // Sync oversized
+                oversized.sync(checkpoint.section).await?;
 
-                        // Resize table if needed
-                        let expected_table_len = Self::table_offset(checkpoint.table_size);
-                        let mut modified = if table_len != expected_table_len {
-                            table.resize(expected_table_len).await?;
-                            true
-                        } else {
-                            false
-                        };
+                // Resize table if needed
+                let expected_table_len = Self::table_offset(checkpoint.table_size);
+                let mut modified = if table_len != expected_table_len {
+                    table.resize(expected_table_len).await?;
+                    true
+                } else {
+                    false
+                };
 
-                        // Validate and clean invalid entries
-                        let (table_modified, _, _, resizable) = Self::recover_table(
-                            &context,
-                            &table,
-                            checkpoint.table_size,
-                            config.table_resize_frequency,
-                            Some(checkpoint.epoch),
-                            config.table_replay_buffer,
-                        )
-                        .await?;
-                        if table_modified {
-                            modified = true;
-                        }
-
-                        // Sync table if needed
-                        if modified {
-                            table.sync().await?;
-                        }
-
-                        (checkpoint, resizable, None)
-                    }
+                // Validate and clean invalid entries
+                let (table_modified, _, _, resizable) = Self::recover_table(
+                    &context,
+                    &table,
+                    checkpoint.table_size,
+                    config.table_resize_frequency,
+                    Some(checkpoint.epoch),
+                    config.table_replay_buffer,
+                )
+                .await?;
+                if table_modified {
+                    modified = true;
                 }
+
+                // Sync table if needed
+                if modified {
+                    table.sync().await?;
+                }
+
+                (checkpoint, resizable, None)
             }
 
             // Existing table without checkpoint
@@ -1672,7 +1641,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn stale_checkpoint_does_not_shrink_completed_resize() {
+    fn checkpoint_rewinds_completed_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1717,8 +1686,8 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(freezer.table_size, 4);
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
             drop(freezer);
 
             let metadata_cfg = MetadataConfig {
@@ -1731,7 +1700,7 @@ mod tests {
             assert_eq!(
                 metadata.get(&TABLE_STATE_KEY),
                 Some(&State::Resize {
-                    table_size: 4,
+                    table_size: 2,
                     resize_progress: None
                 })
             );

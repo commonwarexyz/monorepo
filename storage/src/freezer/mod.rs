@@ -1144,11 +1144,11 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(freezer.resizable(), 1);
-            assert_eq!(freezer.resizing(), Some(1));
+            assert_eq!(freezer.resizing(), None);
 
-            // Verify resize resumes from the remaining entry.
+            // Verify resize restarts from the checkpointed table.
             freezer.sync().await.unwrap();
-            assert!(freezer.resizing().is_none());
+            assert_eq!(freezer.resizing(), Some(1));
 
             // Run until resize completes
             while freezer.resizing().is_some() {
