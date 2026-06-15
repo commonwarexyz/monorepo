@@ -1,11 +1,7 @@
-use super::{Error, Signature};
+use super::{native, Error, Signature};
 use commonware_formatting::Hex;
 use core::convert::{TryFrom, TryInto};
-use curve25519_dalek::{
-    edwards::{CompressedEdwardsY, EdwardsPoint},
-    scalar::Scalar,
-    traits::IsIdentity,
-};
+use curve25519_dalek::scalar::Scalar;
 use sha2::{digest::Update, Sha512};
 
 /// A refinement type for `[u8; 32]` indicating that the bytes represent an
@@ -95,7 +91,7 @@ impl From<VerificationKeyBytes> for [u8; 32] {
 #[allow(non_snake_case)]
 pub struct VerificationKey {
     pub(super) A_bytes: VerificationKeyBytes,
-    pub(super) minus_A: EdwardsPoint,
+    pub(super) A: native::Point,
 }
 
 impl PartialOrd for VerificationKey {
@@ -148,14 +144,9 @@ impl TryFrom<VerificationKeyBytes> for VerificationKey {
     fn try_from(bytes: VerificationKeyBytes) -> Result<Self, Self::Error> {
         // * `A_bytes` and `R_bytes` MUST be encodings of points `A` and `R` respectively on the
         //   twisted Edwards form of Curve25519, and non-canonical encodings MUST be accepted;
-        let A = CompressedEdwardsY(bytes.0)
-            .decompress()
-            .ok_or(Error::MalformedPublicKey)?;
+        let A = native::Point::decompress(&bytes.0).ok_or(Error::MalformedPublicKey)?;
 
-        Ok(Self {
-            A_bytes: bytes,
-            minus_A: -A,
-        })
+        Ok(Self { A_bytes: bytes, A })
     }
 }
 
@@ -184,6 +175,61 @@ impl VerificationKey {
     /// View the byte encoding of the verification key.
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.A_bytes.0
+    }
+
+    /// Build a verification key from a decompressed point `(x, y)`, validating
+    /// it lies on the curve. No square root is computed, unlike [`Self::try_from`]
+    /// on a compressed encoding. The canonical compressed encoding is derived for
+    /// use as the challenge input.
+    #[allow(non_snake_case)]
+    pub(in crate::ed25519) fn from_coordinates(
+        x_bytes: &[u8; 32],
+        y_bytes: &[u8; 32],
+    ) -> Result<Self, Error> {
+        let A =
+            native::Point::from_coordinates(x_bytes, y_bytes).ok_or(Error::MalformedPublicKey)?;
+        let (x, y) = A.coordinates();
+        let mut a_bytes = y;
+        a_bytes[31] |= (x[0] & 1) << 7;
+        Ok(Self {
+            A_bytes: VerificationKeyBytes(a_bytes),
+            A,
+        })
+    }
+
+    /// The decompressed `(x, y)` coordinates of the key, canonically encoded.
+    pub(in crate::ed25519) fn coordinates(&self) -> ([u8; 32], [u8; 32]) {
+        self.A.coordinates()
+    }
+
+    /// The committed decompression hint (affine `x`) for an `R` encoding, if it
+    /// decodes. Computed once at signing time; the verifier validates it cheaply.
+    pub(in crate::ed25519) fn decompression_hint(r_bytes: &[u8; 32]) -> Option<[u8; 32]> {
+        native::Point::decompress(r_bytes).map(|point| point.coordinates().0)
+    }
+
+    /// Verify a signature whose `R` carries a committed decompression hint
+    /// `R_x`, recovering `R` without a square root. An invalid hint is an invalid
+    /// signature (no fallback).
+    #[allow(non_snake_case)]
+    pub(in crate::ed25519) fn verify_hinted(
+        &self,
+        R_bytes: &[u8; 32],
+        s_bytes: &[u8; 32],
+        R_x: &[u8; 32],
+        msg: &[u8],
+    ) -> Result<(), Error> {
+        let k = Scalar::from_hash(
+            Sha512::default()
+                .chain(&R_bytes[..])
+                .chain(&self.A_bytes.0[..])
+                .chain(msg),
+        );
+        let s = Scalar::from_canonical_bytes(*s_bytes)
+            .into_option()
+            .ok_or(Error::InvalidSignature)?;
+        let R = native::Point::decompress_with_hint(R_bytes, R_x).ok_or(Error::InvalidSignature)?;
+        self.verify_prehashed_parts(R, s, k)
     }
 
     /// Verify a purported `signature` on the given `msg`.
@@ -226,18 +272,28 @@ impl VerificationKey {
             .into_option()
             .ok_or(Error::InvalidSignature)?;
         // `R_bytes` MUST be an encoding of a point on the twisted Edwards form of Curve25519.
-        let R = CompressedEdwardsY(signature.R_bytes)
-            .decompress()
-            .ok_or(Error::InvalidSignature)?;
+        let R = native::Point::decompress(&signature.R_bytes).ok_or(Error::InvalidSignature)?;
         // We checked the encoding of A_bytes when constructing `self`.
 
+        self.verify_prehashed_parts(R, s, k)
+    }
+
+    #[allow(non_snake_case)]
+    pub(super) fn verify_prehashed_parts(
+        &self,
+        R: native::Point,
+        s: Scalar,
+        k: Scalar,
+    ) -> Result<(), Error> {
         //       [8][s]B = [8]R + [8][k]A
         // <=>   [8]R = [8][s]B - [8][k]A
         // <=>   0 = [8](R - ([s]B - [k]A))
         // <=>   0 = [8](R - R')  where R' = [s]B - [k]A
-        let R_prime = EdwardsPoint::vartime_double_scalar_mul_basepoint(&k, &self.minus_A, &s);
+        let scalars = [-s, k, Scalar::from(1u64)];
+        let points = [native::Point::basepoint(), self.A, R];
+        let check = native::vartime_multiscalar_mul(&scalars, &points);
 
-        if (R - R_prime).mul_by_cofactor().is_identity() {
+        if check.mul_by_cofactor().is_identity() {
             Ok(())
         } else {
             Err(Error::InvalidSignature)

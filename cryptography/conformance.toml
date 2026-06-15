@@ -122,15 +122,27 @@ hash = "d0101a0688d45c8f7428b3861ed6e7e77c2ed25033cb7d6b47b3fa58148a3f18"
 n_cases = 65536
 hash = "eab4ff22bb7ed99fd73107c8b067e39bd25813b65614df95b4b5c46a312557ad"
 
-["commonware_cryptography::ed25519::scheme::tests::conformance::CodecConformance<PrivateKey>"]
+["commonware_cryptography::ed25519::hinted::tests::conformance::CodecConformance<PrivateKey>"]
 n_cases = 65536
 hash = "3e17c0a4943a83bf61cc55d039570928871866f0d50f8846dfd628a23f00d69e"
 
-["commonware_cryptography::ed25519::scheme::tests::conformance::CodecConformance<PublicKey>"]
+["commonware_cryptography::ed25519::hinted::tests::conformance::CodecConformance<PublicKey>"]
+n_cases = 65536
+hash = "600cc5d24b743e4509440f422dc96771e7fa7cbce1d29681ea8e608c5c1a3287"
+
+["commonware_cryptography::ed25519::hinted::tests::conformance::CodecConformance<Signature>"]
+n_cases = 65536
+hash = "85598269d7cdb11ef61db4cbb3969e29d94bf19b49c6f4e6ec9546beb4d87564"
+
+["commonware_cryptography::ed25519::standard::tests::conformance::CodecConformance<PrivateKey>"]
+n_cases = 65536
+hash = "3e17c0a4943a83bf61cc55d039570928871866f0d50f8846dfd628a23f00d69e"
+
+["commonware_cryptography::ed25519::standard::tests::conformance::CodecConformance<PublicKey>"]
 n_cases = 65536
 hash = "9010ca9b2849258179377f855fb77967ff003c8f349258d868bab76b0bfa1c5a"
 
-["commonware_cryptography::ed25519::scheme::tests::conformance::CodecConformance<Signature>"]
+["commonware_cryptography::ed25519::standard::tests::conformance::CodecConformance<Signature>"]
 n_cases = 65536
 hash = "0cbb8c8644dffe0be78d1307fb5034dd804921d66799c1aaec3d335b44e9616c"
 

@@ -28,6 +28,7 @@
 
 pub mod certificate;
 pub(in crate::ed25519) mod core;
-mod scheme;
+pub mod hinted;
+pub mod standard;
 
-pub use scheme::{Batch, PrivateKey, PublicKey, Signature};
+pub use standard::{Batch, PrivateKey, PublicKey, Signature};
