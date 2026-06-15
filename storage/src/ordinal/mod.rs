@@ -53,9 +53,12 @@
 //!
 //! # Recovery
 //!
-//! On restart with bits, [Ordinal] validates required records using their CRC32 and rebuilds the
-//! in-memory [crate::rmap::RMap]. Missing or invalid required records fail initialization.
-//! Restarting without bits deletes any existing ordinal data and starts empty.
+//! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
+//! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
+//! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
+//! stored records whose bits are unset are cleared before replay. Missing or invalid required records
+//! fail initialization. Passing `None` for the bits to [Ordinal::init] deletes any existing ordinal
+//! data and starts empty.
 //!
 //! # Example
 //!

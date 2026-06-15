@@ -159,6 +159,13 @@
 //! Each sync will process up to `table_resize_chunk_size` entries until the resize is complete. If there is
 //! an ongoing resize when closing the [Freezer], the resize will be completed before closing.
 //!
+//! # Recovery
+//!
+//! [Freezer::sync] and [Freezer::close] return a [Checkpoint] for recovering existing data.
+//! When a checkpoint is provided, [Freezer::init] rewinds the journals to the checkpoint, resizes the
+//! table to the checkpointed table size, and clears invalid or newer table entries. Passing `None`
+//! for the checkpoint to [Freezer::init] deletes any existing freezer data and starts empty.
+//!
 //! # Example
 //!
 //! ```rust
