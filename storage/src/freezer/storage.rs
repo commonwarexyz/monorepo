@@ -3,12 +3,9 @@ use crate::{
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
-    metadata::{Config as MetadataConfig, Metadata},
     Context,
 };
-use commonware_codec::{
-    CodecShared, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
-};
+use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
 use commonware_cryptography::{crc32, Crc32, Hasher};
 use commonware_runtime::{
     buffer,
@@ -16,7 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, IoBuf,
 };
-use commonware_utils::{sequence::U64, Array, Span};
+use commonware_utils::{Array, Span};
 use futures::future::{try_join, try_join_all};
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
@@ -179,60 +176,6 @@ impl FixedSize for Checkpoint {
 
 /// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
-
-/// Metadata key for committed table resize state.
-const TABLE_STATE_KEY: U64 = U64::new(0);
-
-/// State stored in [Metadata] for [Freezer].
-#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum State {
-    Resize {
-        table_size: u32,
-        resize_progress: Option<u32>,
-    },
-}
-
-impl CodecWrite for State {
-    fn write(&self, buf: &mut impl BufMut) {
-        match self {
-            Self::Resize {
-                table_size,
-                resize_progress,
-            } => {
-                0u8.write(buf);
-                table_size.write(buf);
-                resize_progress.write(buf);
-            }
-        }
-    }
-}
-
-impl Read for State {
-    type Cfg = ();
-    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
-        let tag = u8::read(buf)?;
-        match tag {
-            0 => Ok(Self::Resize {
-                table_size: u32::read(buf)?,
-                resize_progress: Option::<u32>::read(buf)?,
-            }),
-            _ => Err(commonware_codec::Error::InvalidEnum(tag)),
-        }
-    }
-}
-
-impl EncodeSize for State {
-    fn encode_size(&self) -> usize {
-        u8::SIZE
-            + match self {
-                Self::Resize {
-                    table_size: _,
-                    resize_progress,
-                } => u32::SIZE + resize_progress.encode_size(),
-            }
-    }
-}
 
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
@@ -451,9 +394,6 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Context for storage operations
     context: E,
 
-    // Metadata that tracks the committed logical table size
-    metadata: Metadata<E, U64, State>,
-
     // Table configuration
     table_partition: String,
     table_size: u32,
@@ -522,25 +462,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let read_buf = blob.read_at(offset, Entry::FULL_SIZE).await?;
 
         Self::parse_entries(read_buf)
-    }
-
-    /// Validate committed table resize state from metadata.
-    fn metadata_state(value: Option<&State>, table_len: u64) -> Option<State> {
-        let value = *value?;
-        let State::Resize {
-            table_size,
-            resize_progress,
-        } = value;
-        if table_size == 0 || !table_size.is_power_of_two() {
-            return None;
-        }
-
-        let physical_table_size = match resize_progress {
-            Some(progress) if progress < table_size => table_size.checked_mul(2)?,
-            Some(_) => return None,
-            None => table_size,
-        };
-        (Self::table_offset(physical_table_size) <= table_len).then_some(value)
     }
 
     /// Recover a single table entry and update tracking.
@@ -781,14 +702,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let mut oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
-        // Initialize metadata for committed table state
-        let metadata_cfg = MetadataConfig {
-            partition: config.metadata_partition.clone(),
-            codec_config: (),
-        };
-        let mut metadata =
-            Metadata::<_, U64, State>::init(context.child("metadata"), metadata_cfg).await?;
-
         // Open table blob
         let (mut table, mut table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
@@ -806,14 +719,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     .await?;
             }
         }
-        let metadata_state = Self::metadata_state(metadata.get(&TABLE_STATE_KEY), table_len);
-
         // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable, resize_progress) = match (table_len, checkpoint) {
+        let (checkpoint, resizable) = match (table_len, checkpoint) {
             // New table with no data
             (0, None) => {
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0, None)
+                (Checkpoint::init(config.table_initial_size), 0)
             }
 
             // New table with explicit checkpoint (must be empty)
@@ -827,13 +738,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 }
 
                 Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0, None)
+                (Checkpoint::init(config.table_initial_size), 0)
             }
 
             // Existing empty table with explicit empty checkpoint
-            (_, Some(_)) if empty_checkpoint => {
-                (Checkpoint::init(config.table_initial_size), 0, None)
-            }
+            (_, Some(_)) if empty_checkpoint => (Checkpoint::init(config.table_initial_size), 0),
 
             // Existing table with checkpoint
             (_, Some(checkpoint)) => {
@@ -878,20 +787,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     table.sync().await?;
                 }
 
-                (checkpoint, resizable, None)
+                (checkpoint, resizable)
             }
 
             // Existing table without checkpoint
-            (_, None) => (Checkpoint::init(config.table_initial_size), 0, None),
+            (_, None) => (Checkpoint::init(config.table_initial_size), 0),
         };
-        let recovered_state = State::Resize {
-            table_size: checkpoint.table_size,
-            resize_progress,
-        };
-        if metadata_state != Some(recovered_state) {
-            metadata.put(TABLE_STATE_KEY.clone(), recovered_state);
-            metadata.sync().await?;
-        }
 
         // Create metrics
         let puts = context.counter("puts", "number of put operations");
@@ -908,7 +809,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         Ok(Self {
             context,
-            metadata,
             table_partition: config.table_partition,
             table_size: checkpoint.table_size,
             table_resize_threshold: checkpoint.table_size as u64 * RESIZE_THRESHOLD / 100,
@@ -921,7 +821,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
             modified_sections: BTreeSet::new(),
             resizable,
-            resize_progress,
+            resize_progress: None,
             puts,
             gets,
             unnecessary_reads,
@@ -1238,14 +1138,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Sync updated table entries
         self.table.sync().await?;
-        let metadata_state = State::Resize {
-            table_size: self.table_size,
-            resize_progress: self.resize_progress,
-        };
-        if self.metadata.get(&TABLE_STATE_KEY) != Some(&metadata_state) {
-            self.metadata.put(TABLE_STATE_KEY.clone(), metadata_state);
-            self.metadata.sync().await?;
-        }
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
@@ -1278,9 +1170,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         // Destroy oversized journal
         self.oversized.destroy().await?;
 
-        // Destroy metadata
-        self.metadata.destroy().await?;
-
         // Destroy the table
         drop(self.table);
         self.context
@@ -1310,10 +1199,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 mod conformance {
     use super::*;
     use commonware_codec::conformance::CodecConformance;
+    use commonware_utils::sequence::U64;
+
     commonware_conformance::conformance_tests! {
         CodecConformance<Cursor>,
         CodecConformance<Checkpoint>,
-        CodecConformance<State>,
         CodecConformance<Entry>,
         CodecConformance<Record<U64>>
     }
@@ -1386,7 +1276,6 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 // Use 4 entries but only insert to 2, leaving 2 empty
                 table_initial_size: 4,
                 table_resize_frequency: 1,
@@ -1442,7 +1331,6 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 4,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 4,
@@ -1504,7 +1392,6 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1,
@@ -1551,7 +1438,6 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1,
@@ -1604,7 +1490,6 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1,
@@ -1649,7 +1534,6 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 2,
@@ -1680,22 +1564,6 @@ mod tests {
                     .unwrap();
             assert_eq!(freezer.table_size, 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
-            drop(freezer);
-
-            let metadata_cfg = MetadataConfig {
-                partition: cfg.metadata_partition,
-                codec_config: (),
-            };
-            let metadata = Metadata::<_, U64, State>::init(context.child("metadata"), metadata_cfg)
-                .await
-                .unwrap();
-            assert_eq!(
-                metadata.get(&TABLE_STATE_KEY),
-                Some(&State::Resize {
-                    table_size: 2,
-                    resize_progress: None
-                })
-            );
         });
     }
 
@@ -1712,7 +1580,6 @@ mod tests {
                 value_write_buffer: NZUsize!(1024),
                 value_target_size: 10 * 1024 * 1024,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 2,
@@ -1750,22 +1617,6 @@ mod tests {
             .unwrap();
             assert_eq!(freezer.table_size, 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
-            drop(freezer);
-
-            let metadata_cfg = MetadataConfig {
-                partition: cfg.metadata_partition,
-                codec_config: (),
-            };
-            let metadata = Metadata::<_, U64, State>::init(context.child("metadata"), metadata_cfg)
-                .await
-                .unwrap();
-            assert_eq!(
-                metadata.get(&TABLE_STATE_KEY),
-                Some(&State::Resize {
-                    table_size: 2,
-                    resize_progress: None
-                })
-            );
         });
     }
 }

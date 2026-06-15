@@ -33,9 +33,6 @@ pub const VALUE_PARTITION: &str = "freezer-bench-value";
 /// Partition for [Freezer] table benchmarks.
 pub const TABLE_PARTITION: &str = "freezer-bench-table";
 
-/// Partition for [Freezer] metadata benchmarks.
-pub const METADATA_PARTITION: &str = "freezer-bench-metadata";
-
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);
 
@@ -60,7 +57,6 @@ pub async fn init(ctx: Context) -> FreezerType {
         value_write_buffer: NZUsize!(WRITE_BUFFER),
         value_target_size: VALUE_TARGET_SIZE,
         table_partition: TABLE_PARTITION.into(),
-        metadata_partition: METADATA_PARTITION.into(),
         table_initial_size: TABLE_INITIAL_SIZE,
         table_resize_frequency: TABLE_RESIZE_FREQUENCY,
         table_resize_chunk_size: TABLE_RESIZE_CHUNK_SIZE,

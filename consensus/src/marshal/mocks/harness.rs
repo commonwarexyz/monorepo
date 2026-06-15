@@ -1686,10 +1686,6 @@ impl TestHarness for StandardHarness {
                     "{}-finalizations-by-height-freezer-table",
                     config.partition_prefix
                 ),
-                freezer_metadata_partition: format!(
-                    "{}-finalizations-by-height-freezer-metadata",
-                    config.partition_prefix
-                ),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
@@ -1730,10 +1726,6 @@ impl TestHarness for StandardHarness {
                 ),
                 freezer_table_partition: format!(
                     "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_metadata_partition: format!(
-                    "{}-finalized_blocks-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_table_initial_size: 64,
@@ -2499,10 +2491,6 @@ impl TestHarness for CodingHarness {
                     "{}-finalizations-by-height-freezer-table",
                     config.partition_prefix
                 ),
-                freezer_metadata_partition: format!(
-                    "{}-finalizations-by-height-freezer-metadata",
-                    config.partition_prefix
-                ),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
@@ -2543,10 +2531,6 @@ impl TestHarness for CodingHarness {
                 ),
                 freezer_table_partition: format!(
                     "{}-finalized_blocks-freezer-table",
-                    config.partition_prefix
-                ),
-                freezer_metadata_partition: format!(
-                    "{}-finalized_blocks-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_table_initial_size: 64,

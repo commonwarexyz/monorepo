@@ -26,7 +26,6 @@ impl Conformance for Freezer {
                 value_write_buffer: WRITE_BUFFER,
                 value_target_size: 128,
                 table_partition: format!("freezer-table-conformance-{seed}"),
-                metadata_partition: format!("freezer-metadata-conformance-{seed}"),
                 table_initial_size: 4,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 4,

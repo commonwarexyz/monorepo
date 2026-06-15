@@ -10,11 +10,10 @@
 //!
 //! # Format
 //!
-//! The [Freezer] uses four on-disk components:
+//! The [Freezer] uses a three-level architecture:
 //! 1. An extendible hash table (written in a single [commonware_runtime::Blob]) that maps keys to locations
 //! 2. A key index journal ([crate::journal::segmented::fixed]) that stores keys and collision chain pointers
 //! 3. A value journal ([crate::journal::segmented::glob]) that stores the actual values
-//! 4. A metadata store ([crate::metadata::Metadata]) that tracks committed table resize state
 //!
 //! These journals are combined via [crate::journal::segmented::oversized], which coordinates
 //! crash recovery between them.
@@ -179,7 +178,6 @@
 //!         value_write_buffer: NZUsize!(1024 * 1024), // 1MB
 //!         value_target_size: 100 * 1024 * 1024, // 100MB
 //!         table_partition: "freezer-table".into(),
-//!         metadata_partition: "freezer-metadata".into(),
 //!         table_initial_size: 65_536, // ~3MB initial table size
 //!         table_resize_frequency: 4, // Force resize once 4 writes to the same entry occur
 //!         table_resize_chunk_size: 16_384, // ~1MB of table entries rewritten per sync
@@ -226,8 +224,6 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
-    #[error("metadata error: {0}")]
-    Metadata(#[from] crate::metadata::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
     #[error("checkpoint does not match stored data")]
@@ -260,9 +256,6 @@ pub struct Config<C> {
 
     /// The [commonware_runtime::Storage] partition to use for storing the table.
     pub table_partition: String,
-
-    /// The [commonware_runtime::Storage] partition to use for storing metadata.
-    pub metadata_partition: String,
 
     /// The initial number of items in the table.
     pub table_initial_size: u32,
@@ -323,7 +316,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -398,7 +390,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -456,7 +447,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 4, // Very small to force collisions
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -524,7 +514,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -600,7 +589,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -705,7 +693,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -774,7 +761,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -837,7 +823,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -906,7 +891,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -986,7 +970,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2, // Very small initial size to force multiple resizes
                 table_resize_frequency: 2, // Resize after 2 items per entry
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -1061,7 +1044,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1, // Process one at a time
@@ -1143,7 +1125,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 2,
                 table_resize_frequency: 1,
                 table_resize_chunk_size: 1, // Process one at a time
@@ -1210,7 +1191,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: 128, // Force multiple journal sections
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: 8,     // Small table to force collisions
                 table_resize_frequency: 2, // Force resize frequently
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,
@@ -1370,7 +1350,6 @@ mod tests {
                 value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 value_target_size: DEFAULT_VALUE_TARGET_SIZE,
                 table_partition: "test-table".into(),
-                metadata_partition: "test-metadata".into(),
                 table_initial_size: DEFAULT_TABLE_INITIAL_SIZE,
                 table_resize_frequency: DEFAULT_TABLE_RESIZE_FREQUENCY,
                 table_resize_chunk_size: DEFAULT_TABLE_RESIZE_CHUNK_SIZE,

@@ -66,7 +66,6 @@ impl Conformance for ArchiveImmutable {
             let config = immutable::Config {
                 metadata_partition: format!("archive-immutable-metadata-{seed}"),
                 freezer_table_partition: format!("immutable-freezer-table-{seed}"),
-                freezer_metadata_partition: format!("immutable-freezer-metadata-{seed}"),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 2,
                 freezer_table_resize_chunk_size: 32,

@@ -137,7 +137,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
                 value_write_buffer: cfg.freezer_value_write_buffer,
                 value_target_size: cfg.freezer_value_target_size,
                 table_partition: cfg.freezer_table_partition,
-                metadata_partition: cfg.freezer_metadata_partition,
                 table_initial_size: cfg.freezer_table_initial_size,
                 table_resize_frequency: cfg.freezer_table_resize_frequency,
                 table_resize_chunk_size: cfg.freezer_table_resize_chunk_size,

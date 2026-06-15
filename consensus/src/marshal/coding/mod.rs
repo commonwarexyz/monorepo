@@ -348,9 +348,6 @@ mod tests {
                 freezer_table_partition: format!(
                     "{partition_prefix}-finalizations-by-height-freezer-table"
                 ),
-                freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalizations-by-height-freezer-metadata"
-                ),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
                 freezer_table_resize_chunk_size: 10,
@@ -381,9 +378,6 @@ mod tests {
                 metadata_partition: format!("{partition_prefix}-finalized_blocks-metadata"),
                 freezer_table_partition: format!(
                     "{partition_prefix}-finalized_blocks-freezer-table"
-                ),
-                freezer_metadata_partition: format!(
-                    "{partition_prefix}-finalized_blocks-freezer-metadata"
                 ),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 10,
