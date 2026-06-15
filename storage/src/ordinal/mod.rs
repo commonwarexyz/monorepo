@@ -149,6 +149,23 @@ mod tests {
     const DEFAULT_WRITE_BUFFER: usize = 4096;
     const DEFAULT_REPLAY_BUFFER: usize = 1024 * 1024;
 
+    fn bits_for_indices(
+        items_per_blob: u64,
+        indices: impl Iterator<Item = u64>,
+    ) -> BTreeMap<u64, Option<BitMap>> {
+        let mut bits = BTreeMap::new();
+        for index in indices {
+            let section = index / items_per_blob;
+            let offset = index % items_per_blob;
+            bits.entry(section)
+                .or_insert_with(|| Some(BitMap::zeroes(items_per_blob)))
+                .as_mut()
+                .unwrap()
+                .set(offset, true);
+        }
+        bits
+    }
+
     #[test_traced]
     fn test_put_get() {
         // Initialize the deterministic context
@@ -1041,9 +1058,15 @@ mod tests {
             drop(store);
 
             // Reopen the store
-            let mut store = Ordinal::<_, FixedBytes<128>>::init(context.child("second"), cfg, None)
-                .await
-                .expect("Failed to initialize store");
+            let owned_bits = bits_for_indices(100, values.iter().map(|(index, _)| *index));
+            let bits = owned_bits
+                .iter()
+                .map(|(section, bitmap)| (*section, bitmap))
+                .collect();
+            let mut store =
+                Ordinal::<_, FixedBytes<128>>::init(context.child("second"), cfg, Some(bits))
+                    .await
+                    .expect("Failed to initialize store");
 
             // Verify all values are still there after restart
             for (index, value) in &values {

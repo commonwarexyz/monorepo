@@ -3,9 +3,9 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_storage::ordinal::{Config, Ordinal};
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Debug, Clone)]
 enum OrdinalOperation {
@@ -69,15 +69,32 @@ struct FuzzInput {
     operations: Vec<OrdinalOperation>,
 }
 
+fn bits_for_indices<'a>(
+    items_per_blob: u64,
+    indices: impl Iterator<Item = &'a u64>,
+) -> BTreeMap<u64, Option<BitMap>> {
+    let mut bits = BTreeMap::new();
+    for index in indices {
+        let section = index / items_per_blob;
+        let offset = index % items_per_blob;
+        bits.entry(section)
+            .or_insert_with(|| Some(BitMap::zeroes(items_per_blob)))
+            .as_mut()
+            .unwrap()
+            .set(offset, true);
+    }
+    bits
+}
+
 fn fuzz(input: FuzzInput) {
     // Initialize the runtime
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         // Initialize the ordinal
-        let items_per_blob = NZU64!(input.items_per_blob.clamp(1, u16::MAX) as u64);
+        let items_per_blob = input.items_per_blob.clamp(1, u16::MAX) as u64;
         let cfg = Config {
             partition: "ordinal-operations-fuzz-test".into(),
-            items_per_blob,
+            items_per_blob: NZU64!(items_per_blob),
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(64 * 1024),
         };
@@ -251,7 +268,12 @@ fn fuzz(input: FuzzInput) {
                         synced_data = expected_data.clone();
 
                         // Reopen and verify synced data persisted
-                        match Ordinal::<_, FixedBytes<32>>::init(context.child("ordinal").with_attribute("instance", restarts), cfg.clone(), None).await
+                        let owned_bits = bits_for_indices(items_per_blob, synced_data.keys());
+                        let bits = owned_bits
+                            .iter()
+                            .map(|(section, bitmap)| (*section, bitmap))
+                            .collect();
+                        match Ordinal::<_, FixedBytes<32>>::init(context.child("ordinal").with_attribute("instance", restarts), cfg.clone(), Some(bits)).await
                         {
                             Ok(new_ordinal) => {
                                 restarts += 1;
