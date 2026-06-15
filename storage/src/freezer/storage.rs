@@ -529,7 +529,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Determine if metadata should override a caller-provided checkpoint.
-    fn metadata_state_supersedes_checkpoint(state: State, checkpoint: &Checkpoint) -> bool {
+    const fn metadata_state_supersedes_checkpoint(state: State, checkpoint: &Checkpoint) -> bool {
         match state {
             State::Resize {
                 table_size,
@@ -547,11 +547,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         table: &E::Blob,
         oversized: &Oversized<E, Record<K>, V>,
         table_len: u64,
-        table_size: u32,
-        resize_progress: Option<u32>,
+        state: State,
         table_resize_frequency: u8,
         table_replay_buffer: NonZeroUsize,
     ) -> Result<(Checkpoint, u32, Option<u32>), Error> {
+        let State::Resize {
+            table_size,
+            resize_progress,
+        } = state;
         let physical_table_size = if resize_progress.is_some() {
             table_size.checked_mul(2).expect("table size overflow")
         } else {
@@ -845,17 +848,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 match metadata_state
                     .filter(|state| Self::metadata_state_supersedes_checkpoint(*state, &checkpoint))
                 {
-                    Some(State::Resize {
-                        table_size,
-                        resize_progress,
-                    }) => {
+                    Some(state) => {
                         Self::recover_durable_checkpoint(
                             &context,
                             &table,
                             &oversized,
                             table_len,
-                            table_size,
-                            resize_progress,
+                            state,
                             config.table_resize_frequency,
                             config.table_replay_buffer,
                         )
@@ -905,21 +904,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
             // Existing table without checkpoint
             (_, None) => {
-                let (table_size, resize_progress) = match metadata_state {
-                    Some(State::Resize {
-                        table_size,
-                        resize_progress,
-                    }) => (table_size, resize_progress),
-                    None => ((table_len / Entry::FULL_SIZE as u64) as u32, None),
-                };
+                let state = metadata_state.unwrap_or_else(|| State::Resize {
+                    table_size: (table_len / Entry::FULL_SIZE as u64) as u32,
+                    resize_progress: None,
+                });
 
                 Self::recover_durable_checkpoint(
                     &context,
                     &table,
                     &oversized,
                     table_len,
-                    table_size,
-                    resize_progress,
+                    state,
                     config.table_resize_frequency,
                     config.table_replay_buffer,
                 )
