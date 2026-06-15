@@ -2422,11 +2422,13 @@ mod tests {
         });
     }
 
-    fn run_index_large_collision_chain_stack_overflow<I: Unordered<Value = u64>>(index: &mut I) {
+    /// Exercises a single translated key holding a very large overflow chain, ensuring inserts and
+    /// the resulting `Vec` overflow stay correct at scale.
+    fn run_index_large_collision_chain<I: Unordered<Value = u64>>(index: &mut I) {
         cfg_if::cfg_if! {
             if #[cfg(miri)] {
-                // The full native test stresses stack depth, while miri is mainly checking the
-                // same iterative drop path for memory safety.
+                // miri uses a smaller chain to keep runtime reasonable while exercising the same
+                // insert and overflow paths.
                 const ITEMS: usize = 5_000;
             } else {
                 const ITEMS: usize = 50_000;
@@ -2438,34 +2440,34 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_hash_index_large_collision_chain_stack_overflow() {
+    fn test_hash_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            run_index_large_collision_chain_stack_overflow(&mut index);
+            run_index_large_collision_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_ordered_index_large_collision_chain_stack_overflow() {
+    fn test_ordered_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_ordered(context);
-            run_index_large_collision_chain_stack_overflow(&mut index);
+            run_index_large_collision_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_partitioned_index_large_collision_chain_stack_overflow() {
+    fn test_partitioned_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
                 let mut index = new_partitioned_unordered(context.child("unordered"));
-                run_index_large_collision_chain_stack_overflow(&mut index);
+                run_index_large_collision_chain(&mut index);
             }
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
-                run_index_large_collision_chain_stack_overflow(&mut index);
+                run_index_large_collision_chain(&mut index);
             }
         });
     }
