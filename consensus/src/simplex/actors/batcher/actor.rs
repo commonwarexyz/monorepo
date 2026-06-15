@@ -365,9 +365,16 @@ where
                     }
 
                     // Add the message to the verifier
-                    work.entry(view)
-                        .or_insert_with(|| self.new_round(view))
-                        .add_constructed(message);
+                    let round = work.entry(view).or_insert_with(|| self.new_round(view));
+                    let process = info_span!(
+                        parent: round.span(),
+                        "simplex.batcher.process",
+                        operation = "constructed",
+                        epoch = %self.epoch,
+                        view = %view
+                    );
+                    let _guard = process.entered();
+                    round.add_constructed(message);
                     self.added.inc();
                     updated_view = view;
                 }
