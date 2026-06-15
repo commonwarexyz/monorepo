@@ -315,9 +315,7 @@ where
                         };
                         finalized = new_finalized;
 
-                        // Close the root span of any view the chain has now decided.
-                        // The round lingers until it is no longer interesting, but
-                        // its work no longer anchors a trace.
+                        // Close the root span of any view the chain has now decided
                         for (_, round) in work.range_mut(..=finalized) {
                             round.close_span();
                         }
@@ -413,17 +411,26 @@ where
                 }
                 self.record_activity(&sender, view);
 
-                // Parent under the view's span if we already track the view (we avoid
-                // creating per-view state for certificates that fail verification)
+                // Skip certificates we already have for the view
                 let kind = match &message {
                     Certificate::Notarization(_) => "notarization",
                     Certificate::Nullification(_) => "nullification",
                     Certificate::Finalization(_) => "finalization",
                 };
-                let parent = work
-                    .get(&view)
-                    .map(|round| round.span().clone())
-                    .unwrap_or_else(Span::none);
+                let round = work.get(&view);
+                let duplicate = round.is_some_and(|round| match &message {
+                    Certificate::Notarization(_) => round.has_notarization(),
+                    Certificate::Nullification(_) => round.has_nullification(),
+                    Certificate::Finalization(_) => round.has_finalization(),
+                });
+                if duplicate {
+                    trace!(%view, kind, "skipping duplicate certificate");
+                    continue;
+                }
+
+                // Parent under the view's span if we already track the view (we avoid
+                // creating per-view state for certificates that fail verification)
+                let parent = round.map(|round| round.span().clone()).unwrap_or_else(Span::none);
                 let span = info_span!(
                     parent: parent,
                     "simplex.batcher.verify_certificate",
@@ -435,12 +442,6 @@ where
 
                 match message {
                     Certificate::Notarization(notarization) => {
-                        // Skip if we already have a notarization for this view
-                        if work.get(&view).is_some_and(|r| r.has_notarization()) {
-                            trace!(%view, "skipping duplicate notarization");
-                            continue;
-                        }
-
                         // Verify the certificate
                         if !notarization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
                         {
@@ -455,12 +456,6 @@ where
                         voter.recovered(Certificate::Notarization(notarization));
                     }
                     Certificate::Nullification(nullification) => {
-                        // Skip if we already have a nullification for this view
-                        if work.get(&view).is_some_and(|r| r.has_nullification()) {
-                            trace!(%view, "skipping duplicate nullification");
-                            continue;
-                        }
-
                         // Verify the certificate
                         if !nullification.verify::<_, D>(
                             self.context.as_mut(),
@@ -478,12 +473,6 @@ where
                         voter.recovered(Certificate::Nullification(nullification));
                     }
                     Certificate::Finalization(finalization) => {
-                        // Skip if we already have a finalization for this view
-                        if work.get(&view).is_some_and(|r| r.has_finalization()) {
-                            trace!(%view, "skipping duplicate finalization");
-                            continue;
-                        }
-
                         // Verify the certificate
                         if !finalization.verify(self.context.as_mut(), &self.scheme, &self.strategy)
                         {
@@ -550,7 +539,12 @@ where
                     // timer. We check after adding because duplicate votes are rejected.
                     if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
-                        voter.timeout(Rnd::new(self.epoch, current.view), TimeoutReason::LeaderNullify);
+                        let round = Rnd::new(self.epoch, current.view);
+                        let span = work
+                            .get(&current.view)
+                            .map(|round| round.span().clone())
+                            .unwrap_or_else(Span::none);
+                        span.in_scope(|| voter.timeout(round, TimeoutReason::LeaderNullify));
                     }
                 }
                 updated_view = view;

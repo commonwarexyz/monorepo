@@ -228,8 +228,8 @@ impl<
             "simplex.resolver.fetch",
             id = request.id,
             epoch = %self.epoch,
-            view = %cause,
-            request = %view,
+            cause = %cause,
+            view = %view,
             reason = reason.as_str()
         );
         let feedback = span.in_scope(|| {
@@ -371,8 +371,8 @@ impl<
                     parent: parent,
                     "simplex.resolver.deliver",
                     epoch = %self.epoch,
-                    view = %cause,
-                    request = %view,
+                    cause = %cause,
+                    view = %view,
                     reason,
                     subscribers = subscribers.len()
                 );
@@ -382,7 +382,7 @@ impl<
                 let validate = info_span!(
                     "simplex.resolver.validate",
                     epoch = %self.epoch,
-                    request = %view
+                    view = %view
                 );
                 let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
                     // Resolver will block any peers that send invalid responses, so
@@ -396,7 +396,7 @@ impl<
                 let resolved = info_span!(
                     "simplex.resolver.resolve",
                     epoch = %self.epoch,
-                    request = %view,
+                    view = %view,
                     certificate_view = %parsed.view()
                 );
                 resolved.in_scope(|| voter.resolved(parsed.clone()));
@@ -410,8 +410,7 @@ impl<
                 let span = info_span!(
                     "simplex.resolver.produce",
                     epoch = %self.epoch,
-                    view = %view,
-                    request = %view
+                    view = %view
                 );
                 let _guard = span.entered();
 

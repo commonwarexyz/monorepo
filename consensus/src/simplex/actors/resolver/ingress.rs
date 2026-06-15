@@ -33,7 +33,7 @@ pub enum MailboxMessage<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> MailboxMessage<S, D> {
-    // Return the message view used for pruning and deduplication.
+    /// Returns the message view used for pruning and deduplication.
     pub(crate) fn view(&self) -> View {
         match self {
             Self::Certificate { certificate, .. } => certificate.view(),

@@ -23,7 +23,7 @@ pub enum Message<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
-    // Return the message view used for pruning and span attribution.
+    /// Returns the message view used for pruning and span attribution.
     pub(crate) fn view(&self) -> View {
         match self {
             Self::Update { current, .. } => *current,
