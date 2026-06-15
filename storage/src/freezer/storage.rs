@@ -428,21 +428,6 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
 }
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
-    /// Remove a partition if it contains any blobs.
-    async fn clear_partition(context: &E, partition: &str) -> Result<(), Error> {
-        let stored_blobs = match context.scan(partition).await {
-            Ok(blobs) => blobs,
-            Err(commonware_runtime::Error::PartitionMissing(_)) => return Ok(()),
-            Err(err) => return Err(Error::Runtime(err)),
-        };
-
-        if !stored_blobs.is_empty() {
-            context.remove(partition, None).await?;
-        }
-
-        Ok(())
-    }
-
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -684,10 +669,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 && checkpoint.oversized_size == 0
                 && checkpoint.table_size == 0
         });
-        if checkpoint.is_none() || empty_checkpoint {
-            Self::clear_partition(&context, &config.key_partition).await?;
-            Self::clear_partition(&context, &config.value_partition).await?;
-        }
+        let reset = checkpoint.is_none() || empty_checkpoint;
 
         // Initialize oversized journal (handles crash recovery)
         let oversized_cfg = OversizedConfig {
@@ -699,6 +681,14 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
+        if reset {
+            for partition in [&config.key_partition, &config.value_partition] {
+                match context.remove(partition, None).await {
+                    Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+                    Err(err) => return Err(Error::Runtime(err)),
+                }
+            }
+        }
         let mut oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
@@ -706,7 +696,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let (mut table, mut table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
-        if (checkpoint.is_none() || empty_checkpoint) && table_len != 0 {
+        if reset && table_len != 0 {
             let expected_table_len = Self::table_offset(config.table_initial_size);
             if table_len != expected_table_len
                 || !Self::table_empty(&context, &table, table_len, config.table_replay_buffer)
