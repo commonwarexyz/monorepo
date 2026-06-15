@@ -189,15 +189,6 @@ enum MetadataValue {
     TableSize(u32),
 }
 
-impl MetadataValue {
-    /// Get the committed logical table size.
-    const fn table_size(&self) -> u32 {
-        match self {
-            Self::TableSize(table_size) => *table_size,
-        }
-    }
-}
-
 impl CodecWrite for MetadataValue {
     fn write(&self, buf: &mut impl BufMut) {
         match self {
@@ -720,7 +711,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 .await?;
         let metadata_table_size = metadata
             .get(&TABLE_SIZE_KEY)
-            .map(MetadataValue::table_size)
+            .map(|metadata| match metadata {
+                MetadataValue::TableSize(table_size) => *table_size,
+            })
             .filter(|table_size| *table_size > 0 && table_size.is_power_of_two());
 
         // Open table blob
