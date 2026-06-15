@@ -6839,16 +6839,18 @@ mod tests {
                     event.metadata.content == "requested proposal from automaton"
                         && event
                             .expect_span_at_index(0, |span| {
-                                span.expect_content_exact("simplex.voter.propose")
+                                span.expect_content_exact("simplex.voter.propose")?;
+                                // Operation spans carry both epoch and view so they
+                                // are unambiguous when viewed standalone.
+                                span.expect_field_exact("epoch", "333")?;
+                                span.expect_field_exact("view", "2")
                             })
                             .is_ok()
                         && event
                             .expect_span(|span| {
                                 span.content == "simplex.voter.view"
-                                    && span
-                                        .fields
-                                        .iter()
-                                        .any(|(name, value)| name == "view" && value == "2")
+                                    && span.expect_field_exact("epoch", "333").is_ok()
+                                    && span.expect_field_exact("view", "2").is_ok()
                             })
                             .is_ok()
                 })

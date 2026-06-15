@@ -1,4 +1,4 @@
-use crate::{simplex::types::Certificate, types::View, Viewable};
+use crate::{simplex::types::Certificate, types::View, Epochable, Viewable};
 use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -172,7 +172,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a certificate.
     pub fn updated(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(MailboxMessage::Certificate {
-            span: info_span!("simplex.resolver.mailbox.updated", view = %certificate.view()),
+            span: info_span!("simplex.resolver.mailbox.updated", epoch = %certificate.epoch(), view = %certificate.view()),
             certificate,
         });
     }

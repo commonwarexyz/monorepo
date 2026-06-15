@@ -9,7 +9,7 @@ use crate::{
         types::{Activity, Certificate, Proposal, Vote},
         Plan,
     },
-    types::{Epoch, Participant, View, ViewDelta},
+    types::{Epoch, Participant, Round as Rnd, View, ViewDelta},
     Epochable, Relay, Reporter, Viewable,
 };
 use commonware_actor::mailbox;
@@ -144,8 +144,9 @@ where
         )
     }
 
-    fn new_round(&self) -> Round<S, B, D, Re> {
+    fn new_round(&self, view: View) -> Round<S, B, D, Re> {
         Round::new(
+            Rnd::new(self.epoch, view),
             self.participants.clone(),
             self.scheme.clone(),
             self.blocker.clone(),
@@ -295,6 +296,7 @@ where
                         parent: &view_span,
                         "simplex.batcher.process",
                         operation = "update",
+                        epoch = %self.epoch,
                         view = %new_current
                     );
                     let _guard = process.entered();
@@ -313,7 +315,9 @@ where
                         round.close_span();
                     }
 
-                    let round = work.entry(current.view).or_insert_with(|| self.new_round());
+                    let round = work
+                        .entry(current.view)
+                        .or_insert_with(|| self.new_round(current.view));
                     round.set_span(view_span);
                     round.set_leader(leader);
 
@@ -362,7 +366,7 @@ where
 
                     // Add the message to the verifier
                     work.entry(view)
-                        .or_insert_with(|| self.new_round())
+                        .or_insert_with(|| self.new_round(view))
                         .add_constructed(message);
                     self.added.inc();
                     updated_view = view;
@@ -418,6 +422,7 @@ where
                     parent: parent,
                     "simplex.batcher.verify_certificate",
                     kind,
+                    epoch = %self.epoch,
                     view = %view
                 );
                 let _guard = span.entered();
@@ -439,7 +444,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round())
+                            .or_insert_with(|| self.new_round(view))
                             .set_notarization(notarization.clone());
                         voter.recovered(Certificate::Notarization(notarization));
                     }
@@ -462,7 +467,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round())
+                            .or_insert_with(|| self.new_round(view))
                             .set_nullification(nullification.clone());
                         voter.recovered(Certificate::Nullification(nullification));
                     }
@@ -482,7 +487,7 @@ where
 
                         // Store and forward to voter
                         work.entry(view)
-                            .or_insert_with(|| self.new_round())
+                            .or_insert_with(|| self.new_round(view))
                             .set_finalization(finalization.clone());
                         voter.recovered(Certificate::Finalization(finalization));
                     }
@@ -523,7 +528,7 @@ where
                 // Add the vote to the verifier
                 if work
                     .entry(view)
-                    .or_insert_with(|| self.new_round())
+                    .or_insert_with(|| self.new_round(view))
                     .add_network(sender.clone(), message)
                 {
                     self.added.inc();

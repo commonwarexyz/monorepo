@@ -133,6 +133,7 @@ impl<
                     parent: message.span(),
                     "simplex.resolver.process",
                     operation = message.name(),
+                    epoch = %self.epoch,
                     view = %message.view()
                 );
                 let _guard = span.entered();
@@ -251,7 +252,7 @@ impl<
                 data,
                 response,
             } => {
-                let span = info_span!("simplex.resolver.deliver", view = %view);
+                let span = info_span!("simplex.resolver.deliver", epoch = %self.epoch, view = %view);
                 let _guard = span.entered();
 
                 // Validate incoming message
@@ -270,7 +271,7 @@ impl<
                 self.state.handle(parsed, Some(view), resolver);
             }
             HandlerMessage::Produce { view, response } => {
-                let span = debug_span!("simplex.resolver.produce", view = %view);
+                let span = debug_span!("simplex.resolver.produce", epoch = %self.epoch, view = %view);
                 let _guard = span.entered();
 
                 // Produce message for view

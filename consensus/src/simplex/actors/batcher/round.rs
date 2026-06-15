@@ -7,7 +7,7 @@ use crate::{
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
-    types::Participant,
+    types::{Participant, Round as Rnd},
     Reporter,
 };
 use commonware_cryptography::Digest;
@@ -18,7 +18,7 @@ use commonware_utils::{
     N3f1,
 };
 use rand_core::CryptoRngCore;
-use tracing::Span;
+use tracing::{info_span, Span};
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -27,6 +27,7 @@ pub struct Round<
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
+    round: Rnd,
     participants: Set<S::PublicKey>,
 
     blocker: B,
@@ -64,10 +65,11 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<S, B, D, R>
 {
-    pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
+    pub fn new(round: Rnd, participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
         let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {
+            round,
             participants,
 
             blocker,
@@ -316,7 +318,7 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all)]
+    #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all, fields(epoch = %self.round.epoch(), view = %self.round.view()))]
     pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -333,7 +335,7 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all)]
+    #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all, fields(epoch = %self.round.epoch(), view = %self.round.view()))]
     pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -350,7 +352,7 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all)]
+    #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all, fields(epoch = %self.round.epoch(), view = %self.round.view()))]
     pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -425,11 +427,6 @@ impl<
     /// Attempts to construct a notarization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    #[tracing::instrument(
-        name = "simplex.batcher.try_construct_notarization",
-        level = "debug",
-        skip_all
-    )]
     pub fn try_construct_notarization(
         &mut self,
         scheme: &S,
@@ -441,6 +438,8 @@ impl<
         if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
+        let _span =
+            info_span!("simplex.batcher.try_construct_notarization", epoch = %self.round.epoch(), view = %self.round.view()).entered();
         let notarization =
             Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
         self.set_notarization(notarization.clone());
@@ -450,11 +449,6 @@ impl<
     /// Attempts to construct a nullification certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    #[tracing::instrument(
-        name = "simplex.batcher.try_construct_nullification",
-        level = "debug",
-        skip_all
-    )]
     pub fn try_construct_nullification(
         &mut self,
         scheme: &S,
@@ -466,6 +460,8 @@ impl<
         if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
+        let _span =
+            info_span!("simplex.batcher.try_construct_nullification", epoch = %self.round.epoch(), view = %self.round.view()).entered();
         let nullification =
             Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
         self.set_nullification(nullification.clone());
@@ -475,11 +471,6 @@ impl<
     /// Attempts to construct a finalization certificate from verified votes.
     ///
     /// Returns the certificate if we have quorum and haven't already constructed one.
-    #[tracing::instrument(
-        name = "simplex.batcher.try_construct_finalization",
-        level = "debug",
-        skip_all
-    )]
     pub fn try_construct_finalization(
         &mut self,
         scheme: &S,
@@ -491,6 +482,8 @@ impl<
         if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
+        let _span =
+            info_span!("simplex.batcher.try_construct_finalization", epoch = %self.round.epoch(), view = %self.round.view()).entered();
         let finalization =
             Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
         self.set_finalization(finalization.clone());

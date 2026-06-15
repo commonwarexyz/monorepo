@@ -221,7 +221,7 @@ impl<
         if let Some(journal) = self.journal.as_mut() {
             journal
                 .prune(min_active.get())
-                .instrument(info_span!("simplex.voter.journal.prune", min = %min_active))
+                .instrument(info_span!("simplex.voter.journal.prune", epoch = %self.state.epoch(), min = %min_active))
                 .await
                 .expect("unable to prune journal");
         }
@@ -238,7 +238,7 @@ impl<
     }
 
     /// Syncs the journal so other replicas can recover messages in `view`.
-    #[tracing::instrument(name = "simplex.voter.journal.sync", level = "info", skip_all, fields(view = %view))]
+    #[tracing::instrument(name = "simplex.voter.journal.sync", level = "info", skip_all, fields(epoch = %self.state.epoch(), view = %view))]
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
             journal
@@ -302,6 +302,7 @@ impl<
         let span = info_span!(
             parent: self.state.view_span(context.view()),
             "simplex.voter.propose",
+            epoch = %context.round.epoch(),
             view = %context.view()
         );
         let receiver = async {
@@ -323,6 +324,7 @@ impl<
         let span = info_span!(
             parent: self.state.view_span(context.view()),
             "simplex.voter.verify",
+            epoch = %context.round.epoch(),
             view = %context.view()
         );
         let receiver = async {
@@ -916,6 +918,7 @@ impl<
 
         // Rebuild from journal
         let start = self.context.current();
+        let epoch = self.state.epoch();
         async {
             let stream = journal
                 .replay(0, 0, self.replay_buffer)
@@ -979,7 +982,7 @@ impl<
                 // when timing out.
             }
         }
-        .instrument(info_span!("simplex.voter.replay"))
+        .instrument(info_span!("simplex.voter.replay", %epoch))
         .await;
         self.journal = Some(journal);
 
@@ -1044,6 +1047,7 @@ impl<
                     let span = info_span!(
                         parent: self.state.view_span(view),
                         "simplex.voter.certify",
+                        epoch = %round.epoch(),
                         view = %view
                     );
                     let result = if is_local {
@@ -1079,6 +1083,7 @@ impl<
                 let span = info_span!(
                     parent: self.state.view_span(current_view),
                     "simplex.voter.timeout",
+                    epoch = %self.state.epoch(),
                     view = %current_view
                 );
                 self.timeout(&mut batcher, &mut vote_sender, &mut certificate_sender)
@@ -1121,6 +1126,7 @@ impl<
                     parent: msg.span(),
                     "simplex.voter.process",
                     operation = msg.name(),
+                    epoch = %self.state.epoch(),
                     view = %msg.view()
                 );
                 let Some((processed_view, processed_resolved)) = self
@@ -1144,6 +1150,7 @@ impl<
                 let span = info_span!(
                     parent: self.state.view_span(view),
                     "simplex.voter.notify",
+                    epoch = %self.state.epoch(),
                     view = %view
                 );
                 self.notify(

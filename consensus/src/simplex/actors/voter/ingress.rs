@@ -4,7 +4,7 @@ use crate::{
         types::{Certificate, Proposal},
     },
     types::View,
-    Viewable,
+    Epochable, Viewable,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -199,7 +199,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a leader's proposal.
     pub fn proposal(&mut self, proposal: Proposal<D>) {
         let _ = self.sender.enqueue(Message::Proposal {
-            span: info_span!("simplex.voter.mailbox.proposal", view = %proposal.view()),
+            span: info_span!("simplex.voter.mailbox.proposal", epoch = %proposal.epoch(), view = %proposal.view()),
             proposal,
         });
     }
@@ -216,7 +216,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a recovered certificate.
     pub fn recovered(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(Message::Verified {
-            span: info_span!("simplex.voter.mailbox.recovered", view = %certificate.view()),
+            span: info_span!("simplex.voter.mailbox.recovered", epoch = %certificate.epoch(), view = %certificate.view()),
             certificate,
             from_resolver: false,
         });
@@ -225,7 +225,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a resolved certificate.
     pub fn resolved(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(Message::Verified {
-            span: info_span!("simplex.voter.mailbox.resolved", view = %certificate.view()),
+            span: info_span!("simplex.voter.mailbox.resolved", epoch = %certificate.epoch(), view = %certificate.view()),
             certificate,
             from_resolver: true,
         });
