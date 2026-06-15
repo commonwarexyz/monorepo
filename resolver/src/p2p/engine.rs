@@ -228,6 +228,7 @@ where
                         for FetchKey {
                             key,
                             subscribers,
+                            span,
                             metadata: targets,
                         } in keys
                         {
@@ -235,7 +236,7 @@ where
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
-                            self.subscribers.insert(key.clone(), subscribers);
+                            self.subscribers.insert(key.clone(), subscribers, span);
 
                             // Update targets
                             match targets {
@@ -409,6 +410,7 @@ where
             return;
         };
         let delivery = Delivery {
+            span: self.subscribers.span(&key),
             key: key.clone(),
             subscribers,
         };
@@ -422,6 +424,7 @@ where
         let Delivery {
             key,
             subscribers: delivered,
+            ..
         } = delivery;
 
         if valid {
@@ -437,7 +440,12 @@ where
                     self.metrics.fetch.inc(Status::Success);
                     self.inflight.accept_response(&key, self.context.as_ref());
                 }
-                self.inflight.redeliver(Delivery { key, subscribers });
+                let span = self.subscribers.span(&key);
+                self.inflight.redeliver(Delivery {
+                    key,
+                    subscribers,
+                    span,
+                });
             } else {
                 // All subscribers observed a valid response; clear any targeting
                 // state retained for this key.

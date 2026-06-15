@@ -13,6 +13,7 @@ fn fetch_key<K, P, S>(fetch: Fetch<K, S>, targets: Option<NonEmptyVec<P>>) -> Fe
     FetchKey {
         key: fetch.key,
         subscribers: NonEmptyVec::new(fetch.subscriber),
+        span: fetch.span,
         metadata: targets,
     }
 }
@@ -50,10 +51,15 @@ where
     where
         D: Into<Fetch<Self::Key, Self::Subscriber>> + Send,
     {
-        let Fetch { key, subscriber } = key.into();
+        let Fetch {
+            key,
+            subscriber,
+            span,
+        } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
+            span,
             metadata: None,
         }]))
     }
@@ -114,10 +120,15 @@ where
         key: impl Into<Fetch<Self::Key, Self::Subscriber>> + Send,
         targets: NonEmptyVec<Self::PublicKey>,
     ) -> Feedback {
-        let Fetch { key, subscriber } = key.into();
+        let Fetch {
+            key,
+            subscriber,
+            span,
+        } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
+            span,
             metadata: Some(targets),
         }]))
     }
@@ -150,6 +161,7 @@ mod tests {
             key,
             subscribers: NonEmptyVec::new(subscriber),
             metadata: targets,
+            span: tracing::Span::none(),
         }])
     }
 
@@ -162,6 +174,7 @@ mod tests {
             key,
             subscribers: NonEmptyVec::from_unchecked(subscribers),
             metadata: targets,
+            span: tracing::Span::none(),
         }])
     }
 

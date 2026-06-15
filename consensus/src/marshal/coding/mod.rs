@@ -220,6 +220,7 @@ mod tests {
                 delivery: Delivery {
                     key: fetch.key,
                     subscribers: NonEmptyVec::new(fetch.subscriber),
+                    span: tracing::Span::none(),
                 },
                 value,
                 response,
@@ -536,6 +537,7 @@ mod tests {
                     delivery: Delivery {
                         key: handler::Key::Notarized { round },
                         subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
+                        span: tracing::Span::none(),
                     },
                     value: (notarization, dishonest_block).encode(),
                     response,

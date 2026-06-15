@@ -1,4 +1,3 @@
-use super::request::FetchRequest;
 use crate::{
     simplex::types::Certificate,
     types::{Round as Rnd, View},
@@ -8,7 +7,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer, Delivery};
-use commonware_utils::{channel::oneshot, sequence::U64, vec::NonEmptyVec};
+use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 use tracing::{info_span, Span};
 
@@ -199,8 +198,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 #[derive(Debug)]
 pub(crate) enum HandlerMessage {
     Deliver {
+        span: Span,
         view: View,
-        subscribers: NonEmptyVec<FetchRequest>,
         data: Bytes,
         response: oneshot::Sender<bool>,
     },
@@ -271,7 +270,7 @@ impl Handler {
 impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
-    type Subscriber = FetchRequest;
+    type Subscriber = ();
 
     fn deliver(
         &mut self,
@@ -280,8 +279,8 @@ impl Consumer for Handler {
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
+            span: delivery.span,
             view: View::new(delivery.key.into()),
-            subscribers: delivery.subscribers,
             data: value,
             response,
         });

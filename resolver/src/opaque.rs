@@ -298,9 +298,12 @@ where
     /// Add subscribers for a key and start the first fetch if needed.
     fn add_fetch(&mut self, fetch: FetchKey<F::Key, Con::Subscriber>) {
         let FetchKey {
-            key, subscribers, ..
+            key,
+            subscribers,
+            span,
+            ..
         } = fetch;
-        let is_new = self.subscribers.insert(key.clone(), subscribers);
+        let is_new = self.subscribers.insert(key.clone(), subscribers, span);
 
         if is_new {
             assert!(self.deliveries.insert(key.clone()), "delivery entry");
@@ -354,6 +357,7 @@ where
         self.next_id = self.next_id.wrapping_add(1);
         self.deliveries.deliver(
             Delivery {
+                span: self.subscribers.span(&key),
                 key: key.clone(),
                 subscribers: delivered,
             },
@@ -365,9 +369,11 @@ where
 
     /// Deliver an already accepted response to subscribers that arrived later.
     fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<Con::Subscriber>) {
+        let span = self.subscribers.span(&key);
         self.deliveries.redeliver(Delivery {
             key,
             subscribers: delivered,
+            span,
         });
     }
 
@@ -393,6 +399,7 @@ where
         let Delivery {
             key,
             subscribers: delivered,
+            ..
         } = delivery;
         if !self.current_delivery(&key, id) {
             return;
@@ -754,7 +761,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             let first = wait_for_delivery(&context, &consumer).await;
@@ -763,7 +771,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 11
+                    subscriber: 11,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             context.sleep(Duration::from_millis(10)).await;
@@ -792,7 +801,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             context
@@ -818,7 +828,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             let first = wait_for_delivery(&context, &consumer).await;
@@ -826,7 +837,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 11
+                    subscriber: 11,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             context.sleep(Duration::from_millis(10)).await;
@@ -853,13 +865,15 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 11
+                    subscriber: 11,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             started.await.expect("fetch did not start");
@@ -887,7 +901,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             started.await.expect("fetch did not start");
@@ -917,7 +932,8 @@ mod tests {
             assert!(resolver
                 .fetch(Fetch {
                     key: 1,
-                    subscriber: 10
+                    subscriber: 10,
+                    span: tracing::Span::none(),
                 })
                 .accepted());
             let delivery = wait_for_delivery(&context, &consumer).await;
@@ -950,7 +966,8 @@ mod tests {
                 .fetch_targeted(
                     Fetch {
                         key: 1,
-                        subscriber: 10
+                        subscriber: 10,
+                        span: tracing::Span::none(),
                     },
                     non_empty_vec![target]
                 )

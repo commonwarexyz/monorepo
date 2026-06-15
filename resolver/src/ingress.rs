@@ -50,6 +50,9 @@ pub struct FetchKey<K, S, M = ()> {
     /// Subscribers used to decide whether the fetch should be retained.
     pub subscribers: NonEmptyVec<S>,
 
+    /// Trace span carried from issuance to delivery.
+    pub span: tracing::Span,
+
     /// Fetch metadata merged when duplicate fetches are coalesced.
     pub metadata: M,
 }
@@ -59,6 +62,7 @@ impl<K, S> From<Fetch<K, S>> for FetchKey<K, S> {
         Self {
             key: fetch.key,
             subscribers: NonEmptyVec::new(fetch.subscriber),
+            span: fetch.span,
             metadata: (),
         }
     }
@@ -208,6 +212,7 @@ mod tests {
         Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::new(subscriber),
+            span: tracing::Span::none(),
             metadata: (),
         }])
     }
@@ -216,6 +221,7 @@ mod tests {
         Message::Fetch(vec![FetchKey {
             key,
             subscribers: NonEmptyVec::from_unchecked(subscribers),
+            span: tracing::Span::none(),
             metadata: (),
         }])
     }
@@ -229,6 +235,7 @@ mod tests {
             key,
             subscribers: NonEmptyVec::new(subscriber),
             metadata,
+            span: tracing::Span::none(),
         }])
     }
 
@@ -328,6 +335,7 @@ mod tests {
         let fetch = Fetch {
             key: 7,
             subscriber: 8,
+            span: tracing::Span::none(),
         };
         let key = FetchKey::from(fetch);
 

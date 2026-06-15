@@ -156,6 +156,7 @@ mod tests {
         Delivery {
             key,
             subscribers: non_empty_vec![()],
+            span: tracing::Span::none(),
         }
     }
 

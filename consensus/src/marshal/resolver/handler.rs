@@ -6,6 +6,7 @@ use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer, Delivery, Fetch as ResolverFetch};
 use commonware_runtime::Metrics;
 use commonware_utils::{channel::oneshot, Span};
+use tracing::info_span;
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -308,28 +309,33 @@ impl<D: Digest> Request<D> {
         }
     }
 
-    pub(crate) const fn into_inner(self) -> ResolverFetch<Key<D>, Annotation> {
-        match self.kind {
-            RequestKind::Notarized { round } => ResolverFetch {
-                key: Key::Notarized { round },
-                subscriber: Annotation::Notarization { round },
-            },
-            RequestKind::Finalized { height } => ResolverFetch {
-                key: Key::Finalized { height },
-                subscriber: Annotation::Finalized(Finalized::ByHeight { height }),
-            },
-            RequestKind::CertifiedBlock { commitment, height } => ResolverFetch {
-                key: Key::Block(commitment),
-                subscriber: Annotation::Certified { height },
-            },
-            RequestKind::FinalizedBlockByHeight { commitment, height } => ResolverFetch {
-                key: Key::Block(commitment),
-                subscriber: Annotation::Finalized(Finalized::ByHeight { height }),
-            },
-            RequestKind::FinalizedBlockByRound { commitment, round } => ResolverFetch {
-                key: Key::Block(commitment),
-                subscriber: Annotation::Finalized(Finalized::ByRound { round }),
-            },
+    pub(crate) fn into_inner(self) -> ResolverFetch<Key<D>, Annotation> {
+        let (key, subscriber) = match self.kind {
+            RequestKind::Notarized { round } => (
+                Key::Notarized { round },
+                Annotation::Notarization { round },
+            ),
+            RequestKind::Finalized { height } => (
+                Key::Finalized { height },
+                Annotation::Finalized(Finalized::ByHeight { height }),
+            ),
+            RequestKind::CertifiedBlock { commitment, height } => {
+                (Key::Block(commitment), Annotation::Certified { height })
+            }
+            RequestKind::FinalizedBlockByHeight { commitment, height } => (
+                Key::Block(commitment),
+                Annotation::Finalized(Finalized::ByHeight { height }),
+            ),
+            RequestKind::FinalizedBlockByRound { commitment, round } => (
+                Key::Block(commitment),
+                Annotation::Finalized(Finalized::ByRound { round }),
+            ),
+        };
+        let span = info_span!("marshal.resolver.fetch", key = %key);
+        ResolverFetch {
+            key,
+            subscriber,
+            span,
         }
     }
 }

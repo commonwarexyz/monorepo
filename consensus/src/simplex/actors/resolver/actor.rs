@@ -1,6 +1,6 @@
 use super::{
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
-    request::{FetchReason, FetchRequest},
+    request::FetchReason,
     state::Effect,
     Config,
 };
@@ -22,12 +22,10 @@ use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::{p2p, Fetch, Resolver as _};
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{
-    channel::fallible::OneshotExt, ordered::Quorum, sequence::U64, vec::NonEmptyVec,
-};
+use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
-use std::{collections::HashMap, num::NonZeroUsize, time::Duration};
-use tracing::{debug, info_span, Span};
+use std::{num::NonZeroUsize, time::Duration};
+use tracing::{debug, info_span};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -47,8 +45,6 @@ pub struct Actor<
     fetch_timeout: Duration,
 
     state: State<S, D>,
-    next_fetch_id: u64,
-    fetch_spans: HashMap<FetchRequest, Span>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
@@ -75,8 +71,6 @@ impl<
                 fetch_timeout: cfg.fetch_timeout,
 
                 state: State::new(cfg.fetch_concurrent),
-                next_fetch_id: 0,
-                fetch_spans: HashMap::new(),
 
                 mailbox_receiver: receiver,
             },
@@ -166,20 +160,9 @@ impl<
         }
     }
 
-    const fn next_fetch_request(
-        &mut self,
-        view: View,
-        cause: View,
-        reason: FetchReason,
-    ) -> FetchRequest {
-        let request = FetchRequest::new(self.next_fetch_id, view, cause, reason);
-        self.next_fetch_id = self.next_fetch_id.wrapping_add(1);
-        request
-    }
-
     fn apply_effects(
         &mut self,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
         effects: Vec<Effect>,
     ) {
         for effect in effects {
@@ -189,75 +172,37 @@ impl<
                     cause,
                     reason,
                 } => self.fetch(resolver, view, cause, reason),
-                Effect::Remove(view) => self.remove(resolver, view),
-                Effect::RetainAbove(floor) => self.retain_above(resolver, floor),
+                Effect::Remove(view) => {
+                    let key = U64::from(view);
+                    let _ = resolver.retain(move |candidate, _| *candidate != key);
+                }
+                Effect::RetainAbove(floor) => {
+                    let floor = U64::from(floor);
+                    let _ = resolver.retain(move |candidate, _| *candidate > floor);
+                }
             }
         }
     }
 
-    fn retain_fetches(
-        &mut self,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
-        predicate: impl Fn(&FetchRequest) -> bool + Copy + Send + 'static,
-    ) {
-        self.fetch_spans.retain(|request, _| predicate(request));
-        let _ = resolver.retain(move |_, request| predicate(request));
-    }
-
-    fn remove(&mut self, resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>, view: View) {
-        self.retain_fetches(resolver, move |request| request.view != view);
-    }
-
-    fn retain_above(
-        &mut self,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
-        floor: View,
-    ) {
-        self.retain_fetches(resolver, move |request| request.view > floor);
-    }
-
     fn fetch(
-        &mut self,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
+        &self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
         view: View,
         cause: View,
         reason: FetchReason,
     ) {
-        let request = self.next_fetch_request(view, cause, reason);
         let span = info_span!(
             "simplex.resolver.fetch",
-            id = request.id,
             epoch = %self.epoch,
             cause = %cause,
             view = %view,
             reason = reason.as_str()
         );
-        let feedback = span.in_scope(|| {
-            resolver.fetch(Fetch {
-                key: U64::from(view),
-                subscriber: request,
-            })
+        let _ = resolver.fetch(Fetch {
+            key: U64::from(view),
+            subscriber: (),
+            span,
         });
-        if feedback.accepted() {
-            self.fetch_spans.insert(request, span);
-        }
-    }
-
-    fn request_span(
-        &self,
-        subscribers: &NonEmptyVec<FetchRequest>,
-    ) -> Option<(FetchRequest, Span)> {
-        subscribers.iter().find_map(|request| {
-            self.fetch_spans
-                .get(request)
-                .map(|span| (*request, span.clone()))
-        })
-    }
-
-    fn close_fetches(&mut self, subscribers: &NonEmptyVec<FetchRequest>) {
-        for request in subscribers {
-            self.fetch_spans.remove(request);
-        }
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
@@ -348,33 +293,22 @@ impl<
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
     ) {
         match message {
             HandlerMessage::Deliver {
+                span,
                 view,
-                subscribers,
                 data,
                 response,
             } => {
-                let request = self.request_span(&subscribers);
-                let parent = request
-                    .as_ref()
-                    .map(|(_, span)| span.clone())
-                    .unwrap_or_else(Span::none);
-                let cause = request.as_ref().map_or(view, |(request, _)| request.cause);
-                let reason = request
-                    .as_ref()
-                    .map(|(request, _)| request.reason.as_str())
-                    .unwrap_or("unknown");
+                // The span was opened when the fetch was issued, so the delivery
+                // nests under the request that caused it.
                 let span = info_span!(
-                    parent: parent,
+                    parent: span,
                     "simplex.resolver.deliver",
                     epoch = %self.epoch,
-                    cause = %cause,
-                    view = %view,
-                    reason,
-                    subscribers = subscribers.len()
+                    view = %view
                 );
                 let _guard = span.entered();
 
@@ -404,7 +338,6 @@ impl<
                 // Process message with the request view for tracking
                 let effects = self.state.handle(parsed, Some(view));
                 self.apply_effects(resolver, effects);
-                self.close_fetches(&subscribers);
             }
             HandlerMessage::Produce { view, response } => {
                 let span = info_span!(

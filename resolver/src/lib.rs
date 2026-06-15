@@ -17,12 +17,17 @@ commonware_macros::stability_scope!(BETA {
     mod subscribers;
 
     /// A key to fetch data for a subscriber.
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    #[derive(Clone, Debug)]
     pub struct Fetch<K, S = ()> {
         /// The peer-visible key.
         pub key: K,
         /// Subscriber attached to the key.
         pub subscriber: S,
+        /// Trace span carried from issuance to delivery.
+        ///
+        /// The resolver re-attaches this span to [`Delivery`] when the fetch
+        /// resolves, so consumer work nests under the span that requested it.
+        pub span: tracing::Span,
     }
 
     impl<K, S: Default> From<K> for Fetch<K, S> {
@@ -30,18 +35,29 @@ commonware_macros::stability_scope!(BETA {
             Self {
                 key,
                 subscriber: S::default(),
+                span: tracing::Span::none(),
             }
         }
     }
 
     /// Data delivered for a resolved fetch.
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    #[derive(Clone, Debug)]
     pub struct Delivery<K, S> {
         /// The peer-visible key used to validate the response.
         pub key: K,
         /// Subscribers that were still retained when the response arrived.
         pub subscribers: NonEmptyVec<S>,
+        /// Trace span carried from the originating fetch.
+        pub span: tracing::Span,
     }
+
+    impl<K: PartialEq, S: PartialEq> PartialEq for Delivery<K, S> {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key && self.subscribers == other.subscribers
+        }
+    }
+
+    impl<K: Eq, S: Eq> Eq for Delivery<K, S> {}
 
     /// Notified when data is available, and must validate it.
     pub trait Consumer: Clone + Send + 'static {

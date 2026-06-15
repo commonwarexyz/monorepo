@@ -7,10 +7,17 @@
 use commonware_utils::vec::NonEmptyVec;
 use std::collections::{btree_map::Entry as BTreeMapEntry, BTreeMap, BTreeSet};
 
+/// Retained subscribers for a key plus the span of the fetch that opened it.
+#[derive(Clone, Debug)]
+struct Entry<S> {
+    span: tracing::Span,
+    subscribers: BTreeSet<S>,
+}
+
 /// Tracks retained subscribers by resolver key.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct Tracker<K, S> {
-    entries: BTreeMap<K, BTreeSet<S>>,
+    entries: BTreeMap<K, Entry<S>>,
 }
 
 impl<K, S> Default for Tracker<K, S> {
@@ -38,18 +45,32 @@ where
 
     /// Add subscribers for a key, deduplicating subscribers already retained.
     ///
+    /// The span is retained only when the key entry is created; later fetches for
+    /// the same key keep the original span.
+    ///
     /// Returns `true` if this created a new key entry.
-    pub fn insert(&mut self, key: K, subscribers: NonEmptyVec<S>) -> bool {
+    pub fn insert(&mut self, key: K, subscribers: NonEmptyVec<S>, span: tracing::Span) -> bool {
         match self.entries.entry(key) {
             BTreeMapEntry::Vacant(entry) => {
-                entry.insert(subscribers.into_iter().collect());
+                entry.insert(Entry {
+                    span,
+                    subscribers: subscribers.into_iter().collect(),
+                });
                 true
             }
             BTreeMapEntry::Occupied(mut entry) => {
-                entry.get_mut().extend(subscribers);
+                entry.get_mut().subscribers.extend(subscribers);
                 false
             }
         }
+    }
+
+    /// Returns the span of the fetch that opened the key, or a disabled span if
+    /// the key is not tracked.
+    pub fn span(&self, key: &K) -> tracing::Span {
+        self.entries
+            .get(key)
+            .map_or_else(tracing::Span::none, |entry| entry.span.clone())
     }
 
     /// Remove all subscribers for a key.
@@ -72,9 +93,11 @@ where
         F: FnMut(&K, &S) -> bool,
     {
         let mut removed = Vec::new();
-        self.entries.retain(|key, subscribers| {
-            subscribers.retain(|subscriber| predicate(key, subscriber));
-            let keep = !subscribers.is_empty();
+        self.entries.retain(|key, entry| {
+            entry
+                .subscribers
+                .retain(|subscriber| predicate(key, subscriber));
+            let keep = !entry.subscribers.is_empty();
             if !keep {
                 removed.push(key.clone());
             }
@@ -87,7 +110,7 @@ where
     pub fn pending(&self, key: &K) -> Option<NonEmptyVec<S>> {
         self.entries
             .get(key)
-            .and_then(|subscribers| Self::non_empty(subscribers))
+            .and_then(|entry| Self::non_empty(&entry.subscribers))
     }
 
     /// Remove subscribers that just received a valid delivery.
@@ -99,11 +122,11 @@ where
         key: &K,
         delivered: NonEmptyVec<S>,
     ) -> Option<NonEmptyVec<S>> {
-        let subscribers = self.entries.get_mut(key)?;
+        let entry = self.entries.get_mut(key)?;
         for subscriber in delivered {
-            subscribers.remove(&subscriber);
+            entry.subscribers.remove(&subscriber);
         }
-        if subscribers.is_empty() {
+        if entry.subscribers.is_empty() {
             self.entries.remove(key);
             return None;
         }
@@ -124,8 +147,8 @@ mod tests {
     fn insert_merges_and_deduplicates_subscribers() {
         let mut tracker = Tracker::new();
 
-        assert!(tracker.insert(1, non_empty_vec![10, 11]));
-        assert!(!tracker.insert(1, non_empty_vec![11, 12]));
+        assert!(tracker.insert(1, non_empty_vec![10, 11], tracing::Span::none()));
+        assert!(!tracker.insert(1, non_empty_vec![11, 12], tracing::Span::none()));
 
         assert_eq!(
             tracker.pending(&1).map(NonEmptyVec::into_vec),
@@ -136,8 +159,8 @@ mod tests {
     #[test]
     fn retain_prunes_subscribers_and_reports_removed_keys() {
         let mut tracker = Tracker::new();
-        tracker.insert(1, non_empty_vec![11]);
-        tracker.insert(2, non_empty_vec![20]);
+        tracker.insert(1, non_empty_vec![11], tracing::Span::none());
+        tracker.insert(2, non_empty_vec![20], tracing::Span::none());
 
         let removed = tracker.retain(|_, subscriber| *subscriber % 2 == 0);
 
@@ -152,7 +175,7 @@ mod tests {
     #[test]
     fn remove_delivered_returns_remaining_subscribers() {
         let mut tracker = Tracker::new();
-        tracker.insert(1, non_empty_vec![10, 11, 12]);
+        tracker.insert(1, non_empty_vec![10, 11, 12], tracing::Span::none());
 
         let remaining = tracker.remove_delivered(&1, non_empty_vec![10, 12]);
 
@@ -163,7 +186,7 @@ mod tests {
     #[test]
     fn remove_delivered_removes_completed_key() {
         let mut tracker = Tracker::new();
-        tracker.insert(1, non_empty_vec![10, 11]);
+        tracker.insert(1, non_empty_vec![10, 11], tracing::Span::none());
 
         assert!(tracker
             .remove_delivered(&1, non_empty_vec![10, 11])

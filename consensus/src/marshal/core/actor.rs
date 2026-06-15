@@ -842,6 +842,9 @@ where
                     value,
                     response,
                 } => {
+                    // The span was opened when the fetch was issued, so the
+                    // delivery nests under the request that caused it.
+                    let span = info_span!(parent: &delivery.span, "marshal.resolver.handle_deliver");
                     needs_sync |= self
                         .handle_deliver(
                             ResolverDelivery {
@@ -854,6 +857,7 @@ where
                             application,
                             resolver,
                         )
+                        .instrument(span)
                         .await;
                 }
             }
@@ -1221,7 +1225,9 @@ where
             mut value,
             response,
         } = message;
-        let Delivery { key, subscribers } = delivery;
+        let Delivery {
+            key, subscribers, ..
+        } = delivery;
         match key {
             Key::Block(commitment) => {
                 let block_cfg = V::block_cfg(&self.block_codec_config, commitment);
