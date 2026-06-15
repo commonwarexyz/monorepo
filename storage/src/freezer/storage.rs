@@ -643,8 +643,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             "table_initial_size must be a power of 2"
         );
 
-        let empty_checkpoint = checkpoint.is_some_and(|checkpoint| checkpoint.is_empty());
-        let reset = checkpoint.is_none() || empty_checkpoint;
+        // A missing or empty checkpoint starts fresh: delete all existing freezer data
+        let reset = checkpoint.is_none_or(|checkpoint| checkpoint.is_empty());
         if reset {
             for partition in [
                 &config.key_partition,
@@ -675,26 +675,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
-        // Determine checkpoint based on initialization scenario
-        let (checkpoint, resizable) = match (table_len, checkpoint) {
-            // New table with no data
-            (0, None) => {
-                Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
-            }
 
-            // New table with explicit checkpoint (must be empty)
-            (0, Some(checkpoint)) => {
-                if !checkpoint.is_empty() {
+        // Determine checkpoint based on initialization scenario
+        let (checkpoint, resizable) = match checkpoint {
+            // Non-empty checkpoint: align existing data to it
+            Some(checkpoint) if !checkpoint.is_empty() => {
+                // A non-empty checkpoint against an empty table references data that does not exist
+                if table_len == 0 {
                     return Err(Error::CheckpointMismatch);
                 }
-
-                Self::init_table(&table, config.table_initial_size).await?;
-                (Checkpoint::init(config.table_initial_size), 0)
-            }
-
-            // Existing table with checkpoint
-            (_, Some(checkpoint)) => {
                 assert!(
                     checkpoint.table_size > 0 && checkpoint.table_size.is_power_of_two(),
                     "table_size must be a power of 2"
@@ -739,8 +728,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 (checkpoint, resizable)
             }
 
-            // Existing table without checkpoint
-            (_, None) => (Checkpoint::init(config.table_initial_size), 0),
+            // Missing or empty checkpoint: reset wiped any existing data, so initialize a new table
+            _ => {
+                Self::init_table(&table, config.table_initial_size).await?;
+                (Checkpoint::init(config.table_initial_size), 0)
+            }
         };
 
         // Create metrics
@@ -1566,6 +1558,42 @@ mod tests {
             .unwrap();
             assert_eq!(freezer.table_size, 2);
             assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn non_empty_checkpoint_against_empty_table_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+
+            let checkpoint = Checkpoint {
+                epoch: 1,
+                section: 0,
+                oversized_size: 0,
+                table_size: 2,
+            };
+            let result = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("storage"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await;
+            assert!(matches!(result, Err(Error::CheckpointMismatch)));
         });
     }
 }
