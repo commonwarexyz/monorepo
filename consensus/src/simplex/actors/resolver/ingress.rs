@@ -1,3 +1,4 @@
+use super::request::FetchRequest;
 use crate::{
     simplex::types::Certificate,
     types::{Round as Rnd, View},
@@ -191,23 +192,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 }
 
-/// Subscriber id used to tie p2p resolver responses back to request spans.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub(crate) struct FetchTrace {
-    id: u64,
-}
-
-impl FetchTrace {
-    pub(crate) const fn new(id: u64) -> Self {
-        Self { id }
-    }
-}
-
 #[derive(Debug)]
 pub(crate) enum HandlerMessage {
     Deliver {
         view: View,
-        subscribers: NonEmptyVec<FetchTrace>,
+        subscribers: NonEmptyVec<FetchRequest>,
         data: Bytes,
         response: oneshot::Sender<bool>,
     },
@@ -278,7 +267,7 @@ impl Handler {
 impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
-    type Subscriber = FetchTrace;
+    type Subscriber = FetchRequest;
 
     fn deliver(
         &mut self,
