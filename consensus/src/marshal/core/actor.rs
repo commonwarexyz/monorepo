@@ -842,9 +842,11 @@ where
                     value,
                     response,
                 } => {
-                    // The span was opened when the fetch was issued, so the
-                    // delivery nests under the request that caused it.
-                    let span = info_span!(parent: &delivery.span, "marshal.resolver.handle_deliver");
+                    let span = info_span!(
+                        parent: &delivery.span,
+                        "marshal.resolver.handle_deliver",
+                        key = %delivery.key
+                    );
                     needs_sync |= self
                         .handle_deliver(
                             ResolverDelivery {

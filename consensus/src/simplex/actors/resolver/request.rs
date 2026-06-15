@@ -1,5 +1,5 @@
 /// Why a resolver fetch was requested.
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FetchReason {
     MissingNullification,
     CertificationFailed,

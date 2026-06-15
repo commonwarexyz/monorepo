@@ -6,7 +6,6 @@ use commonware_cryptography::Digest;
 use commonware_resolver::{p2p::Producer, Consumer, Delivery, Fetch as ResolverFetch};
 use commonware_runtime::Metrics;
 use commonware_utils::{channel::oneshot, Span};
-use tracing::info_span;
 use std::{
     collections::VecDeque,
     fmt::{Debug, Display},
@@ -14,6 +13,7 @@ use std::{
     num::NonZeroUsize,
     sync::mpsc::TryRecvError,
 };
+use tracing::info_span;
 
 /// The subject of a backfill request.
 const BLOCK_REQUEST: u8 = 0;
@@ -311,10 +311,9 @@ impl<D: Digest> Request<D> {
 
     pub(crate) fn into_inner(self) -> ResolverFetch<Key<D>, Annotation> {
         let (key, subscriber) = match self.kind {
-            RequestKind::Notarized { round } => (
-                Key::Notarized { round },
-                Annotation::Notarization { round },
-            ),
+            RequestKind::Notarized { round } => {
+                (Key::Notarized { round }, Annotation::Notarization { round })
+            }
             RequestKind::Finalized { height } => (
                 Key::Finalized { height },
                 Annotation::Finalized(Finalized::ByHeight { height }),

@@ -302,8 +302,6 @@ impl<
                 data,
                 response,
             } => {
-                // The span was opened when the fetch was issued, so the delivery
-                // nests under the request that caused it.
                 let span = info_span!(
                     parent: span,
                     "simplex.resolver.deliver",

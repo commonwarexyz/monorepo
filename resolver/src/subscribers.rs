@@ -193,4 +193,22 @@ mod tests {
             .is_none());
         assert!(!tracker.contains(&1));
     }
+
+    #[test]
+    fn span_retains_first_fetch_and_untracked_returns_disabled() {
+        let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
+
+        let first = tracing::info_span!("first");
+        let second = tracing::info_span!("second");
+        let first_id = first.id();
+        assert!(first_id.is_some());
+        assert_ne!(first.id(), second.id());
+
+        let mut tracker = Tracker::new();
+        assert!(tracker.insert(1, non_empty_vec![10], first));
+        assert!(!tracker.insert(1, non_empty_vec![11], second));
+
+        assert_eq!(tracker.span(&1).id(), first_id);
+        assert!(tracker.span(&2).is_disabled());
+    }
 }
