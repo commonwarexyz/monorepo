@@ -28,6 +28,10 @@ use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 
+/// Minimum keys per shard for [`Db::get_many_map`] to parallelize the index probe rather than
+/// probe serially, ensuring each shard carries enough work to amortize the thread-pool handoff.
+const MIN_PROBES_PER_SHARD: usize = 8;
+
 /// Metrics for Any QMDBs.
 pub(crate) struct Metrics<E: Context> {
     /// State gauges.
@@ -254,7 +258,7 @@ where
         // its global key index, so partition order does not matter.
         let strategy = self.strategy();
         let parallelism = strategy.parallelism_hint().max(1);
-        let mut candidates: Vec<(usize, u64)> = if keys.len() < parallelism {
+        let mut candidates: Vec<(usize, u64)> = if keys.len() < MIN_PROBES_PER_SHARD * parallelism {
             let mut candidates = Vec::with_capacity(keys.len());
             self.snapshot
                 .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
