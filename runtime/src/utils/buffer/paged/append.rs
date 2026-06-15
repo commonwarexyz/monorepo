@@ -384,7 +384,7 @@ impl<B: Blob> Append<B> {
         let bulk_len = (buf.len() - fill) / logical_page_size * logical_page_size;
         let bulk = buf.slice(fill..fill + bulk_len);
         let mut physical_pages = IoBufs::default();
-        self.physical_full_pages(&bulk, None, &mut physical_pages);
+        self.append_full_pages(&bulk, None, &mut physical_pages);
 
         // Acquire a write lock on the blob state so nobody tries to read or modify the blob
         // while we're writing to it. Everything below up to the write mutates shared state
@@ -943,7 +943,7 @@ impl<B: Blob> Append<B> {
         let buffer_data = buffer.as_ref();
 
         if pages_to_write > 0 {
-            self.physical_full_pages(
+            self.append_full_pages(
                 &buffer.slice(..pages_to_write * logical_page_size),
                 old_crc_record,
                 &mut write_buffer,
@@ -997,12 +997,12 @@ impl<B: Blob> Append<B> {
         (write_buffer, Some(crc_record))
     }
 
-    /// Append the physical-page representation of `data` to `write_buffer`: payload bytes as
-    /// zero-copy slices of `data`, interleaved with newly built CRC records.
+    /// Appends each page of `data` to `write_buffer` in on-disk format: its payload (a zero-copy
+    /// slice of `data`) followed by a CRC record.
     ///
-    /// `data` must contain a non-zero whole number of logical pages. If `old_crc_record` is
-    /// present, the first page's CRC record preserves the old CRC in its original slot.
-    fn physical_full_pages(
+    /// `data.len()` must be a non-zero multiple of the page size. When `old_crc_record` is present,
+    /// the first page's record preserves the old CRC in its original slot.
+    fn append_full_pages(
         &self,
         data: &IoBuf,
         old_crc_record: Option<&Checksum>,
