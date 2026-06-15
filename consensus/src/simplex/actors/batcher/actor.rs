@@ -284,99 +284,98 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping batcher");
             },
-            Some(message) = self.mailbox_receiver.recv() else break => match message {
-                Message::Update {
-                    view_span,
-                    current: new_current,
-                    leader,
-                    finalized: new_finalized,
-                    forwardable_proposal,
-                } => {
-                    let process = info_span!(
-                        parent: &view_span,
+            Some(message) = self.mailbox_receiver.recv() else break => {
+                let view = message.view();
+                let operation = message.name();
+                let epoch = self.epoch;
+                let process_span = |parent: Span| {
+                    info_span!(
+                        parent: parent,
                         "simplex.batcher.process",
-                        operation = "update",
-                        epoch = %self.epoch,
-                        view = %new_current
-                    );
-                    let _guard = process.entered();
-                    let am_leader = self.scheme.me().is_some_and(|me| me == leader);
-                    current = Current {
-                        view: new_current,
-                        leader: Some(leader),
-                        timed_out: false,
-                    };
-                    finalized = new_finalized;
-
-                    // Close the root span of any view the chain has now decided.
-                    // The round lingers until it is no longer interesting, but
-                    // its work no longer anchors a trace.
-                    for (_, round) in work.range_mut(..=finalized) {
-                        round.close_span();
-                    }
-
-                    let round = work
-                        .entry(current.view)
-                        .or_insert_with(|| self.new_round(current.view));
-                    round.set_span(view_span);
-                    round.set_leader(leader);
-
-                    // If the leader nullified this view or has not been active
-                    // recently, tell the voter to reduce the leader timeout to now
-                    #[allow(clippy::collapsible_else_if)]
-                    let timeout_reason = if Self::leader_nullified(&current, &work) {
-                        // Leader already buffered a nullify for this now-current view
-                        // (allowed because we accept votes up to `current+1`)
-                        Some(TimeoutReason::LeaderNullify)
-                    } else {
-                        if am_leader {
-                            // If we are the leader, we should not timeout
-                            None
-                        } else {
-                            // If we are not the leader and the leader isn't active, we should timeout
-                            (!self.is_active(&work, current.view, leader))
-                                .then_some(TimeoutReason::Inactivity)
-                        }
-                    };
-                    if let Some(timeout_reason) = timeout_reason {
-                        current.timed_out = true;
-                        voter.timeout(Rnd::new(self.epoch, current.view), timeout_reason);
-                    }
-
-                    // Forward the proposal, if enabled and we have something to forward
-                    if let Some((proposal, round)) = forwardable_proposal
-                        .filter(|_| self.forwarding.is_enabled())
-                        .and_then(|proposal| {
-                            work.get(&proposal.view()).map(|round| (proposal, round))
-                        })
-                    {
-                        let participants = self.forward_targets(round, &proposal, leader);
-                        self.forward_proposal(proposal, participants);
-                    }
-
-                    // Setting leader may enable batch verification
-                    updated_view = current.view;
-                }
-                Message::Constructed(message) => {
-                    // If the view isn't interesting, we can skip
-                    let view = message.view();
-                    if !interesting(self.activity_timeout, finalized, current.view, view, false) {
-                        continue;
-                    }
-
-                    // Add the message to the verifier
-                    let round = work.entry(view).or_insert_with(|| self.new_round(view));
-                    let process = info_span!(
-                        parent: round.span(),
-                        "simplex.batcher.process",
-                        operation = "constructed",
-                        epoch = %self.epoch,
+                        operation,
+                        epoch = %epoch,
                         view = %view
-                    );
-                    let _guard = process.entered();
-                    round.add_constructed(message);
-                    self.added.inc();
-                    updated_view = view;
+                    )
+                };
+                match message {
+                    Message::Update {
+                        view_span,
+                        current: new_current,
+                        leader,
+                        finalized: new_finalized,
+                        forwardable_proposal,
+                    } => {
+                        let process = process_span(view_span.clone());
+                        let _guard = process.entered();
+                        let am_leader = self.scheme.me().is_some_and(|me| me == leader);
+                        current = Current {
+                            view: new_current,
+                            leader: Some(leader),
+                            timed_out: false,
+                        };
+                        finalized = new_finalized;
+
+                        // Close the root span of any view the chain has now decided.
+                        // The round lingers until it is no longer interesting, but
+                        // its work no longer anchors a trace.
+                        for (_, round) in work.range_mut(..=finalized) {
+                            round.close_span();
+                        }
+
+                        let round = work
+                            .entry(current.view)
+                            .or_insert_with(|| self.new_round(current.view));
+                        round.set_span(view_span);
+                        round.set_leader(leader);
+
+                        // If the leader nullified this view or has not been active
+                        // recently, tell the voter to reduce the leader timeout to now
+                        #[allow(clippy::collapsible_else_if)]
+                        let timeout_reason = if Self::leader_nullified(&current, &work) {
+                            // Leader already buffered a nullify for this now-current view
+                            // (allowed because we accept votes up to `current+1`)
+                            Some(TimeoutReason::LeaderNullify)
+                        } else {
+                            if am_leader {
+                                // If we are the leader, we should not timeout
+                                None
+                            } else {
+                                // If we are not the leader and the leader isn't active, we should timeout
+                                (!self.is_active(&work, current.view, leader))
+                                    .then_some(TimeoutReason::Inactivity)
+                            }
+                        };
+                        if let Some(timeout_reason) = timeout_reason {
+                            current.timed_out = true;
+                            voter.timeout(Rnd::new(self.epoch, current.view), timeout_reason);
+                        }
+
+                        // Forward the proposal, if enabled and we have something to forward
+                        if let Some((proposal, round)) = forwardable_proposal
+                            .filter(|_| self.forwarding.is_enabled())
+                            .and_then(|proposal| {
+                                work.get(&proposal.view()).map(|round| (proposal, round))
+                            })
+                        {
+                            let participants = self.forward_targets(round, &proposal, leader);
+                            self.forward_proposal(proposal, participants);
+                        }
+
+                        // Setting leader may enable batch verification
+                        updated_view = current.view;
+                    }
+                    Message::Constructed(message) => {
+                        if !interesting(self.activity_timeout, finalized, current.view, view, false)
+                        {
+                            continue;
+                        }
+                        let round = work.entry(view).or_insert_with(|| self.new_round(view));
+                        let process = process_span(round.span().clone());
+                        let _guard = process.entered();
+                        round.add_constructed(message);
+                        self.added.inc();
+                        updated_view = view;
+                    }
                 }
             },
             // Handle certificates from the network

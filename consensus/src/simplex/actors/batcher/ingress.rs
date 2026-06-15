@@ -24,6 +24,22 @@ pub enum Message<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Message<S, D> {
+    // Return the message view used for pruning and span attribution.
+    pub(crate) fn view(&self) -> View {
+        match self {
+            Self::Update { current, .. } => *current,
+            Self::Constructed(vote) => vote.view(),
+        }
+    }
+
+    /// Returns the operation name of this message.
+    pub(crate) const fn name(&self) -> &'static str {
+        match self {
+            Self::Update { .. } => "update",
+            Self::Constructed(_) => "constructed",
+        }
+    }
+
     // Return whether the retained update makes a constructed vote stale.
     fn prunes(current: View, finalized: View, vote: &Vote<S, D>) -> bool {
         let view = vote.view();
