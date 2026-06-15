@@ -10,15 +10,14 @@
 //!
 //! # Format
 //!
-//! The [Freezer] uses a three-level architecture:
+//! The [Freezer] uses four on-disk components:
 //! 1. An extendible hash table (written in a single [commonware_runtime::Blob]) that maps keys to locations
 //! 2. A key index journal ([crate::journal::segmented::fixed]) that stores keys and collision chain pointers
 //! 3. A value journal ([crate::journal::segmented::glob]) that stores the actual values
+//! 4. A metadata store ([crate::metadata::Metadata]) that tracks committed table resize state
 //!
 //! These journals are combined via [crate::journal::segmented::oversized], which coordinates
 //! crash recovery between them.
-//! A small [crate::metadata::Metadata] store tracks the committed logical table size so recovery
-//! can distinguish a completed resize from a partially copied table expansion.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
