@@ -24,11 +24,11 @@ hash = "e53b4b684f0344590427aae976d298e3b6fd2b08ef46ff2cad5def04b4f7690b"
 
 ["commonware_consensus::marshal::conformance::CodingStorageConformance"]
 n_cases = 32
-hash = "9234e6644b5aaf723be352e7e17b8613efafb7e80869e8dffe8b5527c04128ef"
+hash = "5ba253b405726b29861a89c95a5098920b7b8626595f008ba6c3e7f1da5546f1"
 
 ["commonware_consensus::marshal::conformance::StandardStorageConformance"]
 n_cases = 32
-hash = "05033526f41131ceb367df9177c4090d9670d6ea0119d8478211f894e2d557d7"
+hash = "5b1003be5aabc1cf5eee6841178f2511a1991a738ab3b2fbf0e149462e92c996"
 
 ["commonware_consensus::marshal::resolver::handler::tests::conformance::CodecConformance<Key<D>>"]
 n_cases = 65536
