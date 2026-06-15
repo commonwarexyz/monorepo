@@ -531,6 +531,55 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         }
     }
 
+    /// Recover checkpoint and resize state from the durable table and oversized journal.
+    async fn recover_durable_checkpoint(
+        pooler: &impl BufferPooler,
+        table: &E::Blob,
+        oversized: &Oversized<E, Record<K>, V>,
+        table_len: u64,
+        metadata_table_size: Option<u32>,
+        table_resize_frequency: u8,
+        table_replay_buffer: NonZeroUsize,
+    ) -> Result<(Checkpoint, u32), Error> {
+        let table_size = Self::recover_table_size(table, table_len, metadata_table_size).await?;
+        let expected_table_len = Self::table_offset(table_size);
+        let mut modified = if table_len != expected_table_len {
+            table.resize(expected_table_len).await?;
+            true
+        } else {
+            false
+        };
+
+        let (table_modified, max_epoch, max_section, resizable) = Self::recover_table(
+            pooler,
+            table,
+            table_size,
+            table_resize_frequency,
+            None,
+            table_replay_buffer,
+        )
+        .await?;
+        if table_modified {
+            modified = true;
+        }
+
+        if modified {
+            table.sync().await?;
+        }
+
+        let oversized_size = oversized.size(max_section).await?;
+
+        Ok((
+            Checkpoint {
+                epoch: max_epoch,
+                section: max_section,
+                oversized_size,
+                table_size,
+            },
+            resizable,
+        ))
+    }
+
     /// Recover a single table entry and update tracking.
     async fn recover_entry(
         blob: &E::Blob,
@@ -788,44 +837,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 if metadata_table_size.is_some_and(|table_size| {
                     table_size > checkpoint.table_size && Self::table_offset(table_size) <= table_len
                 }) {
-                    let table_size =
-                        Self::recover_table_size(&table, table_len, metadata_table_size).await?;
-                    let expected_table_len = Self::table_offset(table_size);
-                    let mut modified = if table_len != expected_table_len {
-                        table.resize(expected_table_len).await?;
-                        true
-                    } else {
-                        false
-                    };
-
-                    let (table_modified, max_epoch, max_section, resizable) = Self::recover_table(
+                    Self::recover_durable_checkpoint(
                         &context,
                         &table,
-                        table_size,
+                        &oversized,
+                        table_len,
+                        metadata_table_size,
                         config.table_resize_frequency,
-                        None,
                         config.table_replay_buffer,
                     )
-                    .await?;
-                    if table_modified {
-                        modified = true;
-                    }
-
-                    if modified {
-                        table.sync().await?;
-                    }
-
-                    let oversized_size = oversized.size(max_section).await?;
-
-                    (
-                        Checkpoint {
-                            epoch: max_epoch,
-                            section: max_section,
-                            oversized_size,
-                            table_size,
-                        },
-                        resizable,
-                    )
+                    .await?
                 } else {
                     // Rewind oversized to the committed section and key size
                     oversized
@@ -870,46 +891,16 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             // Existing table without checkpoint
             (_, None) => {
                 // Find max epoch/section and clean invalid entries in a single pass
-                let table_size =
-                    Self::recover_table_size(&table, table_len, metadata_table_size).await?;
-                let expected_table_len = Self::table_offset(table_size);
-                let mut modified = if table_len != expected_table_len {
-                    table.resize(expected_table_len).await?;
-                    true
-                } else {
-                    false
-                };
-
-                let (table_modified, max_epoch, max_section, resizable) = Self::recover_table(
+                Self::recover_durable_checkpoint(
                     &context,
                     &table,
-                    table_size,
+                    &oversized,
+                    table_len,
+                    metadata_table_size,
                     config.table_resize_frequency,
-                    None,
                     config.table_replay_buffer,
                 )
-                .await?;
-                if table_modified {
-                    modified = true;
-                }
-
-                // Sync table if needed
-                if modified {
-                    table.sync().await?;
-                }
-
-                // Get sizes from oversized (crash recovery already ran during init)
-                let oversized_size = oversized.size(max_section).await?;
-
-                (
-                    Checkpoint {
-                        epoch: max_epoch,
-                        section: max_section,
-                        oversized_size,
-                        table_size,
-                    },
-                    resizable,
-                )
+                .await?
             }
         };
         if metadata_table_size != Some(checkpoint.table_size) {
