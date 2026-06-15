@@ -7,7 +7,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer, Delivery};
-use commonware_utils::{channel::oneshot, sequence::U64};
+use commonware_utils::{channel::oneshot, sequence::U64, vec::NonEmptyVec};
 use std::collections::VecDeque;
 use tracing::{info_span, Span};
 
@@ -191,10 +191,23 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     }
 }
 
+/// Subscriber id used to tie p2p resolver responses back to request spans.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct FetchTrace {
+    id: u64,
+}
+
+impl FetchTrace {
+    pub(crate) const fn new(id: u64) -> Self {
+        Self { id }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum HandlerMessage {
     Deliver {
         view: View,
+        subscribers: NonEmptyVec<FetchTrace>,
         data: Bytes,
         response: oneshot::Sender<bool>,
     },
@@ -265,7 +278,7 @@ impl Handler {
 impl Consumer for Handler {
     type Key = U64;
     type Value = Bytes;
-    type Subscriber = ();
+    type Subscriber = FetchTrace;
 
     fn deliver(
         &mut self,
@@ -275,6 +288,7 @@ impl Consumer for Handler {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
             view: View::new(delivery.key.into()),
+            subscribers: delivery.subscribers,
             data: value,
             response,
         });

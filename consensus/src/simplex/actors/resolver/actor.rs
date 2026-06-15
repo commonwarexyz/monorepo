@@ -1,5 +1,6 @@
 use super::{
-    ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
+    ingress::{FetchTrace, Handler, HandlerMessage, Mailbox, MailboxMessage},
+    state::{Effect, FetchReason},
     Config,
 };
 use crate::{
@@ -18,12 +19,21 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_resolver::p2p;
+use commonware_resolver::{p2p, Fetch, Resolver as _};
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
-use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
+use commonware_utils::{
+    channel::fallible::OneshotExt, ordered::Quorum, sequence::U64, vec::NonEmptyVec,
+};
 use rand_core::CryptoRngCore;
-use std::{num::NonZeroUsize, time::Duration};
-use tracing::{debug, debug_span, info_span};
+use std::{collections::HashMap, num::NonZeroUsize, time::Duration};
+use tracing::{debug, info_span, Span};
+
+struct RequestSpan {
+    view: View,
+    cause: View,
+    reason: FetchReason,
+    span: Span,
+}
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -43,6 +53,8 @@ pub struct Actor<
     fetch_timeout: Duration,
 
     state: State<S, D>,
+    next_fetch_trace: u64,
+    fetch_spans: HashMap<FetchTrace, RequestSpan>,
 
     mailbox_receiver: mailbox::Receiver<MailboxMessage<S, D>>,
 }
@@ -69,6 +81,8 @@ impl<
                 fetch_timeout: cfg.fetch_timeout,
 
                 state: State::new(cfg.fetch_concurrent),
+                next_fetch_trace: 0,
+                fetch_spans: HashMap::new(),
 
                 mailbox_receiver: receiver,
             },
@@ -140,11 +154,12 @@ impl<
                 match message {
                     MailboxMessage::Certificate { certificate, .. } => {
                         // Certificates from mailbox have no associated request view
-                        self.state.handle(certificate, None, &mut resolver);
+                        let effects = self.state.handle(certificate, None);
+                        self.apply_effects(&mut resolver, effects);
                     }
                     MailboxMessage::Certified { round, success, .. } => {
-                        self.state
-                            .handle_certified(round.view(), success, &mut resolver)
+                        let effects = self.state.handle_certified(round.view(), success);
+                        self.apply_effects(&mut resolver, effects);
                     }
                 }
             },
@@ -154,6 +169,96 @@ impl<
                 }
                 self.handle_resolver(message, &mut voter, &mut resolver);
             },
+        }
+    }
+
+    fn next_fetch_trace(&mut self) -> FetchTrace {
+        let trace = FetchTrace::new(self.next_fetch_trace);
+        self.next_fetch_trace = self.next_fetch_trace.wrapping_add(1);
+        trace
+    }
+
+    fn apply_effects(
+        &mut self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchTrace>,
+        effects: Vec<Effect>,
+    ) {
+        for effect in effects {
+            match effect {
+                Effect::Fetch {
+                    view,
+                    cause,
+                    reason,
+                } => self.fetch(resolver, view, cause, reason),
+                Effect::Remove(view) => self.remove(resolver, view),
+                Effect::RetainAbove(floor) => self.retain_above(resolver, floor),
+            }
+        }
+    }
+
+    fn remove(
+        &mut self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchTrace>,
+        view: View,
+    ) {
+        self.fetch_spans.retain(|_, request| request.view != view);
+        let request = U64::from(view);
+        let _ = resolver.retain(move |candidate, _| *candidate != request);
+    }
+
+    fn retain_above(
+        &mut self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchTrace>,
+        floor: View,
+    ) {
+        self.fetch_spans.retain(|_, request| request.view > floor);
+        let floor = U64::from(floor);
+        let _ = resolver.retain(move |request, _| *request > floor);
+    }
+
+    fn fetch(
+        &mut self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchTrace>,
+        view: View,
+        cause: View,
+        reason: FetchReason,
+    ) {
+        let trace = self.next_fetch_trace();
+        let span = info_span!(
+            "simplex.resolver.fetch",
+            epoch = %self.epoch,
+            view = %cause,
+            request = %view,
+            reason = reason.as_str()
+        );
+        let feedback = span.in_scope(|| {
+            resolver.fetch(Fetch {
+                key: U64::from(view),
+                subscriber: trace,
+            })
+        });
+        if feedback.accepted() {
+            self.fetch_spans.insert(
+                trace,
+                RequestSpan {
+                    view,
+                    cause,
+                    reason,
+                    span,
+                },
+            );
+        }
+    }
+
+    fn request_span(&self, subscribers: &NonEmptyVec<FetchTrace>) -> Option<&RequestSpan> {
+        subscribers
+            .iter()
+            .find_map(|trace| self.fetch_spans.get(trace))
+    }
+
+    fn close_fetches(&mut self, subscribers: &NonEmptyVec<FetchTrace>) {
+        for trace in subscribers {
+            self.fetch_spans.remove(trace);
         }
     }
 
@@ -245,19 +350,41 @@ impl<
         &mut self,
         message: HandlerMessage,
         voter: &mut voter::Mailbox<S, D>,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchTrace>,
     ) {
         match message {
             HandlerMessage::Deliver {
                 view,
+                subscribers,
                 data,
                 response,
             } => {
-                let span = info_span!("simplex.resolver.deliver", epoch = %self.epoch, view = %view);
+                let request = self.request_span(&subscribers);
+                let parent = request
+                    .map(|request| request.span.clone())
+                    .unwrap_or_else(Span::none);
+                let cause = request.map_or(view, |request| request.cause);
+                let reason = request
+                    .map(|request| request.reason.as_str())
+                    .unwrap_or("unknown");
+                let span = info_span!(
+                    parent: parent,
+                    "simplex.resolver.deliver",
+                    epoch = %self.epoch,
+                    view = %cause,
+                    request = %view,
+                    reason,
+                    subscribers = subscribers.len()
+                );
                 let _guard = span.entered();
 
                 // Validate incoming message
-                let Some(parsed) = self.validate(view, data) else {
+                let validate = info_span!(
+                    "simplex.resolver.validate",
+                    epoch = %self.epoch,
+                    request = %view
+                );
+                let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
                     response.send_lossy(false);
@@ -266,13 +393,26 @@ impl<
                 response.send_lossy(true);
 
                 // Notify voter as soon as possible
-                voter.resolved(parsed.clone());
+                let resolved = info_span!(
+                    "simplex.resolver.resolve",
+                    epoch = %self.epoch,
+                    request = %view,
+                    certificate_view = %parsed.view()
+                );
+                resolved.in_scope(|| voter.resolved(parsed.clone()));
 
                 // Process message with the request view for tracking
-                self.state.handle(parsed, Some(view), resolver);
+                let effects = self.state.handle(parsed, Some(view));
+                self.apply_effects(resolver, effects);
+                self.close_fetches(&subscribers);
             }
             HandlerMessage::Produce { view, response } => {
-                let span = debug_span!("simplex.resolver.produce", epoch = %self.epoch, view = %view);
+                let span = info_span!(
+                    "simplex.resolver.produce",
+                    epoch = %self.epoch,
+                    view = %view,
+                    request = %view
+                );
                 let _guard = span.entered();
 
                 // Produce message for view
