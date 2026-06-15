@@ -528,10 +528,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     }
 
     /// Determine if metadata should override a caller-provided checkpoint.
-    fn metadata_state_supersedes_checkpoint(
-        state: MetadataValue,
-        checkpoint: &Checkpoint,
-    ) -> bool {
+    fn metadata_state_supersedes_checkpoint(state: MetadataValue, checkpoint: &Checkpoint) -> bool {
         match state {
             MetadataValue::State {
                 table_size,
