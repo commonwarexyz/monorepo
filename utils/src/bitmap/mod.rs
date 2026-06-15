@@ -13,6 +13,7 @@ use commonware_codec::{util::at_least, EncodeSize, Error as CodecError, Read, Re
 use core::{
     fmt::{self, Formatter, Write as _},
     iter,
+    num::NonZeroU64,
     ops::{BitAnd, BitOr, BitXor, Index, Range},
 };
 #[cfg(feature = "std")]
@@ -31,16 +32,11 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 ///
 /// Each returned key is `index / items_per_section`; the corresponding bitmap has
 /// `items_per_section` bits and sets `index % items_per_section`.
-///
-/// # Panics
-///
-/// Panics if `items_per_section` is zero.
 pub fn bits_for_indices<const N: usize>(
-    items_per_section: u64,
+    items_per_section: NonZeroU64,
     indices: impl IntoIterator<Item = u64>,
 ) -> BTreeMap<u64, Option<BitMap<N>>> {
-    assert!(items_per_section > 0, "items_per_section must be non-zero");
-
+    let items_per_section = items_per_section.get();
     let mut bits = BTreeMap::new();
     for index in indices {
         let section = index / items_per_section;
@@ -1120,10 +1116,11 @@ mod tests {
 
     #[test]
     fn test_bits_for_indices() {
-        let empty = bits_for_indices::<1>(10, core::iter::empty());
+        let items_per_section = NonZeroU64::new(10).unwrap();
+        let empty = bits_for_indices::<1>(items_per_section, core::iter::empty());
         assert!(empty.is_empty());
 
-        let bits = bits_for_indices::<1>(10, [0, 1, 9, 10, 25]);
+        let bits = bits_for_indices::<1>(items_per_section, [0, 1, 9, 10, 25]);
         assert_eq!(bits.len(), 3);
 
         let section_0 = bits.get(&0).unwrap().as_ref().unwrap();

@@ -74,10 +74,10 @@ fn fuzz(input: FuzzInput) {
     let runner = deterministic::Runner::default();
     runner.start(|context| async move {
         // Initialize the ordinal
-        let items_per_blob = input.items_per_blob.clamp(1, u16::MAX) as u64;
+        let items_per_blob = NZU64!(input.items_per_blob.clamp(1, u16::MAX) as u64);
         let cfg = Config {
             partition: "ordinal-operations-fuzz-test".into(),
-            items_per_blob: NZU64!(items_per_blob),
+            items_per_blob,
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(64 * 1024),
         };
@@ -180,11 +180,13 @@ fn fuzz(input: FuzzInput) {
 
                 OrdinalOperation::Prune { min } => {
                     if let Some(ordinal) = store.as_mut() {
-                        let min_blob = *min / items_per_blob;
+                        let min_blob = *min / items_per_blob.get();
                         if ordinal.prune(*min).await.is_ok() {
                             // Remove all data in pruned blobs from expected state
-                            expected_data.retain(|&index, _| index / items_per_blob >= min_blob);
-                            synced_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                            expected_data
+                                .retain(|&index, _| index / items_per_blob.get() >= min_blob);
+                            synced_data
+                                .retain(|&index, _| index / items_per_blob.get() >= min_blob);
                         }
                     }
                 }

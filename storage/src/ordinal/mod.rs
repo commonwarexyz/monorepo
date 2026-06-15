@@ -1048,7 +1048,7 @@ mod tests {
             drop(store);
 
             // Reopen the store
-            let owned_bits = bits_for_indices(100, values.iter().map(|(index, _)| *index));
+            let owned_bits = bits_for_indices(NZU64!(100), values.iter().map(|(index, _)| *index));
             let bits = owned_bits
                 .iter()
                 .map(|(section, bitmap)| (*section, bitmap))
