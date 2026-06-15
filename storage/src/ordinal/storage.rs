@@ -208,16 +208,17 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 let Some((blob, size)) = blobs.get(section) else {
                     return Err(Error::MissingRecord(section * items_per_blob));
                 };
-                let mut replay_blob =
-                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
 
                 // A section with a bitmap replays only its set records; without one every record
                 // must exist
-                let indices: Box<dyn Iterator<Item = u64> + Send + '_> = match bits {
-                    Some(bits) => Box::new(bits.ones_iter()),
-                    None => Box::new(0..items_per_blob),
-                };
-                for bit_index in indices {
+                let mut set_indices = bits.as_ref().map(|bits| bits.ones_iter());
+                let mut all_indices = 0..items_per_blob;
+                let mut replay_blob =
+                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
+                while let Some(bit_index) = match &mut set_indices {
+                    Some(indices) => indices.next(),
+                    None => all_indices.next(),
+                } {
                     let index = section * items_per_blob + bit_index;
                     if bit_index >= items_per_blob {
                         return Err(Error::MissingRecord(index));
