@@ -65,7 +65,13 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<S, B, D, R>
 {
-    pub fn new(round: Rnd, participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
+    pub fn new(
+        round: Rnd,
+        participants: Set<S::PublicKey>,
+        scheme: S,
+        blocker: B,
+        reporter: R,
+    ) -> Self {
         let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {

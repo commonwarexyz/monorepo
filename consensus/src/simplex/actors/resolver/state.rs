@@ -79,11 +79,7 @@ impl<S: Scheme, D: Digest> State<S, D> {
     /// when this certificate was fetched. If the certificate is a notarization
     /// at a higher view, we track that the request was "satisfied by" this
     /// notarization so we can re-request on certification failure.
-    pub fn handle(
-        &mut self,
-        certificate: Certificate<S, D>,
-        request: Option<View>,
-    ) -> Vec<Effect> {
+    pub fn handle(&mut self, certificate: Certificate<S, D>, request: Option<View>) -> Vec<Effect> {
         let cause = certificate.view();
         let mut effects = Vec::new();
         match certificate {
@@ -255,9 +251,7 @@ mod tests {
         },
         types::{Epoch, Round, View},
     };
-    use commonware_cryptography::{
-        certificate::mocks::Fixture, sha256::Digest as Sha256Digest,
-    };
+    use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, NZUsize};
 
@@ -369,10 +363,7 @@ mod tests {
         );
         assert_eq!(
             effects,
-            vec![
-                remove(2),
-                fetch(3, 2, FetchReason::MissingNullification),
-            ]
+            vec![remove(2), fetch(3, 2, FetchReason::MissingNullification),]
         );
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
@@ -479,7 +470,10 @@ mod tests {
 
         // Notarization at view 5 satisfies request for view 2
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        let effects = state.handle(Certificate::Notarization(notarization_v5), Some(View::new(2)));
+        let effects = state.handle(
+            Certificate::Notarization(notarization_v5),
+            Some(View::new(2)),
+        );
         assert_eq!(
             effects,
             vec![
@@ -555,10 +549,7 @@ mod tests {
 
         // Create and certify a notarization at view 5
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
-        let effects = state.handle(
-            Certificate::Notarization(notarization_v5.clone()),
-            None,
-        );
+        let effects = state.handle(Certificate::Notarization(notarization_v5.clone()), None);
         assert_eq!(
             effects,
             vec![

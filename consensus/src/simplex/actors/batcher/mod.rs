@@ -722,17 +722,47 @@ mod tests {
         });
     }
 
-    #[test_collect_traces]
-    fn test_quorum_votes_construct_certificate(traces: TraceStorage) {
-        quorum_votes_construct_certificate(bls12381_threshold_vrf::fixture::<MinPk, _>, traces.clone());
-        quorum_votes_construct_certificate(bls12381_threshold_vrf::fixture::<MinSig, _>, traces.clone());
-        quorum_votes_construct_certificate(bls12381_threshold_std::fixture::<MinPk, _>, traces.clone());
-        quorum_votes_construct_certificate(bls12381_threshold_std::fixture::<MinSig, _>, traces.clone());
-        quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinPk, _>, traces.clone());
-        quorum_votes_construct_certificate(bls12381_multisig::fixture::<MinSig, _>, traces.clone());
-        quorum_votes_construct_certificate(ed25519::fixture, traces.clone());
-        quorum_votes_construct_certificate(secp256r1::fixture, traces);
+    macro_rules! quorum_votes_construct_certificate_test {
+        ($name:ident, $fixture:path) => {
+            #[test_collect_traces]
+            fn $name(traces: TraceStorage) {
+                quorum_votes_construct_certificate($fixture, traces);
+            }
+        };
     }
+
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_bls12381_threshold_vrf_min_pk,
+        bls12381_threshold_vrf::fixture::<MinPk, _>
+    );
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_bls12381_threshold_vrf_min_sig,
+        bls12381_threshold_vrf::fixture::<MinSig, _>
+    );
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_bls12381_threshold_std_min_pk,
+        bls12381_threshold_std::fixture::<MinPk, _>
+    );
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_bls12381_threshold_std_min_sig,
+        bls12381_threshold_std::fixture::<MinSig, _>
+    );
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_bls12381_multisig_min_pk,
+        bls12381_multisig::fixture::<MinPk, _>
+    );
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_bls12381_multisig_min_sig,
+        bls12381_multisig::fixture::<MinSig, _>
+    );
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_ed25519,
+        ed25519::fixture
+    );
+    quorum_votes_construct_certificate_test!(
+        test_quorum_votes_construct_certificate_secp256r1,
+        secp256r1::fixture
+    );
 
     /// Test that constructing a notarization does not forward immediately, but
     /// entering the next view with an explicit forwardable proposal does.

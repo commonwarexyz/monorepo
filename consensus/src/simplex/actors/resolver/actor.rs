@@ -166,7 +166,12 @@ impl<
         }
     }
 
-    fn next_fetch_request(&mut self, view: View, cause: View, reason: FetchReason) -> FetchRequest {
+    const fn next_fetch_request(
+        &mut self,
+        view: View,
+        cause: View,
+        reason: FetchReason,
+    ) -> FetchRequest {
         let request = FetchRequest::new(self.next_fetch_id, view, cause, reason);
         self.next_fetch_id = self.next_fetch_id.wrapping_add(1);
         request
@@ -190,11 +195,7 @@ impl<
         }
     }
 
-    fn remove(
-        &mut self,
-        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
-        view: View,
-    ) {
+    fn remove(&mut self, resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>, view: View) {
         self.fetch_spans.retain(|request, _| request.view != view);
         let request = U64::from(view);
         let _ = resolver.retain(move |candidate, _| *candidate != request);
@@ -237,10 +238,15 @@ impl<
         }
     }
 
-    fn request_span(&self, subscribers: &NonEmptyVec<FetchRequest>) -> Option<(FetchRequest, Span)> {
-        subscribers
-            .iter()
-            .find_map(|request| self.fetch_spans.get(request).map(|span| (*request, span.clone())))
+    fn request_span(
+        &self,
+        subscribers: &NonEmptyVec<FetchRequest>,
+    ) -> Option<(FetchRequest, Span)> {
+        subscribers.iter().find_map(|request| {
+            self.fetch_spans
+                .get(request)
+                .map(|span| (*request, span.clone()))
+        })
     }
 
     fn close_fetches(&mut self, subscribers: &NonEmptyVec<FetchRequest>) {

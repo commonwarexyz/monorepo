@@ -3027,7 +3027,10 @@ mod tests {
             }
 
             let target_view = current_view;
-            mailbox.timeout(Round::new(Epoch::new(333), target_view), TimeoutReason::LeaderNullify);
+            mailbox.timeout(
+                Round::new(Epoch::new(333), target_view),
+                TimeoutReason::LeaderNullify,
+            );
 
             // Expect local nullify quickly despite 10s timeouts.
             loop {
@@ -3051,7 +3054,10 @@ mod tests {
             }
 
             // Send the same expire signal again. Duplicates should not retrigger the fast-path.
-            mailbox.timeout(Round::new(Epoch::new(333), target_view), TimeoutReason::LeaderNullify);
+            mailbox.timeout(
+                Round::new(Epoch::new(333), target_view),
+                TimeoutReason::LeaderNullify,
+            );
 
             let duplicate_window = context.current() + Duration::from_millis(300);
             loop {
@@ -6788,12 +6794,9 @@ mod tests {
             } = fixture(&mut context, &namespace, n);
 
             // Create simulated network
-            let oracle = start_test_network_with_peers(
-                context.child("network"),
-                participants.clone(),
-                true,
-            )
-            .await;
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
 
             let elector = RoundRobin::<Sha256>::default();
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(

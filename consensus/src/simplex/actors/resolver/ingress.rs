@@ -151,8 +151,12 @@ impl<S: Scheme, D: Digest> Policy for MailboxMessage<S, D> {
                         )
                 }
                 (
-                    Self::Certified { round: new_round, .. },
-                    Self::Certified { round: old_round, .. },
+                    Self::Certified {
+                        round: new_round, ..
+                    },
+                    Self::Certified {
+                        round: old_round, ..
+                    },
                 ) => new_round.view() == old_round.view(),
                 _ => false,
             })

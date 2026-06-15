@@ -155,7 +155,14 @@ impl<S: Scheme, D: Digest> Policy for Message<S, D> {
                         ..
                     },
                 ) => new_proposal.view() == old_proposal.view(),
-                (Self::Timeout { round: new_round, .. }, Self::Timeout { round: old_round, .. }) => {
+                (
+                    Self::Timeout {
+                        round: new_round, ..
+                    },
+                    Self::Timeout {
+                        round: old_round, ..
+                    },
+                ) => {
                     new_round.view() == old_round.view() // only retain the first queued timeout reason
                 }
                 (
