@@ -488,6 +488,21 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
 }
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
+    /// Remove a partition if it contains any blobs.
+    async fn clear_partition(context: &E, partition: &str) -> Result<(), Error> {
+        let stored_blobs = match context.scan(partition).await {
+            Ok(blobs) => blobs,
+            Err(commonware_runtime::Error::PartitionMissing(_)) => return Ok(()),
+            Err(err) => return Err(Error::Runtime(err)),
+        };
+
+        if !stored_blobs.is_empty() {
+            context.remove(partition, None).await?;
+        }
+
+        Ok(())
+    }
+
     /// Calculate the byte offset for a table index.
     #[inline]
     const fn table_offset(table_index: u32) -> u64 {
@@ -526,64 +541,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             None => table_size,
         };
         (Self::table_offset(physical_table_size) <= table_len).then_some(value)
-    }
-
-    /// Recover checkpoint and resize state from the durable table and oversized journal.
-    async fn recover_durable_checkpoint(
-        pooler: &impl BufferPooler,
-        table: &E::Blob,
-        oversized: &Oversized<E, Record<K>, V>,
-        table_len: u64,
-        state: State,
-        table_resize_frequency: u8,
-        table_replay_buffer: NonZeroUsize,
-    ) -> Result<(Checkpoint, u32, Option<u32>), Error> {
-        let State::Resize {
-            table_size,
-            resize_progress,
-        } = state;
-        let physical_table_size = if resize_progress.is_some() {
-            table_size.checked_mul(2).expect("table size overflow")
-        } else {
-            table_size
-        };
-        let expected_table_len = Self::table_offset(physical_table_size);
-        let mut modified = if table_len != expected_table_len {
-            table.resize(expected_table_len).await?;
-            true
-        } else {
-            false
-        };
-
-        let (table_modified, max_epoch, max_section, resizable) = Self::recover_table(
-            pooler,
-            table,
-            table_size,
-            table_resize_frequency,
-            None,
-            table_replay_buffer,
-        )
-        .await?;
-        if table_modified {
-            modified = true;
-        }
-
-        if modified {
-            table.sync().await?;
-        }
-
-        let oversized_size = oversized.size(max_section).await?;
-
-        Ok((
-            Checkpoint {
-                epoch: max_epoch,
-                section: max_section,
-                oversized_size,
-                table_size,
-            },
-            resizable,
-            resize_progress,
-        ))
     }
 
     /// Recover a single table entry and update tracking.
@@ -685,6 +642,31 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok((modified, max_epoch, max_section, resizable))
     }
 
+    /// Determine whether the table contains no entries.
+    async fn table_empty(
+        pooler: &impl BufferPooler,
+        blob: &E::Blob,
+        table_len: u64,
+        table_replay_buffer: NonZeroUsize,
+    ) -> Result<bool, Error> {
+        if !table_len.is_multiple_of(Entry::FULL_SIZE as u64) {
+            return Ok(false);
+        }
+
+        let mut reader =
+            buffer::Read::from_pooler(pooler, blob.clone(), table_len, table_replay_buffer);
+        let table_size = table_len / Entry::FULL_SIZE as u64;
+        for _ in 0..table_size {
+            let entry_buf = reader.read(Entry::FULL_SIZE).await?;
+            let (entry1, entry2) = Self::parse_entries(entry_buf)?;
+            if !entry1.is_empty() || !entry2.is_empty() {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
     /// Determine the write offset for a table entry based on current entries and epoch.
     const fn compute_write_offset(entry1: &Entry, entry2: &Entry, epoch: u64) -> u64 {
         // If either entry matches the current epoch, overwrite it
@@ -761,14 +743,10 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(())
     }
 
-    /// Initialize a new [Freezer] instance.
-    pub async fn init(context: E, config: Config<V::Cfg>) -> Result<Self, Error> {
-        Self::init_with_checkpoint(context, config, None).await
-    }
-
-    /// Initialize a new [Freezer] instance with a [Checkpoint].
-    // TODO(#1227): Hide this complexity from the caller.
-    pub async fn init_with_checkpoint(
+    /// Initialize a [Freezer] instance, aligning existing data to a [Checkpoint] when provided.
+    ///
+    /// If no checkpoint is provided, any existing data is deleted and the freezer starts empty.
+    pub async fn init(
         context: E,
         config: Config<V::Cfg>,
         checkpoint: Option<Checkpoint>,
@@ -778,6 +756,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             config.table_initial_size > 0 && config.table_initial_size.is_power_of_two(),
             "table_initial_size must be a power of 2"
         );
+
+        let empty_checkpoint = checkpoint.is_some_and(|checkpoint| {
+            checkpoint.epoch == 0
+                && checkpoint.section == 0
+                && checkpoint.oversized_size == 0
+                && checkpoint.table_size == 0
+        });
+        if checkpoint.is_none() || empty_checkpoint {
+            Self::clear_partition(&context, &config.key_partition).await?;
+            Self::clear_partition(&context, &config.value_partition).await?;
+        }
 
         // Initialize oversized journal (handles crash recovery)
         let oversized_cfg = OversizedConfig {
@@ -801,9 +790,22 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             Metadata::<_, U64, State>::init(context.child("metadata"), metadata_cfg).await?;
 
         // Open table blob
-        let (table, table_len) = context
+        let (mut table, mut table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
+        if (checkpoint.is_none() || empty_checkpoint) && table_len != 0 {
+            let expected_table_len = Self::table_offset(config.table_initial_size);
+            if table_len != expected_table_len
+                || !Self::table_empty(&context, &table, table_len, config.table_replay_buffer)
+                    .await?
+            {
+                drop(table);
+                context.remove(&config.table_partition, None).await?;
+                (table, table_len) = context
+                    .open(&config.table_partition, TABLE_BLOB_NAME)
+                    .await?;
+            }
+        }
         let metadata_state = Self::metadata_state(metadata.get(&TABLE_STATE_KEY), table_len);
 
         // Determine checkpoint based on initialization scenario
@@ -816,12 +818,20 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
             // New table with explicit checkpoint (must be empty)
             (0, Some(checkpoint)) => {
-                assert_eq!(checkpoint.epoch, 0);
-                assert_eq!(checkpoint.section, 0);
-                assert_eq!(checkpoint.oversized_size, 0);
-                assert_eq!(checkpoint.table_size, 0);
+                if checkpoint.epoch != 0
+                    || checkpoint.section != 0
+                    || checkpoint.oversized_size != 0
+                    || checkpoint.table_size != 0
+                {
+                    return Err(Error::CheckpointMismatch);
+                }
 
                 Self::init_table(&table, config.table_initial_size).await?;
+                (Checkpoint::init(config.table_initial_size), 0, None)
+            }
+
+            // Existing empty table with explicit empty checkpoint
+            (_, Some(_)) if empty_checkpoint => {
                 (Checkpoint::init(config.table_initial_size), 0, None)
             }
 
@@ -872,23 +882,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             }
 
             // Existing table without checkpoint
-            (_, None) => {
-                let state = metadata_state.unwrap_or_else(|| State::Resize {
-                    table_size: (table_len / Entry::FULL_SIZE as u64) as u32,
-                    resize_progress: None,
-                });
-
-                Self::recover_durable_checkpoint(
-                    &context,
-                    &table,
-                    &oversized,
-                    table_len,
-                    state,
-                    config.table_resize_frequency,
-                    config.table_replay_buffer,
-                )
-                .await?
-            }
+            (_, None) => (Checkpoint::init(config.table_initial_size), 0, None),
         };
         let recovered_state = State::Resize {
             table_size: checkpoint.table_size,
@@ -1401,7 +1395,7 @@ mod tests {
                 codec_config: (),
             };
             let mut freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone(), None)
                     .await
                     .unwrap();
 
@@ -1458,10 +1452,13 @@ mod tests {
 
             // Create freezer with data
             let checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("first"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
                 freezer.put(test_key("key0"), 42).await.unwrap();
                 freezer.sync().await.unwrap();
                 freezer.close().await.unwrap()
@@ -1483,7 +1480,7 @@ mod tests {
             // Entry::new(0,0,0,0) which has is_empty()=false and is_valid()=true.
             // read_latest_entry would then see two "valid" entries with epoch=0 and
             // panic on unreachable!().
-            let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                 context.child("second"),
                 cfg.clone(),
                 Some(checkpoint),
@@ -1495,7 +1492,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn issue_4043_no_checkpoint_recovery_after_partial_sync_resize() {
+    fn no_checkpoint_deletes_partial_sync_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1517,10 +1514,13 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("first"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
                 freezer.put(key.clone(), 42).await.unwrap();
                 freezer.sync().await.unwrap();
 
@@ -1529,17 +1529,17 @@ mod tests {
             }
 
             let freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
                     .await
                     .unwrap();
             assert_eq!(freezer.table_size, 2);
-            assert_eq!(freezer.resizing(), Some(1));
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            assert_eq!(freezer.resizing(), None);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
         });
     }
 
     #[test_traced]
-    fn issue_4043_no_checkpoint_recovery_after_close_starts_partial_resize() {
+    fn empty_checkpoint_deletes_existing_data() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1561,27 +1561,83 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("first"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
+                freezer.put(key.clone(), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            }
+
+            let checkpoint = Checkpoint {
+                epoch: 0,
+                section: 0,
+                oversized_size: 0,
+                table_size: 0,
+            };
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                context.child("second"),
+                cfg.clone(),
+                Some(checkpoint),
+            )
+            .await
+            .unwrap();
+            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
+        });
+    }
+
+    #[test_traced]
+    fn no_checkpoint_deletes_close_started_partial_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                metadata_partition: "test-metadata".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+            let key = test_key_at_index(4, 3);
+
+            {
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("first"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
                 freezer.put(key.clone(), 42).await.unwrap();
                 let checkpoint = freezer.close().await.unwrap();
                 assert_eq!(checkpoint.table_size, 2);
             }
 
             let freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
                     .await
                     .unwrap();
             assert_eq!(freezer.table_size, 2);
-            assert_eq!(freezer.resizing(), Some(1));
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            assert_eq!(freezer.resizing(), None);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
         });
     }
 
     #[test_traced]
-    fn metadata_state_preserves_completed_resize() {
+    fn no_checkpoint_deletes_completed_resize() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = super::super::Config {
@@ -1603,10 +1659,13 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("first"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
                 freezer.put(key.clone(), 42).await.unwrap();
                 let checkpoint = freezer.sync().await.unwrap();
 
@@ -1616,11 +1675,11 @@ mod tests {
             }
 
             let freezer =
-                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone(), None)
                     .await
                     .unwrap();
-            assert_eq!(freezer.table_size, 4);
-            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            assert_eq!(freezer.table_size, 2);
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), None);
             drop(freezer);
 
             let metadata_cfg = MetadataConfig {
@@ -1633,7 +1692,7 @@ mod tests {
             assert_eq!(
                 metadata.get(&TABLE_STATE_KEY),
                 Some(&State::Resize {
-                    table_size: 4,
+                    table_size: 2,
                     resize_progress: None
                 })
             );
@@ -1663,10 +1722,13 @@ mod tests {
             let key = test_key_at_index(4, 3);
 
             let stale_checkpoint = {
-                let mut freezer =
-                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
-                        .await
-                        .unwrap();
+                let mut freezer = Freezer::<_, FixedBytes<64>, i32>::init(
+                    context.child("first"),
+                    cfg.clone(),
+                    None,
+                )
+                .await
+                .unwrap();
                 let stale_checkpoint = freezer.sync().await.unwrap();
                 assert_eq!(stale_checkpoint.table_size, 2);
 
@@ -1679,7 +1741,7 @@ mod tests {
                 stale_checkpoint
             };
 
-            let freezer = Freezer::<_, FixedBytes<64>, i32>::init_with_checkpoint(
+            let freezer = Freezer::<_, FixedBytes<64>, i32>::init(
                 context.child("second"),
                 cfg.clone(),
                 Some(stale_checkpoint),

@@ -26,7 +26,7 @@ pub async fn init(ctx: Context) -> Ordinal {
         write_buffer: NZUsize!(WRITE_BUFFER),
         replay_buffer: NZUsize!(REPLAY_BUFFER),
     };
-    ordinal::Ordinal::init(ctx, cfg).await.unwrap()
+    ordinal::Ordinal::init(ctx, cfg, None).await.unwrap()
 }
 
 /// Append `count` sequential entries with random values to ordinal store and sync once.

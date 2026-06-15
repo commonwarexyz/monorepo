@@ -67,7 +67,7 @@ fn fuzz(input: FuzzInput) {
             codec_config: (),
         };
         let mut freezer =
-            Freezer::<_, FixedBytes<32>, i32>::init(context.child("storage"), cfg.clone())
+            Freezer::<_, FixedBytes<32>, i32>::init(context.child("storage"), cfg.clone(), None)
                 .await
                 .unwrap();
 

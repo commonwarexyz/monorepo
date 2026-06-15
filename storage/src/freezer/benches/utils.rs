@@ -67,7 +67,7 @@ pub async fn init(ctx: Context) -> FreezerType {
         table_replay_buffer: NZUsize!(TABLE_REPLAY_BUFFER),
         codec_config: (),
     };
-    Freezer::init(ctx, cfg).await.unwrap()
+    Freezer::init(ctx, cfg, None).await.unwrap()
 }
 
 /// Append `count` key-value pairs with random values to freezer store and sync once.

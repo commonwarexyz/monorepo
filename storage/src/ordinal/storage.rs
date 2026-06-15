@@ -95,31 +95,30 @@ pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
 }
 
 impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
-    /// Initialize a new [Ordinal] instance.
-    pub async fn init(context: E, config: Config) -> Result<Self, Error> {
-        Self::init_with_bits(context, config, None).await
-    }
-
     /// Initialize a new [Ordinal] instance with a collection of [BitMap]s (indicating which
     /// records should be considered available).
     ///
     /// If a section is not provided in the [BTreeMap], all records in that section are considered
     /// unavailable. If a [BitMap] is provided for a section, all records in that section are
     /// considered available if and only if the [BitMap] is set for the record. If a section is provided
-    /// but no [BitMap] is populated, all records in that section are considered available.
-    // TODO(#1227): Hide this complexity from the caller.
-    pub async fn init_with_bits(
+    /// but no [BitMap] is populated, all records in that section are considered available. If no
+    /// bits are provided, any existing ordinal data is deleted.
+    pub async fn init(
         context: E,
         config: Config,
         bits: Option<BTreeMap<u64, &Option<BitMap>>>,
     ) -> Result<Self, Error> {
         // Scan for all blobs in the partition
         let mut blobs = BTreeMap::new();
-        let stored_blobs = match context.scan(&config.partition).await {
+        let mut stored_blobs = match context.scan(&config.partition).await {
             Ok(blobs) => blobs,
             Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
             Err(err) => return Err(Error::Runtime(err)),
         };
+        if bits.is_none() && !stored_blobs.is_empty() {
+            context.remove(&config.partition, None).await?;
+            stored_blobs.clear();
+        }
 
         // Open all blobs and check for partial records
         for name in stored_blobs {
@@ -131,7 +130,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
             // Check if blob size is aligned to record size
             let record_size = Record::<V>::SIZE as u64;
-            if len % record_size != 0 {
+            if bits.is_some() && len % record_size != 0 {
                 warn!(
                     blob = index,
                     invalid_size = len,
@@ -146,6 +145,43 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             debug!(blob = index, len, "found index blob");
             blobs.insert(index, (blob, len));
         }
+        if let Some(bits) = &bits {
+            let sections = blobs.keys().copied().collect::<Vec<_>>();
+            for section in sections {
+                let keep = match bits.get(&section) {
+                    Some(Some(bits)) => bits.count_ones() != 0,
+                    Some(None) => true,
+                    None => false,
+                };
+                if !keep {
+                    context
+                        .remove(&config.partition, Some(&section.to_be_bytes()))
+                        .await?;
+                    blobs.remove(&section);
+                }
+            }
+        }
+        if let Some(bits) = &bits {
+            let record_size = Record::<V>::SIZE as u64;
+            for (section, (blob, size)) in &blobs {
+                let Some(Some(bits)) = bits.get(section) else {
+                    continue;
+                };
+
+                let mut modified = false;
+                let empty = vec![0u8; Record::<V>::SIZE];
+                for bit_index in 0..(*size / record_size) {
+                    if bit_index >= bits.len() || !bits.get(bit_index) {
+                        blob.write_at(bit_index * record_size, empty.clone())
+                            .await?;
+                        modified = true;
+                    }
+                }
+                if modified {
+                    blob.sync().await?;
+                }
+            }
+        }
 
         // Initialize intervals by scanning existing records
         debug!(
@@ -155,61 +191,67 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let start = context.current();
         let mut items = 0;
         let mut intervals = RMap::new();
-        for (section, (blob, size)) in &blobs {
-            // Skip if bits are provided and the section is not in the bits
-            if let Some(bits) = &bits {
-                if !bits.contains_key(section) {
-                    warn!(section, "skipping section without bits");
-                    continue;
-                }
-            }
-
-            // Initialize read buffer
-            let mut replay_blob =
-                ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
-
-            // Iterate over all records in the blob
-            let mut offset = 0;
+        if let Some(bits) = &bits {
+            let record_size = Record::<V>::SIZE as u64;
             let items_per_blob = config.items_per_blob.get();
-            while offset < *size {
-                // Calculate index for this record
-                let index = section * items_per_blob + (offset / Record::<V>::SIZE as u64);
-
-                // If bits are provided, skip if not set
-                let mut must_exist = false;
-                if let Some(bits) = &bits {
-                    // If bits are provided, check if the record exists
-                    let bits = bits.get(section).unwrap();
-                    if let Some(bits) = bits {
-                        let bit_index = offset as usize / Record::<V>::SIZE;
-                        if !bits.get(bit_index as u64) {
-                            offset += Record::<V>::SIZE as u64;
-                            continue;
-                        }
-                    }
-
-                    // If bit section exists but it is empty, we must have all records
-                    must_exist = true;
-                }
-
-                // Attempt to read record at offset
-                replay_blob.seek_to(offset)?;
-                let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
-                offset += Record::<V>::SIZE as u64;
-
-                // If record is valid, add to intervals
-                if let Ok(record) = Record::<V>::read(&mut record_buf) {
-                    if record.is_valid() {
-                        items += 1;
-                        intervals.insert(index);
+            for (section, bits) in bits {
+                if let Some(bits) = bits {
+                    if bits.count_ones() == 0 {
                         continue;
                     }
-                };
+                }
 
-                // If record is invalid, it may either be empty or corrupted. We only care
-                // which is which if the provided bits indicate that the record must exist.
-                if must_exist {
-                    return Err(Error::MissingRecord(index));
+                let Some((blob, size)) = blobs.get(section) else {
+                    return Err(Error::MissingRecord(section * items_per_blob));
+                };
+                let mut replay_blob =
+                    ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
+
+                match bits {
+                    Some(bits) => {
+                        for bit_index in bits.ones_iter() {
+                            let index = section * items_per_blob + bit_index;
+                            if bit_index >= items_per_blob {
+                                return Err(Error::MissingRecord(index));
+                            }
+
+                            let offset = bit_index * record_size;
+                            if offset + record_size > *size {
+                                return Err(Error::MissingRecord(index));
+                            }
+
+                            replay_blob.seek_to(offset)?;
+                            let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
+                            if let Ok(record) = Record::<V>::read(&mut record_buf) {
+                                if record.is_valid() {
+                                    items += 1;
+                                    intervals.insert(index);
+                                    continue;
+                                }
+                            };
+                            return Err(Error::MissingRecord(index));
+                        }
+                    }
+                    None => {
+                        for bit_index in 0..items_per_blob {
+                            let index = section * items_per_blob + bit_index;
+                            let offset = bit_index * record_size;
+                            if offset + record_size > *size {
+                                return Err(Error::MissingRecord(index));
+                            }
+
+                            replay_blob.seek_to(offset)?;
+                            let mut record_buf = replay_blob.read(Record::<V>::SIZE).await?;
+                            if let Ok(record) = Record::<V>::read(&mut record_buf) {
+                                if record.is_valid() {
+                                    items += 1;
+                                    intervals.insert(index);
+                                    continue;
+                                }
+                            };
+                            return Err(Error::MissingRecord(index));
+                        }
+                    }
                 }
             }
         }

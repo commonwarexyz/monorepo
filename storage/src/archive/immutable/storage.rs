@@ -126,7 +126,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         // Initialize table
         //
         // TODO (#1227): Use sharded metadata to provide consistency
-        let freezer = Freezer::init_with_checkpoint(
+        let freezer = Freezer::init(
             context.child("freezer"),
             freezer::Config {
                 key_partition: cfg.freezer_key_partition,
@@ -166,7 +166,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         // Initialize ordinal
         //
         // TODO (#1227): Use sharded metadata to provide consistency
-        let ordinal = Ordinal::init_with_bits(
+        let ordinal = Ordinal::init(
             context.child("ordinal"),
             ordinal::Config {
                 partition: cfg.ordinal_partition,
