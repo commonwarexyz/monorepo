@@ -506,11 +506,10 @@ fn constraint_matrices_to_r1cs(matrices: Vec<Matrix<Fq>>) -> R1cs<Scalar> {
         }
         out
     }
-    let mut matrices = matrices.into_iter();
-    let a = matrices.next().expect("R1CS A matrix missing");
-    let b = matrices.next().expect("R1CS B matrix missing");
-    let c = matrices.next().expect("R1CS C matrix missing");
-    assert!(matrices.next().is_none(), "R1CS has exactly three matrices");
+    let [a, b, c] = match <[Matrix<Fq>; 3]>::try_from(matrices) {
+        Ok(matrices) => matrices,
+        Err(_) => panic!("R1CS has exactly three matrices"),
+    };
     R1cs {
         a: convert_matrix(a),
         b: convert_matrix(b),
@@ -565,15 +564,15 @@ fn vrf_batch_checked_inner(
         // is column-aligned with the R1CS matrix
         // (`[instance_assignment | witness_assignment]`). The first instance
         // entry is the constant `1`.
-        let witness = cs
+        let instance_assignment = cs
             .instance_assignment()
-            .expect("instance assignment should be populated")
+            .expect("instance assignment should be populated");
+        let witness_assignment = cs
+            .witness_assignment()
+            .expect("witness assignment should be populated");
+        let witness = instance_assignment
             .iter()
-            .chain(
-                cs.witness_assignment()
-                    .expect("witness assignment should be populated")
-                    .iter(),
-            )
+            .chain(witness_assignment.iter())
             .map(fq_to_scalar)
             .collect::<Vec<_>>();
         let (c, w) =
