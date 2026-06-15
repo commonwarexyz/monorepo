@@ -1157,6 +1157,11 @@ impl<
                 .instrument(span)
                 .await;
 
+                // Close the root span of any view the chain has now decided.
+                // This runs after notify so the finalization broadcast and the
+                // report into the application still nest under the view span.
+                self.state.close_decided_spans();
+
                 // After sending all required messages, prune any views
                 // we no longer need
                 self.prune_views().await;

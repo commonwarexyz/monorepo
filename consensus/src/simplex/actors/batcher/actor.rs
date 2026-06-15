@@ -305,6 +305,14 @@ where
                         timed_out: false,
                     };
                     finalized = new_finalized;
+
+                    // Close the root span of any view the chain has now decided.
+                    // The round lingers until it is no longer interesting, but
+                    // its work no longer anchors a trace.
+                    for (_, round) in work.range_mut(..=finalized) {
+                        round.close_span();
+                    }
+
                     let round = work.entry(current.view).or_insert_with(|| self.new_round());
                     round.set_span(view_span);
                     round.set_leader(leader);

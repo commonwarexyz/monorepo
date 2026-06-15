@@ -186,8 +186,18 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     }
 
     /// Returns the root span for all work attributed to this view.
+    ///
+    /// Disabled once the view is decided (see [Self::close_span]).
     pub const fn span(&self) -> &Span {
         &self.span
+    }
+
+    /// Closes the view's root span once the view is decided.
+    ///
+    /// The round is retained for backfill and deduplication, but its work no
+    /// longer anchors a trace.
+    pub fn close_span(&mut self) {
+        self.span = Span::none();
     }
 
     /// Returns the elected leader (if any) for this round.

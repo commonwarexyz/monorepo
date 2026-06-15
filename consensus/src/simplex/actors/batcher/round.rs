@@ -97,6 +97,14 @@ impl<
         self.span = span;
     }
 
+    /// Closes the view's root span once the view is decided.
+    ///
+    /// The round is retained until it is no longer interesting, but its work no
+    /// longer anchors a trace.
+    pub fn close_span(&mut self) {
+        self.span = Span::none();
+    }
+
     /// Returns true if we already have a notarization certificate for this view.
     pub const fn has_notarization(&self) -> bool {
         self.notarization.is_some()
