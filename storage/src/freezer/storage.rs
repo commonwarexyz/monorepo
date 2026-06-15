@@ -3,9 +3,12 @@ use crate::{
     journal::segmented::oversized::{
         Config as OversizedConfig, Oversized, Record as OversizedRecord,
     },
+    metadata::{Config as MetadataConfig, Metadata},
     Context,
 };
-use commonware_codec::{CodecShared, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite};
+use commonware_codec::{
+    CodecShared, EncodeSize, FixedArray, FixedSize, Read, ReadExt, Write as CodecWrite,
+};
 use commonware_cryptography::{crc32, Crc32, Hasher};
 use commonware_runtime::{
     buffer,
@@ -13,7 +16,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, IoBuf,
 };
-use commonware_utils::{Array, Span};
+use commonware_utils::{sequence::U64 as MetadataKey, Array, Span};
 use futures::future::{try_join, try_join_all};
 use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
 use tracing::debug;
@@ -176,6 +179,54 @@ impl FixedSize for Checkpoint {
 
 /// Name of the table blob.
 const TABLE_BLOB_NAME: &[u8] = b"table";
+
+/// Metadata key for the committed logical table size.
+const TABLE_SIZE_KEY: MetadataKey = MetadataKey::new(0);
+
+/// Item stored in [Metadata] for [Freezer].
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+enum MetadataValue {
+    TableSize(u32),
+}
+
+impl MetadataValue {
+    /// Get the committed logical table size.
+    const fn table_size(&self) -> u32 {
+        match self {
+            Self::TableSize(table_size) => *table_size,
+        }
+    }
+}
+
+impl CodecWrite for MetadataValue {
+    fn write(&self, buf: &mut impl BufMut) {
+        match self {
+            Self::TableSize(table_size) => {
+                0u8.write(buf);
+                table_size.write(buf);
+            }
+        }
+    }
+}
+
+impl Read for MetadataValue {
+    type Cfg = ();
+    fn read_cfg(buf: &mut impl Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let tag = u8::read(buf)?;
+        match tag {
+            0 => Ok(Self::TableSize(u32::read(buf)?)),
+            _ => Err(commonware_codec::Error::InvalidEnum(tag)),
+        }
+    }
+}
+
+impl EncodeSize for MetadataValue {
+    fn encode_size(&self) -> usize {
+        1 + match self {
+            Self::TableSize(_) => u32::SIZE,
+        }
+    }
+}
 
 /// Single table entry stored in the table blob.
 #[derive(Debug, Clone, PartialEq)]
@@ -403,6 +454,10 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
 
     // Table blob that maps slots to key index chain heads
     table: E::Blob,
+
+    // Metadata that tracks the committed logical table size
+    metadata: Metadata<E, MetadataKey, MetadataValue>,
+    metadata_table_size: u32,
 
     // Combined key index + value storage with crash recovery
     oversized: Oversized<E, Record<K>, V>,
@@ -655,6 +710,19 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         let mut oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
+        // Initialize metadata for committed table state
+        let metadata_cfg = MetadataConfig {
+            partition: format!("{}-metadata", config.table_partition),
+            codec_config: (),
+        };
+        let mut metadata =
+            Metadata::<_, MetadataKey, MetadataValue>::init(context.child("metadata"), metadata_cfg)
+                .await?;
+        let metadata_table_size = metadata
+            .get(&TABLE_SIZE_KEY)
+            .map(MetadataValue::table_size)
+            .filter(|table_size| *table_size > 0 && table_size.is_power_of_two());
+
         // Open table blob
         let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
@@ -728,8 +796,19 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             // Existing table without checkpoint
             (_, None) => {
                 // Find max epoch/section and clean invalid entries in a single pass
-                let table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
-                let (modified, max_epoch, max_section, resizable) = Self::recover_table(
+                let physical_table_size = (table_len / Entry::FULL_SIZE as u64) as u32;
+                let table_size = metadata_table_size
+                    .filter(|table_size| Self::table_offset(*table_size) <= table_len)
+                    .unwrap_or(physical_table_size);
+                let expected_table_len = Self::table_offset(table_size);
+                let mut modified = if table_len != expected_table_len {
+                    table.resize(expected_table_len).await?;
+                    true
+                } else {
+                    false
+                };
+
+                let (table_modified, max_epoch, max_section, resizable) = Self::recover_table(
                     &context,
                     &table,
                     table_size,
@@ -738,6 +817,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                     config.table_replay_buffer,
                 )
                 .await?;
+                if table_modified {
+                    modified = true;
+                }
 
                 // Sync table if needed
                 if modified {
@@ -758,6 +840,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 )
             }
         };
+        if metadata_table_size != Some(checkpoint.table_size) {
+            metadata.put(
+                TABLE_SIZE_KEY.clone(),
+                MetadataValue::TableSize(checkpoint.table_size),
+            );
+            metadata.sync().await?;
+        }
 
         // Create metrics
         let puts = context.counter("puts", "number of put operations");
@@ -780,6 +869,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             table_resize_frequency: config.table_resize_frequency,
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
+            metadata,
+            metadata_table_size: checkpoint.table_size,
             oversized,
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
@@ -1103,6 +1194,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
         // Sync updated table entries
         self.table.sync().await?;
+        if self.metadata_table_size != self.table_size {
+            self.metadata
+                .put(TABLE_SIZE_KEY.clone(), MetadataValue::TableSize(self.table_size));
+            self.metadata.sync().await?;
+            self.metadata_table_size = self.table_size;
+        }
         let stored_epoch = self.next_epoch;
         self.next_epoch = self.next_epoch.checked_add(1).expect("epoch overflow");
 
@@ -1134,6 +1231,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     pub async fn destroy(self) -> Result<(), Error> {
         // Destroy oversized journal
         self.oversized.destroy().await?;
+
+        // Destroy metadata
+        self.metadata.destroy().await?;
 
         // Destroy the table
         drop(self.table);
@@ -1169,6 +1269,7 @@ mod conformance {
     commonware_conformance::conformance_tests! {
         CodecConformance<Cursor>,
         CodecConformance<Checkpoint>,
+        CodecConformance<MetadataValue>,
         CodecConformance<Entry>,
         CodecConformance<Record<U64>>
     }
@@ -1194,6 +1295,23 @@ mod tests {
         assert!(key.len() <= buf.len());
         buf[..key.len()].copy_from_slice(key);
         FixedBytes::decode(buf.as_ref()).unwrap()
+    }
+
+    fn test_key_at_index(table_size: u32, table_index: u32) -> FixedBytes<64> {
+        assert!(table_size.is_power_of_two());
+        assert!(table_index < table_size);
+
+        for value in 0u64.. {
+            let mut buf = [0u8; 64];
+            let bytes = value.to_be_bytes();
+            buf[..bytes.len()].copy_from_slice(&bytes);
+            let key = FixedBytes::new(buf);
+            if Crc32::checksum(key.as_ref()) & (table_size - 1) == table_index {
+                return key;
+            }
+        }
+
+        unreachable!("u64 key space exhausted");
     }
 
     type TestFreezer = Freezer<Context, U64, u64>;
@@ -1321,6 +1439,86 @@ mod tests {
             .await
             .unwrap();
             drop(freezer);
+        });
+    }
+
+    #[test_traced]
+    fn issue_4043_no_checkpoint_recovery_after_partial_sync_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+            let key = test_key_at_index(4, 3);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(key.clone(), 42).await.unwrap();
+                freezer.sync().await.unwrap();
+
+                assert_eq!(freezer.resizing(), Some(1));
+                assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+            }
+
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
+        });
+    }
+
+    #[test_traced]
+    fn issue_4043_no_checkpoint_recovery_after_close_starts_partial_resize() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = super::super::Config {
+                key_partition: "test-key-index".into(),
+                key_write_buffer: NZUsize!(1024),
+                key_page_cache: CacheRef::from_pooler(&context, NZU16!(1024), NZUsize!(10)),
+                value_partition: "test-value-journal".into(),
+                value_compression: None,
+                value_write_buffer: NZUsize!(1024),
+                value_target_size: 10 * 1024 * 1024,
+                table_partition: "test-table".into(),
+                table_initial_size: 2,
+                table_resize_frequency: 1,
+                table_resize_chunk_size: 1,
+                table_replay_buffer: NZUsize!(64 * 1024),
+                codec_config: (),
+            };
+            let key = test_key_at_index(4, 3);
+
+            {
+                let mut freezer =
+                    Freezer::<_, FixedBytes<64>, i32>::init(context.child("first"), cfg.clone())
+                        .await
+                        .unwrap();
+                freezer.put(key.clone(), 42).await.unwrap();
+                let checkpoint = freezer.close().await.unwrap();
+                assert_eq!(checkpoint.table_size, 2);
+            }
+
+            let freezer =
+                Freezer::<_, FixedBytes<64>, i32>::init(context.child("second"), cfg.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(freezer.get(Identifier::Key(&key)).await.unwrap(), Some(42));
         });
     }
 }

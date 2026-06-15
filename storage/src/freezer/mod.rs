@@ -17,6 +17,8 @@
 //!
 //! These journals are combined via [crate::journal::segmented::oversized], which coordinates
 //! crash recovery between them.
+//! A small [crate::metadata::Metadata] store tracks the committed logical table size so recovery
+//! can distinguish a completed resize from a partially copied table expansion.
 //!
 //! ```text
 //! +-----------------------------------------------------------------+
@@ -224,6 +226,8 @@ pub enum Error {
     Runtime(#[from] commonware_runtime::Error),
     #[error("journal error: {0}")]
     Journal(#[from] crate::journal::Error),
+    #[error("metadata error: {0}")]
+    Metadata(#[from] crate::metadata::Error),
     #[error("codec error: {0}")]
     Codec(#[from] commonware_codec::Error),
 }
