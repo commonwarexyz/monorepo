@@ -198,8 +198,8 @@ mod tests {
     fn span_retains_first_fetch_and_untracked_returns_disabled() {
         let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
 
-        let first = tracing::info_span!("first");
-        let second = tracing::info_span!("second");
+        let first = tracing::info_span!("test.first_fetch");
+        let second = tracing::info_span!("test.second_fetch");
         let first_id = first.id();
         assert!(first_id.is_some());
         assert_ne!(first.id(), second.id());
