@@ -256,7 +256,9 @@ where
         // its global key index, so partition order does not matter.
         let strategy = self.strategy();
         let parallelism = strategy.parallelism_hint().max(1);
-        let mut candidates: Vec<(usize, u64)> = if keys.len() < MIN_PROBES_PER_SHARD * parallelism {
+        let mut candidates: Vec<(usize, u64)> = if parallelism == 1
+            || keys.len() < MIN_PROBES_PER_SHARD.saturating_mul(parallelism)
+        {
             let mut candidates = Vec::with_capacity(keys.len());
             self.snapshot
                 .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
