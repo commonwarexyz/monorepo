@@ -195,10 +195,17 @@ impl<
         }
     }
 
+    fn retain_fetches(
+        &mut self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
+        predicate: impl Fn(&FetchRequest) -> bool + Copy + Send + 'static,
+    ) {
+        self.fetch_spans.retain(|request, _| predicate(request));
+        let _ = resolver.retain(move |_, request| predicate(request));
+    }
+
     fn remove(&mut self, resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>, view: View) {
-        self.fetch_spans.retain(|request, _| request.view != view);
-        let request = U64::from(view);
-        let _ = resolver.retain(move |candidate, _| *candidate != request);
+        self.retain_fetches(resolver, move |request| request.view != view);
     }
 
     fn retain_above(
@@ -206,9 +213,7 @@ impl<
         resolver: &mut p2p::Mailbox<U64, S::PublicKey, FetchRequest>,
         floor: View,
     ) {
-        self.fetch_spans.retain(|request, _| request.view > floor);
-        let floor = U64::from(floor);
-        let _ = resolver.retain(move |request, _| *request > floor);
+        self.retain_fetches(resolver, move |request| request.view > floor);
     }
 
     fn fetch(
