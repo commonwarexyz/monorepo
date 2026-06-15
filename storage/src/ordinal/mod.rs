@@ -141,30 +141,17 @@ mod tests {
     use commonware_runtime::{
         deterministic, Blob, Buf, BufMut, Metrics as _, Runner, Storage, Supervisor as _,
     };
-    use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
+    use commonware_utils::{
+        bitmap::{bits_for_indices, BitMap},
+        sequence::FixedBytes,
+        NZUsize, NZU64,
+    };
     use rand::RngCore;
     use std::collections::BTreeMap;
 
     const DEFAULT_ITEMS_PER_BLOB: u64 = 1000;
     const DEFAULT_WRITE_BUFFER: usize = 4096;
     const DEFAULT_REPLAY_BUFFER: usize = 1024 * 1024;
-
-    fn bits_for_indices(
-        items_per_blob: u64,
-        indices: impl Iterator<Item = u64>,
-    ) -> BTreeMap<u64, Option<BitMap>> {
-        let mut bits = BTreeMap::new();
-        for index in indices {
-            let section = index / items_per_blob;
-            let offset = index % items_per_blob;
-            bits.entry(section)
-                .or_insert_with(|| Some(BitMap::zeroes(items_per_blob)))
-                .as_mut()
-                .unwrap()
-                .set(offset, true);
-        }
-        bits
-    }
 
     #[test_traced]
     fn test_put_get() {

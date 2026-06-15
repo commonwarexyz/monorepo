@@ -3,9 +3,9 @@
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner, Supervisor as _};
 use commonware_storage::ordinal::{Config, Ordinal};
-use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{bitmap::bits_for_indices, sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
 enum OrdinalOperation {
@@ -67,23 +67,6 @@ impl<'a> Arbitrary<'a> for OrdinalOperation {
 struct FuzzInput {
     items_per_blob: u16,
     operations: Vec<OrdinalOperation>,
-}
-
-fn bits_for_indices<'a>(
-    items_per_blob: u64,
-    indices: impl Iterator<Item = &'a u64>,
-) -> BTreeMap<u64, Option<BitMap>> {
-    let mut bits = BTreeMap::new();
-    for index in indices {
-        let section = index / items_per_blob;
-        let offset = index % items_per_blob;
-        bits.entry(section)
-            .or_insert_with(|| Some(BitMap::zeroes(items_per_blob)))
-            .as_mut()
-            .unwrap()
-            .set(offset, true);
-    }
-    bits
 }
 
 fn fuzz(input: FuzzInput) {
@@ -268,7 +251,7 @@ fn fuzz(input: FuzzInput) {
                         synced_data = expected_data.clone();
 
                         // Reopen and verify synced data persisted
-                        let owned_bits = bits_for_indices(items_per_blob, synced_data.keys());
+                        let owned_bits = bits_for_indices(items_per_blob, synced_data.keys().copied());
                         let bits = owned_bits
                             .iter()
                             .map(|(section, bitmap)| (*section, bitmap))
