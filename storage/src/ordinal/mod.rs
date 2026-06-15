@@ -39,7 +39,7 @@
 //! - **Reads**: O(1) - direct offset calculation
 //! - **Has**: O(1) - in-memory lookup (via [crate::rmap::RMap])
 //! - **Next Gap**: O(log n) - in-memory range query (via [crate::rmap::RMap])
-//! - **Restart**: O(n) where n is the number of existing records (to rebuild [crate::rmap::RMap])
+//! - **Recovery**: O(n) over committed records when bits are provided; `None` resets the store
 //!
 //! # Atomicity
 //!
@@ -592,18 +592,16 @@ mod tests {
                 blob.write_at_sync(32, vec![0xFF]).await.unwrap();
             }
 
-            // Reopen and try to read corrupted data
+            // Reopen without bits, deleting the stored corrupted data before replay.
             {
                 let store =
                     Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
-                // Reading corrupt record will return empty
                 let result = store.get(0).await.unwrap();
                 assert!(result.is_none());
 
-                // The index should not be in the intervals after restart with corrupted data
                 assert!(!store.has(0));
             }
         });
@@ -1658,7 +1656,7 @@ mod tests {
                 let store =
                     Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
-                        .expect("Failed to initialize store with bits");
+                        .expect("Failed to initialize store");
 
                 assert!(!store.has(0));
                 assert!(!store.has(5));
@@ -1699,7 +1697,7 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            // Reinitialize with empty HashMap - should skip all sections
+            // Reinitialize with an empty map, deleting every stored section.
             {
                 let bits: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
                 let store = Ordinal::<_, FixedBytes<32>>::init(
@@ -2001,7 +1999,7 @@ mod tests {
                 let bitmap1_option = Some(bitmap1);
                 bits_map.insert(1, &bitmap1_option);
 
-                // Section 2: Not in map, should be skipped entirely
+                // Section 2: Not in map, so it should be removed entirely.
 
                 let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
@@ -2140,7 +2138,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
-            // Create store with valid records
+            // Create store with records, including one that will fail to parse if recovered.
             {
                 let mut store =
                     Ordinal::<_, DummyValue>::init(context.child("first"), cfg.clone(), None)

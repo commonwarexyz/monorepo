@@ -109,7 +109,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         config: Config,
         bits: Option<BTreeMap<u64, &Option<BitMap>>>,
     ) -> Result<Self, Error> {
-        // Scan for all blobs in the partition
+        // Reset when no committed bits are provided; otherwise scan stored blobs for recovery.
         let record_size = Record::<V>::SIZE as u64;
         let items_per_blob = config.items_per_blob.get();
         let mut blobs = BTreeMap::new();
