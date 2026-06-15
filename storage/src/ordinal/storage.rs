@@ -113,17 +113,18 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let record_size = Record::<V>::SIZE as u64;
         let items_per_blob = config.items_per_blob.get();
         let mut blobs = BTreeMap::new();
-        let mut stored_blobs = match context.scan(&config.partition).await {
-            Ok(blobs) => blobs,
-            Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
-            Err(err) => return Err(Error::Runtime(err)),
+        let stored_blobs = if bits.is_none() {
+            match context.remove(&config.partition, None).await {
+                Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
+                Err(err) => return Err(Error::Runtime(err)),
+            }
+        } else {
+            match context.scan(&config.partition).await {
+                Ok(blobs) => blobs,
+                Err(commonware_runtime::Error::PartitionMissing(_)) => Vec::new(),
+                Err(err) => return Err(Error::Runtime(err)),
+            }
         };
-
-        // No committed bits starts empty: delete any existing data
-        if bits.is_none() && !stored_blobs.is_empty() {
-            context.remove(&config.partition, None).await?;
-            stored_blobs.clear();
-        }
 
         // Open all blobs and check for partial records
         for name in stored_blobs {
