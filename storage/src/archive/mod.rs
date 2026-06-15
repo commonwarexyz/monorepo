@@ -219,7 +219,7 @@ mod tests {
         let cfg = immutable::Config {
             metadata_partition: "test-metadata".into(),
             freezer_table_partition: "test-table".into(),
-            freezer_metadata_partition: "test-table-metadata".into(),
+            freezer_metadata_partition: "test-freezer-metadata".into(),
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,

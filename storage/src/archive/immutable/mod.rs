@@ -151,7 +151,7 @@ mod tests {
             let cfg = Config {
                 metadata_partition: "test-metadata2".into(),
                 freezer_table_partition: "test-table2".into(),
-                freezer_metadata_partition: "test-table2-metadata".into(),
+                freezer_metadata_partition: "test-freezer-metadata2".into(),
                 freezer_table_initial_size: 8192, // Must be power of 2
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,
@@ -219,7 +219,7 @@ mod tests {
             let cfg = Config {
                 metadata_partition: "empty-metadata".into(),
                 freezer_table_partition: "empty-table".into(),
-                freezer_metadata_partition: "empty-table-metadata".into(),
+                freezer_metadata_partition: "empty-freezer-metadata".into(),
                 freezer_table_initial_size: 8192,
                 freezer_table_resize_frequency: 4,
                 freezer_table_resize_chunk_size: 8192,

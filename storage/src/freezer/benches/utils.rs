@@ -34,7 +34,7 @@ pub const VALUE_PARTITION: &str = "freezer-bench-value";
 pub const TABLE_PARTITION: &str = "freezer-bench-table";
 
 /// Partition for [Freezer] metadata benchmarks.
-pub const METADATA_PARTITION: &str = "freezer-bench-table-metadata";
+pub const METADATA_PARTITION: &str = "freezer-bench-metadata";
 
 /// Use a "prod sized" page size to test the performance of the journal.
 const PAGE_SIZE: NonZeroU16 = NZU16!(16_384);

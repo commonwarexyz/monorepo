@@ -65,8 +65,8 @@ impl Conformance for ArchiveImmutable {
         runner.start(|mut context| async move {
             let config = immutable::Config {
                 metadata_partition: format!("archive-immutable-metadata-{seed}"),
-                freezer_table_partition: format!("archive-immutable-table-{seed}"),
-                freezer_metadata_partition: format!("archive-immutable-table-{seed}-metadata"),
+                freezer_table_partition: format!("immutable-freezer-table-{seed}"),
+                freezer_metadata_partition: format!("immutable-freezer-metadata-{seed}"),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 2,
                 freezer_table_resize_chunk_size: 32,

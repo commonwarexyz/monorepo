@@ -66,7 +66,7 @@ impl Archive {
                 let cfg = immutable::Config {
                     metadata_partition: "archive-bench-metadata".into(),
                     freezer_table_partition: "archive-bench-table".into(),
-                    freezer_metadata_partition: "archive-bench-table-metadata".into(),
+                    freezer_metadata_partition: "archive-bench-freezer-metadata".into(),
                     freezer_table_initial_size: 131_072,
                     freezer_table_resize_frequency: 4,
                     freezer_table_resize_chunk_size: 1024,
