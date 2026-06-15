@@ -156,17 +156,31 @@ pub struct Append<B: Blob> {
 ///   new data even while caching a nearly-full page of already written data.
 fn adjusted_capacity(capacity: usize, page_size: u64) -> usize {
     let page_size = page_size as usize;
-    let rounded = capacity.div_ceil(page_size) * page_size;
+    let rounded = capacity.next_multiple_of(page_size);
     let floor = page_size * 2;
     if rounded < floor {
         warn!(
             floor,
             "requested buffer capacity is too low, increasing it to floor"
         );
-        floor
-    } else {
-        rounded
     }
+    rounded.max(floor)
+}
+
+/// Returns whether appending `append_len` bytes should bypass the write buffer and write whole
+/// pages directly: the append would overflow capacity, and at least one whole page remains to
+/// write after filling the current page up to a boundary.
+const fn too_big_for_buffer(
+    buffer_len: usize,
+    buffer_capacity: usize,
+    append_len: usize,
+    logical_page_size: usize,
+) -> bool {
+    let fill = buffer_len.next_multiple_of(logical_page_size) - buffer_len;
+    let overflows_capacity = buffer_len + append_len > buffer_capacity;
+    let has_full_page_after_fill = append_len >= fill + logical_page_size;
+
+    overflows_capacity && has_full_page_after_fill
 }
 
 impl<B: Blob> Append<B> {
@@ -306,14 +320,13 @@ impl<B: Blob> Append<B> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buf_guard = self.buffer.write().await;
 
-        // Bytes needed to fill current page to a page boundary (0 if already aligned).
-        let fill = (logical_page_size - (buf_guard.len() % logical_page_size)) % logical_page_size;
-
-        // Bypass the append buffer if appending `buf` would overflow capacity, and at least one
-        // whole page remains to be written after filling the current page to a page boundary.
-        let overflows_capacity = buf_guard.len() + buf.len() > buf_guard.capacity;
-        let has_full_page_after_fill = buf.len() >= fill + logical_page_size;
-        if overflows_capacity && has_full_page_after_fill {
+        // Bypass the append buffer and write whole pages directly when `buf` is large.
+        if too_big_for_buffer(
+            buf_guard.len(),
+            buf_guard.capacity,
+            buf.len(),
+            logical_page_size,
+        ) {
             drop(buf_guard);
             return self.append_owned(IoBuf::copy_from_slice(buf)).await;
         }
@@ -332,20 +345,21 @@ impl<B: Blob> Append<B> {
         let mut buf_guard = self.buffer.write().await;
         let offset = buf_guard.size();
 
-        // Bytes needed to fill current page to a page boundary (0 if already aligned).
-        let fill = (logical_page_size - (buf_guard.len() % logical_page_size)) % logical_page_size;
-
-        // Buffer the bytes within the append buffer if the append fits within its capacity, or if
-        // no whole page remains to write directly after filling the current page to a page
-        // boundary.
-        let overflows_capacity = buf_guard.len() + buf.len() > buf_guard.capacity;
-        let has_full_page_after_fill = buf.len() >= fill + logical_page_size;
-        if !overflows_capacity || !has_full_page_after_fill {
+        // Buffer the append unless `buf` is too big for the buffer.
+        if !too_big_for_buffer(
+            buf_guard.len(),
+            buf_guard.capacity,
+            buf.len(),
+            logical_page_size,
+        ) {
             if buf_guard.append(buf.as_ref()) {
                 self.flush_internal(buf_guard, false, false).await?;
             }
             return Ok(offset);
         }
+
+        // Bytes needed to fill current page to a page boundary (0 if already aligned).
+        let fill = buf_guard.len().next_multiple_of(logical_page_size) - buf_guard.len();
 
         // Top up the tip to a page boundary so its contents flush as full pages, leaving any
         // partial-page CRC handling to the regular flush path.
