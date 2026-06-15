@@ -278,8 +278,9 @@ impl Consumer for Handler {
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
+        let (_, span) = delivery.subscribers.first().clone();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
-            span: delivery.span,
+            span,
             view: View::new(delivery.key.into()),
             data: value,
             response,

@@ -25,8 +25,9 @@ commonware_macros::stability_scope!(BETA {
         pub subscriber: S,
         /// Trace span carried from issuance to delivery.
         ///
-        /// The resolver re-attaches this span to [`Delivery`] when the fetch
-        /// resolves, so consumer work nests under the span that requested it.
+        /// The resolver retains this span with the subscriber and re-attaches it
+        /// to that subscriber in [`Delivery`] when the fetch resolves, so consumer
+        /// work nests under the span that requested it.
         pub span: tracing::Span,
     }
 
@@ -45,15 +46,23 @@ commonware_macros::stability_scope!(BETA {
     pub struct Delivery<K, S> {
         /// The peer-visible key used to validate the response.
         pub key: K,
-        /// Subscribers that were still retained when the response arrived.
-        pub subscribers: NonEmptyVec<S>,
-        /// Trace span carried from the originating fetch.
-        pub span: tracing::Span,
+        /// Subscribers that were still retained when the response arrived, each
+        /// paired with the trace span of the fetch that requested it.
+        ///
+        /// Consumer work for a subscriber nests under that subscriber's span, so
+        /// every requester observes the resolution of its own fetch.
+        pub subscribers: NonEmptyVec<(S, tracing::Span)>,
     }
 
     impl<K: PartialEq, S: PartialEq> PartialEq for Delivery<K, S> {
         fn eq(&self, other: &Self) -> bool {
-            self.key == other.key && self.subscribers == other.subscribers
+            self.key == other.key
+                && self.subscribers.len() == other.subscribers.len()
+                && self
+                    .subscribers
+                    .iter()
+                    .zip(other.subscribers.iter())
+                    .all(|((a, _), (b, _))| a == b)
         }
     }
 

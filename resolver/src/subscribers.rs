@@ -5,19 +5,13 @@
 //! resolver decides how keys are fetched, retried, and delivered.
 
 use commonware_utils::vec::NonEmptyVec;
-use std::collections::{btree_map::Entry as BTreeMapEntry, BTreeMap, BTreeSet};
+use std::collections::{btree_map::Entry as BTreeMapEntry, BTreeMap};
 
-/// Retained subscribers for a key plus the span of the fetch that opened it.
-#[derive(Clone, Debug)]
-struct Entry<S> {
-    span: tracing::Span,
-    subscribers: BTreeSet<S>,
-}
-
-/// Tracks retained subscribers by resolver key.
+/// Tracks retained subscribers by resolver key, each paired with the span of the
+/// fetch that introduced it.
 #[derive(Clone, Debug)]
 pub struct Tracker<K, S> {
-    entries: BTreeMap<K, Entry<S>>,
+    entries: BTreeMap<K, BTreeMap<S, tracing::Span>>,
 }
 
 impl<K, S> Default for Tracker<K, S> {
@@ -43,49 +37,46 @@ where
         self.entries.contains_key(key)
     }
 
-    /// Add subscribers for a key, deduplicating subscribers already retained.
+    /// Add subscribers for a key, each paired with the span of the fetch.
     ///
-    /// The span is retained only when the key entry is created; later fetches for
-    /// the same key keep the original span.
+    /// A subscriber's span is retained only when the subscriber is first seen;
+    /// later fetches for an already-tracked subscriber keep the original span.
     ///
     /// Returns `true` if this created a new key entry.
     pub fn insert(&mut self, key: K, subscribers: NonEmptyVec<S>, span: tracing::Span) -> bool {
         match self.entries.entry(key) {
             BTreeMapEntry::Vacant(entry) => {
-                entry.insert(Entry {
-                    span,
-                    subscribers: subscribers.into_iter().collect(),
-                });
+                let subscribers = subscribers
+                    .into_iter()
+                    .map(|subscriber| (subscriber, span.clone()))
+                    .collect();
+                entry.insert(subscribers);
                 true
             }
             BTreeMapEntry::Occupied(mut entry) => {
-                entry.get_mut().subscribers.extend(subscribers);
+                let entry = entry.get_mut();
+                for subscriber in subscribers {
+                    entry.entry(subscriber).or_insert_with(|| span.clone());
+                }
                 false
             }
         }
     }
 
-    /// Returns the span of the fetch that opened the key, or a disabled span if
-    /// the key is not tracked.
-    pub fn span(&self, key: &K) -> tracing::Span {
-        self.entries
-            .get(key)
-            .map_or_else(tracing::Span::none, |entry| entry.span.clone())
-    }
-
-    /// Remove all subscribers for a key.
+    /// Remove all subscribers for a key, closing their spans.
     ///
     /// Returns true if the key was present.
     pub fn remove(&mut self, key: &K) -> bool {
         self.entries.remove(key).is_some()
     }
 
-    /// Remove every tracked key.
+    /// Remove every tracked key, closing all spans.
     pub fn clear(&mut self) {
         self.entries.clear();
     }
 
-    /// Retain only subscribers for which the predicate returns true.
+    /// Retain only subscribers for which the predicate returns true, closing the
+    /// spans of the dropped subscribers.
     ///
     /// Returns keys whose subscriber sets became empty and were removed.
     pub fn retain<F>(&mut self, mut predicate: F) -> Vec<K>
@@ -93,11 +84,9 @@ where
         F: FnMut(&K, &S) -> bool,
     {
         let mut removed = Vec::new();
-        self.entries.retain(|key, entry| {
-            entry
-                .subscribers
-                .retain(|subscriber| predicate(key, subscriber));
-            let keep = !entry.subscribers.is_empty();
+        self.entries.retain(|key, subscribers| {
+            subscribers.retain(|subscriber, _| predicate(key, subscriber));
+            let keep = !subscribers.is_empty();
             if !keep {
                 removed.push(key.clone());
             }
@@ -106,35 +95,43 @@ where
         removed
     }
 
-    /// Return the subscribers currently waiting on a key.
-    pub fn pending(&self, key: &K) -> Option<NonEmptyVec<S>> {
-        self.entries
-            .get(key)
-            .and_then(|entry| Self::non_empty(&entry.subscribers))
+    /// Return the subscribers currently waiting on a key, each paired with the
+    /// span of the fetch that introduced it.
+    pub fn pending(&self, key: &K) -> Option<NonEmptyVec<(S, tracing::Span)>> {
+        self.entries.get(key).and_then(Self::non_empty)
     }
 
-    /// Remove subscribers that just received a valid delivery.
+    /// Remove subscribers that just received a valid delivery, closing their
+    /// spans.
     ///
-    /// Returns remaining subscribers for the key, or `None` if the key is now
-    /// complete or was not tracked.
+    /// Returns the remaining subscribers (with spans) for the key, or `None` if
+    /// the key is now complete or was not tracked.
     pub fn remove_delivered(
         &mut self,
         key: &K,
         delivered: NonEmptyVec<S>,
-    ) -> Option<NonEmptyVec<S>> {
+    ) -> Option<NonEmptyVec<(S, tracing::Span)>> {
         let entry = self.entries.get_mut(key)?;
         for subscriber in delivered {
-            entry.subscribers.remove(&subscriber);
+            entry.remove(&subscriber);
         }
-        if entry.subscribers.is_empty() {
+        if entry.is_empty() {
             self.entries.remove(key);
             return None;
         }
         self.pending(key)
     }
 
-    fn non_empty(subscribers: &BTreeSet<S>) -> Option<NonEmptyVec<S>> {
-        NonEmptyVec::try_from(subscribers.iter().cloned().collect::<Vec<_>>()).ok()
+    fn non_empty(
+        subscribers: &BTreeMap<S, tracing::Span>,
+    ) -> Option<NonEmptyVec<(S, tracing::Span)>> {
+        NonEmptyVec::try_from(
+            subscribers
+                .iter()
+                .map(|(subscriber, span)| (subscriber.clone(), span.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .ok()
     }
 }
 
@@ -143,6 +140,15 @@ mod tests {
     use super::*;
     use commonware_utils::non_empty_vec;
 
+    fn subscribers<S: Clone>(pending: Option<NonEmptyVec<(S, tracing::Span)>>) -> Option<Vec<S>> {
+        pending.map(|pending| {
+            pending
+                .into_iter()
+                .map(|(subscriber, _)| subscriber)
+                .collect()
+        })
+    }
+
     #[test]
     fn insert_merges_and_deduplicates_subscribers() {
         let mut tracker = Tracker::new();
@@ -150,10 +156,7 @@ mod tests {
         assert!(tracker.insert(1, non_empty_vec![10, 11], tracing::Span::none()));
         assert!(!tracker.insert(1, non_empty_vec![11, 12], tracing::Span::none()));
 
-        assert_eq!(
-            tracker.pending(&1).map(NonEmptyVec::into_vec),
-            Some(vec![10, 11, 12])
-        );
+        assert_eq!(subscribers(tracker.pending(&1)), Some(vec![10, 11, 12]));
     }
 
     #[test]
@@ -166,10 +169,7 @@ mod tests {
 
         assert_eq!(removed, vec![1]);
         assert!(!tracker.contains(&1));
-        assert_eq!(
-            tracker.pending(&2).map(NonEmptyVec::into_vec),
-            Some(vec![20])
-        );
+        assert_eq!(subscribers(tracker.pending(&2)), Some(vec![20]));
     }
 
     #[test]
@@ -179,7 +179,7 @@ mod tests {
 
         let remaining = tracker.remove_delivered(&1, non_empty_vec![10, 12]);
 
-        assert_eq!(remaining.map(NonEmptyVec::into_vec), Some(vec![11]));
+        assert_eq!(subscribers(remaining), Some(vec![11]));
         assert!(tracker.contains(&1));
     }
 
@@ -195,20 +195,31 @@ mod tests {
     }
 
     #[test]
-    fn span_retains_first_fetch_and_untracked_returns_disabled() {
+    fn each_subscriber_keeps_its_own_fetch_span() {
         let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
 
         let first = tracing::info_span!("test.first_fetch");
         let second = tracing::info_span!("test.second_fetch");
         let first_id = first.id();
+        let second_id = second.id();
         assert!(first_id.is_some());
-        assert_ne!(first.id(), second.id());
+        assert_ne!(first_id, second_id);
 
         let mut tracker = Tracker::new();
         assert!(tracker.insert(1, non_empty_vec![10], first));
-        assert!(!tracker.insert(1, non_empty_vec![11], second));
+        // The second fetch joins subscriber 11 under its own span and re-requests
+        // 10, which keeps its original span.
+        assert!(!tracker.insert(1, non_empty_vec![10, 11], second));
 
-        assert_eq!(tracker.span(&1).id(), first_id);
-        assert!(tracker.span(&2).is_disabled());
+        let spans: BTreeMap<i32, Option<tracing::Id>> = tracker
+            .pending(&1)
+            .unwrap()
+            .into_iter()
+            .map(|(subscriber, span)| (subscriber, span.id()))
+            .collect();
+        assert_eq!(spans.get(&10), Some(&first_id));
+        assert_eq!(spans.get(&11), Some(&second_id));
+
+        assert!(tracker.pending(&2).is_none());
     }
 }

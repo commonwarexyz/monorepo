@@ -843,10 +843,13 @@ where
                     response,
                 } => {
                     let span = info_span!(
-                        parent: &delivery.span,
+                        parent: &delivery.subscribers.first().1,
                         "marshal.resolver.handle_deliver",
                         key = %delivery.key
                     );
+                    for (_, subscriber_span) in delivery.subscribers.iter().skip(1) {
+                        span.follows_from(subscriber_span.id());
+                    }
                     needs_sync |= self
                         .handle_deliver(
                             ResolverDelivery {
@@ -1255,7 +1258,9 @@ where
                 // therefore where, if anywhere, it should be stored.
                 let height = block.height();
                 let digest = block.digest();
-                let annotations = subscribers.into_vec();
+                let annotations = subscribers
+                    .map_into(|(annotation, _)| annotation)
+                    .into_vec();
 
                 // Round-bound proposal-parent fetches are `Key::Notarized`
                 // deliveries and are handled below. In this block-keyed path,

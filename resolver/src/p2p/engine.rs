@@ -410,7 +410,6 @@ where
             return;
         };
         let delivery = Delivery {
-            span: self.subscribers.span(&key),
             key: key.clone(),
             subscribers,
         };
@@ -433,19 +432,16 @@ where
             // Remove only the subscribers that accepted this response. If other
             // subscribers still need the key, deliver the same accepted response
             // locally with the remaining annotations.
-            let remaining = self.subscribers.remove_delivered(&key, delivered);
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
 
             if let Some(subscribers) = remaining {
                 if !already_accepted {
                     self.metrics.fetch.inc(Status::Success);
                     self.inflight.accept_response(&key, self.context.as_ref());
                 }
-                let span = self.subscribers.span(&key);
-                self.inflight.redeliver(Delivery {
-                    key,
-                    subscribers,
-                    span,
-                });
+                self.inflight.redeliver(Delivery { key, subscribers });
             } else {
                 // All subscribers observed a valid response; clear any targeting
                 // state retained for this key.

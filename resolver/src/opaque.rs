@@ -351,13 +351,12 @@ where
         &mut self,
         key: F::Key,
         value: F::Value,
-        delivered: NonEmptyVec<Con::Subscriber>,
+        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.deliveries.deliver(
             Delivery {
-                span: self.subscribers.span(&key),
                 key: key.clone(),
                 subscribers: delivered,
             },
@@ -368,12 +367,10 @@ where
     }
 
     /// Deliver an already accepted response to subscribers that arrived later.
-    fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<Con::Subscriber>) {
-        let span = self.subscribers.span(&key);
+    fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>) {
         self.deliveries.redeliver(Delivery {
             key,
             subscribers: delivered,
-            span,
         });
     }
 
@@ -498,13 +495,15 @@ where
     fn handle_delivered(
         &mut self,
         key: F::Key,
-        delivered: NonEmptyVec<Con::Subscriber>,
+        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
         valid: bool,
     ) {
         let accepted = self.deliveries.response_accepted(&key);
 
         if valid {
-            let remaining = self.subscribers.remove_delivered(&key, delivered);
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
 
             // The first accepted response is reused for subscribers that joined
             // while validation was pending, avoiding a duplicate source fetch
@@ -780,7 +779,15 @@ mod tests {
 
             let second = wait_for_delivery(&context, &consumer).await;
             assert_eq!(second.value, Bytes::from_static(b"value"));
-            assert_eq!(second.delivery.subscribers, non_empty_vec![11]);
+            assert_eq!(
+                second
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![11]
+            );
             second.response.send(true).expect("response dropped");
 
             context.sleep(Duration::from_millis(10)).await;
@@ -886,7 +893,15 @@ mod tests {
                 .expect("fetcher dropped");
 
             let delivery = wait_for_delivery(&context, &consumer).await;
-            assert_eq!(delivery.delivery.subscribers, non_empty_vec![11]);
+            assert_eq!(
+                delivery
+                    .delivery
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| *subscriber)
+                    .collect::<Vec<_>>(),
+                vec![11]
+            );
             delivery.response.send(true).expect("response dropped");
         });
     }

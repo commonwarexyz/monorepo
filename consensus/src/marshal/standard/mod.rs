@@ -2974,8 +2974,7 @@ mod tests {
             let _ = sender.enqueue(handler::Message::Deliver {
                 delivery: Delivery {
                     key: fetch.key,
-                    subscribers: NonEmptyVec::new(fetch.subscriber),
-                    span: tracing::Span::none(),
+                    subscribers: NonEmptyVec::new((fetch.subscriber, tracing::Span::none())),
                 },
                 value,
                 response,
@@ -3695,8 +3694,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: floor_fetch.key,
-                        subscribers: NonEmptyVec::new(floor_fetch.subscriber),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            floor_fetch.subscriber,
+                            tracing::Span::none()
+                        )),
                     },
                     value: floor_block.encode(),
                     response,
@@ -4214,8 +4215,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: old_floor_fetch.key,
-                        subscribers: NonEmptyVec::new(old_floor_fetch.subscriber),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            old_floor_fetch.subscriber,
+                            tracing::Span::none()
+                        )),
                     },
                     value: old_floor_block.encode(),
                     response,
@@ -4246,8 +4249,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: new_floor_fetch.key,
-                        subscribers: NonEmptyVec::new(new_floor_fetch.subscriber),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            new_floor_fetch.subscriber,
+                            tracing::Span::none()
+                        )),
                     },
                     value: new_floor_block.encode(),
                     response,
@@ -4977,8 +4982,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Notarization { round },
+                            tracing::Span::none(),
+                        )),
                     },
                     value: (notarization, block.clone()).encode(),
                     response,
@@ -5035,10 +5042,12 @@ mod tests {
                         key: handler::Key::Notarized {
                             round: requested_round,
                         },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization {
-                            round: requested_round,
-                        }),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Notarization {
+                                round: requested_round,
+                            },
+                            tracing::Span::none(),
+                        )),
                     },
                     value: (notarization, block).encode(),
                     response,
@@ -5078,8 +5087,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Notarization { round },
+                            tracing::Span::none(),
+                        )),
                     },
                     value: (notarization, block).encode(),
                     response,
@@ -5120,10 +5131,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: handler::Key::Finalized { height },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
-                            handler::Finalized::ByHeight { height },
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
+                            tracing::Span::none(),
                         )),
-                        span: tracing::Span::none(),
                     },
                     value: (finalization, block).encode(),
                     response,
@@ -5167,10 +5178,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: handler::Key::Finalized { height },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
-                            handler::Finalized::ByHeight { height },
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
+                            tracing::Span::none(),
                         )),
-                        span: tracing::Span::none(),
                     },
                     value: (finalization, block).encode(),
                     response,
@@ -5537,8 +5548,10 @@ mod tests {
                 .enqueue(handler::Message::Deliver {
                     delivery: Delivery {
                         key: handler::Key::Notarized { round },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization { round }),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Notarization { round },
+                            tracing::Span::none(),
+                        )),
                     },
                     value: (notarization, block.clone()).encode(),
                     response,
@@ -5851,12 +5864,12 @@ mod tests {
                         key: handler::Key::Finalized {
                             height: Height::new(5),
                         },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Finalized(
-                            handler::Finalized::ByHeight {
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Finalized(handler::Finalized::ByHeight {
                                 height: Height::new(5),
-                            },
+                            }),
+                            tracing::Span::none(),
                         )),
-                        span: tracing::Span::none(),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
@@ -5872,10 +5885,12 @@ mod tests {
                         key: handler::Key::Notarized {
                             round: Round::new(Epoch::zero(), View::new(1)),
                         },
-                        subscribers: NonEmptyVec::new(handler::Annotation::Notarization {
-                            round: Round::new(Epoch::zero(), View::new(1)),
-                        }),
-                        span: tracing::Span::none(),
+                        subscribers: NonEmptyVec::new((
+                            handler::Annotation::Notarization {
+                                round: Round::new(Epoch::zero(), View::new(1)),
+                            },
+                            tracing::Span::none(),
+                        )),
                     },
                     value: Bytes::from_static(b"unverifiable"),
                     response,
