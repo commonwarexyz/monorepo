@@ -218,14 +218,14 @@ mod tests {
     ) -> impl Archive<Key = FixedBytes<64>, Value = i32> {
         let cfg = immutable::Config {
             metadata_partition: "test-metadata".into(),
-            freezer_table_partition: "test-table".into(),
+            freezer_table_partition: "test-freezer-table".into(),
             freezer_metadata_partition: "test-freezer-metadata".into(),
             freezer_table_initial_size: 64,
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 32,
-            freezer_key_partition: "test-key".into(),
+            freezer_key_partition: "test-freezer-key".into(),
             freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-            freezer_value_partition: "test-value".into(),
+            freezer_value_partition: "test-freezer-value".into(),
             freezer_value_target_size: 1024 * 1024,
             freezer_value_compression: compression,
             ordinal_partition: "test-ordinal".into(),

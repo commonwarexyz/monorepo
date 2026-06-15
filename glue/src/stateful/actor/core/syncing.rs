@@ -404,14 +404,14 @@ mod tests {
     fn archive_config(page_cache: CacheRef, partition: &str) -> immutable::Config<()> {
         immutable::Config {
             metadata_partition: format!("{partition}-metadata"),
-            freezer_table_partition: format!("{partition}-table"),
-            freezer_metadata_partition: format!("{partition}-table-metadata"),
+            freezer_table_partition: format!("{partition}-freezer-table"),
+            freezer_metadata_partition: format!("{partition}-freezer-metadata"),
             freezer_table_initial_size: 4,
             freezer_table_resize_frequency: 2,
             freezer_table_resize_chunk_size: 2,
-            freezer_key_partition: format!("{partition}-key"),
+            freezer_key_partition: format!("{partition}-freezer-key"),
             freezer_key_page_cache: page_cache,
-            freezer_value_partition: format!("{partition}-value"),
+            freezer_value_partition: format!("{partition}-freezer-value"),
             freezer_value_target_size: 128,
             freezer_value_compression: None,
             ordinal_partition: format!("{partition}-ordinal"),

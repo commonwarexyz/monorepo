@@ -181,7 +181,7 @@ where
                     config.partition_prefix
                 ),
                 freezer_metadata_partition: format!(
-                    "{}-finalizations-by-height-freezer-table-metadata",
+                    "{}-finalizations-by-height-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_table_initial_size: config.freezer_table_initial_size,
@@ -228,7 +228,7 @@ where
                     config.partition_prefix
                 ),
                 freezer_metadata_partition: format!(
-                    "{}-finalized_blocks-freezer-table-metadata",
+                    "{}-finalized_blocks-freezer-metadata",
                     config.partition_prefix
                 ),
                 freezer_table_initial_size: config.freezer_table_initial_size,
