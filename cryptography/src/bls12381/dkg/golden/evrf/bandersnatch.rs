@@ -506,10 +506,8 @@ fn constraint_matrices_to_r1cs(matrices: Vec<Matrix<Fq>>) -> R1cs<Scalar> {
         }
         out
     }
-    let [a, b, c] = match <[Matrix<Fq>; 3]>::try_from(matrices) {
-        Ok(matrices) => matrices,
-        Err(_) => panic!("R1CS has exactly three matrices"),
-    };
+    let [a, b, c] = <[Matrix<Fq>; 3]>::try_from(matrices)
+        .unwrap_or_else(|_| panic!("R1CS has exactly three matrices"));
     R1cs {
         a: convert_matrix(a),
         b: convert_matrix(b),
