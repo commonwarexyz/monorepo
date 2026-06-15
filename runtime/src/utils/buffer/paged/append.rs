@@ -147,18 +147,25 @@ pub struct Append<B: Blob> {
     buffer: Arc<AsyncRwLock<Buffer>>,
 }
 
-/// Returns the capacity with a floor applied to ensure it can hold at least one full page of new
-/// data even when caching a nearly-full page of already written data.
-fn capacity_with_floor(capacity: usize, page_size: u64) -> usize {
-    let floor = page_size as usize * 2;
-    if capacity < floor {
+/// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
+/// applying two upward adjustments:
+///
+/// - Rounds up to a whole multiple of `page_size`, so the buffer always holds an exact number of
+///   pages. Callers can then drain and bulk-cache full pages without re-rounding the capacity.
+/// - Raises the result to a floor of two pages, so the buffer can hold at least one full page of
+///   new data even while caching a nearly-full page of already written data.
+fn adjusted_capacity(capacity: usize, page_size: u64) -> usize {
+    let page_size = page_size as usize;
+    let rounded = capacity.div_ceil(page_size) * page_size;
+    let floor = page_size * 2;
+    if rounded < floor {
         warn!(
             floor,
             "requested buffer capacity is too low, increasing it to floor"
         );
         floor
     } else {
-        capacity
+        rounded
     }
 }
 
@@ -186,7 +193,7 @@ impl<B: Blob> Append<B> {
             blob.sync().await?;
         }
 
-        let capacity = capacity_with_floor(capacity, cache_ref.page_size());
+        let capacity = adjusted_capacity(capacity, cache_ref.page_size());
         let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
         let (blob_state, partial_data) = match partial_page_state {
@@ -297,43 +304,43 @@ impl<B: Blob> Append<B> {
     /// the first byte was written.
     pub async fn append(&self, buf: &[u8]) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
-        let mut buffer = self.buffer.write().await;
+        let mut buf_guard = self.buffer.write().await;
 
-        // Take the buffered path unless `buf` would push the buffer over capacity and at least
-        // one full page could be written directly from it.
-        let fill = (logical_page_size - (buffer.len() % logical_page_size)) % logical_page_size;
-        if buffer.len() + buf.len() <= buffer.capacity || buf.len() < fill + logical_page_size {
-            let offset = buffer.size();
-            if buffer.append(buf) {
-                self.flush_internal(buffer, false, false).await?;
-            }
-            return Ok(offset);
+        // Bytes needed to fill current page to a page boundary (0 if already aligned).
+        let fill = (logical_page_size - (buf_guard.len() % logical_page_size)) % logical_page_size;
+
+        // Bypass the append buffer if appending `buf` would overflow capacity, and at least one
+        // whole page remains to be written after filling the current page to a page boundary.
+        let overflows_capacity = buf_guard.len() + buf.len() > buf_guard.capacity;
+        let has_full_page_after_fill = buf.len() >= fill + logical_page_size;
+        if overflows_capacity && has_full_page_after_fill {
+            drop(buf_guard);
+            return self.append_owned(IoBuf::copy_from_slice(buf)).await;
         }
-        drop(buffer);
 
-        self.append_owned(IoBuf::copy_from_slice(buf)).await
+        let offset = buf_guard.size();
+        if buf_guard.append(buf) {
+            self.flush_internal(buf_guard, false, false).await?;
+        }
+        Ok(offset)
     }
 
     /// Append all bytes in `buf` to the tip of the blob, writing whole pages directly to the
     /// underlying blob instead of staging them in the write buffer when `buf` is large.
-    ///
-    /// Behaves like [Self::append], but an owned `buf` too large to buffer additionally avoids
-    /// the copy into the write buffer: bytes needed to complete the current partial page are
-    /// buffered and flushed through the regular path, the whole pages that follow are written to
-    /// the blob as zero-copy slices of `buf` (populating the page cache, exactly as a buffered
-    /// flush would), and the remaining sub-page suffix is buffered.
-    ///
-    /// Like [Self::append], the write is not durable until [Self::sync] is called.
     pub async fn append_owned(&self, buf: IoBuf) -> Result<u64, Error> {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let mut buf_guard = self.buffer.write().await;
         let offset = buf_guard.size();
 
-        // Take the buffered path unless `buf` would push the buffer over capacity and at least
-        // one full page can be written directly from it.
+        // Bytes needed to fill current page to a page boundary (0 if already aligned).
         let fill = (logical_page_size - (buf_guard.len() % logical_page_size)) % logical_page_size;
-        if buf_guard.len() + buf.len() <= buf_guard.capacity || buf.len() < fill + logical_page_size
-        {
+
+        // Buffer the bytes within the append buffer if the append fits within its capacity, or if
+        // no whole page remains to write directly after filling the current page to a page
+        // boundary.
+        let overflows_capacity = buf_guard.len() + buf.len() > buf_guard.capacity;
+        let has_full_page_after_fill = buf.len() >= fill + logical_page_size;
+        if !overflows_capacity || !has_full_page_after_fill {
             if buf_guard.append(buf.as_ref()) {
                 self.flush_internal(buf_guard, false, false).await?;
             }
@@ -375,11 +382,12 @@ impl<B: Blob> Append<B> {
             "an empty tip implies no partial page state"
         );
 
-        // Cache the bulk pages before `replace` publishes the new size and the tip lock is
-        // released, so reads of the bulk range are served from the cache while the blob write
-        // is still in flight. Insert in write-buffer-sized chunks so the cache lock is not held
-        // across the entire copy.
-        let chunk_len = buf_guard.capacity / logical_page_size * logical_page_size;
+        // Cache the pages before `replace` publishes the new size and the tip lock is released, so
+        // reads of the bulk range are served from the cache while the blob write is still in
+        // flight. Insert in write-buffer-sized chunks so the cache lock is not held across the
+        // entire copy. The capacity is a whole number of pages (see [adjusted_capacity]), so each
+        // chunk is page-aligned.
+        let chunk_len = buf_guard.capacity;
         let mut cache_offset = boundary;
         for chunk in bulk.as_ref().chunks(chunk_len) {
             let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
