@@ -548,31 +548,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok((modified, max_epoch, max_section, resizable))
     }
 
-    /// Determine whether the table contains no entries.
-    async fn table_empty(
-        pooler: &impl BufferPooler,
-        blob: &E::Blob,
-        table_len: u64,
-        table_replay_buffer: NonZeroUsize,
-    ) -> Result<bool, Error> {
-        if !table_len.is_multiple_of(Entry::FULL_SIZE as u64) {
-            return Ok(false);
-        }
-
-        let mut reader =
-            buffer::Read::from_pooler(pooler, blob.clone(), table_len, table_replay_buffer);
-        let table_size = table_len / Entry::FULL_SIZE as u64;
-        for _ in 0..table_size {
-            let entry_buf = reader.read(Entry::FULL_SIZE).await?;
-            let (entry1, entry2) = Self::parse_entries(entry_buf)?;
-            if !entry1.is_empty() || !entry2.is_empty() {
-                return Ok(false);
-            }
-        }
-
-        Ok(true)
-    }
-
     /// Determine the write offset for a table entry based on current entries and epoch.
     const fn compute_write_offset(entry1: &Entry, entry2: &Entry, epoch: u64) -> u64 {
         // If either entry matches the current epoch, overwrite it
@@ -670,6 +645,18 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 && checkpoint.table_size == 0
         });
         let reset = checkpoint.is_none() || empty_checkpoint;
+        if reset {
+            for partition in [
+                &config.key_partition,
+                &config.value_partition,
+                &config.table_partition,
+            ] {
+                match context.remove(partition, None).await {
+                    Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
+                    Err(err) => return Err(Error::Runtime(err)),
+                }
+            }
+        }
 
         // Initialize oversized journal (handles crash recovery)
         let oversized_cfg = OversizedConfig {
@@ -681,34 +668,13 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             compression: config.value_compression,
             codec_config: config.codec_config,
         };
-        if reset {
-            for partition in [&config.key_partition, &config.value_partition] {
-                match context.remove(partition, None).await {
-                    Ok(()) | Err(commonware_runtime::Error::PartitionMissing(_)) => {}
-                    Err(err) => return Err(Error::Runtime(err)),
-                }
-            }
-        }
         let mut oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Open table blob
-        let (mut table, mut table_len) = context
+        let (table, table_len) = context
             .open(&config.table_partition, TABLE_BLOB_NAME)
             .await?;
-        if reset && table_len != 0 {
-            let expected_table_len = Self::table_offset(config.table_initial_size);
-            if table_len != expected_table_len
-                || !Self::table_empty(&context, &table, table_len, config.table_replay_buffer)
-                    .await?
-            {
-                drop(table);
-                context.remove(&config.table_partition, None).await?;
-                (table, table_len) = context
-                    .open(&config.table_partition, TABLE_BLOB_NAME)
-                    .await?;
-            }
-        }
         // Determine checkpoint based on initialization scenario
         let (checkpoint, resizable) = match (table_len, checkpoint) {
             // New table with no data
@@ -730,9 +696,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
                 Self::init_table(&table, config.table_initial_size).await?;
                 (Checkpoint::init(config.table_initial_size), 0)
             }
-
-            // Existing empty table with explicit empty checkpoint
-            (_, Some(_)) if empty_checkpoint => (Checkpoint::init(config.table_initial_size), 0),
 
             // Existing table with checkpoint
             (_, Some(checkpoint)) => {
