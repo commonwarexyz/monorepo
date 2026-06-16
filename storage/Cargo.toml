@@ -73,7 +73,8 @@ arbitrary = [
 	"commonware-utils/arbitrary",
 	"dep:arbitrary",
 ]
-fuzzing = []
+fuzzing = [ "test-utils" ]
+test-utils = []
 test-traits = []
 
 [lib]

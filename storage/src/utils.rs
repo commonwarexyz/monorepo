@@ -1,3 +1,5 @@
+//! Utilities for storage tests and fuzz targets.
+
 use commonware_utils::bitmap::BitMap;
 use std::{collections::BTreeMap, num::NonZeroU64};
 
