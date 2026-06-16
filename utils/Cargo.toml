@@ -41,6 +41,7 @@ version = "0.2.15"
 features = ["js"]
 
 # Enable the wasm_js backend for ahash's getrandom 0.3 dependency on WASM
+
 [target.'cfg(target_arch = "wasm32")'.dependencies.getrandom_v3]
 package = "getrandom"
 version = "0.3"
@@ -68,6 +69,7 @@ std = [
 	"commonware-macros/std",
 	"futures",
 	"getrandom/std",
+	"getrandom_v3/std",
 	"num-bigint",
 	"num-bigint?/std",
 	"num-integer",
