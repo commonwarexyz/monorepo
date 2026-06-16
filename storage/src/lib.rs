@@ -32,6 +32,8 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod metadata;
     pub mod ordinal;
     pub mod rmap;
+    #[cfg(any(test, feature = "fuzzing"))]
+    pub mod utils;
 
     /// A runtime context providing storage, timing, and metrics capabilities.
     ///

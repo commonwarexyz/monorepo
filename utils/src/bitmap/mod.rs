@@ -4,20 +4,16 @@
 //! more-efficient memory layout than doing [`Vec<bool>`].
 
 #[cfg(not(feature = "std"))]
-use alloc::{
-    collections::{BTreeMap, VecDeque},
-    vec::Vec,
-};
+use alloc::{collections::VecDeque, vec::Vec};
 use bytes::{Buf, BufMut};
 use commonware_codec::{util::at_least, EncodeSize, Error as CodecError, Read, ReadExt, Write};
 use core::{
     fmt::{self, Formatter, Write as _},
     iter,
-    num::NonZeroU64,
     ops::{BitAnd, BitOr, BitXor, Index, Range},
 };
 #[cfg(feature = "std")]
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 
 mod prunable;
 pub use prunable::Prunable;
@@ -27,28 +23,6 @@ commonware_macros::stability_mod!(ALPHA, pub mod roaring);
 
 /// The default [BitMap] chunk size in bytes.
 pub const DEFAULT_CHUNK_SIZE: usize = 8;
-
-/// Build section bitmaps from absolute indices.
-///
-/// Each index maps to key `index / items_per_section` and sets bit
-/// `index % items_per_section` in that section's bitmap of `items_per_section` bits.
-pub fn bits_for_indices<const N: usize>(
-    items_per_section: NonZeroU64,
-    indices: impl IntoIterator<Item = u64>,
-) -> BTreeMap<u64, Option<BitMap<N>>> {
-    let items_per_section = items_per_section.get();
-    let mut bits = BTreeMap::new();
-    for index in indices {
-        let section = index / items_per_section;
-        let offset = index % items_per_section;
-        bits.entry(section)
-            .or_insert_with(|| Some(BitMap::zeroes(items_per_section)))
-            .as_mut()
-            .unwrap()
-            .set(offset, true);
-    }
-    bits
-}
 
 /// A bitmap that stores data in chunks of N bytes.
 ///
@@ -1112,33 +1086,6 @@ mod tests {
         let bv: BitMap<4> = BitMap::with_capacity(10);
         assert_eq!(bv.len(), 0);
         assert!(bv.is_empty());
-    }
-
-    #[test]
-    fn test_bits_for_indices() {
-        let items_per_section = NonZeroU64::new(10).unwrap();
-        let empty = bits_for_indices::<1>(items_per_section, core::iter::empty());
-        assert!(empty.is_empty());
-
-        let bits = bits_for_indices::<1>(items_per_section, [0, 1, 9, 10, 25]);
-        assert_eq!(bits.len(), 3);
-
-        let section_0 = bits.get(&0).unwrap().as_ref().unwrap();
-        assert_eq!(section_0.len(), 10);
-        assert_eq!(section_0.count_ones(), 3);
-        assert!(section_0.get(0));
-        assert!(section_0.get(1));
-        assert!(section_0.get(9));
-
-        let section_1 = bits.get(&1).unwrap().as_ref().unwrap();
-        assert_eq!(section_1.len(), 10);
-        assert_eq!(section_1.count_ones(), 1);
-        assert!(section_1.get(0));
-
-        let section_2 = bits.get(&2).unwrap().as_ref().unwrap();
-        assert_eq!(section_2.len(), 10);
-        assert_eq!(section_2.count_ones(), 1);
-        assert!(section_2.get(5));
     }
 
     #[test]

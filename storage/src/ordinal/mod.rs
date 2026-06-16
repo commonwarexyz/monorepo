@@ -137,6 +137,7 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::bits_for_indices;
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
@@ -144,11 +145,7 @@ mod tests {
     use commonware_runtime::{
         deterministic, Blob, Buf, BufMut, Metrics as _, Runner, Storage, Supervisor as _,
     };
-    use commonware_utils::{
-        bitmap::{bits_for_indices, BitMap},
-        sequence::FixedBytes,
-        NZUsize, NZU64,
-    };
+    use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
     use rand::RngCore;
     use std::collections::BTreeMap;
 

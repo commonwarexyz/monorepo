@@ -2,8 +2,11 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner, Supervisor as _};
-use commonware_storage::ordinal::{Config, Ordinal};
-use commonware_utils::{bitmap::bits_for_indices, sequence::FixedBytes, NZUsize, NZU64};
+use commonware_storage::{
+    ordinal::{Config, Ordinal},
+    utils::bits_for_indices,
+};
+use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
 
