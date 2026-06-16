@@ -748,6 +748,7 @@ impl<
                 let Some(notarization) = self.handle_certification(view, certified).await else {
                     return false;
                 };
+
                 // Always forward certification outcomes to resolver.
                 // This can happen after a nullification for the same view because
                 // certification is asynchronous; finalization is the boundary that
