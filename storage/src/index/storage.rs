@@ -126,17 +126,13 @@ impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> Cursor<'a, K, V, E> {
 
     /// Returns the key's overflow chain, taking it from the overflow map on first use.
     fn chain_mut(&mut self) -> &mut Vec<V> {
-        let Self {
-            key,
-            overflow,
-            chain,
-            ..
-        } = self;
-        chain.get_or_insert_with(|| {
+        let key = self.key;
+        let overflow = &mut self.overflow;
+        self.chain.get_or_insert_with(|| {
             if overflow.is_empty() {
                 Vec::new()
             } else {
-                overflow.remove(key).unwrap_or_default()
+                overflow.remove(&key).unwrap_or_default()
             }
         })
     }

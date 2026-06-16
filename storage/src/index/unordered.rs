@@ -147,16 +147,14 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                // Fast path: a key with no overflow chain holds exactly one value, so retaining
-                // it and inserting the new value reduces to a few direct cases. This avoids
-                // building a cursor for the common (collision-free) case. The cases below match
-                // the cursor's value ordering and metric accounting exactly.
+                // Optimized fast path for the common case of no overflow chain. The cases below
+                // match the cursor's value ordering and metric accounting exactly.
+                #[allow(clippy::map_entry)] // suppress lint false positive
                 if !self.overflow.contains_key(&k) {
                     match (should_retain(entry.get()), should_retain(&value)) {
-                        // Keep both: the new value joins the chain as the oldest (the position a
-                        // cursor insert after retain would place it).
+                        // Keep both, with the new value placed at the end of the overflow chain.
                         (true, true) => {
-                            self.overflow.entry(k).or_default().push(value);
+                            self.overflow.insert(k, vec![value]);
                             self.items.inc();
                         }
                         // Drop the existing value, keep the new one: replace in place.
@@ -212,9 +210,9 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
             self.items.dec();
             self.pruned.inc();
             if !self.overflow.is_empty() {
-                for _ in self.overflow.remove(&k).into_iter().flatten() {
-                    self.items.dec();
-                    self.pruned.inc();
+                if let Some(chain) = self.overflow.remove(&k) {
+                    self.items.dec_by(chain.len() as i64);
+                    self.pruned.inc_by(chain.len() as u64);
                 }
             }
         }
