@@ -215,10 +215,10 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 let mut all_indices = 0..items_per_blob;
                 let mut replay_blob =
                     ReadBuffer::from_pooler(&context, blob.clone(), *size, config.replay_buffer);
-                while let Some(bit_index) = match &mut set_indices {
-                    Some(indices) => indices.next(),
-                    None => all_indices.next(),
-                } {
+                while let Some(bit_index) = set_indices
+                    .as_mut()
+                    .map_or_else(|| all_indices.next(), |indices| indices.next())
+                {
                     let index = section * items_per_blob + bit_index;
                     if bit_index >= items_per_blob {
                         return Err(Error::MissingRecord(index));
