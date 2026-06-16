@@ -67,7 +67,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use core::{
-    hash::{BuildHasher, Hash},
+    hash::Hash,
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -77,9 +77,9 @@ use hashbrown::HashMap;
 use std::collections::HashMap;
 
 #[cfg(feature = "std")]
-type DefaultHashBuilder = std::collections::hash_map::RandomState;
+type Hasher = ahash::RandomState;
 #[cfg(not(feature = "std"))]
-type DefaultHashBuilder = hashbrown::DefaultHashBuilder;
+type Hasher = hashbrown::DefaultHashBuilder;
 
 /// A single cache slot.
 ///
@@ -95,15 +95,13 @@ struct Slot<K, V> {
 /// (second-chance) replacement policy.
 ///
 /// See the [module documentation](self) for the policy, allocation reuse, and
-/// concurrency details. `S` is the hash builder used for the key index; it
-/// defaults to the standard library's DoS-resistant hasher (or hashbrown's
-/// default under `no_std`). Use [Clock::with_hasher] to supply a faster
-/// hasher when keys are not adversarial.
-pub struct Clock<K, V, S = DefaultHashBuilder> {
+/// concurrency details. The key index uses a randomly seeded ahash hasher under
+/// `std` and hashbrown's default hasher under `no_std`.
+pub struct Clock<K, V> {
     /// Maps each live key to the index of its slot in `slots`.
     ///
     /// `index.len() + free.len() == slots.len()` always holds.
-    index: HashMap<K, usize, S>,
+    index: HashMap<K, usize, Hasher>,
     /// Backing storage for slots, grown lazily up to `capacity` and then reused.
     slots: Vec<Slot<K, V>>,
     /// Slots detached from the index (by eviction overwrite never; by
@@ -115,21 +113,12 @@ pub struct Clock<K, V, S = DefaultHashBuilder> {
     capacity: usize,
 }
 
-impl<K: Hash + Eq + Clone, V> Clock<K, V, DefaultHashBuilder> {
-    /// Creates a cache that holds at most `capacity` entries, using the default
-    /// hasher.
+impl<K: Hash + Eq + Clone, V> Clock<K, V> {
+    /// Creates a cache that holds at most `capacity` entries.
     pub fn new(capacity: NonZeroUsize) -> Self {
-        Self::with_hasher(capacity, DefaultHashBuilder::default())
-    }
-}
-
-impl<K: Hash + Eq + Clone, V, S: BuildHasher> Clock<K, V, S> {
-    /// Creates a cache that holds at most `capacity` entries, using `hasher` for
-    /// the key index.
-    pub fn with_hasher(capacity: NonZeroUsize, hasher: S) -> Self {
         let capacity = capacity.get();
         Self {
-            index: HashMap::with_capacity_and_hasher(capacity, hasher),
+            index: HashMap::with_capacity_and_hasher(capacity, Hasher::default()),
             slots: Vec::with_capacity(capacity),
             free: Vec::new(),
             hand: 0,
@@ -384,7 +373,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Clock<K, V, S> {
     }
 }
 
-impl<K: Hash + Eq + Clone + Default, V, S: BuildHasher> Clock<K, V, S> {
+impl<K: Hash + Eq + Clone + Default, V> Clock<K, V> {
     /// Pre-allocates all slots up to capacity, each holding a value from `make`,
     /// and leaves them free for reuse.
     ///
@@ -410,7 +399,7 @@ impl<K: Hash + Eq + Clone + Default, V, S: BuildHasher> Clock<K, V, S> {
     }
 }
 
-impl<K, V, S> core::fmt::Debug for Clock<K, V, S> {
+impl<K, V> core::fmt::Debug for Clock<K, V> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Clock")
             .field("len", &self.index.len())
@@ -427,7 +416,7 @@ mod tests {
     use proptest::prelude::*;
     use std::{collections::HashMap, rc::Rc, thread};
 
-    impl<K: Hash + Eq + Clone, V, S: BuildHasher> Clock<K, V, S> {
+    impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         /// Asserts the structural invariants hold (test-only).
         fn check_invariants(&self) {
             assert!(self.slots.len() <= self.capacity);
@@ -687,15 +676,6 @@ mod tests {
         assert_eq!(cache.len(), 0);
         cache.put(9, 9);
         assert_eq!(cache.get(&9).copied(), Some(9));
-        cache.check_invariants();
-    }
-
-    #[test]
-    fn test_with_hasher() {
-        let mut cache: Clock<u64, u64, std::collections::hash_map::RandomState> =
-            Clock::with_hasher(NZUsize!(2), std::collections::hash_map::RandomState::new());
-        cache.put(1, 10);
-        assert_eq!(cache.get(&1).copied(), Some(10));
         cache.check_invariants();
     }
 

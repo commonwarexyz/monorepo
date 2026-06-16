@@ -3,7 +3,7 @@
 
 use super::get_page_from_blob;
 use crate::{Blob, BufferPool, BufferPooler, Error, IoBuf, IoBufMut};
-use ahash::{AHashMap, RandomState};
+use ahash::AHashMap;
 use commonware_utils::{cache::Clock, sync::RwLock};
 use futures::{future::Shared, FutureExt};
 use std::{
@@ -101,7 +101,7 @@ impl Drop for PageFetchGuard {
 /// construction.
 struct Cache {
     /// Maps each (blob id, page number) to its logical page buffer.
-    cache: Clock<(u64, u64), IoBufMut, RandomState>,
+    cache: Clock<(u64, u64), IoBufMut>,
 
     /// Size of each page in bytes.
     page_size: usize,
@@ -410,7 +410,7 @@ impl Cache {
     /// `page_size` bytes. All page buffers are eagerly allocated from `pool` and reused thereafter.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
-        let mut cache = Clock::with_hasher(capacity, RandomState::new());
+        let mut cache = Clock::new(capacity);
         cache.prefill(|| pool.alloc_zeroed(page_size));
         Self {
             cache,
