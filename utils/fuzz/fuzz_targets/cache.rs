@@ -97,7 +97,7 @@ fn run(plan: Plan) {
                 assert!(cache.len() <= cap);
             }
             Op::IsEmpty => {
-                assert_eq!(cache.is_empty(), cache.len() == 0);
+                let _ = cache.is_empty();
             }
             Op::Clear => {
                 cache.clear();
@@ -119,6 +119,7 @@ fn run(plan: Plan) {
             }
         }
         assert_eq!(cache.len(), present);
+        assert_eq!(cache.is_empty(), present == 0);
     }
 }
 
