@@ -170,6 +170,10 @@ fn adjusted_capacity(capacity: usize, page_size: u64) -> usize {
 /// Returns whether appending `append_len` bytes should bypass the write buffer and write whole
 /// pages directly: the append would overflow capacity, and at least one whole page remains to
 /// write after filling the current page up to a boundary.
+///
+/// Larger appends bypass the buffer, so a buffered append exceeds `capacity` by less than one
+/// page (given `capacity` is a whole number of pages; see [adjusted_capacity]). The write
+/// buffer's peak size therefore stays under `capacity + logical_page_size`.
 const fn too_big_for_buffer(
     buffer_len: usize,
     buffer_capacity: usize,
