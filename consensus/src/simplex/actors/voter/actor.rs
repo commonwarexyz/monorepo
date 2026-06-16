@@ -918,15 +918,24 @@ impl<
             Floor::Genesis(_) => View::zero(),
             Floor::Finalized(finalization) => finalization.view(),
         };
-        if let Some(finalization) = self.state.set_floor(floor) {
-            let report = finalization.clone();
-            resolver.updated(Certificate::Finalization(finalization));
-            self.reporter.report(Activity::Finalization(report));
-        }
 
-        // Rebuild from journal
+        // Anchor all startup work under a single root span. The floor
+        // finalization and journal replay both run here before any view span
+        // exists, so without this root their work would emit as orphan traces.
         let start = self.context.current();
         let epoch = self.state.epoch();
+        let start_span = info_span!("simplex.voter.start", epoch = epoch.traced());
+
+        // Apply the configured floor, forwarding and reporting any finalization.
+        start_span.in_scope(|| {
+            if let Some(finalization) = self.state.set_floor(floor) {
+                let report = finalization.clone();
+                resolver.updated(Certificate::Finalization(finalization));
+                self.reporter.report(Activity::Finalization(report));
+            }
+        });
+
+        // Rebuild from journal, nested under the startup span.
         async {
             let stream = journal
                 .replay(0, 0, self.replay_buffer)
@@ -990,7 +999,7 @@ impl<
                 // when timing out.
             }
         }
-        .instrument(info_span!("simplex.voter.replay", epoch = epoch.traced()))
+        .instrument(info_span!(parent: &start_span, "simplex.voter.replay", epoch = epoch.traced()))
         .await;
         self.journal = Some(journal);
 

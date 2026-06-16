@@ -54,20 +54,22 @@ where
         new
     }
 
-    /// Remove all subscribers for a key, closing their spans.
+    /// Remove all subscribers for a key, dropping the tracker's reference to
+    /// their spans.
     ///
     /// Returns true if the key was present.
     pub fn remove(&mut self, key: &K) -> bool {
         self.entries.remove(key).is_some()
     }
 
-    /// Remove every tracked key, closing all spans.
+    /// Remove every tracked key, dropping the tracker's references to their
+    /// spans.
     pub fn clear(&mut self) {
         self.entries.clear();
     }
 
-    /// Retain only subscribers for which the predicate returns true, closing the
-    /// spans of the dropped subscribers.
+    /// Retain only subscribers for which the predicate returns true, dropping
+    /// the tracker's reference to the spans of the dropped subscribers.
     ///
     /// Returns keys whose subscriber sets became empty and were removed.
     pub fn retain<F>(&mut self, mut predicate: F) -> Vec<K>
@@ -92,8 +94,9 @@ where
         self.entries.get(key).and_then(Self::non_empty)
     }
 
-    /// Remove subscribers that just received a valid delivery, closing their
-    /// spans.
+    /// Remove subscribers that just received a valid delivery, dropping the
+    /// tracker's reference to their spans (the delivered consumer still holds a
+    /// clone).
     ///
     /// Returns the remaining subscribers (with spans) for the key, or `None` if
     /// the key is now complete or was not tracked.

@@ -34,6 +34,8 @@ mod tracing {
 }
 
 mod types {
+    use std::marker::PhantomData;
+
     #[derive(Clone, Copy)]
     pub struct View(pub u64);
     #[derive(Clone, Copy)]
@@ -47,6 +49,15 @@ mod types {
         }
     }
 
+    // A single-integer newtype that carries a zero-sized marker, e.g.
+    // Delta<T>(u64, PhantomData<T>). The PhantomData must be ignored so this is
+    // still linted.
+    #[derive(Clone, Copy)]
+    pub struct Delta<T>(pub u64, pub PhantomData<T>);
+    #[derive(Clone, Copy)]
+    pub struct ViewTag;
+    pub type ViewDelta = Delta<ViewTag>;
+
     // A composite (multiple fields), e.g. a Round = (epoch, view). Recorded as a
     // string is fine, so it must NOT be linted.
     pub struct Round {
@@ -59,6 +70,7 @@ fn main() {
     let view = types::View(7);
     let epoch = types::Epoch(0);
     let height = types::Height(3);
+    let view_delta: types::ViewDelta = types::Delta(5, std::marker::PhantomData);
     let round = types::Round { epoch: 0, view: 7 };
     let count: u64 = 42;
 
@@ -68,6 +80,7 @@ fn main() {
     info_span!("simplex.voter.view", view = ?view);
     info_span!("simplex.voter.view", epoch = %epoch);
     info_span!("simplex.voter.view", height = %height);
+    info_span!("simplex.voter.view", view_delta = %view_delta);
     info_span!("simplex.voter.view", count = %count);
 
     // Good: numeric, not routed through Display/Debug.

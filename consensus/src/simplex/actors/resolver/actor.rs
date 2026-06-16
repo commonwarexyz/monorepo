@@ -328,7 +328,7 @@ impl<
 
                 // Notify voter as soon as possible
                 let resolved = info_span!(
-                    "simplex.resolver.resolve",
+                    "simplex.resolver.resolved",
                     epoch = self.epoch.traced(),
                     view = view.traced(),
                     certificate_view = parsed.view().traced()

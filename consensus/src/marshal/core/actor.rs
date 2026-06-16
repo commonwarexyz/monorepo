@@ -35,7 +35,10 @@ use commonware_parallel::Strategy;
 use commonware_resolver::{Delivery, Resolver, TargetedResolver};
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{Gauge, GaugeExt, MetricsExt as _},
+    telemetry::{
+        metrics::{Gauge, GaugeExt, MetricsExt as _},
+        traces::TracedExt as _,
+    },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
 use commonware_storage::archive::Identifier as ArchiveID;
@@ -348,41 +351,49 @@ where
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
-        // Get tip and send to application
-        let tip = self.get_latest().await;
-        if let Some((height, digest, round)) = tip {
-            application.report(Update::Tip(round, height, digest));
-            self.tip = height;
-            let _ = self.finalized_height.try_set(height.get());
+        // Anchor all startup work under a single root span. Tip recovery, floor
+        // installation, gap repair, and the initial dispatch all run before any
+        // mailbox message arrives, so without this root their work would emit as
+        // orphan traces.
+        async {
+            // Get tip and send to application
+            let tip = self.get_latest().await;
+            if let Some((height, digest, round)) = tip {
+                application.report(Update::Tip(round, height, digest));
+                self.tip = height;
+                let _ = self.finalized_height.try_set(height.get());
+            }
+
+            // Load persisted cache epochs so find_block can discover blocks
+            // written before the last shutdown.
+            self.cache.load_persisted_epochs().await;
+
+            // A configured floor follows the same path as `SetFloor`: verify it,
+            // then apply a local anchor or fetch the anchor block.
+            if let Some(finalization) = self.floor.take_pending_anchor() {
+                self.install_floor(
+                    finalization,
+                    false,
+                    &mut resolver,
+                    &mut buffer,
+                    &mut application,
+                )
+                .await;
+            }
+
+            // Attempt to repair any gaps in the finalized blocks archive, if there are any.
+            if self
+                .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
+                .await
+            {
+                self.sync_finalized().await;
+            }
+
+            // Attempt to dispatch the next finalized block to the application, if it is ready.
+            self.try_dispatch_blocks(&mut application).await;
         }
-
-        // Load persisted cache epochs so find_block can discover blocks
-        // written before the last shutdown.
-        self.cache.load_persisted_epochs().await;
-
-        // A configured floor follows the same path as `SetFloor`: verify it,
-        // then apply a local anchor or fetch the anchor block.
-        if let Some(finalization) = self.floor.take_pending_anchor() {
-            self.install_floor(
-                finalization,
-                false,
-                &mut resolver,
-                &mut buffer,
-                &mut application,
-            )
-            .await;
-        }
-
-        // Attempt to repair any gaps in the finalized blocks archive, if there are any.
-        if self
-            .try_repair_gaps(&mut buffer, &mut resolver, &mut application)
-            .await
-        {
-            self.sync_finalized().await;
-        }
-
-        // Attempt to dispatch the next finalized block to the application, if it is ready.
-        self.try_dispatch_blocks(&mut application).await;
+        .instrument(info_span!("marshal.actor.start"))
+        .await;
 
         select_loop! {
             self.context,
@@ -844,7 +855,7 @@ where
                 } => {
                     let span = info_span!(
                         parent: &delivery.subscribers.first().1,
-                        "marshal.resolver.handle_deliver",
+                        "marshal.resolver.deliver",
                         key = %delivery.key
                     );
                     for (_, subscriber_span) in delivery.subscribers.iter().skip(1) {
@@ -897,7 +908,7 @@ where
     }
 
     /// Handle a produce request from a remote peer.
-    #[tracing::instrument(name = "marshal.resolver.handle_produce", level = "debug", skip_all, fields(key = %key))]
+    #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
     async fn handle_produce<Buf: Buffer<V>>(
         &self,
         key: ResolverRequestFor<V>,
@@ -1407,7 +1418,7 @@ where
 
     /// Batch verify pending certificates and process valid items. Returns true
     /// if finalization archives were written and need syncing.
-    #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len()))]
+    #[tracing::instrument(name = "marshal.actor.verify_delivered", level = "info", skip_all, fields(count = delivers.len().traced()))]
     async fn verify_delivered<Buf: Buffer<V>>(
         &mut self,
         mut delivers: Vec<PendingVerification<P::Scheme, V>>,

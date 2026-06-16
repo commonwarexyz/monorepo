@@ -1,5 +1,5 @@
 error: integer-valued `types::View` recorded as a tracing span field via Display (%); record it as an integer
-  --> $DIR/main.rs:67:46
+  --> $DIR/main.rs:79:46
    |
 LL |     info_span!("simplex.voter.view", view = %view);
    |                                              ^^^^
@@ -8,7 +8,7 @@ LL |     info_span!("simplex.voter.view", view = %view);
    = note: `#[deny(tracing_int_fields)]` on by default
 
 error: integer-valued `types::View` recorded as a tracing span field via Debug (?); record it as an integer
-  --> $DIR/main.rs:68:46
+  --> $DIR/main.rs:80:46
    |
 LL |     info_span!("simplex.voter.view", view = ?view);
    |                                              ^^^^
@@ -16,7 +16,7 @@ LL |     info_span!("simplex.voter.view", view = ?view);
    = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
 
 error: integer-valued `types::Epoch` recorded as a tracing span field via Display (%); record it as an integer
-  --> $DIR/main.rs:69:47
+  --> $DIR/main.rs:81:47
    |
 LL |     info_span!("simplex.voter.view", epoch = %epoch);
    |                                               ^^^^^
@@ -24,20 +24,28 @@ LL |     info_span!("simplex.voter.view", epoch = %epoch);
    = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
 
 error: integer-valued `types::Height` recorded as a tracing span field via Display (%); record it as an integer
-  --> $DIR/main.rs:70:48
+  --> $DIR/main.rs:82:48
    |
 LL |     info_span!("simplex.voter.view", height = %height);
    |                                                ^^^^^^
    |
    = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
 
+error: integer-valued `types::Delta<types::ViewTag>` recorded as a tracing span field via Display (%); record it as an integer
+  --> $DIR/main.rs:83:52
+   |
+LL |     info_span!("simplex.voter.view", view_delta = %view_delta);
+   |                                                    ^^^^^^^^^^
+   |
+   = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
+
 error: integer-valued `u64` recorded as a tracing span field via Display (%); record it as an integer
-  --> $DIR/main.rs:71:47
+  --> $DIR/main.rs:84:47
    |
 LL |     info_span!("simplex.voter.view", count = %count);
    |                                               ^^^^^
    |
    = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
 
-error: aborting due to 5 previous errors
+error: aborting due to 6 previous errors
 

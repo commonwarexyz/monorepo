@@ -3,15 +3,16 @@ use tracing::Span;
 /// Lifecycle of a view's root tracing span.
 ///
 /// A view is anchored by a single root span that opens when the view becomes
-/// active and closes when the chain decides it. Once closed the span cannot
-/// reopen, so a round retained for backfill or deduplication never anchors a
-/// new trace.
+/// active and is released when the chain decides it. The voter and batcher each
+/// hold a clone of this span, so the underlying trace ends only once both
+/// owners release it. Once released this owner cannot reopen, so a round
+/// retained for backfill or deduplication never anchors a new trace.
 pub(crate) enum ViewSpan {
     /// Not yet opened.
     Pending,
     /// Active root span anchoring the view's work.
     Open(Span),
-    /// View decided; the span is closed and cannot reopen.
+    /// View decided; this owner released the span and cannot reopen.
     Closed,
 }
 
@@ -43,7 +44,9 @@ impl ViewSpan {
         }
     }
 
-    /// Closes the span. No-op if already closed; the span cannot reopen.
+    /// Releases this owner's clone of the span. No-op if already released. The
+    /// underlying span ends once the other owner releases its clone too, and it
+    /// cannot reopen here.
     pub(crate) fn close(&mut self) {
         *self = Self::Closed;
     }

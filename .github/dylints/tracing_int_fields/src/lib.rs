@@ -81,9 +81,11 @@ fn in_span_macro(span: Span) -> bool {
     })
 }
 
-/// Returns true if `ty` is an integer primitive or a single-field newtype
-/// wrapping an integer (e.g. `View(u64)`, `Epoch(u64)`, `Height(u64)`). These
-/// should be recorded as `i64`, not via `Display`/`Debug`.
+/// Returns true if `ty` is an integer primitive or a newtype whose only
+/// non-marker field wraps an integer (e.g. `View(u64)`, `Epoch(u64)`,
+/// `Height(u64)`, `Delta(u64, PhantomData<T>)`). Zero-sized `PhantomData`
+/// markers are ignored, so a single-integer newtype that carries one still
+/// counts. These should be recorded as `i64`, not via `Display`/`Debug`.
 fn is_integer_like(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
     if ty.is_integral() {
         return true;
@@ -94,10 +96,21 @@ fn is_integer_like(cx: &LateContext<'_>, ty: Ty<'_>) -> bool {
     if !adt.is_struct() {
         return false;
     }
-    let [field] = &adt.non_enum_variant().fields.raw[..] else {
-        return false;
-    };
-    cx.tcx.type_of(field.did).skip_binder().is_integral()
+    let phantom_data = cx.tcx.lang_items().phantom_data();
+    let mut integral = false;
+    for field in adt.non_enum_variant().fields.iter() {
+        let field_ty = cx.tcx.type_of(field.did).skip_binder();
+        if let ty::Adt(field_adt, _) = field_ty.kind() {
+            if Some(field_adt.did()) == phantom_data {
+                continue;
+            }
+        }
+        if integral || !field_ty.is_integral() {
+            return false;
+        }
+        integral = true;
+    }
+    integral
 }
 
 impl<'tcx> LateLintPass<'tcx> for TracingIntFields {
