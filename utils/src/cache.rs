@@ -182,28 +182,18 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         Some(&mut slot.value)
     }
 
-    /// Inserts `value` for `key`, recording use.
+    /// Inserts `value` for `key`.
     ///
-    /// If `key` was already present, replaces and returns the previous value. If
-    /// inserting a new entry exceeds the capacity, the CLOCK evictor reclaims a
-    /// slot first.
+    /// If `key` was already present, replaces and returns the previous value,
+    /// recording use. If inserting a new entry exceeds the capacity, the CLOCK
+    /// evictor reclaims a slot first.
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
         if let Some(&index) = self.index.get(&key) {
             let slot = &mut self.slots[index];
             slot.referenced.store(true, Ordering::Relaxed);
             return Some(core::mem::replace(&mut slot.value, value));
         }
-        match self.take_slot() {
-            Some(slot) => {
-                self.slots[slot].key = key.clone();
-                self.slots[slot].value = value;
-                self.slots[slot].referenced.store(true, Ordering::Relaxed);
-                self.index.insert(key, slot);
-            }
-            None => {
-                self.grow(key, value);
-            }
-        }
+        self.insert_value(key, value);
         None
     }
 
@@ -245,15 +235,15 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
         Ok(&self.slots[slot].value)
     }
 
-    /// Returns a mutable reference to the slot for `key`, recording use and
-    /// reusing an existing allocation where possible.
+    /// Returns a mutable reference to the slot for `key`, reusing an existing
+    /// allocation where possible.
     ///
-    /// On a hit, returns the current value. On a miss into a reused slot (a
-    /// freed slot or an eviction victim), the returned reference is the reused
-    /// slot's stale value, which the caller is expected to overwrite. Only when
-    /// the cache grows is `make` called to produce a fresh value. This lets
-    /// callers holding pooled buffers overwrite in place rather than allocating
-    /// on every insert.
+    /// On a hit, records use and returns the current value. On a miss into a
+    /// reused slot (a freed slot or an eviction victim), the returned reference
+    /// is the reused slot's stale value, which the caller is expected to
+    /// overwrite. Only when the cache grows is `make` called to produce a fresh
+    /// value. This lets callers holding pooled buffers overwrite in place
+    /// rather than allocating on every insert.
     pub fn get_or_insert_mut<F: FnOnce() -> V>(&mut self, key: K, make: F) -> &mut V {
         let slot = match self.index.get(&key) {
             Some(&slot) => {
@@ -295,18 +285,17 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     ///
     /// Dropped entries' slots and allocations are retained for reuse.
     pub fn retain<F: FnMut(&K, &V) -> bool>(&mut self, mut keep: F) {
-        let mut drop_keys: Vec<K> = Vec::new();
-        for (key, &slot) in &self.index {
-            if !keep(key, &self.slots[slot].value) {
-                drop_keys.push(key.clone());
+        let Self {
+            index, slots, free, ..
+        } = self;
+        index.retain(|key, &mut slot| {
+            let keep = keep(key, &slots[slot].value);
+            if !keep {
+                slots[slot].referenced.store(false, Ordering::Relaxed);
+                free.push(slot);
             }
-        }
-        for key in drop_keys {
-            if let Some(slot) = self.index.remove(&key) {
-                self.slots[slot].referenced.store(false, Ordering::Relaxed);
-                self.free.push(slot);
-            }
-        }
+            keep
+        });
     }
 
     /// Removes all entries, dropping their values and retaining the allocated
