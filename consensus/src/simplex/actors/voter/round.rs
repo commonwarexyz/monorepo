@@ -68,17 +68,11 @@ pub struct Round<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
-        let span = info_span!(
-            parent: None,
-            "simplex.voter.view",
-            epoch = round.epoch().traced(),
-            view = round.view().traced()
-        );
         Self {
             start,
             scheme,
             round,
-            span,
+            span: Span::none(),
             leader: None,
             proposal: ProposalSlot::new(),
             leader_deadline: None,
@@ -191,6 +185,19 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Disabled once the view is decided (see [Self::close_span]).
     pub const fn span(&self) -> &Span {
         &self.span
+    }
+
+    /// Opens the view's root span when the round becomes the active view.
+    pub fn open_span(&mut self) {
+        if !self.span.is_none() {
+            return;
+        }
+        self.span = info_span!(
+            parent: None,
+            "simplex.voter.view",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        );
     }
 
     /// Closes the view's root span once the view is decided.

@@ -220,6 +220,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let certification_deadline = now + self.certification_timeout;
 
         let round = self.create_round(view);
+        round.open_span();
         round.set_deadlines(leader_deadline, certification_deadline);
         self.view = view;
 
@@ -854,10 +855,12 @@ mod tests {
             state.add_finalization(finalization);
             assert_eq!(state.last_finalized(), finalize_view);
 
-            // Finalizing does not close spans on its own; the work for the
-            // finalized view (broadcast, report) still runs under the span.
+            // Finalizing does not close entered spans on its own; follow-up work
+            // for an entered view can still run under the span until notification
+            // completes. This finalization skips over view 2, so that prepared
+            // future view never opened a span.
             assert!(!state.view_span(View::new(1)).is_none());
-            assert!(!state.view_span(finalize_view).is_none());
+            assert!(state.view_span(finalize_view).is_none());
             assert!(!state.view_span(View::new(3)).is_none());
 
             // Closing decided spans releases every view at or below the

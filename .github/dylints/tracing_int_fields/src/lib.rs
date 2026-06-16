@@ -61,14 +61,22 @@ fn path_has_tail(path: &str, tail: &str) -> bool {
     path == tail || path.ends_with(&format!("::{tail}"))
 }
 
+/// Returns the final `::`-separated segment of a macro path, so path-qualified
+/// invocations (`tracing::info_span!`, `$crate::span!`) match the bare macro name.
+fn last_segment(name: &str) -> &str {
+    name.rsplit("::").next().unwrap_or(name)
+}
+
 /// Returns true when this expression was generated while expanding a tracing
 /// span macro or `#[instrument]`. Events are intentionally allowed to keep `%`
 /// and `?` formatting because they are log records, not range-queryable span
 /// attributes.
 fn in_span_macro(span: Span) -> bool {
     span.macro_backtrace().any(|expn| match expn.kind {
-        ExpnKind::Macro(MacroKind::Bang, name) => SPAN_MACROS.contains(&name.as_str()),
-        ExpnKind::Macro(MacroKind::Attr, name) => name.as_str() == "instrument",
+        ExpnKind::Macro(MacroKind::Bang, name) => {
+            SPAN_MACROS.contains(&last_segment(name.as_str()))
+        }
+        ExpnKind::Macro(MacroKind::Attr, name) => last_segment(name.as_str()) == "instrument",
         _ => false,
     })
 }
@@ -122,10 +130,14 @@ impl<'tcx> LateLintPass<'tcx> for TracingIntFields {
             return;
         }
         let ty_name = arg_ty.to_string();
+        let value_span = match arg.kind {
+            ExprKind::AddrOf(_, _, inner) => inner.span,
+            _ => arg.span,
+        };
 
         cx.emit_span_lint(
             TRACING_INT_FIELDS,
-            arg.span,
+            value_span.source_callsite(),
             DiagDecorator(move |diag| {
                 diag.primary_message(format!(
                     "integer-valued `{ty_name}` recorded as a tracing span field via {recorder}; record it as an integer"
