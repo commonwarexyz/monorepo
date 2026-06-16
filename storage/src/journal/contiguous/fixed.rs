@@ -111,6 +111,7 @@
 use super::{
     blobs::{Blobs, Handle, Partition, Snapshot},
     checkpoint::Checkpoint,
+    replay::ReplaySource,
 };
 use crate::{
     journal::{
@@ -1226,145 +1227,117 @@ impl<E: Context, A: CodecFixedShared> crate::journal::contiguous::Reader for Rea
             per_blob_replays.push((blob_first, replay, initial_offset));
         }
 
-        // Stream the sealed blobs in ascending order, fully draining each before the next.
-        // Each blob yields *batches* of items (decoding several buffered items per await is
-        // cheaper than one await per item); the single `flat_map(stream::iter)` applied after
-        // the tail is chained flattens batches into items, so the per-item cost is one poll of
-        // that final stream rather than one poll of every layer.
-        /// State threaded through the `unfold` that replays a single sealed blob.
-        struct BlobReplayState<B: Blob> {
-            /// First retained position in the blob; origin for emitted positions. Loop-invariant.
-            blob_first: u64,
-            /// Sequential reader over the blob's logical bytes.
-            replay: Replay<B>,
-            /// Index of the next item to emit, relative to `blob_first`.
-            position: u64,
-            /// Set once an error was emitted; every later call returns `None`, terminating this
-            /// blob's stream.
-            done: bool,
-        }
+        // Stream the sealed blobs in ascending order, then the tail. Each source yields batches
+        // of items; the trailing `flat_map(stream::iter)` flattens batches back into items.
         let sealed_batches = stream::iter(per_blob_replays).flat_map(
             move |(blob_first, replay, initial_position)| {
-                // `unfold` repeatedly calls the closure below, threading `BlobReplayState`
-                // through each call, to turn one blob's byte `Replay` into a stream of batches.
-                stream::unfold(
-                    BlobReplayState {
-                        blob_first,
-                        replay,
-                        position: initial_position,
-                        done: false,
-                    },
-                    move |mut state| async move {
-                        // A previous call hit an error and set `done`.
-                        if state.done {
-                            return None;
-                        }
-
-                        // Pull bytes from the blob until at least one whole item is buffered.
-                        match state.replay.ensure(chunk_size).await {
-                            Ok(true) => {}
-                            // Blob fully drained.
-                            Ok(false) => return None,
-                            // Read failure: surface it as the blob's final item.
-                            Err(err) => {
-                                state.done = true;
-                                return Some((vec![Err(Error::Runtime(err))], state));
-                            }
-                        }
-
-                        // Decode every whole item currently buffered. Positions within the
-                        // batch are consecutive, so overflow is checked once per batch.
-                        let count = (state.replay.remaining() / chunk_size) as u64;
-                        let Some(base) = state
-                            .blob_first
-                            .checked_add(state.position)
-                            .filter(|base| base.checked_add(count).is_some())
-                        else {
-                            state.done = true;
-                            return Some((vec![Err(Error::OffsetOverflow)], state));
-                        };
-                        state.position += count;
-
-                        let mut batch = Vec::with_capacity(count as usize);
-                        for i in 0..count {
-                            match A::read(&mut state.replay) {
-                                Ok(item) => batch.push(Ok((base + i, item))),
-                                // Corrupt bytes: surface the decode error and stop the blob.
-                                Err(err) => {
-                                    batch.push(Err(Error::Codec(err)));
-                                    state.done = true;
-                                    break;
-                                }
-                            }
-                        }
-                        Some((batch, state))
-                    },
-                )
+                BlobReplayState::<E::Blob, A> {
+                    blob_first,
+                    replay,
+                    position: initial_position,
+                    _marker: PhantomData,
+                }
+                .into_batches()
             },
         );
 
-        // Stream the tail in `buffer`-sized batches, bounded by the snapshot bounds.
+        // Stream the tail in `buffer`-sized batches, bounded by the snapshot's size.
         let tail_first = first_in_blob(pruning_boundary, tail_blob, items_per_blob)?;
         let tail_start = if start_blob == tail_blob {
             start_pos
         } else {
             tail_first
         };
-        /// State for the `unfold` that replays the tail through the snapshot's read handle.
-        struct TailReplayState<B: Blob> {
-            reader: paged::Reader<B>,
-            /// Next position to emit.
-            next_pos: u64,
-            /// One past the last position to emit: the snapshot's size. Set to `next_pos` after
-            /// an error so every later call returns `None`, terminating the stream.
-            end_pos: u64,
-            /// First retained position in the tail; origin for byte offsets.
-            tail_first: u64,
-        }
-        let tail_state = TailReplayState {
+        let tail_batches = TailReplayState::<E::Blob, A> {
             reader: self.snapshot.tail_reader.clone(),
-            next_pos: tail_start.max(tail_first),
-            end_pos: self.snapshot.bounds.end,
+            positions: tail_start.max(tail_first)..self.snapshot.bounds.end,
             tail_first,
-        };
-        let batch_items = (buffer.get() / chunk_size).max(1);
-        let tail_batches = stream::unfold(tail_state, move |mut state| async move {
-            if state.next_pos >= state.end_pos {
-                return None;
-            }
-            // Take the min in u64: casting the item count first would truncate on 32-bit
-            // targets, where an exact multiple of 2^32 yields a zero batch that never advances.
-            let count = (state.end_pos - state.next_pos).min(batch_items as u64) as usize;
-            let mut buf = vec![0u8; count * chunk_size];
-            let byte_offset =
-                match Journal::<E, A>::items_to_bytes(state.next_pos - state.tail_first) {
-                    Ok(offset) => offset,
-                    Err(err) => {
-                        state.end_pos = state.next_pos;
-                        return Some((vec![Err(err)], state));
-                    }
-                };
-            if let Err(err) = state.reader.read_into(&mut buf, byte_offset).await {
-                state.end_pos = state.next_pos;
-                return Some((vec![Err(Error::Runtime(err))], state));
-            }
-            let mut batch: Vec<Result<(u64, A), Error>> = Vec::with_capacity(count);
-            for i in 0..count {
-                let slice = &buf[i * chunk_size..(i + 1) * chunk_size];
-                match A::decode(slice) {
-                    Ok(item) => batch.push(Ok((state.next_pos + i as u64, item))),
-                    Err(err) => {
-                        batch.push(Err(Error::Codec(err)));
-                        state.end_pos = state.next_pos;
-                        return Some((batch, state));
-                    }
-                }
-            }
-            state.next_pos += count as u64;
-            Some((batch, state))
-        });
+            items_per_batch: (buffer.get() / chunk_size).max(1),
+            _marker: PhantomData,
+        }
+        .into_batches();
 
         Ok(sealed_batches.chain(tail_batches).flat_map(stream::iter))
+    }
+}
+
+/// Replays a single sealed blob through its `Replay`.
+struct BlobReplayState<B: Blob, A> {
+    /// First retained position in the blob.
+    blob_first: u64,
+    /// Sequential reader over the blob's logical bytes.
+    replay: Replay<B>,
+    /// Index of the next item to emit, relative to `blob_first`.
+    position: u64,
+    _marker: PhantomData<A>,
+}
+
+impl<B: Blob, A: CodecFixedShared> ReplaySource for BlobReplayState<B, A> {
+    type Item = A;
+
+    /// Decode every whole item currently buffered. Positions are consecutive, so overflow is
+    /// checked once per batch.
+    async fn drain(&mut self, batch: &mut Vec<Result<(u64, A), Error>>) -> Result<(), Error> {
+        // Pull bytes from the blob until at least one whole item is buffered.
+        if !self.replay.ensure(A::SIZE).await? {
+            return Ok(()); // blob fully drained
+        }
+        let count = (self.replay.remaining() / A::SIZE) as u64;
+        let base = self
+            .blob_first
+            .checked_add(self.position)
+            .filter(|base| base.checked_add(count).is_some())
+            .ok_or(Error::OffsetOverflow)?;
+        self.position += count;
+        batch.reserve(count as usize);
+        for i in 0..count {
+            let item = A::read(&mut self.replay).map_err(Error::Codec)?;
+            batch.push(Ok((base + i, item)));
+        }
+        Ok(())
+    }
+}
+
+/// Replays the writable tail through the snapshot's read handle.
+struct TailReplayState<B: Blob, A> {
+    reader: paged::Reader<B>,
+    /// Positions still to emit; `positions.end` is the snapshot's size.
+    positions: Range<u64>,
+    /// First retained position in the tail; origin for byte offsets.
+    tail_first: u64,
+    /// Items to read per batch.
+    items_per_batch: usize,
+    _marker: PhantomData<A>,
+}
+
+impl<B: Blob, A: CodecFixedShared> ReplaySource for TailReplayState<B, A> {
+    type Item = A;
+
+    /// Read and decode up to `items_per_batch` fixed-size items from the tail.
+    async fn drain(&mut self, batch: &mut Vec<Result<(u64, A), Error>>) -> Result<(), Error> {
+        if self.positions.is_empty() {
+            return Ok(());
+        }
+        // Take the min in u64: casting the item count first would truncate on 32-bit targets,
+        // where an exact multiple of 2^32 yields a zero batch that never advances.
+        let count =
+            (self.positions.end - self.positions.start).min(self.items_per_batch as u64) as usize;
+        let byte_offset = (self.positions.start - self.tail_first)
+            .checked_mul(A::SIZE as u64)
+            .ok_or(Error::OffsetOverflow)?;
+        let mut buf = vec![0u8; count * A::SIZE];
+        self.reader
+            .read_into(&mut buf, byte_offset)
+            .await
+            .map_err(Error::Runtime)?;
+        batch.reserve(count);
+        for i in 0..count {
+            let slice = &buf[i * A::SIZE..(i + 1) * A::SIZE];
+            let item = A::decode(slice).map_err(Error::Codec)?;
+            batch.push(Ok((self.positions.start + i as u64, item)));
+        }
+        self.positions.start += count as u64;
+        Ok(())
     }
 }
 
