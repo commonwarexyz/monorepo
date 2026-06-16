@@ -2,7 +2,10 @@
 
 use arbitrary::Arbitrary;
 use commonware_runtime::{deterministic, Runner, Supervisor as _};
-use commonware_storage::ordinal::{Config, Ordinal};
+use commonware_storage::{
+    ordinal::{Config, Ordinal},
+    utils::bits_for_indices,
+};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashMap;
@@ -81,7 +84,7 @@ fn fuzz(input: FuzzInput) {
             write_buffer: NZUsize!(4096),
             replay_buffer: NZUsize!(64 * 1024),
         };
-        let mut store = Some(Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone()).await.expect("failed to init ordinal"));
+        let mut store = Some(Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None).await.expect("failed to init ordinal"));
         let mut restarts = 0usize;
 
         // Run operations
@@ -180,11 +183,13 @@ fn fuzz(input: FuzzInput) {
 
                 OrdinalOperation::Prune { min } => {
                     if let Some(ordinal) = store.as_mut() {
-                        let min_blob = *min / items_per_blob;
+                        let min_blob = *min / items_per_blob.get();
                         if ordinal.prune(*min).await.is_ok() {
                             // Remove all data in pruned blobs from expected state
-                            expected_data.retain(|&index, _| index / items_per_blob >= min_blob);
-                            synced_data.retain(|&index, _| index / items_per_blob >= min_blob);
+                            expected_data
+                                .retain(|&index, _| index / items_per_blob.get() >= min_blob);
+                            synced_data
+                                .retain(|&index, _| index / items_per_blob.get() >= min_blob);
                         }
                     }
                 }
@@ -251,7 +256,12 @@ fn fuzz(input: FuzzInput) {
                         synced_data = expected_data.clone();
 
                         // Reopen and verify synced data persisted
-                        match Ordinal::<_, FixedBytes<32>>::init(context.child("ordinal").with_attribute("instance", restarts), cfg.clone()).await
+                        let owned_bits = bits_for_indices(items_per_blob, synced_data.keys().copied());
+                        let bits = owned_bits
+                            .iter()
+                            .map(|(section, bitmap)| (*section, bitmap))
+                            .collect();
+                        match Ordinal::<_, FixedBytes<32>>::init(context.child("ordinal").with_attribute("instance", restarts), cfg.clone(), Some(bits)).await
                         {
                             Ok(new_ordinal) => {
                                 restarts += 1;
