@@ -199,9 +199,10 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Clock<K, V, S> {
     /// inserting a new entry exceeds the capacity, the CLOCK evictor reclaims a
     /// slot first.
     pub fn put(&mut self, key: K, value: V) -> Option<V> {
-        if let Some(&slot) = self.index.get(&key) {
-            self.slots[slot].referenced.store(true, Ordering::Relaxed);
-            return Some(core::mem::replace(&mut self.slots[slot].value, value));
+        if let Some(&index) = self.index.get(&key) {
+            let slot = &mut self.slots[index];
+            slot.referenced.store(true, Ordering::Relaxed);
+            return Some(core::mem::replace(&mut slot.value, value));
         }
         match self.take_slot() {
             Some(slot) => {
@@ -378,8 +379,7 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Clock<K, V, S> {
         }
         let slot = self.hand;
         self.hand = (self.hand + 1) % len;
-        let evicted = self.slots[slot].key.clone();
-        self.index.remove(&evicted);
+        self.index.remove(&self.slots[slot].key);
         Some(slot)
     }
 }
