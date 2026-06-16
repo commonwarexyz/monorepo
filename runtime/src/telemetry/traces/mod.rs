@@ -150,9 +150,9 @@ mod tests {
             assert_ne!(trace_id_of(&d), expected);
 
             // The span-name boundary is explicit.
-            let e = tracing::info_span!("ab");
+            let e = tracing::info_span!("runtime.trace.ab");
             correlate(&e, b"c");
-            let f = tracing::info_span!("a");
+            let f = tracing::info_span!("runtime.trace.a");
             correlate(&f, b"bc");
             assert_ne!(trace_id_of(&e), trace_id_of(&f));
 
