@@ -298,12 +298,9 @@ where
     /// Add subscribers for a key and start the first fetch if needed.
     fn add_fetch(&mut self, fetch: FetchKey<F::Key, Con::Subscriber>) {
         let FetchKey {
-            key,
-            subscribers,
-            span,
-            ..
+            key, subscribers, ..
         } = fetch;
-        let is_new = self.subscribers.insert(key.clone(), subscribers, span);
+        let is_new = self.subscribers.insert(key.clone(), subscribers);
 
         if is_new {
             assert!(self.deliveries.insert(key.clone()), "delivery entry");
@@ -351,7 +348,7 @@ where
         &mut self,
         key: F::Key,
         value: F::Value,
-        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
+        delivered: NonEmptyVec<(Con::Subscriber, Vec<tracing::Span>)>,
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -367,7 +364,11 @@ where
     }
 
     /// Deliver an already accepted response to subscribers that arrived later.
-    fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>) {
+    fn redeliver(
+        &mut self,
+        key: F::Key,
+        delivered: NonEmptyVec<(Con::Subscriber, Vec<tracing::Span>)>,
+    ) {
         self.deliveries.redeliver(Delivery {
             key,
             subscribers: delivered,
@@ -495,7 +496,7 @@ where
     fn handle_delivered(
         &mut self,
         key: F::Key,
-        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
+        delivered: NonEmptyVec<(Con::Subscriber, Vec<tracing::Span>)>,
         valid: bool,
     ) {
         let accepted = self.deliveries.response_accepted(&key);

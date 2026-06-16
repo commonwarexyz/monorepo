@@ -1,4 +1,3 @@
-use super::request::FetchReason;
 use crate::{
     simplex::types::{Certificate, Notarization},
     types::View,
@@ -9,6 +8,25 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     num::NonZeroUsize,
 };
+
+/// Why a resolver fetch was requested.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FetchReason {
+    MissingNullification,
+    CertificationFailed,
+    SatisfiedByFailedNotarization,
+}
+
+impl FetchReason {
+    /// Returns the stable trace field value for this reason.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MissingNullification => "missing_nullification",
+            Self::CertificationFailed => "certification_failed",
+            Self::SatisfiedByFailedNotarization => "satisfied_by_failed_notarization",
+        }
+    }
+}
 
 /// Side effects requested by resolver state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -315,24 +333,12 @@ mod tests {
         Finalization::from_finalizes(verifier, &votes, &Sequential).expect("finalization quorum")
     }
 
-    fn v(view: u64) -> View {
-        View::new(view)
-    }
-
     fn fetch(view: u64, cause: u64, reason: FetchReason) -> Effect {
         Effect::Fetch {
-            view: v(view),
-            cause: v(cause),
+            view: View::new(view),
+            cause: View::new(cause),
             reason,
         }
-    }
-
-    fn remove(view: u64) -> Effect {
-        Effect::Remove(v(view))
-    }
-
-    fn retain_above(view: u64) -> Effect {
-        Effect::RetainAbove(v(view))
     }
 
     #[test]
@@ -349,7 +355,7 @@ mod tests {
         assert_eq!(
             effects,
             vec![
-                remove(4),
+                Effect::Remove(View::new(4)),
                 fetch(1, 4, FetchReason::MissingNullification),
                 fetch(2, 4, FetchReason::MissingNullification),
             ]
@@ -363,7 +369,7 @@ mod tests {
         );
         assert_eq!(
             effects,
-            vec![remove(2), fetch(3, 2, FetchReason::MissingNullification),]
+            vec![Effect::Remove(View::new(2)), fetch(3, 2, FetchReason::MissingNullification),]
         );
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));
@@ -372,7 +378,7 @@ mod tests {
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Nullification(n)) if n == &nullification_v1)
         );
-        assert_eq!(effects, vec![remove(1)]);
+        assert_eq!(effects, vec![Effect::Remove(View::new(1))]);
     }
 
     #[test]
@@ -387,14 +393,14 @@ mod tests {
                 assert_eq!(
                     effects,
                     vec![
-                        remove(4),
+                        Effect::Remove(View::new(4)),
                         fetch(1, 4, FetchReason::MissingNullification),
                         fetch(2, 4, FetchReason::MissingNullification),
                         fetch(3, 4, FetchReason::MissingNullification),
                     ]
                 );
             } else {
-                assert_eq!(effects, vec![remove(view)]);
+                assert_eq!(effects, vec![Effect::Remove(View::new(view))]);
             }
         }
         assert_eq!(state.current_view, View::new(6));
@@ -413,7 +419,7 @@ mod tests {
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization)
         );
-        assert_eq!(effects, vec![retain_above(6)]);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(6))]);
         assert!(state.notarizations.is_empty());
         assert!(state.nullifications.is_empty());
     }
@@ -426,7 +432,7 @@ mod tests {
         // Finalization sets floor
         let finalization = build_finalization(&schemes, &verifier, View::new(3));
         let effects = state.handle(Certificate::Finalization(finalization.clone()), None);
-        assert_eq!(effects, vec![retain_above(3)]);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(3))]);
         assert!(
             matches!(state.get(View::new(1)), Some(Certificate::Finalization(f)) if f == &finalization)
         );
@@ -437,7 +443,7 @@ mod tests {
         // New nullification is kept
         let nullification_v4 = build_nullification(&schemes, &verifier, View::new(4));
         let effects = state.handle(Certificate::Nullification(nullification_v4.clone()), None);
-        assert_eq!(effects, vec![remove(4)]);
+        assert_eq!(effects, vec![Effect::Remove(View::new(4))]);
         assert!(
             matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v4)
         );
@@ -535,7 +541,7 @@ mod tests {
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Notarization(n)) if n == &notarization_v5)
         );
-        assert_eq!(effects, vec![retain_above(5)]);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
         // Tracking should be cleaned up
         assert!(!state.satisfied_by.contains_key(&View::new(5)));
         // View 5 should not be marked as failed
@@ -560,7 +566,7 @@ mod tests {
             ]
         );
         let effects = state.handle_certified(View::new(5), true);
-        assert_eq!(effects, vec![retain_above(5)]);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
 
         // Floor should be the notarization at view 5
         assert!(
@@ -576,6 +582,6 @@ mod tests {
         assert!(
             matches!(state.floor.as_ref(), Some(Certificate::Finalization(f)) if f == &finalization_v5)
         );
-        assert_eq!(effects, vec![retain_above(5)]);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
     }
 }

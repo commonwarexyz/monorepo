@@ -12,8 +12,7 @@ pub type Message<K, P, S> = ingress::Message<K, S, Option<NonEmptyVec<P>>>;
 fn fetch_key<K, P, S>(fetch: Fetch<K, S>, targets: Option<NonEmptyVec<P>>) -> FetchKey<K, P, S> {
     FetchKey {
         key: fetch.key,
-        subscribers: NonEmptyVec::new(fetch.subscriber),
-        span: fetch.span,
+        subscribers: NonEmptyVec::new((fetch.subscriber, fetch.span)),
         metadata: targets,
     }
 }
@@ -58,8 +57,7 @@ where
         } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
-            span,
+            subscribers: NonEmptyVec::new((subscriber, span)),
             metadata: None,
         }]))
     }
@@ -127,8 +125,7 @@ where
         } = key.into();
         self.sender.enqueue(Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
-            span,
+            subscribers: NonEmptyVec::new((subscriber, span)),
             metadata: Some(targets),
         }]))
     }
@@ -159,9 +156,8 @@ mod tests {
     fn fetch(key: u8, subscriber: u16, targets: Option<NonEmptyVec<u8>>) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
+            subscribers: NonEmptyVec::new((subscriber, tracing::Span::none())),
             metadata: targets,
-            span: tracing::Span::none(),
         }])
     }
 
@@ -172,9 +168,13 @@ mod tests {
     ) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::from_unchecked(subscribers),
+            subscribers: NonEmptyVec::from_unchecked(
+                subscribers
+                    .into_iter()
+                    .map(|subscriber| (subscriber, tracing::Span::none()))
+                    .collect(),
+            ),
             metadata: targets,
-            span: tracing::Span::none(),
         }])
     }
 
@@ -226,7 +226,12 @@ mod tests {
         };
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].key, expected_key);
-        assert_eq!(&keys[0].subscribers[..], expected_subscribers);
+        let actual: Vec<_> = keys[0]
+            .subscribers
+            .iter()
+            .map(|(subscriber, _)| *subscriber)
+            .collect();
+        assert_eq!(actual, expected_subscribers);
     }
 
     #[test]
@@ -249,9 +254,11 @@ mod tests {
         Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
         Policy::handle(&mut pending, fetch_with_subscribers(1, vec![11, 12], None));
 
+        // Coalescing keeps every fetch's span, so re-requested subscriber 11
+        // appears once per fetch. The tracker later groups spans by subscriber.
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 1);
-        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 12]);
+        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 11, 12]);
     }
 
     #[test]

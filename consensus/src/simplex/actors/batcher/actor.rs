@@ -371,7 +371,7 @@ where
                             continue;
                         }
                         let round = work.entry(view).or_insert_with(|| self.new_round(view));
-                        let process = process_span(round.span().clone());
+                        let process = process_span(round.span());
                         let _guard = process.entered();
                         round.add_constructed(message);
                         self.added.inc();
@@ -433,7 +433,7 @@ where
 
                 // Parent under the view's span if we already track the view (we avoid
                 // creating per-view state for certificates that fail verification)
-                let parent = round.map(|round| round.span().clone()).unwrap_or_else(Span::none);
+                let parent = round.map(|round| round.span()).unwrap_or_else(Span::none);
                 let span = info_span!(
                     parent: parent,
                     "simplex.batcher.verify_certificate",
@@ -545,7 +545,7 @@ where
                         let round = Rnd::new(self.epoch, current.view);
                         let span = work
                             .get(&current.view)
-                            .map(|round| round.span().clone())
+                            .map(|round| round.span())
                             .unwrap_or_else(Span::none);
                         span.in_scope(|| voter.timeout(round, TimeoutReason::LeaderNullify));
                     }
@@ -562,7 +562,7 @@ where
                 if let Some(round) = work.get_mut(&current.view) {
                     if let Some(me) = self.scheme.me() {
                         if let Some(proposal) = round.forward_proposal(me) {
-                            round.span().clone().in_scope(|| voter.proposal(proposal));
+                            round.span().in_scope(|| voter.proposal(proposal));
                         }
                     }
                 }
@@ -580,7 +580,7 @@ where
                 let Some(round) = work.get_mut(&updated_view) else {
                     continue;
                 };
-                let _guard = round.span().clone().entered();
+                let _guard = round.span().entered();
 
                 // Batch verify votes if ready
                 let timer = self.verify_latency.timer(self.context.as_ref());

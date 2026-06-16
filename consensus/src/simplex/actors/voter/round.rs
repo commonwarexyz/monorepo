@@ -1,6 +1,7 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
+        actors::span::ViewSpan,
         metrics::TimeoutReason,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
@@ -42,7 +43,7 @@ pub struct Round<S: Scheme, D: Digest> {
     round: Rnd,
 
     // Root span for all work attributed to this view.
-    span: Span,
+    span: ViewSpan,
 
     // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<Leader<S::PublicKey>>,
@@ -72,7 +73,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             start,
             scheme,
             round,
-            span: Span::none(),
+            span: ViewSpan::new(),
             leader: None,
             proposal: ProposalSlot::new(),
             leader_deadline: None,
@@ -183,21 +184,21 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// Returns the root span for all work attributed to this view.
     ///
     /// Disabled once the view is decided (see [Self::close_span]).
-    pub const fn span(&self) -> &Span {
-        &self.span
+    pub fn span(&self) -> Span {
+        self.span.get()
     }
 
     /// Opens the view's root span when the round becomes the active view.
     pub fn open_span(&mut self) {
-        if !self.span.is_none() {
-            return;
-        }
-        self.span = info_span!(
-            parent: None,
-            "simplex.voter.view",
-            epoch = self.round.epoch().traced(),
-            view = self.round.view().traced()
-        );
+        let round = self.round;
+        self.span.open(|| {
+            info_span!(
+                parent: None,
+                "simplex.voter.view",
+                epoch = round.epoch().traced(),
+                view = round.view().traced()
+            )
+        });
     }
 
     /// Closes the view's root span once the view is decided.
@@ -205,7 +206,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     /// The round is retained for backfill and deduplication, but its work no
     /// longer anchors a trace.
     pub fn close_span(&mut self) {
-        self.span = Span::none();
+        self.span.close();
     }
 
     /// Returns the elected leader (if any) for this round.

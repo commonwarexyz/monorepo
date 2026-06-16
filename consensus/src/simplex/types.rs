@@ -419,6 +419,17 @@ pub enum Certificate<S: Scheme, D: Digest> {
     Finalization(Finalization<S, D>),
 }
 
+impl<S: Scheme, D: Digest> Certificate<S, D> {
+    /// Returns the stable trace field value for this certificate's type.
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::Notarization(_) => "notarization",
+            Self::Nullification(_) => "nullification",
+            Self::Finalization(_) => "finalization",
+        }
+    }
+}
+
 impl<S: Scheme, D: Digest> Write for Certificate<S, D> {
     fn write(&self, writer: &mut impl BufMut) {
         match self {

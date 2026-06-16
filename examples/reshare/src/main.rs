@@ -165,7 +165,7 @@ fn main() {
                 json: false,
             },
             None,
-            None,
+            tokio::telemetry::Tracing::Disabled,
         );
 
         match app.subcommand {

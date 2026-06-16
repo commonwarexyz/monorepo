@@ -2126,8 +2126,8 @@ mod tests {
                 Delivery {
                     key,
                     subscribers: non_empty_vec![
-                        (first_subscriber, tracing::Span::none()),
-                        (second_subscriber, tracing::Span::none())
+                        (first_subscriber, vec![tracing::Span::none()]),
+                        (second_subscriber, vec![tracing::Span::none()])
                     ],
                 }
             );
@@ -2191,8 +2191,8 @@ mod tests {
                 Delivery {
                     key: key.clone(),
                     subscribers: non_empty_vec![
-                        (first_subscriber, tracing::Span::none()),
-                        (second_subscriber, tracing::Span::none())
+                        (first_subscriber, vec![tracing::Span::none()]),
+                        (second_subscriber, vec![tracing::Span::none()])
                     ],
                 }
             );
@@ -2261,7 +2261,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
+                    subscribers: non_empty_vec![(first_subscriber.clone(), vec![tracing::Span::none()])],
                 }
             );
 
@@ -2282,7 +2282,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(first_subscriber, vec![tracing::Span::none()])],
                 }
             );
             assert_eq!(value, first_response);
@@ -2297,7 +2297,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![(second_subscriber.clone(), tracing::Span::none())],
+                    subscribers: non_empty_vec![(second_subscriber.clone(), vec![tracing::Span::none()])],
                 }
             );
 
@@ -2307,7 +2307,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: key.clone(),
-                    subscribers: non_empty_vec![(second_subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(second_subscriber, vec![tracing::Span::none()])],
                 }
             );
             assert_eq!(value, first_response);
@@ -2411,7 +2411,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: main_key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber.clone(), tracing::Span::none())],
+                    subscribers: non_empty_vec![(first_subscriber.clone(), vec![tracing::Span::none()])],
                 }
             );
 
@@ -2428,7 +2428,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: main_key.clone(),
-                    subscribers: non_empty_vec![(first_subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(first_subscriber, vec![tracing::Span::none()])],
                 }
             );
             assert_eq!(value, data);
@@ -2443,7 +2443,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key: main_key,
-                    subscribers: non_empty_vec![(second_subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(second_subscriber, vec![tracing::Span::none()])],
                 }
             );
         });
@@ -2503,7 +2503,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key,
-                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(subscriber, vec![tracing::Span::none()])],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));
@@ -2558,7 +2558,7 @@ mod tests {
                 delivery,
                 Delivery {
                     key,
-                    subscribers: non_empty_vec![(subscriber, tracing::Span::none())],
+                    subscribers: non_empty_vec![(subscriber, vec![tracing::Span::none()])],
                 }
             );
             assert_eq!(value, Bytes::from("data for key 5"));

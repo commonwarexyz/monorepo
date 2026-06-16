@@ -1,6 +1,7 @@
 use super::Verifier;
 use crate::{
     simplex::{
+        actors::span::ViewSpan,
         scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
@@ -55,8 +56,8 @@ pub struct Round<
 
     /// Root span of the view, shared with the voter's round.
     ///
-    /// Disabled until the voter announces the view via an update.
-    span: Span,
+    /// Pending until the voter announces the view via an update.
+    span: ViewSpan,
 }
 
 impl<
@@ -92,18 +93,18 @@ impl<
             nullification: None,
             finalization: None,
 
-            span: Span::none(),
+            span: ViewSpan::new(),
         }
     }
 
     /// Returns the root span of the view.
-    pub const fn span(&self) -> &Span {
-        &self.span
+    pub fn span(&self) -> Span {
+        self.span.get()
     }
 
     /// Adopts the root span of the view from the voter.
     pub fn set_span(&mut self, span: Span) {
-        self.span = span;
+        self.span.adopt(span);
     }
 
     /// Closes the view's root span once the view is decided.
@@ -111,7 +112,7 @@ impl<
     /// The round is retained until it is no longer interesting, but its work no
     /// longer anchors a trace.
     pub fn close_span(&mut self) {
-        self.span = Span::none();
+        self.span.close();
     }
 
     /// Returns true if we already have a notarization certificate for this view.

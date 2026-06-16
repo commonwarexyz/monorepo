@@ -3758,7 +3758,7 @@ mod tests {
                     json: false,
                 },
                 Some(address),
-                None,
+                tokio::telemetry::Tracing::Disabled,
             );
 
             // Register a test metric

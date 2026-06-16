@@ -1,7 +1,7 @@
 [package]
 name = "tracing_int_fields"
 version = "0.0.1"
-description = "Require consensus View/Epoch tracing fields to be recorded as integers, not via Display/Debug."
+description = "Require integer-valued tracing span fields to be recorded as integers, not via Display/Debug."
 edition = "2021"
 publish = false
 

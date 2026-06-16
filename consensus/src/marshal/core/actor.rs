@@ -842,12 +842,16 @@ where
                     value,
                     response,
                 } => {
+                    let mut spans = delivery
+                        .subscribers
+                        .iter()
+                        .flat_map(|(_, spans)| spans.iter());
                     let span = info_span!(
-                        parent: &delivery.subscribers.first().1,
+                        parent: spans.next().and_then(tracing::Span::id),
                         "marshal.resolver.handle_deliver",
                         key = %delivery.key
                     );
-                    for (_, subscriber_span) in delivery.subscribers.iter().skip(1) {
+                    for subscriber_span in spans {
                         span.follows_from(subscriber_span.id());
                     }
                     needs_sync |= self

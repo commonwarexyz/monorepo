@@ -25,10 +25,6 @@ commonware_macros::stability_scope!(BETA {
         /// Subscriber attached to the key.
         pub subscriber: S,
         /// Trace span carried from issuance to delivery.
-        ///
-        /// The resolver retains this span with the subscriber and re-attaches it
-        /// to that subscriber in [`Delivery`] when the fetch resolves, so consumers
-        /// can attribute delivery work to the request span when useful.
         pub span: tracing::Span,
     }
 
@@ -73,11 +69,8 @@ commonware_macros::stability_scope!(BETA {
         /// The peer-visible key used to validate the response.
         pub key: K,
         /// Subscribers that were still retained when the response arrived, each
-        /// paired with the trace span of the fetch that requested it.
-        ///
-        /// Consumers can use these spans to attribute delivery work to the
-        /// requests that caused it.
-        pub subscribers: NonEmptyVec<(S, tracing::Span)>,
+        /// paired with the trace spans of every fetch that requested it.
+        pub subscribers: NonEmptyVec<(S, Vec<tracing::Span>)>,
     }
 
     impl<K: PartialEq, S: PartialEq> PartialEq for Delivery<K, S> {

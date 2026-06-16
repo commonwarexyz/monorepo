@@ -222,7 +222,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
             span: info_span!(
                 "simplex.voter.mailbox.timeout",
                 epoch = round.epoch().traced(),
-                view = round.view().traced()
+                view = round.view().traced(),
+                reason = reason.as_str()
             ),
             round,
             reason,
@@ -235,7 +236,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
             span: info_span!(
                 "simplex.voter.mailbox.recovered",
                 epoch = certificate.epoch().traced(),
-                view = certificate.view().traced()
+                view = certificate.view().traced(),
+                certificate = certificate.kind()
             ),
             certificate,
             from_resolver: false,
@@ -248,7 +250,8 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
             span: info_span!(
                 "simplex.voter.mailbox.resolved",
                 epoch = certificate.epoch().traced(),
-                view = certificate.view().traced()
+                view = certificate.view().traced(),
+                certificate = certificate.kind()
             ),
             certificate,
             from_resolver: true,

@@ -968,7 +968,7 @@ fn main() {
                 json: false,
             },
             Some(SocketAddr::from((Ipv4Addr::LOCALHOST, config.metrics_port))),
-            None,
+            tokio_runtime::telemetry::Tracing::Disabled,
         );
         info!(
             sync_mode = %config.sync_mode.as_str(),

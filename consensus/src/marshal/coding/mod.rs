@@ -219,7 +219,7 @@ mod tests {
             let _ = sender.enqueue(handler::Message::Deliver {
                 delivery: Delivery {
                     key: fetch.key,
-                    subscribers: NonEmptyVec::new((fetch.subscriber, tracing::Span::none())),
+                    subscribers: NonEmptyVec::new((fetch.subscriber, vec![tracing::Span::none()])),
                 },
                 value,
                 response,
@@ -537,7 +537,7 @@ mod tests {
                         key: handler::Key::Notarized { round },
                         subscribers: NonEmptyVec::new((
                             handler::Annotation::Notarization { round },
-                            tracing::Span::none(),
+                            vec![tracing::Span::none()],
                         )),
                     },
                     value: (notarization, dishonest_block).encode(),

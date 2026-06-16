@@ -255,14 +255,13 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     pub fn view_span(&self, view: View) -> Span {
         self.views
             .get(&view)
-            .map(|round| round.span().clone())
+            .map(|round| round.span())
             .unwrap_or_else(Span::none)
     }
 
     /// Closes the root span of every decided view (at or below the finalized
     /// view) so each view trace ends when the chain commits it rather than when
-    /// the round is later pruned. Idempotent; retained rounds keep serving
-    /// backfill without anchoring a trace.
+    /// the round is later pruned.
     pub fn close_decided_spans(&mut self) {
         for (_, round) in self.views.range_mut(..=self.last_finalized) {
             round.close_span();

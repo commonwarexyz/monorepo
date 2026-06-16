@@ -1,7 +1,6 @@
 use super::{
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
-    request::FetchReason,
-    state::Effect,
+    state::{Effect, FetchReason},
     Config,
 };
 use crate::{
@@ -300,17 +299,21 @@ impl<
     ) {
         match message {
             HandlerMessage::Deliver {
-                span,
+                spans,
                 view,
                 data,
                 response,
             } => {
+                let mut spans = spans.into_iter();
                 let span = info_span!(
-                    parent: span,
+                    parent: spans.next().and_then(|span| span.id()),
                     "simplex.resolver.deliver",
                     epoch = self.epoch.traced(),
                     view = view.traced()
                 );
+                for fetch in spans {
+                    span.follows_from(fetch.id());
+                }
                 let _guard = span.entered();
 
                 // Validate incoming message

@@ -228,7 +228,6 @@ where
                         for FetchKey {
                             key,
                             subscribers,
-                            span,
                             metadata: targets,
                         } in keys
                         {
@@ -236,7 +235,7 @@ where
 
                             // Check if the fetch is already in progress
                             let is_new = !self.inflight.contains(&key);
-                            self.subscribers.insert(key.clone(), subscribers, span);
+                            self.subscribers.insert(key.clone(), subscribers);
 
                             // Update targets
                             match targets {

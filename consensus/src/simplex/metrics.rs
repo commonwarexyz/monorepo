@@ -20,6 +20,22 @@ pub enum TimeoutReason {
     FailedCertification,
 }
 
+impl TimeoutReason {
+    /// Returns the stable trace field value for this reason.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Inactivity => "inactivity",
+            Self::LeaderNullify => "leader_nullify",
+            Self::LeaderTimeout => "leader_timeout",
+            Self::CertificationTimeout => "certification_timeout",
+            Self::MissingProposal => "missing_proposal",
+            Self::IgnoredProposal => "ignored_proposal",
+            Self::InvalidProposal => "invalid_proposal",
+            Self::FailedCertification => "failed_certification",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
 pub struct Timeout {
     pub leader: String,

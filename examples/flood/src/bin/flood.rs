@@ -76,13 +76,13 @@ fn main() {
     executor.start(|context| async move {
         // Configure telemetry
         let tracing = if config.instrument {
-            Some(tokio::tracing::Config {
+            tokio::telemetry::Tracing::Export(tokio::tracing::Config {
                 endpoint: format!("http://{}:4318/v1/traces", hosts.monitoring.private),
                 name: public_key.to_string(),
                 rate: 1.0,
             })
         } else {
-            None
+            tokio::telemetry::Tracing::Disabled
         };
         tokio::telemetry::init(
             context.child("telemetry"),
