@@ -401,12 +401,7 @@ impl<
                     }
                 };
 
-                if let Err(err) = self.prepare_node_journal(&node, &sender).await {
-                    debug!(?err, ?sender, "node journal prepare failed");
-                    continue;
-                }
-
-                let result = match self.validate_node(&node, &sender) {
+                let result = match self.prepare_and_validate_node(&node, &sender).await {
                     Ok(result) => result,
                     Err(err) => {
                         debug!(?err, ?sender, "node validate failed");
@@ -865,12 +860,14 @@ impl<
     // Validation
     ////////////////////////////////////////
 
-    /// Takes a raw `Node` (from sender) from the p2p network and validates it.
+    /// Prepares the sender's journal, then validates an inbound `Node`.
     ///
     /// If valid (and not already the tracked tip for the sender), returns the implied
     /// parent chunk and its certificate.
     /// Else returns an error if the `Node` is invalid.
-    fn validate_node(
+    ///
+    /// Origin checks run before journal replay, and tip-dependent checks run after replay.
+    async fn prepare_and_validate_node(
         &mut self,
         node: &Node<C::PublicKey, P::Scheme, D>,
         sender: &C::PublicKey,
@@ -880,6 +877,13 @@ impl<
             return Err(Error::PeerMismatch);
         }
 
+        // Verify the sequencer before opening the journal so arbitrary peers cannot create
+        // journal partitions.
+        self.validate_chunk_sequencer(&node.chunk, self.epoch)?;
+
+        // Replay before checking the tracked tip so validation observes recovered journal state.
+        self.journal_prepare(sender).await;
+
         // Optimization: If the node is exactly equal to the tip,
         // don't perform further validation.
         if let Some(tip) = self.tip_manager.get(sender) {
@@ -888,8 +892,8 @@ impl<
             }
         }
 
-        // Validate chunk
-        self.validate_chunk(&node.chunk, self.epoch)?;
+        // Validate chunk against the recovered tip.
+        self.validate_chunk_tip(&node.chunk)?;
 
         // Verify the node
         node.verify(
@@ -898,27 +902,6 @@ impl<
             &self.validators_provider,
             &self.strategy,
         )
-    }
-
-    async fn prepare_node_journal(
-        &mut self,
-        node: &Node<C::PublicKey, P::Scheme, D>,
-        sender: &C::PublicKey,
-    ) -> Result<(), Error> {
-        if node.chunk.sequencer != *sender {
-            return Err(Error::PeerMismatch);
-        }
-        if self
-            .sequencers_provider
-            .sequencers(self.epoch)
-            .and_then(|sequencers| sequencers.position(sender))
-            .is_none()
-        {
-            return Err(Error::UnknownSequencer(self.epoch, sender.to_string()));
-        }
-
-        self.journal_prepare(sender).await;
-        Ok(())
     }
 
     /// Takes a raw ack (from sender) from the p2p network and validates it.
@@ -931,7 +914,8 @@ impl<
         sender: &<P::Scheme as Verifier>::PublicKey,
     ) -> Result<(), Error> {
         // Validate chunk
-        self.validate_chunk(&ack.chunk, ack.epoch)?;
+        self.validate_chunk_sequencer(&ack.chunk, ack.epoch)?;
+        self.validate_chunk_tip(&ack.chunk)?;
 
         // Get the scheme for the epoch to validate the sender
         let Some(scheme) = self.validators_provider.scheme(ack.epoch) else {
@@ -982,12 +966,11 @@ impl<
         Ok(())
     }
 
-    /// Takes a raw chunk from the p2p network and validates it against the epoch.
-    ///
-    /// Returns the chunk if the chunk is valid.
-    /// Returns an error if the chunk is invalid.
-    fn validate_chunk(&self, chunk: &Chunk<C::PublicKey, D>, epoch: Epoch) -> Result<(), Error> {
-        // Verify sequencer
+    fn validate_chunk_sequencer(
+        &self,
+        chunk: &Chunk<C::PublicKey, D>,
+        epoch: Epoch,
+    ) -> Result<(), Error> {
         if self
             .sequencers_provider
             .sequencers(epoch)
@@ -997,7 +980,10 @@ impl<
             return Err(Error::UnknownSequencer(epoch, chunk.sequencer.to_string()));
         }
 
-        // Verify height
+        Ok(())
+    }
+
+    fn validate_chunk_tip(&self, chunk: &Chunk<C::PublicKey, D>) -> Result<(), Error> {
         if let Some(tip) = self.tip_manager.get(&chunk.sequencer) {
             // Height must be at least the tip height
             match chunk.height.cmp(&tip.chunk.height) {
