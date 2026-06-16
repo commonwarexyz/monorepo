@@ -57,8 +57,8 @@
 //! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
 //! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
 //! stored records whose bits are unset are cleared before replay. Missing or invalid required records
-//! fail initialization. Passing `None` for the bits to [Ordinal::init] deletes any existing ordinal
-//! data and starts empty.
+//! fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored sections and
+//! starts empty.
 //!
 //! # Example
 //!

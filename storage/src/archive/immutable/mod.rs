@@ -16,6 +16,15 @@
 //! can be changed between initializations of [Archive], however, it must remain populated if any
 //! data was written with compression enabled.
 //!
+//! # Durability and Recovery
+//!
+//! `put` updates the underlying [crate::freezer::Freezer] and [crate::ordinal::Ordinal]
+//! eagerly, but data is not committed until `sync` succeeds. Sync first makes the freezer
+//! and ordinal data durable, then commits metadata that names the freezer checkpoint and ordinal
+//! section bits. On restart, this metadata is the source of truth: lower-layer data not described by
+//! metadata is treated as uncommitted and may be removed during initialization. If no freezer
+//! checkpoint has been committed yet, initialization starts from an empty archive.
+//!
 //! # Querying for Gaps
 //!
 //! [Archive] tracks gaps in the index space to enable the caller to efficiently fetch unknown keys

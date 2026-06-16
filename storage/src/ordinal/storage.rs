@@ -103,7 +103,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// considered available if and only if the [BitMap] is set for the record. If a section is provided
     /// but no [BitMap] is populated, all records in that section are considered available.
     ///
-    /// Passing `None` for `bits` deletes any existing ordinal data and starts empty.
+    /// Passing `Some(BTreeMap::new())` or `None` removes all stored sections and starts empty.
     pub async fn init(
         context: E,
         config: Config,

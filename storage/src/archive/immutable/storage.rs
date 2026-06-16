@@ -119,7 +119,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         )
         .await?;
 
-        // Get checkpoint
+        // Metadata is the commit record for lower-layer storage. If no checkpoint was committed,
+        // Freezer::init treats existing freezer blobs as uncommitted and starts empty.
         let freezer_key = U64::new(FREEZER_PREFIX, 0);
         let checkpoint = metadata.get(&freezer_key).map(|freezer| *freezer.freezer());
 
@@ -147,7 +148,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         )
         .await?;
 
-        // Collect sections
+        // Collect committed ordinal sections. Ordinal::init removes stored sections that are not
+        // present in this map, so an empty map represents a committed empty ordinal.
         let sections = metadata
             .keys()
             .filter(|k| k.prefix() == ORDINAL_PREFIX)

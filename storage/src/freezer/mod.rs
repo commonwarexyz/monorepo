@@ -164,7 +164,7 @@
 //! [Freezer::sync] and [Freezer::close] return a [Checkpoint] for recovering existing data.
 //! When a checkpoint is provided, [Freezer::init] rewinds the journals to the checkpoint, resizes the
 //! table to the checkpointed table size, and clears invalid or newer table entries. Passing `None`
-//! for the checkpoint to [Freezer::init] deletes any existing freezer data and starts empty.
+//! or an empty checkpoint to [Freezer::init] deletes any existing freezer data and starts empty.
 //!
 //! # Example
 //!

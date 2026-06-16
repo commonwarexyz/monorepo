@@ -631,7 +631,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
 
     /// Initialize a [Freezer] instance, aligning existing data to a [Checkpoint] when provided.
     ///
-    /// Passing `None` for `checkpoint` deletes any existing freezer data and starts empty.
+    /// Passing `None` or an empty [Checkpoint] deletes any existing freezer data and starts empty.
     pub async fn init(
         context: E,
         config: Config<V::Cfg>,
