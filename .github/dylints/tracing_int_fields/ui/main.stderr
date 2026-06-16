@@ -1,0 +1,63 @@
+error: integer-valued `types::View` recorded as a tracing span field via Display (%); record it as an integer
+  --> $DIR/main.rs:9:41
+   |
+LL |         let _ = tracing::field::display(&$value);
+   |                                         ^^^^^^^
+...
+LL |     info_span!("simplex.voter.view", view = %view);
+   |     ---------------------------------------------- in this macro invocation
+   |
+   = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
+   = note: `#[deny(tracing_int_fields)]` on by default
+   = note: this error originates in the macro `info_span` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: integer-valued `types::View` recorded as a tracing span field via Debug (?); record it as an integer
+  --> $DIR/main.rs:13:39
+   |
+LL |         let _ = tracing::field::debug(&$value);
+   |                                       ^^^^^^^
+...
+LL |     info_span!("simplex.voter.view", view = ?view);
+   |     ---------------------------------------------- in this macro invocation
+   |
+   = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
+   = note: this error originates in the macro `info_span` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: integer-valued `types::Epoch` recorded as a tracing span field via Display (%); record it as an integer
+  --> $DIR/main.rs:9:41
+   |
+LL |         let _ = tracing::field::display(&$value);
+   |                                         ^^^^^^^
+...
+LL |     info_span!("simplex.voter.view", epoch = %epoch);
+   |     ------------------------------------------------ in this macro invocation
+   |
+   = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
+   = note: this error originates in the macro `info_span` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: integer-valued `types::Height` recorded as a tracing span field via Display (%); record it as an integer
+  --> $DIR/main.rs:9:41
+   |
+LL |         let _ = tracing::field::display(&$value);
+   |                                         ^^^^^^^
+...
+LL |     info_span!("simplex.voter.view", height = %height);
+   |     -------------------------------------------------- in this macro invocation
+   |
+   = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
+   = note: this error originates in the macro `info_span` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: integer-valued `u64` recorded as a tracing span field via Display (%); record it as an integer
+  --> $DIR/main.rs:9:41
+   |
+LL |         let _ = tracing::field::display(&$value);
+   |                                         ^^^^^^^
+...
+LL |     info_span!("simplex.voter.view", count = %count);
+   |     ------------------------------------------------ in this macro invocation
+   |
+   = help: record it as an integer, e.g. `field = value.traced()`; `tracing-opentelemetry` records Display/Debug span fields (and even a bare `u64`) as strings, which TraceQL cannot range-query or sort numerically
+   = note: this error originates in the macro `info_span` (in Nightly b$DIRlds, run with -Z macro-backtrace for more info)
+
+error: aborting due to 5 previous errors
+

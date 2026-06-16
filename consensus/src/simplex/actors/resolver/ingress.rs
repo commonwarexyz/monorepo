@@ -7,6 +7,7 @@ use bytes::Bytes;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
 use commonware_resolver::{p2p::Producer, Consumer, Delivery};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{channel::oneshot, sequence::U64};
 use std::collections::VecDeque;
 use tracing::{info_span, Span};
@@ -180,7 +181,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a certificate.
     pub fn updated(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(MailboxMessage::Certificate {
-            span: info_span!("simplex.resolver.mailbox.updated", epoch = %certificate.epoch(), view = %certificate.view()),
+            span: info_span!(
+                "simplex.resolver.mailbox.updated",
+                epoch = certificate.epoch().traced(),
+                view = certificate.view().traced()
+            ),
             certificate,
         });
     }
@@ -188,7 +193,12 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Notify the resolver of a certification result.
     pub fn certified(&mut self, round: Rnd, success: bool) {
         let _ = self.sender.enqueue(MailboxMessage::Certified {
-            span: info_span!("simplex.resolver.mailbox.certified", epoch = %round.epoch(), view = %round.view(), success),
+            span: info_span!(
+                "simplex.resolver.mailbox.certified",
+                epoch = round.epoch().traced(),
+                view = round.view().traced(),
+                success
+            ),
             round,
             success,
         });

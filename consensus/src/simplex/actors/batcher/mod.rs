@@ -76,8 +76,9 @@ mod tests {
     };
     use commonware_parallel::Sequential;
     use commonware_runtime::{
-        deterministic, telemetry::traces::collector::TraceStorage, Clock, Metrics as _, Quota,
-        Runner, Supervisor as _,
+        deterministic,
+        telemetry::traces::{collector::TraceStorage, TracedExt as _},
+        Clock, Metrics as _, Quota, Runner, Supervisor as _,
     };
     use commonware_utils::{ordered::Set, sync::Mutex, NZUsize};
     use std::{num::NonZeroU32, sync::Arc, time::Duration};
@@ -648,8 +649,12 @@ mod tests {
             // (so we can test leader proposal forwarding when vote arrives from network)
             let view = View::new(1);
             let leader = Participant::new(1);
-            let span =
-                tracing::info_span!(parent: None, "simplex.voter.view", %epoch, %view);
+            let span = tracing::info_span!(
+                parent: None,
+                "simplex.voter.view",
+                epoch = epoch.traced(),
+                view = view.traced()
+            );
             batcher_mailbox.update(span, view, leader, View::zero(), None);
 
             // Build proposal and votes

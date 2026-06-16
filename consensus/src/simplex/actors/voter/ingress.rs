@@ -8,6 +8,7 @@ use crate::{
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{certificate::Scheme, Digest};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use std::collections::VecDeque;
 use tracing::{info_span, Span};
 
@@ -206,7 +207,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a leader's proposal.
     pub fn proposal(&mut self, proposal: Proposal<D>) {
         let _ = self.sender.enqueue(Message::Proposal {
-            span: info_span!("simplex.voter.mailbox.proposal", epoch = %proposal.epoch(), view = %proposal.view()),
+            span: info_span!(
+                "simplex.voter.mailbox.proposal",
+                epoch = proposal.epoch().traced(),
+                view = proposal.view().traced()
+            ),
             proposal,
         });
     }
@@ -214,7 +219,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Signal that the given round should timeout (if not already).
     pub fn timeout(&mut self, round: Rnd, reason: TimeoutReason) {
         let _ = self.sender.enqueue(Message::Timeout {
-            span: info_span!("simplex.voter.mailbox.timeout", epoch = %round.epoch(), view = %round.view()),
+            span: info_span!(
+                "simplex.voter.mailbox.timeout",
+                epoch = round.epoch().traced(),
+                view = round.view().traced()
+            ),
             round,
             reason,
         });
@@ -223,7 +232,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a recovered certificate.
     pub fn recovered(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(Message::Verified {
-            span: info_span!("simplex.voter.mailbox.recovered", epoch = %certificate.epoch(), view = %certificate.view()),
+            span: info_span!(
+                "simplex.voter.mailbox.recovered",
+                epoch = certificate.epoch().traced(),
+                view = certificate.view().traced()
+            ),
             certificate,
             from_resolver: false,
         });
@@ -232,7 +245,11 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
     /// Send a resolved certificate.
     pub fn resolved(&mut self, certificate: Certificate<S, D>) {
         let _ = self.sender.enqueue(Message::Verified {
-            span: info_span!("simplex.voter.mailbox.resolved", epoch = %certificate.epoch(), view = %certificate.view()),
+            span: info_span!(
+                "simplex.voter.mailbox.resolved",
+                epoch = certificate.epoch().traced(),
+                view = certificate.view().traced()
+            ),
             certificate,
             from_resolver: true,
         });

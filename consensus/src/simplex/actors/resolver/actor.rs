@@ -21,7 +21,10 @@ use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
 use commonware_resolver::{p2p, Fetch, Resolver as _};
-use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_runtime::{
+    spawn_cell, telemetry::traces::TracedExt as _, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner,
+};
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
@@ -135,8 +138,8 @@ impl<
                     parent: message.span(),
                     "simplex.resolver.process",
                     operation = message.name(),
-                    epoch = %self.epoch,
-                    view = %message.view()
+                    epoch = self.epoch.traced(),
+                    view = message.view().traced()
                 );
                 let _guard = span.entered();
                 match message {
@@ -193,9 +196,9 @@ impl<
     ) {
         let span = info_span!(
             "simplex.resolver.fetch",
-            epoch = %self.epoch,
-            cause = %cause,
-            view = %view,
+            epoch = self.epoch.traced(),
+            cause = cause.traced(),
+            view = view.traced(),
             reason = reason.as_str()
         );
         let _ = resolver.fetch(Fetch {
@@ -305,16 +308,16 @@ impl<
                 let span = info_span!(
                     parent: span,
                     "simplex.resolver.deliver",
-                    epoch = %self.epoch,
-                    view = %view
+                    epoch = self.epoch.traced(),
+                    view = view.traced()
                 );
                 let _guard = span.entered();
 
                 // Validate incoming message
                 let validate = info_span!(
                     "simplex.resolver.validate",
-                    epoch = %self.epoch,
-                    view = %view
+                    epoch = self.epoch.traced(),
+                    view = view.traced()
                 );
                 let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
                     // Resolver will block any peers that send invalid responses, so
@@ -327,9 +330,9 @@ impl<
                 // Notify voter as soon as possible
                 let resolved = info_span!(
                     "simplex.resolver.resolve",
-                    epoch = %self.epoch,
-                    view = %view,
-                    certificate_view = %parsed.view()
+                    epoch = self.epoch.traced(),
+                    view = view.traced(),
+                    certificate_view = parsed.view().traced()
                 );
                 resolved.in_scope(|| voter.resolved(parsed.clone()));
 
@@ -340,8 +343,8 @@ impl<
             HandlerMessage::Produce { view, response } => {
                 let span = info_span!(
                     "simplex.resolver.produce",
-                    epoch = %self.epoch,
-                    view = %view
+                    epoch = self.epoch.traced(),
+                    view = view.traced()
                 );
                 let _guard = span.entered();
 

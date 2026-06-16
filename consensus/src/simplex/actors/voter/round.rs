@@ -7,6 +7,7 @@ use crate::{
     types::{Participant, Round as Rnd},
 };
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{futures::Aborter, ordered::Quorum};
 use std::{
     mem::replace,
@@ -70,8 +71,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         let span = info_span!(
             parent: None,
             "simplex.voter.view",
-            epoch = %round.epoch(),
-            view = %round.view()
+            epoch = round.epoch().traced(),
+            view = round.view().traced()
         );
         Self {
             start,

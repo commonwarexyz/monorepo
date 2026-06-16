@@ -13,6 +13,7 @@ use crate::{
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{
     ordered::{Quorum, Set},
     N3f1,
@@ -324,7 +325,7 @@ impl<
         self.verifier.ready_notarizes()
     }
 
-    #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all, fields(epoch = %self.round.epoch(), view = %self.round.view()))]
+    #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
     pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -341,7 +342,7 @@ impl<
         self.verifier.ready_nullifies()
     }
 
-    #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all, fields(epoch = %self.round.epoch(), view = %self.round.view()))]
+    #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
     pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -358,7 +359,7 @@ impl<
         self.verifier.ready_finalizes()
     }
 
-    #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all, fields(epoch = %self.round.epoch(), view = %self.round.view()))]
+    #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
     pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -444,8 +445,12 @@ impl<
         if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let _span =
-            info_span!("simplex.batcher.try_construct_notarization", epoch = %self.round.epoch(), view = %self.round.view()).entered();
+        let _span = info_span!(
+            "simplex.batcher.try_construct_notarization",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        )
+        .entered();
         let notarization =
             Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
         self.set_notarization(notarization.clone());
@@ -466,8 +471,12 @@ impl<
         if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let _span =
-            info_span!("simplex.batcher.try_construct_nullification", epoch = %self.round.epoch(), view = %self.round.view()).entered();
+        let _span = info_span!(
+            "simplex.batcher.try_construct_nullification",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        )
+        .entered();
         let nullification =
             Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
         self.set_nullification(nullification.clone());
@@ -488,8 +497,12 @@ impl<
         if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
-        let _span =
-            info_span!("simplex.batcher.try_construct_finalization", epoch = %self.round.epoch(), view = %self.round.view()).entered();
+        let _span = info_span!(
+            "simplex.batcher.try_construct_finalization",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        )
+        .entered();
         let finalization =
             Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
         self.set_finalization(finalization.clone());

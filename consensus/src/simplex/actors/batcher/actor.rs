@@ -19,9 +19,12 @@ use commonware_p2p::{utils::codec::WrappedReceiver, Blocker, Receiver, Recipient
 use commonware_parallel::Strategy;
 use commonware_runtime::{
     spawn_cell,
-    telemetry::metrics::{
-        histogram::{self, Buckets},
-        Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
+    telemetry::{
+        metrics::{
+            histogram::{self, Buckets},
+            Counter, CounterFamily, GaugeExt, GaugeFamily, Histogram, MetricsExt as _,
+        },
+        traces::TracedExt as _,
     },
     Clock, ContextCell, Handle, Metrics, Spawner,
 };
@@ -293,8 +296,8 @@ where
                         parent: parent,
                         "simplex.batcher.process",
                         operation,
-                        epoch = %epoch,
-                        view = %view
+                        epoch = epoch.traced(),
+                        view = view.traced()
                     )
                 };
                 match message {
@@ -435,8 +438,8 @@ where
                     parent: parent,
                     "simplex.batcher.verify_certificate",
                     kind,
-                    epoch = %self.epoch,
-                    view = %view
+                    epoch = self.epoch.traced(),
+                    view = view.traced()
                 );
                 let _guard = span.entered();
 
@@ -597,7 +600,7 @@ where
 
                     // Process verified votes
                     let batch = voters.len() + failed.len();
-                    trace!(view = %updated_view, batch, "batch verified votes");
+                    trace!(%updated_view, batch, "batch verified votes");
                     self.verified.inc_by(batch as u64);
                     self.batch_size.observe(batch as f64);
 
@@ -630,7 +633,7 @@ where
                         round.try_construct_notarization(&self.scheme, &self.strategy)
                     })
                 {
-                    debug!(view = %updated_view, "constructed notarization, forwarding to voter");
+                    debug!(%updated_view, "constructed notarization, forwarding to voter");
 
                     // Forward notarization to voter
                     voter.recovered(Certificate::Notarization(notarization));
@@ -640,7 +643,7 @@ where
                         round.try_construct_nullification(&self.scheme, &self.strategy)
                     })
                 {
-                    debug!(view = %updated_view, "constructed nullification, forwarding to voter");
+                    debug!(%updated_view, "constructed nullification, forwarding to voter");
                     voter.recovered(Certificate::Nullification(nullification));
                 }
                 if let Some(finalization) =
@@ -648,7 +651,7 @@ where
                         round.try_construct_finalization(&self.scheme, &self.strategy)
                     })
                 {
-                    debug!(view = %updated_view, "constructed finalization, forwarding to voter");
+                    debug!(%updated_view, "constructed finalization, forwarding to voter");
                     voter.recovered(Certificate::Finalization(finalization));
                 }
                 drop(_guard);
