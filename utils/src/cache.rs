@@ -71,15 +71,9 @@ use core::{
     num::NonZeroUsize,
     sync::atomic::{AtomicBool, Ordering},
 };
-#[cfg(not(feature = "std"))]
 use hashbrown::HashMap;
-#[cfg(feature = "std")]
-use std::collections::HashMap;
 
-#[cfg(feature = "std")]
 type Hasher = ahash::RandomState;
-#[cfg(not(feature = "std"))]
-type Hasher = hashbrown::DefaultHashBuilder;
 
 /// A single cache slot.
 ///
@@ -95,8 +89,7 @@ struct Slot<K, V> {
 /// (second-chance) replacement policy.
 ///
 /// See the [module documentation](self) for the policy, allocation reuse, and
-/// concurrency details. The key index uses a randomly seeded ahash hasher under
-/// `std` and hashbrown's default hasher under `no_std`.
+/// concurrency details.
 pub struct Clock<K, V> {
     /// Maps each live key to the index of its slot in `slots`.
     ///

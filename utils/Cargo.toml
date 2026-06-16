@@ -14,7 +14,7 @@ documentation = "https://docs.rs/commonware-utils"
 workspace = true
 
 [dependencies]
-ahash = { workspace = true, optional = true }
+ahash = { workspace = true, features = ["no-rng"] }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 cfg-if.workspace = true
@@ -39,6 +39,12 @@ zeroize.workspace = true
 # Enable "js" feature when WASM is target
 version = "0.2.15"
 features = ["js"]
+
+# Enable the wasm_js backend for ahash's getrandom 0.3 dependency on WASM
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom_v3]
+package = "getrandom"
+version = "0.3"
+features = ["wasm_js"]
 
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
