@@ -21,7 +21,7 @@ mod freelist;
 mod pool;
 
 use buffer::{
-    allocate_aligned, owner_from_bytes, owner_from_vec, try_adopt_vec, OwnerRef, PooledBuffer,
+    allocate_aligned_mut, owner_from_bytes, owner_from_vec, try_adopt_vec, OwnerRef, PooledBuffer,
 };
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
@@ -114,6 +114,7 @@ impl std::fmt::Debug for IoBuf {
 }
 
 impl Clone for IoBuf {
+    #[inline]
     fn clone(&self) -> Self {
         // SAFETY: cloning an immutable view retains the shared owner when one
         // exists. Static views have an empty owner and need no lifecycle work.
@@ -419,6 +420,19 @@ impl Buf for IoBuf {
             return Bytes::from(std::mem::take(self));
         }
 
+        // External-backed views slice the inner Bytes directly: one inner
+        // refcount clone, instead of cloning and then dropping our owner
+        // through the shared-decrement path.
+        if self.owner.is_external() {
+            // SAFETY: the external owner is live while `self` holds its
+            // reference, and the view prefix lies within the inner `Bytes`
+            // range by invariant, as `slice_ref` requires.
+            let inner = unsafe { self.owner.external_bytes() };
+            let bytes = inner.slice_ref(&self.as_ref()[..len]);
+            self.advance(len);
+            return bytes;
+        }
+
         let drained = Self {
             ptr: self.ptr,
             len,
@@ -611,7 +625,7 @@ impl std::fmt::Debug for IoBufMut {
 impl Drop for IoBufMut {
     fn drop(&mut self) {
         // SAFETY: mutable buffers uniquely own their allocation.
-        unsafe { self.owner.release_unique_mut() };
+        unsafe { self.owner.release_unique_mut_at(self.ptr, self.cap) };
     }
 }
 
@@ -642,7 +656,7 @@ impl IoBufMut {
         if capacity == 0 {
             return Self::default();
         }
-        let (ptr, owner) = allocate_aligned(capacity, alignment.get(), false);
+        let (ptr, owner) = allocate_aligned_mut(capacity, alignment.get(), false);
         Self {
             ptr,
             len: 0,
@@ -658,7 +672,7 @@ impl IoBufMut {
         if len == 0 {
             return Self::default();
         }
-        let (ptr, owner) = allocate_aligned(len, alignment.get(), true);
+        let (ptr, owner) = allocate_aligned_mut(len, alignment.get(), true);
         Self {
             ptr,
             len,
@@ -743,13 +757,19 @@ impl IoBufMut {
     /// immediately so empty immutable views never pin pool memory.
     #[inline]
     pub fn freeze(self) -> IoBuf {
-        let me = ManuallyDrop::new(self);
+        let mut me = ManuallyDrop::new(self);
         if me.len == 0 {
             // SAFETY: mutable buffers uniquely own their allocation. Empty
             // freeze releases it so empty immutable views do not pin pool memory.
-            unsafe { me.owner.release_unique_mut() };
+            unsafe { me.owner.release_unique_mut_at(me.ptr, me.cap) };
             return IoBuf::default();
         }
+        let ptr = me.ptr;
+        let cap = me.cap;
+        // SAFETY: mutable buffers uniquely own their allocation. A reserved
+        // front heap header must be initialized before the owner is shared by
+        // the immutable handle.
+        unsafe { me.owner.ensure_heap_header_for_mut(ptr, cap) };
         IoBuf {
             ptr: me.ptr,
             len: me.len,
@@ -2845,6 +2865,25 @@ mod tests {
         assert!(pooled.is_empty());
         pooled.put_slice(b"x");
         assert!(!pooled.is_empty());
+    }
+
+    #[test]
+    fn test_iobufmut_low_alignment_freeze_after_advance_recovers_capacity() {
+        let mut buf = IoBufMut::with_capacity(16);
+        assert_eq!(buf.capacity(), 16);
+        buf.put_slice(b"abcdefghijklmnop");
+        buf.advance(3);
+        assert_eq!(buf.as_ref(), b"defghijklmnop");
+        assert_eq!(buf.capacity(), 13);
+
+        let frozen = buf.freeze();
+        assert_eq!(frozen.as_ref(), b"defghijklmnop");
+
+        let recovered = frozen
+            .try_into_mut()
+            .expect("unique low-alignment buffer should recover mutability");
+        assert_eq!(recovered.as_ref(), b"defghijklmnop");
+        assert_eq!(recovered.capacity(), 13);
     }
 
     #[test]
