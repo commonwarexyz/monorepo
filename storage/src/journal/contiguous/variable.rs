@@ -227,6 +227,8 @@ impl<C> Config<C> {
 /// [rocksdb](https://github.com/facebook/rocksdb/blob/0c533e61bc6d89fdf1295e8e0bcee4edb3aef401/include/rocksdb/options.h#L441-L445),
 /// the first invalid data read will be considered the new end of the journal (and the underlying
 /// blob will be truncated to the last valid item). Repair is performed during init.
+/// Incomplete trailing frames are repaired as torn writes; complete frames whose payloads fail to
+/// decode are treated as corruption.
 ///
 /// # Invariants
 ///
@@ -1835,7 +1837,10 @@ impl<B: Blob, V: CodecShared> replay::Source for TailReplayState<B, V> {
             self.positions.start += 1;
             local += total;
         }
-        self.byte_offset += local as u64;
+        self.byte_offset = self
+            .byte_offset
+            .checked_add(local as u64)
+            .ok_or(Error::OffsetOverflow)?;
         if !batch.is_empty() || self.positions.is_empty() {
             return Ok(());
         }
@@ -1858,9 +1863,13 @@ impl<B: Blob, V: CodecShared> replay::Source for TailReplayState<B, V> {
                 self.positions.start, self.positions.end
             )));
         };
+        let payload_offset = self
+            .byte_offset
+            .checked_add(varint_len as u64)
+            .ok_or(Error::OffsetOverflow)?;
         let bufs = self
             .reader
-            .read_at(self.byte_offset + varint_len as u64, item_size)
+            .read_at(payload_offset, item_size)
             .await
             .map_err(Error::Runtime)?;
         let item = decode_item::<V>(bufs, &self.codec_config, self.compressed)?;
