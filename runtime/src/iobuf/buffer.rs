@@ -341,9 +341,9 @@ impl OwnerRef {
     ///
     /// The refcount uses `1` as the reusable sentinel (see the module docs),
     /// so the unshared fast path is a single Acquire load followed by release:
-    /// no read-modify-write. The decrement path for shared owners is outlined
-    /// in [`Self::drop_shared_slow`]: the lifecycle hot loop drops unshared
-    /// handles, and a shared decrement happens at most once per clone.
+    /// no read-modify-write. Shared owners pay one inline Release decrement.
+    /// Only the rare race where another drop reaches the sentinel between the
+    /// load and the decrement is outlined in [`Self::drop_shared_race_final`].
     ///
     /// # Safety
     ///
@@ -355,53 +355,50 @@ impl OwnerRef {
             return;
         }
 
-        // Acquire pairs with the Release decrements in `drop_shared_slow`:
-        // observing 1 means every other handle has already dropped, and their
-        // payload reads happen-before this release.
         // SAFETY: non-empty owners have a valid refcount.
-        if unsafe { self.refs() }.load(Ordering::Acquire) == 1 {
+        let refs = unsafe { self.refs() };
+        // Acquire pairs with the Release decrements below: observing 1 means
+        // every other handle has already dropped, and their payload reads
+        // happen-before this release.
+        if refs.load(Ordering::Acquire) == 1 {
             // SAFETY: this is the final shared owner.
             unsafe { self.release_unique() };
             return;
         }
 
-        // SAFETY: same contract as this method; the owner is shared.
-        unsafe { self.drop_shared_slow() };
-    }
-
-    /// Decrements a shared refcount and releases on the final drop.
-    ///
-    /// Reached when the fast-path load observed a shared count. If every
-    /// other handle drops between that load and this decrement, the decrement
-    /// itself hits zero (`old == 1`): this drop is then the final owner, so
-    /// it restores the sentinel and releases. That branch is reachable only
-    /// under true concurrency (covered by loom).
-    ///
-    /// # Safety
-    ///
-    /// `self` must be a live non-empty owner with one live reference owned by
-    /// the caller, which this call consumes.
-    #[cold]
-    #[inline(never)]
-    unsafe fn drop_shared_slow(self) {
-        // SAFETY: guaranteed by the caller.
-        let refs = unsafe { self.refs() };
-        // Release pairs with the Acquire load in `drop_shared` (and the
-        // Acquire fence below): it publishes this handle's payload reads to
-        // whichever drop ends up releasing the allocation.
+        // Release publishes this handle's payload reads to whichever drop ends
+        // up releasing the allocation. This is the common shared-clone drop
+        // path, so keep it inline instead of paying an outlined call.
         let old = refs.fetch_sub(1, Ordering::Release);
         debug_assert!(old >= 1);
         if old == 1 {
-            // Acquire fence pairs with the Release decrements of all other
-            // handles, ordering their payload accesses before the release.
-            fence(Ordering::Acquire);
-            // Restore the sentinel before releasing. No other handle exists,
-            // so Relaxed is sufficient; pooled reuse synchronizes through the
-            // freelist's own Release/Acquire bit transitions.
-            refs.store(1, Ordering::Relaxed);
             // SAFETY: this drop won the final-owner race.
-            unsafe { self.release_unique() };
+            unsafe { self.drop_shared_race_final(refs) };
         }
+    }
+
+    /// Releases after a shared-drop race made this handle final.
+    ///
+    /// Reached when the fast-path load observed a shared count, but every
+    /// other handle dropped before this handle's decrement. That branch is
+    /// reachable only under true concurrency (covered by loom), so it stays
+    /// outlined and cold.
+    ///
+    /// # Safety
+    ///
+    /// `self` must be the final owner and `refs` must be this owner's refcount.
+    #[cold]
+    #[inline(never)]
+    unsafe fn drop_shared_race_final(self, refs: &AtomicUsize) {
+        // Acquire fence pairs with the Release decrements of all other
+        // handles, ordering their payload accesses before the release.
+        fence(Ordering::Acquire);
+        // Restore the sentinel before releasing. No other handle exists, so
+        // Relaxed is sufficient; pooled reuse synchronizes through the
+        // freelist's own Release/Acquire bit transitions.
+        refs.store(1, Ordering::Relaxed);
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.release_unique() };
     }
 
     /// Releases a uniquely-owned allocation.
@@ -513,7 +510,7 @@ impl OwnerRef {
     /// Sound for the same reason `Arc::get_mut` is: a count of 1 observed
     /// through Acquire means no other handle exists, and no thread can clone
     /// without a handle. The Acquire load pairs with the Release decrement in
-    /// [`Self::drop_shared_slow`] so the last dropper's payload reads
+    /// [`Self::drop_shared`] so the last dropper's payload reads
     /// happen-before any mutation that follows a `true` result.
     ///
     /// # Safety
@@ -1566,7 +1563,7 @@ mod loom_tests {
     };
 
     // Models the owner refcount protocol under true concurrency. The
-    // restore-sentinel branch in `drop_shared_slow` (a decrement that hits
+    // restore-sentinel branch in `drop_shared_race_final` (a decrement that hits
     // zero because another thread decremented between this thread's Acquire
     // load and its fetch_sub) is unreachable single-threaded, so loom is the
     // only coverage it has.
