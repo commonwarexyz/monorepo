@@ -111,7 +111,7 @@
 use super::{
     blobs::{Blobs, Handle, Partition, Snapshot},
     checkpoint::Checkpoint,
-    replay::ReplaySource,
+    replay::{self, Source as _},
 };
 use crate::{
     journal::{
@@ -1272,7 +1272,7 @@ struct BlobReplayState<B: Blob, A> {
     _marker: PhantomData<A>,
 }
 
-impl<B: Blob, A: CodecFixedShared> ReplaySource for BlobReplayState<B, A> {
+impl<B: Blob, A: CodecFixedShared> replay::Source for BlobReplayState<B, A> {
     type Item = A;
 
     /// Decode every whole item currently buffered. Positions are consecutive, so overflow is
@@ -1310,7 +1310,7 @@ struct TailReplayState<B: Blob, A> {
     _marker: PhantomData<A>,
 }
 
-impl<B: Blob, A: CodecFixedShared> ReplaySource for TailReplayState<B, A> {
+impl<B: Blob, A: CodecFixedShared> replay::Source for TailReplayState<B, A> {
     type Item = A;
 
     /// Read and decode up to `items_per_batch` fixed-size items from the tail.
