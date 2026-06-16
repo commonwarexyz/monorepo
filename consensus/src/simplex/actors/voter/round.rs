@@ -7,8 +7,9 @@ use crate::{
     },
     types::{Participant, Round as Rnd},
 };
+use commonware_codec::Encode as _;
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
-use commonware_runtime::telemetry::traces::TracedExt as _;
+use commonware_runtime::telemetry::traces::{correlate, TracedExt as _};
 use commonware_utils::{futures::Aborter, ordered::Quorum};
 use std::{
     mem::replace,
@@ -192,12 +193,17 @@ impl<S: Scheme, D: Digest> Round<S, D> {
     pub fn open_span(&mut self) {
         let round = self.round;
         self.span.open(|| {
-            info_span!(
+            let span = info_span!(
                 parent: None,
                 "simplex.voter.view",
                 epoch = round.epoch().traced(),
                 view = round.view().traced()
-            )
+            );
+
+            // Share one trace id across instances for this (epoch, view) so
+            // multi-instance trace tooling can correlate the view across nodes
+            correlate(&span, round.encode());
+            span
         });
     }
 
