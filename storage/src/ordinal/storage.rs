@@ -176,8 +176,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 }
             }
 
-            // Zero records the committed bits do not mark set so a partial resize cannot
-            // resurrect them
+            // Replay ignores records outside the committed bits, but recovery clears them so
+            // stored blobs match the checkpointed view
             let empty = vec![0u8; Record::<V>::SIZE];
             for (section, (blob, size)) in &blobs {
                 // A section with no bitmap requires every record, so nothing is cleared

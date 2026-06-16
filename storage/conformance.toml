@@ -1,6 +1,6 @@
 ["commonware_storage::archive::conformance::ArchiveImmutable"]
 n_cases = 128
-hash = "09d55a9a01a3dfef029ebd4d5f22d1be8b232e82a9ec23931e860b01cb527dd7"
+hash = "76d177808be5f0485ea3de5ccdb52f876c664b29991e3ae0186fe51aa9e0fb71"
 
 ["commonware_storage::archive::conformance::ArchivePrunable"]
 n_cases = 128
