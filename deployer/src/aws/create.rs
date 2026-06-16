@@ -37,7 +37,6 @@ struct ToolUrls {
     tempo: String,
     node_exporter: String,
     promtail: String,
-    libjemalloc: String,
     logrotate: String,
     fonts_dejavu_mono: String,
     fonts_dejavu_core: String,
@@ -307,7 +306,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
         let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 13] =
+             logrotate_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 12] =
             try_join_all([
                 cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
                 cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
@@ -316,7 +315,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 cache_tool(tempo_bin_s3_key(TEMPO_VERSION, *arch), tempo_download_url(TEMPO_VERSION, *arch)),
                 cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION, *arch), node_exporter_download_url(NODE_EXPORTER_VERSION, *arch)),
                 cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch)),
-                cache_tool(libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch), libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch)),
                 cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
                 cache_tool(fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION, *arch), fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION, *arch)),
                 cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
@@ -336,7 +334,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 tempo: tempo_url,
                 node_exporter: node_exporter_url,
                 promtail: promtail_url,
-                libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
                 fonts_dejavu_mono: fonts_dejavu_mono_url.clone(),
                 fonts_dejavu_core: fonts_dejavu_core_url.clone(),
@@ -865,7 +862,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     // Cache binary_service per architecture
     let mut binary_service_urls_by_arch: HashMap<Architecture, String> = HashMap::new();
     for arch in &architectures_needed {
-        let binary_service_content = binary_service(*arch);
+        let binary_service_content = binary_service();
         let temp_path = tag_directory.join(format!("binary-{}.service", arch.as_str()));
         std::fs::write(&temp_path, &binary_service_content)?;
         let binary_service_url = cache_and_presign(
@@ -1072,7 +1069,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
                     pyroscope_service: pyroscope_agent_service_url.clone(),
                     pyroscope_timer: pyroscope_agent_timer_url.clone(),
-                    libjemalloc_deb: tool_urls.libjemalloc.clone(),
                     logrotate_deb: tool_urls.logrotate.clone(),
                     unzip_deb: tool_urls.unzip.clone(),
                 },
