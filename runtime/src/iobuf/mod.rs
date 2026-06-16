@@ -66,7 +66,10 @@ pub const fn cache_line_size() -> usize {
 
 #[cfg(feature = "bench")]
 pub mod bench {
-    pub use super::{buffer::PooledBuffer, freelist::Freelist};
+    pub use super::{
+        buffer::{PooledBuffer, PooledSlot},
+        freelist::Freelist,
+    };
 }
 
 /// Immutable byte buffer.
@@ -695,11 +698,11 @@ impl IoBufMut {
     ///
     /// # Safety
     ///
-    /// `buffer` must have an initialized live lease in its pooled header.
+    /// `buffer` must have an initialized live lease in its pooled slot.
     #[inline]
     pub(crate) unsafe fn from_pooled_parts(buffer: PooledBuffer) -> Self {
         // SAFETY: pooled buffers returned by the pool have initialized stable
-        // header fields.
+        // slot fields.
         let cap = unsafe { buffer.capacity() };
         let ptr = buffer.data_ptr();
         // SAFETY: guaranteed by the caller.

@@ -25,7 +25,7 @@
 //! 0 (entire value)        EMPTY     no owner; empty views and 'static slices
 //! header ptr | 0b01       ALIGNED   tail HeapHeader; native aligned
 //!                                   allocations and adopted vecs
-//! header ptr | 0b10       POOLED    tail PooledHeader; pool-tracked buffers
+//! slot ptr   | 0b10       POOLED    PooledSlot side-table entry
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
 //!
@@ -39,15 +39,33 @@
 //!
 //! # Allocation layouts
 //!
-//! Native runtime allocations (aligned and pooled) place the owner header at
-//! the tail of the same allocation that stores data when the requested data
-//! alignment is larger than the header's own alignment:
+//! Native heap allocations place the owner header at the tail of the same
+//! allocation that stores data when the requested data alignment is larger than
+//! the header's own alignment:
 //!
 //! ```text
 //! [ usable data bytes ............ ][ padding ][ owner header ]
 //! ^                                            ^
 //! data base (alignment preserved)              OwnerRef target
 //! ```
+//!
+//! Pooled allocations keep their owner metadata out of the data allocation.
+//! Each size class owns a cache-line-padded side table with one [`PooledSlot`]
+//! per possible tracked buffer:
+//!
+//! ```text
+//! SizeClass slots: [ refs | lease | data | capacity | slot | routing ... ]
+//!                    ^
+//!                    OwnerRef target
+//!
+//! data allocation:  [ usable data bytes ............ ]
+//!                    ^
+//!                    data base
+//! ```
+//!
+//! The freelist bitmap records which slots are globally available. The slot
+//! entry is the single state record for refcounting, class liveness, data
+//! pointer, and return routing.
 //!
 //! Low-alignment mutable heap allocations use the v2 front-block layout
 //! instead:
@@ -153,14 +171,14 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 // type is at least 4-byte aligned, including on 32-bit targets where
 // `AtomicUsize` is 4 bytes.
 const _: () = assert!(align_of::<HeapHeader>() >= 4);
-const _: () = assert!(align_of::<PooledHeader>() >= 4);
+const _: () = assert!(align_of::<PooledSlot>() >= 4);
 const _: () = assert!(align_of::<ExternalOwner>() >= 4);
 const _: () = assert!(size_of::<HeapHeader>() % align_of::<HeapHeader>() == 0);
 
 // `OwnerRef::refs` reads the refcount directly through the untagged pointer,
 // which is only sound if every owner type stores it at offset 0.
 const _: () = assert!(offset_of!(HeapHeader, refs) == 0);
-const _: () = assert!(offset_of!(PooledHeader, refs) == 0);
+const _: () = assert!(offset_of!(PooledSlot, refs) == 0);
 const _: () = assert!(offset_of!(ExternalOwner, refs) == 0);
 
 /// Tagged reference to an allocation owner.
@@ -220,16 +238,16 @@ impl OwnerRef {
         Self(base.as_ptr() as usize | OWNER_ALIGNED)
     }
 
-    /// Creates a pooled owner ref from a tail header pointer.
+    /// Creates a pooled owner ref from a side-table slot pointer.
     ///
     /// # Safety
     ///
-    /// `header` must point to a live [`PooledHeader`] whose low tag bits are
-    /// zero and whose lease is initialized.
+    /// `slot` must point to a live [`PooledSlot`] whose low tag bits are zero
+    /// and whose lease is initialized.
     #[inline(always)]
-    pub(crate) unsafe fn from_pooled(header: NonNull<PooledHeader>) -> Self {
-        debug_assert_eq!(header.as_ptr() as usize & OWNER_TAG_MASK, 0);
-        Self(header.as_ptr() as usize | OWNER_POOLED)
+    pub(crate) unsafe fn from_pooled(slot: NonNull<PooledSlot>) -> Self {
+        debug_assert_eq!(slot.as_ptr() as usize & OWNER_TAG_MASK, 0);
+        Self(slot.as_ptr() as usize | OWNER_POOLED)
     }
 
     /// Creates an external owner ref.
@@ -256,16 +274,16 @@ impl OwnerRef {
         unsafe { NonNull::new_unchecked((self.0 & !OWNER_TAG_MASK) as *mut HeapHeader) }
     }
 
-    /// Returns the pooled header for a pooled owner.
+    /// Returns the side-table slot for a pooled owner.
     ///
     /// # Safety
     ///
     /// `self` must be a live pooled owner.
     #[inline(always)]
-    unsafe fn pooled(self) -> NonNull<PooledHeader> {
+    unsafe fn pooled(self) -> NonNull<PooledSlot> {
         debug_assert!(self.is_pooled());
-        // SAFETY: pooled owner refs are created from non-null header pointers.
-        unsafe { NonNull::new_unchecked((self.0 & !OWNER_TAG_MASK) as *mut PooledHeader) }
+        // SAFETY: pooled owner refs are created from non-null slot pointers.
+        unsafe { NonNull::new_unchecked((self.0 & !OWNER_TAG_MASK) as *mut PooledSlot) }
     }
 
     /// Returns the external owner box pointer.
@@ -598,24 +616,24 @@ struct HeapHeader {
     alloc_align: usize,
 }
 
-/// Tail header for pooled allocations.
+/// Side-table entry for one pooled slot.
 ///
-/// Stable fields (`refs` sentinel, `data_base`, `capacity`, `slot`,
-/// `class_id`, `thread_cache_capacity`) are written once when the freelist
-/// creates the slot and never change as the buffer moves between checked-out,
-/// thread-local, and global-free states. The lease is live only while the
-/// buffer is outside the global freelist.
+/// The owning freelist stores one cache-line-padded slot entry per possible
+/// pooled buffer. Stable fields (`refs` sentinel, `data_base`, `capacity`,
+/// `slot`, `class_id`, `thread_cache_capacity`) are written when the slot is
+/// created and remain associated with that slot until the size class drops.
+/// The lease is live only while the slot is outside the global freelist.
 ///
 /// `class_id` and `thread_cache_capacity` duplicate fields of the owning
 /// `SizeClass` so the buffer-return fast path can route into the right
-/// thread-local cache from the header line alone (already loaded for
-/// `data_base`), without a dependent dereference of the class object.
+/// thread-local cache from the slot line alone, without a dependent dereference
+/// of the class object.
 #[repr(C)]
-pub(crate) struct PooledHeader {
+pub struct PooledSlot {
     /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
     refs: AtomicUsize,
     /// Strong size-class reference; initialized at checkout, consumed at
-    /// return ("lease-in-header").
+    /// return.
     lease: MaybeUninit<SizeClassLease>,
     /// Base address of the usable data region.
     data_base: NonNull<u8>,
@@ -628,6 +646,31 @@ pub(crate) struct PooledHeader {
     class_id: u32,
     /// Per-thread cache capacity of the owning size class.
     thread_cache_capacity: u32,
+}
+
+impl PooledSlot {
+    /// Creates an empty side-table entry for a stable slot id.
+    ///
+    /// The data pointer is filled when the freelist first creates the pooled
+    /// allocation for this slot. Until the slot is created, no free bit points
+    /// at it and no [`PooledBuffer`] may be built from it.
+    #[inline]
+    pub fn new(
+        slot: u32,
+        capacity: usize,
+        class_id: u32,
+        thread_cache_capacity: u32,
+    ) -> Self {
+        Self {
+            refs: AtomicUsize::new(1),
+            lease: MaybeUninit::uninit(),
+            data_base: NonNull::dangling(),
+            capacity,
+            slot,
+            class_id,
+            thread_cache_capacity,
+        }
+    }
 }
 
 /// External owner for caller-supplied [`Bytes`] (and vecs that cannot adopt).
@@ -646,19 +689,16 @@ struct ExternalOwner {
 
 /// A raw pooled allocation handle whose layout is stored by its size class.
 ///
-/// This handle carries the allocation base pointer and its tail-header
-/// pointer. The tail header's stable fields (refcount sentinel, data base,
-/// capacity, slot, class routing) are always initialized; the lease is live
-/// exactly while the buffer is outside the global freelist (checked out or
-/// parked in a thread-local cache). Checkout initializes only the lease field
-/// in place and returns an [`OwnerRef`] to that header; return to the global
-/// freelist consumes it.
+/// This handle is a pointer to the owning side-table slot. The slot stores the
+/// data pointer, stable slot id, capacity, return routing, refcount sentinel,
+/// and optional live lease. Checkout initializes only the lease field in place
+/// and returns an [`OwnerRef`] to that slot; return to the global freelist
+/// consumes the lease.
 ///
 /// `PooledBuffer` has no `Drop`: callers must return it to the originating
 /// freelist or deallocate it with the exact layout used for allocation.
 pub struct PooledBuffer {
-    ptr: NonNull<u8>,
-    header: NonNull<PooledHeader>,
+    slot: NonNull<PooledSlot>,
 }
 
 // SAFETY: `PooledBuffer` is a uniquely-owned raw allocation handle while it is
@@ -671,116 +711,76 @@ unsafe impl Sync for PooledBuffer {}
 impl std::fmt::Debug for PooledBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PooledBuffer")
-            .field("ptr", &self.ptr)
-            .field("header", &self.header)
+            .field("slot", &self.slot)
+            .field("ptr", &self.data_ptr())
             .finish()
     }
 }
 
 impl PooledBuffer {
-    /// Creates a new uninitialized pooled allocation for `layout`.
+    /// Creates a new pooled data allocation for `slot`.
     ///
-    /// `layout` must be the full size-class layout, including usable bytes,
-    /// tail padding, and [`PooledHeader`] (see [`pooled_layout`]).
-    ///
-    /// # Panics
-    ///
-    /// Panics if `layout` cannot host an aligned tail [`PooledHeader`]: the
-    /// size must cover the header, the header must land on its alignment, and
-    /// the layout alignment must be at least the header alignment. This is a
-    /// safety boundary, not a convenience check: a misaligned header would
-    /// make the later field writes undefined behavior, and a header address
-    /// with nonzero low tag bits would be corrupted by owner-tag packing.
-    #[inline]
-    pub fn new(layout: Layout) -> Self {
-        assert_valid_pooled_layout(layout);
-        // SAFETY: layout is valid and non-zero sized (asserted above).
-        let ptr = unsafe { alloc(layout) };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        // SAFETY: layout is a valid full pooled layout (asserted above).
-        let header = unsafe { pooled_header_for_layout(ptr, layout) };
-        Self { ptr, header }
-    }
-
-    /// Creates a new zero-initialized pooled allocation for `layout`.
-    ///
-    /// # Panics
-    ///
-    /// Panics under the same conditions as [`Self::new`].
-    #[inline]
-    pub fn new_zeroed(layout: Layout) -> Self {
-        assert_valid_pooled_layout(layout);
-        // SAFETY: layout is valid and non-zero sized (asserted above).
-        let ptr = unsafe { alloc_zeroed(layout) };
-        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-        // SAFETY: layout is a valid full pooled layout (asserted above).
-        let header = unsafe { pooled_header_for_layout(ptr, layout) };
-        Self { ptr, header }
-    }
-
-    /// Initializes invariant pooled header fields for a newly-created slot.
-    ///
-    /// This writes only fields that do not change while the buffer moves
-    /// between checked-out, thread-local, and global-free states. The lease is
-    /// intentionally left uninitialized until checkout.
+    /// `layout` must be the size-class data layout. The slot must be the
+    /// side-table entry reserved for this allocation and must not be visible in
+    /// the freelist.
     ///
     /// # Safety
     ///
-    /// `layout` must be the full size-class layout used to allocate this buffer,
-    /// `slot` must be the stable slot id assigned to the allocation, `capacity`
-    /// must be the usable data capacity for the size class, and `class_id` and
-    /// `thread_cache_capacity` must be the owning size class's routing fields.
-    #[inline(always)]
-    pub(crate) unsafe fn init_owner_header(
-        self,
-        layout: Layout,
-        slot: u32,
-        capacity: usize,
-        class_id: u32,
-        thread_cache_capacity: u32,
-    ) -> Self {
-        // SAFETY: the layout was used to allocate this buffer.
-        debug_assert_eq!(self.header, unsafe {
-            pooled_header_for_layout(self.ptr, layout)
-        });
-        // SAFETY: `header` is within the allocation and points at the stable
-        // pooled header location. `MaybeUninit<SizeClassLease>` is valid with
-        // uninitialized contents, so leaving `lease` unwritten is intentional.
+    /// The caller must own `slot` initialization for this size class. No other
+    /// thread may read the slot until the returned buffer is published through
+    /// the freelist bitmap or handed to a checked-out owner.
+    #[inline]
+    pub unsafe fn new_in_slot(slot: NonNull<PooledSlot>, layout: Layout, zeroed: bool) -> Self {
+        assert!(layout.size() > 0, "pooled data layout must be non-zero");
+        // SAFETY: layout is valid and non-zero sized (asserted above).
+        let ptr = if zeroed {
+            unsafe { alloc_zeroed(layout) }
+        } else {
+            unsafe { alloc(layout) }
+        };
+        let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        // SAFETY: guaranteed by the caller. The slot is unique and not
+        // concurrently visible while its data pointer is initialized.
         unsafe {
-            addr_of_mut!((*self.header.as_ptr()).refs).write(AtomicUsize::new(1));
-            addr_of_mut!((*self.header.as_ptr()).data_base).write(self.ptr);
-            addr_of_mut!((*self.header.as_ptr()).capacity).write(capacity);
-            addr_of_mut!((*self.header.as_ptr()).slot).write(slot);
-            addr_of_mut!((*self.header.as_ptr()).class_id).write(class_id);
-            addr_of_mut!((*self.header.as_ptr()).thread_cache_capacity)
-                .write(thread_cache_capacity);
+            debug_assert_eq!((*slot.as_ptr()).refs.load(Ordering::Relaxed), 1);
+            addr_of_mut!((*slot.as_ptr()).data_base).write(ptr);
         }
-        self
+        Self { slot }
+    }
+
+    /// Recreates a pooled buffer handle from an already-created side-table slot.
+    ///
+    /// # Safety
+    ///
+    /// The caller must own the slot and the slot's data allocation must still
+    /// be live.
+    #[inline(always)]
+    pub(crate) const unsafe fn from_slot(slot: NonNull<PooledSlot>) -> Self {
+        Self { slot }
     }
 
     /// Returns the usable data base pointer.
     #[cfg(any(test, feature = "bench"))]
     #[inline(always)]
-    pub const fn as_ptr(&self) -> *mut u8 {
-        self.ptr.as_ptr()
+    pub fn as_ptr(&self) -> *mut u8 {
+        self.data_ptr().as_ptr()
     }
 
     /// Returns the usable data base pointer without discarding non-nullness.
     #[inline(always)]
-    pub(crate) const fn data_ptr(&self) -> NonNull<u8> {
-        self.ptr
+    pub(crate) fn data_ptr(&self) -> NonNull<u8> {
+        // SAFETY: pooled buffers are built only for created slots.
+        unsafe { self.slot.as_ref().data_base }
     }
 
     /// Returns the usable data capacity for this size-class buffer.
     ///
     /// # Safety
     ///
-    /// The pooled header must have been initialized with
-    /// [`Self::init_owner_header`].
     #[inline(always)]
-    pub(crate) const unsafe fn capacity(&self) -> usize {
+    pub(crate) unsafe fn capacity(&self) -> usize {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.header.as_ref().capacity }
+        unsafe { self.slot.as_ref().capacity }
     }
 
     /// Returns the stable slot id for this size-class buffer.
@@ -791,41 +791,29 @@ impl PooledBuffer {
     ///
     /// # Safety
     ///
-    /// The pooled header must have been initialized with
-    /// [`Self::init_owner_header`].
     #[inline(always)]
-    pub(crate) const unsafe fn slot(&self) -> u32 {
+    pub(crate) unsafe fn slot(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.header.as_ref().slot }
+        unsafe { self.slot.as_ref().slot }
     }
 
     /// Returns the owning size class's dense process-global id.
     ///
-    /// Cached in the header so the buffer-return fast path can route into the
+    /// Cached in the slot so the buffer-return fast path can route into the
     /// right thread-local cache without dereferencing the class object.
-    ///
-    /// # Safety
-    ///
-    /// The pooled header must have been initialized with
-    /// [`Self::init_owner_header`].
     #[inline(always)]
-    pub(crate) const unsafe fn class_id(&self) -> u32 {
+    pub(crate) unsafe fn class_id(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.header.as_ref().class_id }
+        unsafe { self.slot.as_ref().class_id }
     }
 
     /// Returns the owning size class's per-thread cache capacity.
     ///
-    /// Cached in the header for the same reason as [`Self::class_id`].
-    ///
-    /// # Safety
-    ///
-    /// The pooled header must have been initialized with
-    /// [`Self::init_owner_header`].
+    /// Cached in the slot for the same reason as [`Self::class_id`].
     #[inline(always)]
-    pub(crate) const unsafe fn thread_cache_capacity(&self) -> u32 {
+    pub(crate) unsafe fn thread_cache_capacity(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.header.as_ref().thread_cache_capacity }
+        unsafe { self.slot.as_ref().thread_cache_capacity }
     }
 
     /// Initializes the pooled lease for a buffer leaving global state.
@@ -833,13 +821,13 @@ impl PooledBuffer {
     /// # Safety
     ///
     /// This buffer must be checked out from the size class represented by
-    /// `lease`, and the header must not currently contain a live lease.
+    /// `lease`, and the slot must not currently contain a live lease.
     #[inline(always)]
     pub(crate) unsafe fn init_lease(&mut self, lease: SizeClassLease) {
-        // SAFETY: header is within the allocation and properly aligned.
+        // SAFETY: slot is a live side-table entry.
         unsafe {
-            debug_assert_eq!((*self.header.as_ptr()).refs.load(Ordering::Relaxed), 1);
-            addr_of_mut!((*self.header.as_ptr()).lease).write(MaybeUninit::new(lease));
+            debug_assert_eq!((*self.slot.as_ptr()).refs.load(Ordering::Relaxed), 1);
+            addr_of_mut!((*self.slot.as_ptr()).lease).write(MaybeUninit::new(lease));
         }
     }
 
@@ -852,10 +840,10 @@ impl PooledBuffer {
     #[inline(always)]
     pub(crate) const unsafe fn lease(&self) -> &SizeClassLease {
         // SAFETY: guaranteed by the caller.
-        unsafe { &*self.header.as_ref().lease.as_ptr() }
+        unsafe { &*self.slot.as_ref().lease.as_ptr() }
     }
 
-    /// Consumes the live lease from this header.
+    /// Consumes the live lease from this slot.
     ///
     /// # Safety
     ///
@@ -865,7 +853,7 @@ impl PooledBuffer {
     #[inline(always)]
     pub(crate) const unsafe fn take_lease(&mut self) -> SizeClassLease {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.header.as_mut().lease.assume_init_read() }
+        unsafe { self.slot.as_mut().lease.assume_init_read() }
     }
 
     /// Returns the owner ref for a buffer whose lease is already initialized.
@@ -876,7 +864,7 @@ impl PooledBuffer {
     #[inline(always)]
     pub(crate) unsafe fn owner_ref(&self) -> OwnerRef {
         // SAFETY: guaranteed by the caller.
-        unsafe { OwnerRef::from_pooled(self.header) }
+        unsafe { OwnerRef::from_pooled(self.slot) }
     }
 
     /// Deallocates this pooled buffer.
@@ -887,7 +875,7 @@ impl PooledBuffer {
     #[inline(always)]
     pub unsafe fn deallocate(self, layout: Layout) {
         // SAFETY: guaranteed by the caller.
-        unsafe { dealloc(self.ptr.as_ptr(), layout) };
+        unsafe { dealloc(self.data_ptr().as_ptr(), layout) };
     }
 }
 
@@ -1072,20 +1060,13 @@ pub(crate) fn owner_from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, OwnerRef) {
     (ptr, len, owner)
 }
 
-/// Returns the full layout for a pooled size class.
+/// Returns the data layout for a pooled size class.
 ///
-/// The layout covers `size` usable bytes, tail padding to header alignment,
-/// and the [`PooledHeader`].
+/// Pooled owner metadata lives in the size class side table, so the allocation
+/// itself contains only caller-usable bytes with the requested alignment.
 #[inline]
 pub(crate) fn pooled_layout(size: usize, alignment: usize) -> Layout {
-    let header_offset = size
-        .checked_next_multiple_of(align_of::<PooledHeader>())
-        .expect("layout size overflow");
-    let total = header_offset
-        .checked_add(size_of::<PooledHeader>())
-        .expect("pooled layout size overflow");
-    let layout_alignment = alignment.max(align_of::<PooledHeader>());
-    Layout::from_size_align(total, layout_alignment).expect("alignment is a power of two")
+    Layout::from_size_align(size, alignment).expect("alignment is a power of two")
 }
 
 /// Returns the full layout and header offset for a native aligned allocation.
@@ -1143,50 +1124,6 @@ fn heap_usable_capacity(header: NonNull<HeapHeader>, header_ref: &HeapHeader) ->
     }
 }
 
-/// Asserts that `layout` can host an aligned tail [`PooledHeader`].
-///
-/// [`PooledBuffer`] construction is safe and (with the `bench` feature)
-/// public, so the header placement preconditions must be enforced here rather
-/// than assumed: every layout produced by [`pooled_layout`] passes, while a
-/// hand-built layout that would misalign the header (undefined behavior to
-/// write through) or set its low tag bits (corrupted by owner-tag packing)
-/// panics instead.
-fn assert_valid_pooled_layout(layout: Layout) {
-    assert!(
-        layout.size() >= size_of::<PooledHeader>(),
-        "layout must include the pooled header"
-    );
-    assert!(
-        (layout.size() - size_of::<PooledHeader>()).is_multiple_of(align_of::<PooledHeader>()),
-        "pooled header must land on its alignment"
-    );
-    assert!(
-        layout.align() >= align_of::<PooledHeader>(),
-        "layout alignment must cover the pooled header"
-    );
-}
-
-/// Locates the pooled tail header within a full size-class allocation.
-///
-/// # Safety
-///
-/// `ptr` must be the base of an allocation created with `layout`, and `layout`
-/// must be a full pooled layout (see [`pooled_layout`]).
-#[inline(always)]
-const unsafe fn pooled_header_for_layout(
-    ptr: NonNull<u8>,
-    layout: Layout,
-) -> NonNull<PooledHeader> {
-    let header_offset = layout
-        .size()
-        .checked_sub(size_of::<PooledHeader>())
-        .expect("pooled layout includes header");
-    // SAFETY: the size-class layout places the header at this offset.
-    let header = unsafe { ptr.as_ptr().add(header_offset).cast::<PooledHeader>() };
-    // SAFETY: pooled headers are placed within non-null allocations.
-    unsafe { NonNull::new_unchecked(header) }
-}
-
 #[inline(always)]
 fn round_down(value: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
@@ -1200,14 +1137,11 @@ fn round_down(value: usize, align: usize) -> usize {
 /// No other handle may reference this allocation and the pooled lease must be
 /// initialized.
 #[inline(always)]
-unsafe fn release_pooled(header: NonNull<PooledHeader>) {
+unsafe fn release_pooled(slot: NonNull<PooledSlot>) {
     // SAFETY: guaranteed by the caller.
-    let header_ref = unsafe { header.as_ref() };
-    debug_assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
-    let buffer = PooledBuffer {
-        ptr: header_ref.data_base,
-        header,
-    };
+    debug_assert_eq!(unsafe { slot.as_ref() }.refs.load(Ordering::Relaxed), 1);
+    // SAFETY: this unique owner proves the slot's data allocation is live.
+    let buffer = unsafe { PooledBuffer::from_slot(slot) };
     BufferPoolThreadCache::push(buffer);
 }
 
@@ -1545,12 +1479,12 @@ mod tests {
     }
 
     #[test]
-    fn test_pooled_layout_includes_header() {
+    fn test_pooled_layout_is_data_only() {
         let size = 1024;
         let layout = pooled_layout(size, NZUsize!(64).get());
-        assert!(layout.size() >= size + size_of::<PooledHeader>());
-        assert!(layout.align() >= align_of::<PooledHeader>());
+        assert_eq!(layout.size(), size);
         assert!(layout.align() >= 64);
+        assert!(align_of::<PooledSlot>() >= 4);
     }
 }
 
