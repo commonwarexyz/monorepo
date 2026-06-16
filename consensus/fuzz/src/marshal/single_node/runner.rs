@@ -356,6 +356,14 @@ where
         let mut subscribed_heights: HashSet<u64> = HashSet::new();
         // Publish order backing `variant_available`'s FIFO eviction.
         let mut variant_order: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        // Heights still fetchable from network peers via the resolver. A variant
+        // publish broadcasts the block to peers, which retain it (bounded by the
+        // same FIFO as the local variant cache). Unlike the local cache, peer
+        // retention survives a marshal restart, so this set is NOT cleared on
+        // Restart: a floor anchored on such a height completes when marshal fetches
+        // the block from a peer.
+        let mut network_available: HashSet<u64> = HashSet::new();
+        let mut network_order: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
         // ready_prefix is monotone non-decreasing. It advances when the
         // finalized archive becomes contiguous from height 1.
         let mut ready_prefix: u64 = 0;
@@ -941,7 +949,13 @@ where
                         handle.mailbox.set_floor(finalization);
                         stale_to_skip.extend(live_pending_acks.iter().copied());
                         pending_floor = Some(h);
-                        if block_available(&durable_available, &variant_available, h) {
+                        // The floor completes if marshal can obtain the anchor block:
+                        // either it is locally available, or a peer still holds the
+                        // broadcast and marshal fetches it via the resolver (the case
+                        // that survives a restart of the local variant cache).
+                        if block_available(&durable_available, &variant_available, h)
+                            || network_available.contains(&h)
+                        {
                             repair_wake |= apply_pending_floor(
                                 &mut pending_floor,
                                 height,
@@ -987,7 +1001,17 @@ where
                                     variant_available.remove(&evicted);
                                 }
                             }
+                            // Peers retain the broadcast under the same FIFO bound,
+                            // but their retention is not reset by a marshal restart.
+                            network_order.retain(|&x| x != h);
+                            network_order.push_back(h);
+                            while network_order.len() > capacity {
+                                if let Some(evicted) = network_order.pop_front() {
+                                    network_available.remove(&evicted);
+                                }
+                            }
                         }
+                        network_available.insert(h);
                         // A publish only completes a pending floor anchor when
                         // marshal holds a live waiter for this block (from a
                         // prior Subscribe): the publish fires the subscription
@@ -1094,8 +1118,10 @@ where
                     segment_starts.push(setup.height.map_or(0, |h| h.get()) + 1);
                     // The new buffered / shards engine starts with an
                     // empty cache, so anything that was only available
-                    // via the prior variant publish is no longer
-                    // visible to marshal.
+                    // via the prior variant publish is no longer locally
+                    // visible to marshal. `network_available` is deliberately
+                    // NOT cleared: peers still hold those broadcasts, so marshal
+                    // can refetch them via the resolver after the restart.
                     variant_available.clear();
                     variant_order.clear();
                     // The new actor starts with no buffer waiters; any
