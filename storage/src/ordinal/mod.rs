@@ -39,7 +39,7 @@
 //! - **Reads**: O(1) - direct offset calculation
 //! - **Has**: O(1) - in-memory lookup (via [crate::rmap::RMap])
 //! - **Next Gap**: O(log n) - in-memory range query (via [crate::rmap::RMap])
-//! - **Recovery**: O(n) over committed records when bits are provided; `None` resets the store
+//! - **Recovery**: O(n) over committed records when bits are provided (`None` resets the store)
 //!
 //! # Atomicity
 //!

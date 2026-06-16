@@ -109,7 +109,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         config: Config,
         bits: Option<BTreeMap<u64, &Option<BitMap>>>,
     ) -> Result<Self, Error> {
-        // Reset when no committed bits are provided; otherwise scan stored blobs for recovery.
+        // Reset the store unless committed bits are provided to recover from the stored blobs
         let record_size = Record::<V>::SIZE as u64;
         let items_per_blob = config.items_per_blob.get();
         let mut blobs = BTreeMap::new();
@@ -209,8 +209,8 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                     return Err(Error::MissingRecord(section * items_per_blob));
                 };
 
-                // A section with a bitmap replays only its set records; without one every record
-                // must exist
+                // A section replays every record unless a bitmap restricts replay
+                // to the records it marks
                 let mut set_indices = bits.as_ref().map(|bits| bits.ones_iter());
                 let mut all_indices = 0..items_per_blob;
                 let mut replay_blob =

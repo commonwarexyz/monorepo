@@ -30,8 +30,8 @@ pub const DEFAULT_CHUNK_SIZE: usize = 8;
 
 /// Build section bitmaps from absolute indices.
 ///
-/// Each returned key is `index / items_per_section`; the corresponding bitmap has
-/// `items_per_section` bits and sets `index % items_per_section`.
+/// Each index maps to key `index / items_per_section` and sets bit
+/// `index % items_per_section` in that section's bitmap of `items_per_section` bits.
 pub fn bits_for_indices<const N: usize>(
     items_per_section: NonZeroU64,
     indices: impl IntoIterator<Item = u64>,
