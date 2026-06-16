@@ -1,7 +1,7 @@
 //! Helpers shared by the Freezer benchmarks.
 
 use commonware_runtime::{buffer::paged::CacheRef, tokio::Context};
-use commonware_storage::freezer::{Config, Freezer};
+use commonware_storage::freezer::{Checkpoint, Config, Freezer};
 use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
 use std::num::{NonZeroU16, NonZeroUsize};
@@ -47,7 +47,7 @@ pub type Val = FixedBytes<128>;
 pub type FreezerType = Freezer<Context, Key, Val>;
 
 /// Open (or create) a freezer store.
-pub async fn init(ctx: Context) -> FreezerType {
+pub async fn init(ctx: Context, checkpoint: Option<Checkpoint>) -> FreezerType {
     let cfg = Config {
         key_partition: KEY_PARTITION.into(),
         key_write_buffer: NZUsize!(WRITE_BUFFER),
@@ -63,7 +63,7 @@ pub async fn init(ctx: Context) -> FreezerType {
         table_replay_buffer: NZUsize!(TABLE_REPLAY_BUFFER),
         codec_config: (),
     };
-    Freezer::init(ctx, cfg, None).await.unwrap()
+    Freezer::init(ctx, cfg, checkpoint).await.unwrap()
 }
 
 /// Append `count` key-value pairs with random values to freezer store and sync once.

@@ -37,7 +37,7 @@ zstd = { workspace = true, optional = true }
 commonware-conformance.workspace = true
 commonware-math.workspace = true
 commonware-runtime = { workspace = true, features = ["test-utils"] }
-commonware-storage = { path = ".", features = ["std"] }
+commonware-storage = { path = ".", features = ["std", "test-utils"] }
 criterion.workspace = true
 governor.workspace = true
 paste.workspace = true

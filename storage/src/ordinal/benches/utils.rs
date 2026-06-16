@@ -1,7 +1,8 @@
 use commonware_runtime::tokio::Context;
 use commonware_storage::ordinal;
-use commonware_utils::{sequence::FixedBytes, NZUsize, NZU64};
+use commonware_utils::{bitmap::BitMap, sequence::FixedBytes, NZUsize, NZU64};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
+use std::collections::BTreeMap;
 
 /// Number of bytes that can be buffered before being written to disk.
 const WRITE_BUFFER: usize = 1024;
@@ -13,20 +14,20 @@ const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 pub const PARTITION: &str = "ordinal-bench-partition";
 
 /// Configuration constants for [Ordinal] store.
-const ITEMS_PER_BLOB: u64 = 10000;
+pub(super) const ITEMS_PER_BLOB: u64 = 10000;
 
 /// Concrete ordinal store type for benchmarks.
 pub type Ordinal = ordinal::Ordinal<Context, FixedBytes<128>>;
 
 /// Open (or create) an ordinal store.
-pub async fn init(ctx: Context) -> Ordinal {
+pub async fn init(ctx: Context, bits: Option<BTreeMap<u64, &Option<BitMap>>>) -> Ordinal {
     let cfg = ordinal::Config {
         partition: PARTITION.into(),
         items_per_blob: NZU64!(ITEMS_PER_BLOB),
         write_buffer: NZUsize!(WRITE_BUFFER),
         replay_buffer: NZUsize!(REPLAY_BUFFER),
     };
-    ordinal::Ordinal::init(ctx, cfg, None).await.unwrap()
+    ordinal::Ordinal::init(ctx, cfg, bits).await.unwrap()
 }
 
 /// Append `count` sequential entries with random values to ordinal store and sync once.
