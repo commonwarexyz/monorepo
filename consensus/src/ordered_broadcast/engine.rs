@@ -1282,24 +1282,25 @@ mod tests {
                 None,
             );
             let stale_certificate = certificate(&fixture, &stale.chunk, epoch);
-            let durable: TestNode = Node::sign(
+            let persisted: TestNode = Node::sign(
                 &mut signer,
                 Height::new(1),
                 Sha256Digest::from([2; 32]),
                 Some(Parent::new(stale.chunk.payload, epoch, stale_certificate)),
             );
-            let durable_certificate = certificate(&fixture, &durable.chunk, epoch);
-            let next: TestNode = Node::sign(
+            let persisted_certificate = certificate(&fixture, &persisted.chunk, epoch);
+            let successor: TestNode = Node::sign(
                 &mut signer,
                 Height::new(2),
                 Sha256Digest::from([3; 32]),
                 Some(Parent::new(
-                    durable.chunk.payload,
+                    persisted.chunk.payload,
                     epoch,
-                    durable_certificate,
+                    persisted_certificate,
                 )),
             );
 
+            // Persist height 1 without loading it into the restarted engine.
             {
                 let (_reporter, reporter) = mocks::Reporter::new(
                     context.child("writer_reporter"),
@@ -1316,8 +1317,8 @@ mod tests {
                     journal_name_prefix.clone(),
                 );
                 writer.journal_prepare(&sequencer).await;
-                writer.journal_append(durable.clone()).await;
-                writer.journal_sync(&sequencer, durable.chunk.height).await;
+                writer.journal_append(persisted.clone()).await;
+                writer.journal_sync(&sequencer, persisted.chunk.height).await;
             }
 
             let participants = vec![validator.clone(), sequencer.clone()];
@@ -1373,6 +1374,7 @@ mod tests {
                 (validator_ack_sender, validator_ack_receiver),
             );
 
+            // Deliver the old signed node first, then a valid successor.
             sequencer_node_sender.send(
                 Recipients::Some(vec![validator.clone()]),
                 stale.encode(),
@@ -1381,14 +1383,16 @@ mod tests {
             context.sleep(Duration::from_millis(10)).await;
             sequencer_node_sender.send(
                 Recipients::Some(vec![validator.clone()]),
-                next.encode(),
+                successor.encode(),
                 false,
             );
 
-            let wait_for_lock = async {
+            // The successor carries the persisted node's certificate. Observing that lock means
+            // the engine rejected the stale node and continued processing traffic.
+            let wait_for_persisted_lock = async {
                 loop {
                     if reporter_mailbox.get_tip(sequencer.clone()).await
-                        == Some((durable.chunk.height, epoch))
+                        == Some((persisted.chunk.height, epoch))
                     {
                         break;
                     }
@@ -1396,7 +1400,7 @@ mod tests {
                 }
             };
             select! {
-                _ = wait_for_lock => {},
+                _ = wait_for_persisted_lock => {},
                 _ = context.sleep(Duration::from_secs(5)) => panic!("timed out waiting for engine progress"),
             }
         });
