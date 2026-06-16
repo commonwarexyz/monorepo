@@ -223,6 +223,11 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         matches!(self.certify, CertifyState::Certified(true))
     }
 
+    /// Returns true if certification has not yet started (inference-eligible).
+    pub const fn is_certify_ready(&self) -> bool {
+        matches!(self.certify, CertifyState::Ready)
+    }
+
     /// Returns true if certification was aborted due to finalization.
     #[cfg(test)]
     pub const fn is_certify_aborted(&self) -> bool {
