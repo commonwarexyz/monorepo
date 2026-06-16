@@ -369,7 +369,10 @@ mod tests {
         );
         assert_eq!(
             effects,
-            vec![Effect::Remove(View::new(2)), fetch(3, 2, FetchReason::MissingNullification),]
+            vec![
+                Effect::Remove(View::new(2)),
+                fetch(3, 2, FetchReason::MissingNullification),
+            ]
         );
 
         let nullification_v1 = build_nullification(&schemes, &verifier, View::new(1));

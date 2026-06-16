@@ -421,7 +421,7 @@ pub enum Certificate<S: Scheme, D: Digest> {
 
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Returns the stable trace field value for this certificate's type.
-    pub const fn kind(&self) -> &'static str {
+    pub(crate) const fn kind(&self) -> &'static str {
         match self {
             Self::Notarization(_) => "notarization",
             Self::Nullification(_) => "nullification",

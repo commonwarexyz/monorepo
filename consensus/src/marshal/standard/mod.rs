@@ -2974,7 +2974,7 @@ mod tests {
             let _ = sender.enqueue(handler::Message::Deliver {
                 delivery: Delivery {
                     key: fetch.key,
-                    subscribers: NonEmptyVec::new((fetch.subscriber, vec![tracing::Span::none()])),
+                    subscribers: NonEmptyVec::new((fetch.subscriber, tracing::Span::none())),
                 },
                 value,
                 response,
@@ -3696,7 +3696,7 @@ mod tests {
                         key: floor_fetch.key,
                         subscribers: NonEmptyVec::new((
                             floor_fetch.subscriber,
-                            vec![tracing::Span::none()]
+                            tracing::Span::none()
                         )),
                     },
                     value: floor_block.encode(),
@@ -4217,7 +4217,7 @@ mod tests {
                         key: old_floor_fetch.key,
                         subscribers: NonEmptyVec::new((
                             old_floor_fetch.subscriber,
-                            vec![tracing::Span::none()]
+                            tracing::Span::none()
                         )),
                     },
                     value: old_floor_block.encode(),
@@ -4251,7 +4251,7 @@ mod tests {
                         key: new_floor_fetch.key,
                         subscribers: NonEmptyVec::new((
                             new_floor_fetch.subscriber,
-                            vec![tracing::Span::none()]
+                            tracing::Span::none()
                         )),
                     },
                     value: new_floor_block.encode(),
@@ -4984,7 +4984,7 @@ mod tests {
                         key: handler::Key::Notarized { round },
                         subscribers: NonEmptyVec::new((
                             handler::Annotation::Notarization { round },
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: (notarization, block.clone()).encode(),
@@ -5046,7 +5046,7 @@ mod tests {
                             handler::Annotation::Notarization {
                                 round: requested_round,
                             },
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: (notarization, block).encode(),
@@ -5089,7 +5089,7 @@ mod tests {
                         key: handler::Key::Notarized { round },
                         subscribers: NonEmptyVec::new((
                             handler::Annotation::Notarization { round },
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: (notarization, block).encode(),
@@ -5133,7 +5133,7 @@ mod tests {
                         key: handler::Key::Finalized { height },
                         subscribers: NonEmptyVec::new((
                             handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: (finalization, block).encode(),
@@ -5180,7 +5180,7 @@ mod tests {
                         key: handler::Key::Finalized { height },
                         subscribers: NonEmptyVec::new((
                             handler::Annotation::Finalized(handler::Finalized::ByHeight { height }),
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: (finalization, block).encode(),
@@ -5550,7 +5550,7 @@ mod tests {
                         key: handler::Key::Notarized { round },
                         subscribers: NonEmptyVec::new((
                             handler::Annotation::Notarization { round },
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: (notarization, block.clone()).encode(),
@@ -5868,7 +5868,7 @@ mod tests {
                             handler::Annotation::Finalized(handler::Finalized::ByHeight {
                                 height: Height::new(5),
                             }),
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: Bytes::from_static(b"unverifiable"),
@@ -5889,7 +5889,7 @@ mod tests {
                             handler::Annotation::Notarization {
                                 round: Round::new(Epoch::zero(), View::new(1)),
                             },
-                            vec![tracing::Span::none()],
+                            tracing::Span::none(),
                         )),
                     },
                     value: Bytes::from_static(b"unverifiable"),

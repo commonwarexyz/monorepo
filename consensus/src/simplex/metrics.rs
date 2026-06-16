@@ -22,16 +22,19 @@ pub enum TimeoutReason {
 
 impl TimeoutReason {
     /// Returns the stable trace field value for this reason.
+    ///
+    /// Matches the `EncodeLabelValue` rendering so a timeout trace span and its
+    /// metric series share the same string.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Inactivity => "inactivity",
-            Self::LeaderNullify => "leader_nullify",
-            Self::LeaderTimeout => "leader_timeout",
-            Self::CertificationTimeout => "certification_timeout",
-            Self::MissingProposal => "missing_proposal",
-            Self::IgnoredProposal => "ignored_proposal",
-            Self::InvalidProposal => "invalid_proposal",
-            Self::FailedCertification => "failed_certification",
+            Self::Inactivity => "Inactivity",
+            Self::LeaderNullify => "LeaderNullify",
+            Self::LeaderTimeout => "LeaderTimeout",
+            Self::CertificationTimeout => "CertificationTimeout",
+            Self::MissingProposal => "MissingProposal",
+            Self::IgnoredProposal => "IgnoredProposal",
+            Self::InvalidProposal => "InvalidProposal",
+            Self::FailedCertification => "FailedCertification",
         }
     }
 }

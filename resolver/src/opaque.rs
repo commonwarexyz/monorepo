@@ -348,7 +348,7 @@ where
         &mut self,
         key: F::Key,
         value: F::Value,
-        delivered: NonEmptyVec<(Con::Subscriber, Vec<tracing::Span>)>,
+        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
     ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
@@ -364,11 +364,7 @@ where
     }
 
     /// Deliver an already accepted response to subscribers that arrived later.
-    fn redeliver(
-        &mut self,
-        key: F::Key,
-        delivered: NonEmptyVec<(Con::Subscriber, Vec<tracing::Span>)>,
-    ) {
+    fn redeliver(&mut self, key: F::Key, delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>) {
         self.deliveries.redeliver(Delivery {
             key,
             subscribers: delivered,
@@ -496,7 +492,7 @@ where
     fn handle_delivered(
         &mut self,
         key: F::Key,
-        delivered: NonEmptyVec<(Con::Subscriber, Vec<tracing::Span>)>,
+        delivered: NonEmptyVec<(Con::Subscriber, tracing::Span)>,
         valid: bool,
     ) {
         let accepted = self.deliveries.response_accepted(&key);

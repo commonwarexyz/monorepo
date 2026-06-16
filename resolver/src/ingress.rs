@@ -149,14 +149,16 @@ fn retain_fetch<K, S, M>(
     Some(fetch)
 }
 
-/// Append the incoming subscriber spans to the pending fetch, keeping every span
-/// so each coalesced fetch still correlates to delivery.
-fn merge_subscribers<S>(
+/// Add incoming subscribers (with their fetch span) that are not already attached
+/// to the pending fetch, keeping the first span seen for each subscriber.
+fn merge_subscribers<S: Eq>(
     existing: &mut NonEmptyVec<(S, tracing::Span)>,
     incoming: NonEmptyVec<(S, tracing::Span)>,
 ) {
-    for subscriber in incoming {
-        existing.push(subscriber);
+    for (subscriber, span) in incoming {
+        if !existing.iter().any(|(existing, _)| *existing == subscriber) {
+            existing.push((subscriber, span));
+        }
     }
 }
 
@@ -278,11 +280,9 @@ mod tests {
         Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11]));
         Policy::handle(&mut pending, fetch_with_subscribers(1, vec![11, 12]));
 
-        // Coalescing keeps every fetch's span, so re-requested subscriber 11
-        // appears once per fetch. The tracker later groups spans by subscriber.
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 1);
-        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 11, 12]);
+        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 12]);
     }
 
     #[test]

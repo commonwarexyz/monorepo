@@ -69,8 +69,8 @@ commonware_macros::stability_scope!(BETA {
         /// The peer-visible key used to validate the response.
         pub key: K,
         /// Subscribers that were still retained when the response arrived, each
-        /// paired with the trace spans of every fetch that requested it.
-        pub subscribers: NonEmptyVec<(S, Vec<tracing::Span>)>,
+        /// paired with the trace span of the fetch that requested it.
+        pub subscribers: NonEmptyVec<(S, tracing::Span)>,
     }
 
     impl<K: PartialEq, S: PartialEq> PartialEq for Delivery<K, S> {

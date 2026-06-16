@@ -591,12 +591,12 @@ fn main() {
     executor.start(|context| async move {
         tokio_runtime::telemetry::init(
             context.child("telemetry"),
-            tokio_runtime::telemetry::Logging {
+            tokio_runtime::telemetry::Logs {
                 level: tracing::Level::INFO,
                 json: false,
             },
             Some(SocketAddr::from((Ipv4Addr::LOCALHOST, config.metrics_port))),
-            tokio_runtime::telemetry::Tracing::Disabled,
+            None,
         );
         info!(
             sync_mode = %config.sync_mode.as_str(),

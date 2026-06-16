@@ -299,21 +299,17 @@ impl<
     ) {
         match message {
             HandlerMessage::Deliver {
-                spans,
+                span,
                 view,
                 data,
                 response,
             } => {
-                let mut spans = spans.into_iter();
                 let span = info_span!(
-                    parent: spans.next().and_then(|span| span.id()),
+                    parent: span,
                     "simplex.resolver.deliver",
                     epoch = self.epoch.traced(),
                     view = view.traced()
                 );
-                for fetch in spans {
-                    span.follows_from(fetch.id());
-                }
                 let _guard = span.entered();
 
                 // Validate incoming message

@@ -3753,12 +3753,12 @@ mod tests {
             // Configure telemetry
             tokio::telemetry::init(
                 context.child("metrics"),
-                tokio::telemetry::Logging {
+                tokio::telemetry::Logs {
                     level: Level::INFO,
                     json: false,
                 },
                 Some(address),
-                tokio::telemetry::Tracing::Disabled,
+                None,
             );
 
             // Register a test metric

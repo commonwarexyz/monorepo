@@ -7,11 +7,11 @@
 use commonware_utils::vec::NonEmptyVec;
 use std::collections::{btree_map::Entry as BTreeMapEntry, BTreeMap};
 
-/// Tracks retained subscribers by resolver key, each paired with the spans of
-/// every fetch that introduced it.
+/// Tracks retained subscribers by resolver key, each paired with the span of the
+/// fetch that introduced it.
 #[derive(Clone, Debug)]
 pub struct Tracker<K, S> {
-    entries: BTreeMap<K, BTreeMap<S, Vec<tracing::Span>>>,
+    entries: BTreeMap<K, BTreeMap<S, tracing::Span>>,
 }
 
 impl<K, S> Default for Tracker<K, S> {
@@ -39,8 +39,8 @@ where
 
     /// Add subscribers for a key, each paired with the span of its fetch.
     ///
-    /// Every span is retained: re-fetching an already-tracked subscriber appends
-    /// the new fetch's span rather than replacing the original.
+    /// A subscriber's span is retained only when the subscriber is first seen;
+    /// later fetches for an already-tracked subscriber keep the original span.
     ///
     /// Returns `true` if this created a new key entry.
     pub fn insert(&mut self, key: K, subscribers: NonEmptyVec<(S, tracing::Span)>) -> bool {
@@ -49,7 +49,7 @@ where
             BTreeMapEntry::Occupied(entry) => (entry.into_mut(), false),
         };
         for (subscriber, span) in subscribers {
-            entry.entry(subscriber).or_default().push(span);
+            entry.entry(subscriber).or_insert(span);
         }
         new
     }
@@ -87,8 +87,8 @@ where
     }
 
     /// Return the subscribers currently waiting on a key, each paired with the
-    /// spans of every fetch that introduced it.
-    pub fn pending(&self, key: &K) -> Option<NonEmptyVec<(S, Vec<tracing::Span>)>> {
+    /// span of the fetch that introduced it.
+    pub fn pending(&self, key: &K) -> Option<NonEmptyVec<(S, tracing::Span)>> {
         self.entries.get(key).and_then(Self::non_empty)
     }
 
@@ -101,7 +101,7 @@ where
         &mut self,
         key: &K,
         delivered: NonEmptyVec<S>,
-    ) -> Option<NonEmptyVec<(S, Vec<tracing::Span>)>> {
+    ) -> Option<NonEmptyVec<(S, tracing::Span)>> {
         let entry = self.entries.get_mut(key)?;
         for subscriber in delivered {
             entry.remove(&subscriber);
@@ -114,12 +114,12 @@ where
     }
 
     fn non_empty(
-        subscribers: &BTreeMap<S, Vec<tracing::Span>>,
-    ) -> Option<NonEmptyVec<(S, Vec<tracing::Span>)>> {
+        subscribers: &BTreeMap<S, tracing::Span>,
+    ) -> Option<NonEmptyVec<(S, tracing::Span)>> {
         NonEmptyVec::try_from(
             subscribers
                 .iter()
-                .map(|(subscriber, spans)| (subscriber.clone(), spans.clone()))
+                .map(|(subscriber, span)| (subscriber.clone(), span.clone()))
                 .collect::<Vec<_>>(),
         )
         .ok()
@@ -131,9 +131,7 @@ mod tests {
     use super::*;
     use commonware_utils::non_empty_vec;
 
-    fn subscribers<S: Clone>(
-        pending: Option<NonEmptyVec<(S, Vec<tracing::Span>)>>,
-    ) -> Option<Vec<S>> {
+    fn subscribers<S: Clone>(pending: Option<NonEmptyVec<(S, tracing::Span)>>) -> Option<Vec<S>> {
         pending.map(|pending| {
             pending
                 .into_iter()
@@ -197,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn keeps_all_spans_per_subscriber() {
+    fn each_subscriber_keeps_its_own_fetch_span() {
         let _guard = tracing::subscriber::set_default(tracing_subscriber::registry());
 
         let first = tracing::info_span!("test.first_fetch");
@@ -210,17 +208,17 @@ mod tests {
         let mut tracker = Tracker::new();
         assert!(tracker.insert(1, non_empty_vec![(10, first)]));
         // The second fetch joins subscriber 11 under its own span and re-requests
-        // 10, which keeps both its original and new spans.
+        // 10, which keeps its original span.
         assert!(!tracker.insert(1, non_empty_vec![(10, second.clone()), (11, second)]));
 
-        let spans: BTreeMap<i32, Vec<Option<tracing::Id>>> = tracker
+        let spans: BTreeMap<i32, Option<tracing::Id>> = tracker
             .pending(&1)
             .unwrap()
             .into_iter()
-            .map(|(subscriber, spans)| (subscriber, spans.iter().map(tracing::Span::id).collect()))
+            .map(|(subscriber, span)| (subscriber, span.id()))
             .collect();
-        assert_eq!(spans.get(&10), Some(&vec![first_id.clone(), second_id.clone()]));
-        assert_eq!(spans.get(&11), Some(&vec![second_id]));
+        assert_eq!(spans.get(&10), Some(&first_id));
+        assert_eq!(spans.get(&11), Some(&second_id));
 
         assert!(tracker.pending(&2).is_none());
     }

@@ -208,7 +208,7 @@ impl<S: Scheme, D: Digest> Mailbox<S, D> {
 #[derive(Debug)]
 pub(crate) enum HandlerMessage {
     Deliver {
-        spans: Vec<Span>,
+        span: Span,
         view: View,
         data: Bytes,
         response: oneshot::Sender<bool>,
@@ -288,13 +288,9 @@ impl Consumer for Handler {
         value: Self::Value,
     ) -> oneshot::Receiver<bool> {
         let (response, receiver) = oneshot::channel();
-        let spans = delivery
-            .subscribers
-            .iter()
-            .flat_map(|(_, spans)| spans.iter().cloned())
-            .collect();
+        let (_, span) = delivery.subscribers.first().clone();
         let _ = self.sender.enqueue(HandlerMessage::Deliver {
-            spans,
+            span,
             view: View::new(delivery.key.into()),
             data: value,
             response,

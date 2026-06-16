@@ -254,11 +254,9 @@ mod tests {
         Policy::handle(&mut pending, fetch_with_subscribers(1, vec![10, 11], None));
         Policy::handle(&mut pending, fetch_with_subscribers(1, vec![11, 12], None));
 
-        // Coalescing keeps every fetch's span, so re-requested subscriber 11
-        // appears once per fetch. The tracker later groups spans by subscriber.
         let messages = drain(&mut pending);
         assert_eq!(messages.len(), 1);
-        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 11, 12]);
+        assert_fetch_subscribers(&messages[0], 1, &[10, 11, 12]);
     }
 
     #[test]
