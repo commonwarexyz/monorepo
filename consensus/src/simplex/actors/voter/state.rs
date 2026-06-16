@@ -268,6 +268,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         }
     }
 
+    /// Returns the root span for `view` and the finalized view, the two state
+    /// values a batcher update carries.
+    pub fn batcher_context(&self, view: View) -> (Span, View) {
+        (self.view_span(view), self.last_finalized)
+    }
+
     /// Returns the deadline for the next timeout (leader, certification, or retry).
     pub fn next_timeout_deadline(&mut self) -> SystemTime {
         let now = self.context.current();

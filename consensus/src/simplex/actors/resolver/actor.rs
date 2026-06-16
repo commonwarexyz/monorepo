@@ -162,6 +162,7 @@ impl<
         }
     }
 
+    /// Applies the side effects requested by [super::state::State] to the resolver.
     fn apply_effects(
         &mut self,
         resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
@@ -186,6 +187,8 @@ impl<
         }
     }
 
+    /// Issues a resolver fetch for `view`, attaching a span that records why the
+    /// fetch was needed and which view's processing caused it.
     fn fetch(
         &self,
         resolver: &mut p2p::Mailbox<U64, S::PublicKey>,

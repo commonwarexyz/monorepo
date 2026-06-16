@@ -39,8 +39,9 @@ where
 
     /// Add subscribers for a key, each paired with the span of its fetch.
     ///
-    /// A subscriber's span is retained only when the subscriber is first seen;
-    /// later fetches for an already-tracked subscriber keep the original span.
+    /// A subscriber's span is retained only when the subscriber is first seen.
+    /// A later fetch for an already-tracked subscriber, which happens when a
+    /// fetch is retried, keeps the original span.
     ///
     /// Returns `true` if this created a new key entry.
     pub fn insert(&mut self, key: K, subscribers: NonEmptyVec<(S, tracing::Span)>) -> bool {
@@ -116,6 +117,7 @@ where
         self.pending(key)
     }
 
+    /// Clones a key's subscriber map into a [NonEmptyVec], or `None` when empty.
     fn non_empty(
         subscribers: &BTreeMap<S, tracing::Span>,
     ) -> Option<NonEmptyVec<(S, tracing::Span)>> {

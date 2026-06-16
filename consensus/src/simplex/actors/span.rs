@@ -30,15 +30,19 @@ impl ViewSpan {
         }
     }
 
-    /// Opens the span from `make` when pending. No-op once open or closed.
+    /// Opens the span from `make` when pending. No-op once open. Opening a
+    /// closed view span means a decided view was reactivated and panics.
     pub(crate) fn open(&mut self, make: impl FnOnce() -> Span) {
+        assert!(!matches!(self, Self::Closed), "reopened a closed view span");
         if matches!(self, Self::Pending) {
             *self = Self::Open(make());
         }
     }
 
-    /// Adopts an externally created span when pending. No-op once open or closed.
+    /// Adopts an externally created span when pending. No-op once open. Adopting
+    /// onto a closed view span means a decided view was reactivated and panics.
     pub(crate) fn adopt(&mut self, span: Span) {
+        assert!(!matches!(self, Self::Closed), "adopted onto a closed view span");
         if matches!(self, Self::Pending) {
             *self = Self::Open(span);
         }

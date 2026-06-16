@@ -323,6 +323,8 @@ where
                             round.close_span();
                         }
 
+                        // Track the new current view, adopting the voter's view
+                        // span so all of its work shares one trace
                         let round = work
                             .entry(current.view)
                             .or_insert_with(|| self.new_round(current.view));
@@ -366,10 +368,13 @@ where
                         updated_view = current.view;
                     }
                     Message::Constructed(message) => {
+                        // If the view isn't interesting, we can skip
                         if !interesting(self.activity_timeout, finalized, current.view, view, false)
                         {
                             continue;
                         }
+
+                        // Add the message to the verifier
                         let round = work.entry(view).or_insert_with(|| self.new_round(view));
                         let process = process_span(round.span());
                         let _guard = process.entered();
@@ -415,11 +420,7 @@ where
                 self.record_activity(&sender, view);
 
                 // Skip certificates we already have for the view
-                let kind = match &message {
-                    Certificate::Notarization(_) => "notarization",
-                    Certificate::Nullification(_) => "nullification",
-                    Certificate::Finalization(_) => "finalization",
-                };
+                let kind = message.kind();
                 let round = work.get(&view);
                 let duplicate = round.is_some_and(|round| match &message {
                     Certificate::Notarization(_) => round.has_notarization(),
@@ -543,11 +544,12 @@ where
                     if Self::leader_nullified(&current, &work) {
                         current.timed_out = true;
                         let round = Rnd::new(self.epoch, current.view);
-                        let span = work
+                        let _guard = work
                             .get(&current.view)
                             .map(|round| round.span())
-                            .unwrap_or_else(Span::none);
-                        span.in_scope(|| voter.timeout(round, TimeoutReason::LeaderNullify));
+                            .unwrap_or_else(Span::none)
+                            .entered();
+                        voter.timeout(round, TimeoutReason::LeaderNullify);
                     }
                 }
                 updated_view = view;
@@ -580,81 +582,82 @@ where
                 let Some(round) = work.get_mut(&updated_view) else {
                     continue;
                 };
-                let _guard = round.span().entered();
+                {
+                    let _guard = round.span().entered();
 
-                // Batch verify votes if ready
-                let timer = self.verify_latency.timer(self.context.as_ref());
-                let verified = if round.ready_notarizes() {
-                    Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
-                } else if round.ready_nullifies() {
-                    Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
-                } else if round.ready_finalizes() {
-                    Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
-                } else {
-                    None
-                };
+                    // Batch verify votes if ready
+                    let timer = self.verify_latency.timer(self.context.as_ref());
+                    let verified = if round.ready_notarizes() {
+                        Some(round.verify_notarizes(self.context.as_mut(), &self.strategy))
+                    } else if round.ready_nullifies() {
+                        Some(round.verify_nullifies(self.context.as_mut(), &self.strategy))
+                    } else if round.ready_finalizes() {
+                        Some(round.verify_finalizes(self.context.as_mut(), &self.strategy))
+                    } else {
+                        None
+                    };
 
-                // Process batch verification results
-                if let Some((voters, failed)) = verified {
-                    timer.observe(self.context.as_ref());
+                    // Process batch verification results
+                    if let Some((voters, failed)) = verified {
+                        timer.observe(self.context.as_ref());
 
-                    // Process verified votes
-                    let batch = voters.len() + failed.len();
-                    trace!(%updated_view, batch, "batch verified votes");
-                    self.verified.inc_by(batch as u64);
-                    self.batch_size.observe(batch as f64);
+                        // Process verified votes
+                        let batch = voters.len() + failed.len();
+                        trace!(%updated_view, batch, "batch verified votes");
+                        self.verified.inc_by(batch as u64);
+                        self.batch_size.observe(batch as f64);
 
-                    // Block invalid signers
-                    for invalid in failed {
-                        if let Some(signer) = self.participants.key(invalid) {
-                            commonware_p2p::block!(
-                                self.blocker,
-                                signer.clone(),
-                                "invalid signature"
-                            );
+                        // Block invalid signers
+                        for invalid in failed {
+                            if let Some(signer) = self.participants.key(invalid) {
+                                commonware_p2p::block!(
+                                    self.blocker,
+                                    signer.clone(),
+                                    "invalid signature"
+                                );
+                            }
                         }
+
+                        // Store verified votes for certificate construction
+                        for valid in voters {
+                            round.add_verified(valid);
+                        }
+                    } else {
+                        trace!(
+                            current = %current.view,
+                            %finalized,
+                            "no verifier ready"
+                        );
                     }
 
-                    // Store verified votes for certificate construction
-                    for valid in voters {
-                        round.add_verified(valid);
+                    // Try to construct and forward certificates
+                    if let Some(notarization) =
+                        self.recover_latency.time_some(self.context.as_ref(), || {
+                            round.try_construct_notarization(&self.scheme, &self.strategy)
+                        })
+                    {
+                        debug!(%updated_view, "constructed notarization, forwarding to voter");
+
+                        // Forward notarization to voter
+                        voter.recovered(Certificate::Notarization(notarization));
                     }
-                } else {
-                    trace!(
-                        current = %current.view,
-                        %finalized,
-                        "no verifier ready"
-                    );
+                    if let Some(nullification) =
+                        self.recover_latency.time_some(self.context.as_ref(), || {
+                            round.try_construct_nullification(&self.scheme, &self.strategy)
+                        })
+                    {
+                        debug!(%updated_view, "constructed nullification, forwarding to voter");
+                        voter.recovered(Certificate::Nullification(nullification));
+                    }
+                    if let Some(finalization) =
+                        self.recover_latency.time_some(self.context.as_ref(), || {
+                            round.try_construct_finalization(&self.scheme, &self.strategy)
+                        })
+                    {
+                        debug!(%updated_view, "constructed finalization, forwarding to voter");
+                        voter.recovered(Certificate::Finalization(finalization));
+                    }
                 }
-
-                // Try to construct and forward certificates
-                if let Some(notarization) =
-                    self.recover_latency.time_some(self.context.as_ref(), || {
-                        round.try_construct_notarization(&self.scheme, &self.strategy)
-                    })
-                {
-                    debug!(%updated_view, "constructed notarization, forwarding to voter");
-
-                    // Forward notarization to voter
-                    voter.recovered(Certificate::Notarization(notarization));
-                }
-                if let Some(nullification) =
-                    self.recover_latency.time_some(self.context.as_ref(), || {
-                        round.try_construct_nullification(&self.scheme, &self.strategy)
-                    })
-                {
-                    debug!(%updated_view, "constructed nullification, forwarding to voter");
-                    voter.recovered(Certificate::Nullification(nullification));
-                }
-                if let Some(finalization) =
-                    self.recover_latency.time_some(self.context.as_ref(), || {
-                        round.try_construct_finalization(&self.scheme, &self.strategy)
-                    })
-                {
-                    debug!(%updated_view, "constructed finalization, forwarding to voter");
-                    voter.recovered(Certificate::Finalization(finalization));
-                }
-                drop(_guard);
 
                 // Drop any rounds that are no longer interesting
                 while work.first_key_value().is_some_and(|(&view, _)| {
