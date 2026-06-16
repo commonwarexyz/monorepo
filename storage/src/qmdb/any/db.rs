@@ -28,8 +28,8 @@ use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 
-/// Minimum keys per shard for [`Db::get_many_map`] to parallelize the index probe rather than
-/// probe serially, ensuring each shard carries enough work to amortize the thread-pool handoff.
+/// Estimate of the number of keys per shard at which parallelizing [`Db::get_many_map`]'s
+/// index probe is faster than probing serially.
 const MIN_PROBES_PER_SHARD: usize = 8;
 
 /// Metrics for Any QMDBs.
