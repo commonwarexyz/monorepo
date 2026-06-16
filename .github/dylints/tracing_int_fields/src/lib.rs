@@ -27,8 +27,8 @@ const SPAN_MACROS: &[&str] = &[
 dylint_linting::declare_late_lint! {
     /// ### What it does
     ///
-    /// Detects consensus `View`/`Epoch` values recorded as `tracing` span fields
-    /// via `Display` (`%x`) or `Debug` (`?x`).
+    /// Detects integer-valued `tracing` span fields recorded via `Display`
+    /// (`%x`) or `Debug` (`?x`).
     ///
     /// ### Why is this bad?
     ///
@@ -36,9 +36,8 @@ dylint_linting::declare_late_lint! {
     /// span exporter implements `record_i64`/`record_f64` but not `record_u64`,
     /// so even a bare `u64` is stringified. String span attributes can only be
     /// matched with `=`/regex in TraceQL and sort lexicographically
-    /// (`"100" < "70"`). `View`/`Epoch` are ordered integers, so span fields
-    /// should be recorded numerically to be range-queryable and to sort
-    /// correctly.
+    /// (`"100" < "70"`). Ordered integer fields should be recorded numerically
+    /// to be range-queryable and to sort correctly.
     ///
     /// ### Example
     ///
@@ -53,7 +52,7 @@ dylint_linting::declare_late_lint! {
     /// ```
     pub TRACING_INT_FIELDS,
     Deny,
-    "consensus View/Epoch recorded as a tracing span field via Display/Debug instead of as an integer"
+    "integer-valued field recorded as a tracing span field via Display/Debug instead of as an integer"
 }
 
 /// Returns true if `path` equals `tail` or ends with `::{tail}` (a path-segment

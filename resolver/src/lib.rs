@@ -9,6 +9,7 @@ commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
+    use core::cmp::Ordering;
 
     pub mod delivery;
     mod ingress;
@@ -26,9 +27,34 @@ commonware_macros::stability_scope!(BETA {
         /// Trace span carried from issuance to delivery.
         ///
         /// The resolver retains this span with the subscriber and re-attaches it
-        /// to that subscriber in [`Delivery`] when the fetch resolves, so consumer
-        /// work nests under the span that requested it.
+        /// to that subscriber in [`Delivery`] when the fetch resolves, so consumers
+        /// can attribute delivery work to the request span when useful.
         pub span: tracing::Span,
+    }
+
+    impl<K: PartialEq, S: PartialEq> PartialEq for Fetch<K, S> {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key && self.subscriber == other.subscriber
+        }
+    }
+
+    impl<K: Eq, S: Eq> Eq for Fetch<K, S> {}
+
+    impl<K: PartialOrd, S: PartialOrd> PartialOrd for Fetch<K, S> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            match self.key.partial_cmp(&other.key)? {
+                Ordering::Equal => self.subscriber.partial_cmp(&other.subscriber),
+                ordering => Some(ordering),
+            }
+        }
+    }
+
+    impl<K: Ord, S: Ord> Ord for Fetch<K, S> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.key
+                .cmp(&other.key)
+                .then_with(|| self.subscriber.cmp(&other.subscriber))
+        }
     }
 
     impl<K, S: Default> From<K> for Fetch<K, S> {
@@ -49,8 +75,8 @@ commonware_macros::stability_scope!(BETA {
         /// Subscribers that were still retained when the response arrived, each
         /// paired with the trace span of the fetch that requested it.
         ///
-        /// Consumer work for a subscriber nests under that subscriber's span, so
-        /// every requester observes the resolution of its own fetch.
+        /// Consumers can use these spans to attribute delivery work to the
+        /// requests that caused it.
         pub subscribers: NonEmptyVec<(S, tracing::Span)>,
     }
 
@@ -67,6 +93,30 @@ commonware_macros::stability_scope!(BETA {
     }
 
     impl<K: Eq, S: Eq> Eq for Delivery<K, S> {}
+
+    impl<K: PartialOrd, S: PartialOrd> PartialOrd for Delivery<K, S> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            match self.key.partial_cmp(&other.key)? {
+                Ordering::Equal => self
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| subscriber)
+                    .partial_cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber)),
+                ordering => Some(ordering),
+            }
+        }
+    }
+
+    impl<K: Ord, S: Ord> Ord for Delivery<K, S> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.key.cmp(&other.key).then_with(|| {
+                self.subscribers
+                    .iter()
+                    .map(|(subscriber, _)| subscriber)
+                    .cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber))
+            })
+        }
+    }
 
     /// Notified when data is available, and must validate it.
     pub trait Consumer: Clone + Send + 'static {
