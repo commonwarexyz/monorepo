@@ -407,7 +407,7 @@ impl CacheRef {
 
 impl Cache {
     /// Return a new empty page cache with a max cache capacity of `capacity` pages, each of size
-    /// `page_size` bytes. All page buffers are eagerly allocated from `pool` and reused thereafter.
+    /// `page_size` bytes.
     pub fn new(pool: BufferPool, page_size: NonZeroU16, capacity: NonZeroUsize) -> Self {
         let page_size = page_size.get() as usize;
         let mut cache = Clock::new(capacity);
@@ -446,9 +446,6 @@ impl Cache {
     }
 
     /// Put the given `page` into the page cache.
-    ///
-    /// On a hit or a reused (freed or evicted) slot the existing page buffer is overwritten in
-    /// place; only growth to capacity allocates a new buffer from the pool.
     fn cache(&mut self, blob_id: u64, page: &[u8], page_num: u64) {
         assert_eq!(page.len(), self.page_size);
         let pool = &self.pool;
@@ -459,8 +456,7 @@ impl Cache {
         buf.as_mut().copy_from_slice(page);
     }
 
-    /// Drop any cached pages for `blob_id` at `page_num >= start_page`. Freed slots keep their page
-    /// buffers, which are reused in place by the next insert.
+    /// Drop any cached pages for `blob_id` at `page_num >= start_page`.
     fn invalidate_from(&mut self, blob_id: u64, start_page: u64) {
         self.cache
             .retain(|&(bid, page_num), _| bid != blob_id || page_num < start_page);

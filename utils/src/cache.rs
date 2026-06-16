@@ -163,6 +163,10 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn get(&self, key: &K) -> Option<&V> {
         let &index = self.index.get(key)?;
         let slot = &self.slots[index];
+
+        // Skip the store when the bit is already set. Under concurrent &self
+        // readers an unconditional store would dirty this cache line on every
+        // hit and bounce it between cores
         if !slot.referenced.load(Ordering::Relaxed) {
             slot.referenced.store(true, Ordering::Relaxed);
         }
