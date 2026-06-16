@@ -966,6 +966,9 @@ impl<
         Ok(())
     }
 
+    /// Checks that the chunk sequencer is known for the epoch.
+    ///
+    /// This can run before journal replay because it does not depend on tracked tips.
     fn validate_chunk_sequencer(
         &self,
         chunk: &Chunk<C::PublicKey, D>,
@@ -983,6 +986,9 @@ impl<
         Ok(())
     }
 
+    /// Checks the chunk against the currently tracked tip for its sequencer.
+    ///
+    /// For inbound nodes, call this only after replaying the sender's journal.
     fn validate_chunk_tip(&self, chunk: &Chunk<C::PublicKey, D>) -> Result<(), Error> {
         if let Some(tip) = self.tip_manager.get(&chunk.sequencer) {
             // Height must be at least the tip height
@@ -1162,6 +1168,19 @@ mod tests {
         success_rate: 1.0,
     };
     type TestNode = Node<Ed25519PublicKey, ed25519::Scheme, Sha256Digest>;
+    type TestReporter = mocks::ReporterMailbox<Ed25519PublicKey, ed25519::Scheme, Sha256Digest>;
+    type TestEngine = Engine<
+        deterministic::Context,
+        PrivateKey,
+        EpochSequencers,
+        mocks::Provider<ed25519::Scheme>,
+        Sha256Digest,
+        mocks::Automaton<Ed25519PublicKey>,
+        mocks::Automaton<Ed25519PublicKey>,
+        TestReporter,
+        mocks::Monitor,
+        Sequential,
+    >;
 
     #[derive(Clone, Default)]
     struct EpochSequencers {
@@ -1204,21 +1223,10 @@ mod tests {
         context: deterministic::Context,
         fixture: &Fixture<ed25519::Scheme>,
         sequencers_provider: EpochSequencers,
-        reporter: mocks::ReporterMailbox<Ed25519PublicKey, ed25519::Scheme, Sha256Digest>,
+        reporter: TestReporter,
         epoch: Epoch,
         journal_name_prefix: String,
-    ) -> Engine<
-        deterministic::Context,
-        PrivateKey,
-        EpochSequencers,
-        mocks::Provider<ed25519::Scheme>,
-        Sha256Digest,
-        mocks::Automaton<Ed25519PublicKey>,
-        mocks::Automaton<Ed25519PublicKey>,
-        mocks::ReporterMailbox<Ed25519PublicKey, ed25519::Scheme, Sha256Digest>,
-        mocks::Monitor,
-        Sequential,
-    > {
+    ) -> TestEngine {
         let validators_provider = mocks::Provider::new();
         assert!(validators_provider.register(epoch, fixture.schemes[0].clone()));
 
@@ -1245,11 +1253,7 @@ mod tests {
                 journal_write_buffer: NZUsize!(4096),
                 journal_name_prefix,
                 journal_compression: Some(3),
-                journal_page_cache: CacheRef::from_pooler(
-                    &context,
-                    PAGE_SIZE,
-                    PAGE_CACHE_SIZE,
-                ),
+                journal_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 strategy: Sequential,
             },
         );
