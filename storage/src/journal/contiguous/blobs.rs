@@ -5,7 +5,7 @@ use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::paged::{self, CacheRef, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
-    Blob, Error as RError, IoBufs,
+    Blob, Error as RError, IoBuf, IoBufMut, IoBufs,
 };
 use futures::future::try_join_all;
 use std::{
@@ -423,21 +423,6 @@ impl<E: Context> Blobs<E> {
         }
         Partition::remove_all(&self.partition.context, &self.partition.name).await
     }
-
-    /// Test helper: make one blob durable.
-    #[cfg(test)]
-    pub(super) async fn sync_blob(&self, blob: u64) -> Result<(), Error> {
-        if blob == self.tail_blob_index() {
-            return self.tail.sync().await.map_err(Error::Runtime);
-        }
-        match blob
-            .checked_sub(self.oldest_blob_index)
-            .and_then(|idx| self.sealed.get(idx as usize))
-        {
-            Some(sealed) => sealed.sync().await.map_err(Error::Runtime),
-            None => Ok(()),
-        }
-    }
 }
 
 /// A read handle for one blob, resolved from a [`Snapshot`].
@@ -451,6 +436,39 @@ impl<B: Blob> Handle<'_, B> {
         match self {
             Self::Sealed(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
             Self::Tail(t) => t.read_at(offset, len).await.map_err(Error::Runtime),
+        }
+    }
+
+    /// Read up to `len` bytes starting at `offset`, returning the bytes and how many were
+    /// available.
+    pub(super) async fn read_up_to(
+        &self,
+        offset: u64,
+        len: usize,
+    ) -> Result<(IoBuf, usize), Error> {
+        match self {
+            Self::Sealed(s) => {
+                let available = usize::try_from(s.size().saturating_sub(offset))
+                    .unwrap_or(usize::MAX)
+                    .min(len);
+                let bufs = s.read_at(offset, available).await.map_err(Error::Runtime)?;
+                Ok((bufs.coalesce(), available))
+            }
+            Self::Tail(t) => {
+                let (buf, available) = t
+                    .read_up_to(offset, len, IoBufMut::with_capacity(len))
+                    .await
+                    .map_err(Error::Runtime)?;
+                Ok((buf.freeze(), available))
+            }
+        }
+    }
+
+    /// The blob's size, if it can be observed without waiting.
+    pub(super) fn try_size(&self) -> Option<u64> {
+        match self {
+            Self::Sealed(s) => Some(s.size()),
+            Self::Tail(t) => t.try_size(),
         }
     }
 
@@ -552,5 +570,32 @@ impl<B: Blob> Snapshot<B> {
 impl<B: Blob> Drop for Snapshot<B> {
     fn drop(&mut self) {
         self.readers.fetch_sub(1, Ordering::Release);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    impl<E: Context> Blobs<E> {
+        /// Open `blob` as an independent writer, outside this journal's tracking
+        /// (simulates a crash-artifact blob).
+        pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {
+            self.partition.open(blob).await
+        }
+
+        /// Make one blob durable.
+        pub(crate) async fn sync_blob(&self, blob: u64) -> Result<(), Error> {
+            if blob == self.tail_blob_index() {
+                return self.tail.sync().await.map_err(Error::Runtime);
+            }
+            match blob
+                .checked_sub(self.oldest_blob_index)
+                .and_then(|idx| self.sealed.get(idx as usize))
+            {
+                Some(sealed) => sealed.sync().await.map_err(Error::Runtime),
+                None => Ok(()),
+            }
+        }
     }
 }

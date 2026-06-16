@@ -189,9 +189,8 @@ async fn read_item<J: Contiguous>(journal: &J, position: u64) -> Result<J::Item,
 ///
 /// # Assumptions
 ///
-/// These tests assume the journal is configured with **`items_per_section = 10`**
-/// (or `items_per_blob = 10` for fixed journals). Some tests rely on this value
-/// for section boundary calculations and pruning behavior.
+/// These tests assume the journal is configured with **`items_per_blob = 10`**.
+/// Some tests rely on this value for blob-boundary calculations and pruning behavior.
 #[boxed]
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
@@ -280,7 +279,7 @@ where
 
 /// Test that bounds updates after pruning.
 ///
-/// This test assumes items_per_section = 10.
+/// This test assumes items_per_blob = 10.
 async fn test_bounds_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -301,7 +300,7 @@ where
     // Prune first section - trait only guarantees section-aligned pruning
     journal.prune(10).await.unwrap();
 
-    // Assumed section-aligned pruning and items_per_section = 10
+    // Assumed blob-aligned pruning and items_per_blob = 10.
     let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 10);
     assert_eq!(bounds.end, 30);
@@ -533,7 +532,7 @@ where
 /// Test pruning all items then appending new ones.
 ///
 /// Verifies that positions continue consecutively increasing even after
-/// pruning all retained items. Assumes items_per_section = 10.
+/// pruning all retained items. Assumes items_per_blob = 10.
 async fn test_prune_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -546,7 +545,7 @@ where
         journal.append(&i).await.unwrap();
     }
 
-    // Prune all items (prune at section boundary)
+    // Prune all items at a blob boundary.
     journal.prune(10).await.unwrap();
     assert!(get_bounds(&journal).await.is_empty());
 
@@ -1072,7 +1071,7 @@ where
 }
 
 /// Test rewind then append maintains position continuity.
-/// Assumes items_per_section = 10.
+/// Assumes items_per_blob = 10.
 async fn test_rewind_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -1080,7 +1079,7 @@ where
 {
     let mut journal = factory("rewind-then-append".into()).await.unwrap();
 
-    // Append across section boundary (15 items = 1.5 sections)
+    // Append across a blob boundary (15 items = 1.5 blobs).
     for i in 0..15u64 {
         journal.append(&i).await.unwrap();
     }
@@ -1131,7 +1130,7 @@ where
 }
 
 /// Test rewinding after pruning to verify correct interaction between operations.
-/// Assumes items_per_section = 10.
+/// Assumes items_per_blob = 10.
 async fn test_rewind_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -1139,7 +1138,7 @@ where
 {
     let mut journal = factory("rewind-after-prune".into()).await.unwrap();
 
-    // Append items across 3 sections (30 items, assuming items_per_section = 10)
+    // Append items across 3 blobs (30 items, assuming items_per_blob = 10).
     for i in 0..30u64 {
         journal.append(&(i * 100)).await.unwrap();
     }
@@ -1179,7 +1178,7 @@ where
 }
 
 /// Test behavior at section boundaries.
-/// Assumes items_per_section = 10.
+/// Assumes items_per_blob = 10.
 async fn test_section_boundary_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -1193,7 +1192,7 @@ where
         assert_eq!(pos, i);
     }
 
-    // Verify we're at a section boundary
+    // Verify we're at a blob boundary.
     assert_eq!(get_bounds(&journal).await.end, 10);
 
     // Append one more item to cross the boundary
@@ -1201,7 +1200,7 @@ where
     assert_eq!(pos, 10);
     assert_eq!(get_bounds(&journal).await.end, 11);
 
-    // Prune exactly at the section boundary
+    // Prune exactly at the blob boundary.
     journal.prune(10).await.unwrap();
     assert_eq!(get_bounds(&journal).await.start, 10);
 
@@ -1217,7 +1216,7 @@ where
     assert_eq!(pos, 11);
     assert_eq!(get_bounds(&journal).await.end, 12);
 
-    // Rewind to exactly the section boundary (position 10)
+    // Rewind to exactly the blob boundary (position 10).
     // This leaves bounds.end=10, bounds.start=10, making the journal fully pruned
     journal.rewind(10).await.unwrap();
     let bounds = get_bounds(&journal).await;
@@ -1331,7 +1330,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test append_many across section boundaries (items_per_section = 10).
+/// Test append_many across blob boundaries (items_per_blob = 10).
 async fn test_append_many_across_sections<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
