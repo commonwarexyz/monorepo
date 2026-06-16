@@ -256,32 +256,31 @@ where
         // its global key index, so partition order does not matter.
         let strategy = self.strategy();
         let parallelism = strategy.parallelism_hint().max(1);
-        let mut candidates: Vec<(usize, u64)> = if parallelism == 1
-            || keys.len() < MIN_PROBES_PER_SHARD.saturating_mul(parallelism)
-        {
-            let mut candidates = Vec::with_capacity(keys.len());
-            self.snapshot
-                .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
-            candidates
-        } else {
-            let chunk = keys.len().div_ceil(parallelism);
-            let snapshot = &self.snapshot;
-            strategy
-                .map_collect_vec(
-                    keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
-                    |(ci, chunk_keys)| {
-                        let base = ci * chunk;
-                        let mut local: Vec<(usize, u64)> = Vec::with_capacity(chunk_keys.len());
-                        snapshot.get_many(chunk_keys, |key_idx, &loc| {
-                            local.push((base + key_idx, *loc))
-                        });
-                        local
-                    },
-                )
-                .into_iter()
-                .flatten()
-                .collect()
-        };
+        let mut candidates: Vec<(usize, u64)> =
+            if parallelism == 1 || keys.len() < MIN_PROBES_PER_SHARD.saturating_mul(parallelism) {
+                let mut candidates = Vec::with_capacity(keys.len());
+                self.snapshot
+                    .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+                candidates
+            } else {
+                let chunk = keys.len().div_ceil(parallelism);
+                let snapshot = &self.snapshot;
+                strategy
+                    .map_collect_vec(
+                        keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
+                        |(ci, chunk_keys)| {
+                            let base = ci * chunk;
+                            let mut local: Vec<(usize, u64)> = Vec::with_capacity(chunk_keys.len());
+                            snapshot.get_many(chunk_keys, |key_idx, &loc| {
+                                local.push((base + key_idx, *loc))
+                            });
+                            local
+                        },
+                    )
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            };
 
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
         if candidates.is_empty() {
