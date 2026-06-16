@@ -14,7 +14,7 @@ const REPLAY_BUFFER: usize = 1024 * 1024; // 1MB
 pub const PARTITION: &str = "ordinal-bench-partition";
 
 /// Configuration constants for [Ordinal] store.
-pub(super) const ITEMS_PER_BLOB: u64 = 10000;
+pub const ITEMS_PER_BLOB: u64 = 10000;
 
 /// Concrete ordinal store type for benchmarks.
 pub type Ordinal = ordinal::Ordinal<Context, FixedBytes<128>>;
