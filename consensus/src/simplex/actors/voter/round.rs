@@ -67,7 +67,7 @@ pub struct Round<S: Scheme, D: Digest> {
 }
 
 impl<S: Scheme, D: Digest> Round<S, D> {
-    pub fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
+    pub const fn new(scheme: S, round: Rnd, start: SystemTime) -> Self {
         Self {
             start,
             scheme,
