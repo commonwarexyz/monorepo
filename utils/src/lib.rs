@@ -32,7 +32,6 @@ commonware_macros::stability_scope!(BETA {
 
     pub mod bitmap;
     pub mod cache;
-    pub use cache::ClockCache;
     pub mod ordered;
     pub mod range;
 

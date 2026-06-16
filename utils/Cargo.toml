@@ -90,6 +90,11 @@ fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 bench = false
 
 [[bench]]
+name = "cache"
+harness = false
+path = "src/cache/benches/bench.rs"
+
+[[bench]]
 name = "bitmap"
 harness = false
 path = "src/bitmap/benches/bench.rs"
