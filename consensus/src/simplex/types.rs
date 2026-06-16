@@ -419,6 +419,7 @@ pub enum Certificate<S: Scheme, D: Digest> {
     Finalization(Finalization<S, D>),
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl<S: Scheme, D: Digest> Certificate<S, D> {
     /// Returns the stable trace field value for this certificate's type.
     pub(crate) const fn kind(&self) -> &'static str {
