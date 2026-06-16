@@ -2068,6 +2068,7 @@ dependencies = [
 name = "commonware-utils"
 version = "2026.5.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "bytes",
  "cfg-if",
@@ -2079,6 +2080,7 @@ dependencies = [
  "criterion",
  "futures",
  "getrandom 0.2.16",
+ "getrandom 0.3.4",
  "hashbrown 0.16.1",
  "num-bigint",
  "num-integer",
