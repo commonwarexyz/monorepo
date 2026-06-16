@@ -120,6 +120,9 @@ jobs:
         include:
           - os: ubuntu-latest
             package: commonware-runtime
+            flags: "--features commonware-runtime/jemalloc"
+          - os: ubuntu-latest
+            package: commonware-runtime
             flags: "--features commonware-runtime/external"
           - os: windows-latest
             package: commonware-runtime
