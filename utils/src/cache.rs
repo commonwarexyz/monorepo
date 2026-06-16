@@ -178,17 +178,19 @@ impl<K: Hash + Eq + Clone, V, S: BuildHasher> Clock<K, V, S> {
     /// concurrently behind a shared lock.
     #[inline]
     pub fn get(&self, key: &K) -> Option<&V> {
-        let &slot = self.index.get(key)?;
-        self.slots[slot].referenced.store(true, Ordering::Relaxed);
-        Some(&self.slots[slot].value)
+        let &index = self.index.get(key)?;
+        let slot = &self.slots[index];
+        slot.referenced.store(true, Ordering::Relaxed);
+        Some(&slot.value)
     }
 
     /// Returns a mutable reference to the value for `key`, recording use.
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        let &slot = self.index.get(key)?;
-        self.slots[slot].referenced.store(true, Ordering::Relaxed);
-        Some(&mut self.slots[slot].value)
+        let &index = self.index.get(key)?;
+        let slot = &mut self.slots[index];
+        slot.referenced.store(true, Ordering::Relaxed);
+        Some(&mut slot.value)
     }
 
     /// Inserts `value` for `key`, recording use.

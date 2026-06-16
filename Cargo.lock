@@ -2062,6 +2062,7 @@ dependencies = [
 name = "commonware-utils"
 version = "2026.5.0"
 dependencies = [
+ "ahash",
  "arbitrary",
  "bytes",
  "cfg-if",
