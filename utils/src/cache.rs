@@ -97,8 +97,9 @@ pub struct Clock<K, V> {
     index: HashMap<K, usize, Hasher>,
     /// Backing storage for slots, grown lazily up to `capacity` and then reused.
     slots: Vec<Slot<K, V>>,
-    /// Slots detached from the index (by eviction overwrite never; by
-    /// [Self::remove]/[Self::retain]) that are available for reuse.
+    /// Slots detached from the index and available for reuse. Populated by
+    /// [Self::remove] and [Self::retain]; eviction reuses its victim slot
+    /// directly, so it never adds here.
     free: Vec<usize>,
     /// The clock hand: the next slot the evictor will examine.
     hand: usize,
@@ -162,7 +163,9 @@ impl<K: Hash + Eq + Clone, V> Clock<K, V> {
     pub fn get(&self, key: &K) -> Option<&V> {
         let &index = self.index.get(key)?;
         let slot = &self.slots[index];
-        slot.referenced.store(true, Ordering::Relaxed);
+        if !slot.referenced.load(Ordering::Relaxed) {
+            slot.referenced.store(true, Ordering::Relaxed);
+        }
         Some(&slot.value)
     }
 
