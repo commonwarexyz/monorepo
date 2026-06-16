@@ -96,7 +96,7 @@ fn fuzz(input: FuzzInput) {
         let init_checkpoint = input
             .zero_checkpoint
             .then(|| Checkpoint::decode([0u8; Checkpoint::SIZE].as_ref()).unwrap());
-        let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init_with_checkpoint(
+        let mut freezer = Freezer::<_, FixedBytes<32>, i32>::init(
             context.child("storage"),
             cfg.clone(),
             init_checkpoint,
@@ -137,9 +137,12 @@ fn fuzz(input: FuzzInput) {
                 }
                 Op::Restart { mode } => {
                     let checkpoint = match mode % 3 {
-                        // Close and recover from the table alone
+                        // Close and reopen empty: a `None` checkpoint deletes all
+                        // freezer data, so the model must be reset to match.
                         0 => {
                             freezer.close().await.unwrap();
+                            expected_state.clear();
+                            cursors.clear();
                             None
                         }
                         // Close and restore from the returned checkpoint
@@ -156,7 +159,7 @@ fn fuzz(input: FuzzInput) {
                             None => Some(freezer.close().await.unwrap()),
                         },
                     };
-                    freezer = Freezer::<_, FixedBytes<32>, i32>::init_with_checkpoint(
+                    freezer = Freezer::<_, FixedBytes<32>, i32>::init(
                         context
                             .child("storage")
                             .with_attribute("instance", restarts),

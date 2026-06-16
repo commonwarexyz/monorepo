@@ -172,7 +172,7 @@ mod test {
         ed25519::{PrivateKey, PublicKey},
         Signer,
     };
-    use commonware_macros::{select, test_group, test_traced};
+    use commonware_macros::{boxed, select, test_group, test_traced};
     use commonware_p2p::{
         simulated::{self, Link, Network, Oracle},
         utils::mux,
@@ -326,6 +326,7 @@ mod test {
             }
         }
 
+        #[boxed]
         async fn start_one<S, L>(
             &mut self,
             ctx: &deterministic::Context,
@@ -420,6 +421,7 @@ mod test {
 
         /// Start a participant using the appropriate scheme based on whether
         /// we have an initial output (reshare mode) or not (DKG mode).
+        #[boxed]
         async fn start_participant(
             &mut self,
             ctx: &deterministic::Context,
@@ -436,6 +438,7 @@ mod test {
             }
         }
 
+        #[boxed]
         async fn start(
             &mut self,
             ctx: &deterministic::Context,

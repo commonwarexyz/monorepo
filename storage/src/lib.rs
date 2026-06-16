@@ -23,6 +23,8 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     pub mod bmt;
     pub mod cache;
     pub mod queue;
+    #[cfg(any(test, feature = "test-utils"))]
+    pub mod utils;
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod archive;
