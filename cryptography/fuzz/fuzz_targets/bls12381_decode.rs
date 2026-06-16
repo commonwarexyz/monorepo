@@ -4,10 +4,17 @@ use arbitrary::Arbitrary;
 use blst::min_pk::{PublicKey as RefPublicKey, Signature as RefSignature};
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
-    bls12381::{PrivateKey as BlsPrivateKey, PublicKey, Signature},
+    bls12381::{
+        primitives::variant::{MinPk, Variant},
+        PrivateKey as BlsPrivateKey, PublicKey, Signature,
+    },
     Signer as _,
 };
 use libfuzzer_sys::fuzz_target;
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
+};
 
 const NAMESPACE: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_BLS12381_DECODE_FUZZ";
 
@@ -21,6 +28,11 @@ pub struct FuzzInput {
         u.bytes(*len).map(|b| b.to_vec())
     })]
     pub variable_data: Vec<u8>,
+    // Arbitrary-constructed values drive the `Arbitrary` impls for `PrivateKey`
+    // and `Signature` and give us values to exercise the scheme trait impls.
+    pub arb_priv: BlsPrivateKey,
+    pub arb_sig_a: Signature,
+    pub arb_sig_b: Signature,
     pub case_selector: u8,
 }
 
@@ -83,8 +95,41 @@ fn test_signature_decode_encode(data: &[u8]) {
     }
 }
 
+// Exercise the scheme's PrivateKey/PublicKey/Signature trait impls on
+// Arbitrary-constructed values: private-key equality and codec round-trip, the
+// public-key accessors/ordering/hash, and the signature wrappers.
+fn test_trait_impls(input: &FuzzInput) {
+    // PrivateKey: PartialEq plus Write/Read codec round-trip.
+    let priv_a = &input.arb_priv;
+    assert_eq!(*priv_a, priv_a.clone());
+    assert_eq!(*priv_a, BlsPrivateKey::decode(priv_a.encode()).unwrap());
+
+    // PublicKey: AsRef<Public>, Deref and AsRef<[u8]> agree, Ord agrees with
+    // PartialOrd, Hash is deterministic.
+    let pk_a = priv_a.public_key();
+    let pk_b = signer(input).public_key();
+    let _point: &<MinPk as Variant>::Public = pk_a.as_ref();
+    let pk_bytes: &[u8] = &pk_a;
+    assert_eq!(pk_bytes, AsRef::<[u8]>::as_ref(&pk_a));
+    assert_eq!(pk_a.cmp(&pk_b), pk_a.partial_cmp(&pk_b).unwrap());
+    let mut h1 = DefaultHasher::new();
+    let mut h2 = DefaultHasher::new();
+    pk_a.hash(&mut h1);
+    pk_a.hash(&mut h2);
+    assert_eq!(h1.finish(), h2.finish());
+
+    // Signature: Deref and AsRef<[u8]> agree, Ord agrees with PartialOrd, Hash runs.
+    let (sig_a, sig_b) = (&input.arb_sig_a, &input.arb_sig_b);
+    let sig_bytes: &[u8] = sig_a;
+    assert_eq!(sig_bytes, AsRef::<[u8]>::as_ref(sig_a));
+    assert_eq!(sig_a.cmp(sig_b), sig_a.partial_cmp(sig_b).unwrap());
+    let mut hs = DefaultHasher::new();
+    sig_a.hash(&mut hs);
+    let _ = hs.finish();
+}
+
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 10 {
+    match input.case_selector % 11 {
         0 => test_pubkey_diff_validate(&input.pubkey_48), // Fixed 48-byte pubkey
         1 => test_signature_diff_validate(&input.signature_96), // Fixed 96-byte signature
         2 => test_pubkey_diff_validate(&input.variable_data), // Variable length pubkey
@@ -95,6 +140,7 @@ fn fuzz(input: FuzzInput) {
         7 => test_signature_diff_validate(&valid_signature(&input)), // Valid signature differential
         8 => test_pubkey_decode_encode(&valid_pubkey(&input)),   // Valid pubkey roundtrip
         9 => test_signature_decode_encode(&valid_signature(&input)), // Valid signature roundtrip
+        10 => test_trait_impls(&input),                          // Scheme trait impls
         _ => unreachable!(),
     }
 }

@@ -26,6 +26,11 @@ pub struct FuzzInput {
     })]
     pub variable_data: Vec<u8>,
     pub message: Vec<u8>,
+    // Arbitrary-constructed values drive the `Arbitrary` impls for `Signature`
+    // and `PublicKey` and give us values to exercise the newtype trait wrappers.
+    pub arb_sig_a: Signature,
+    pub arb_sig_b: Signature,
+    pub arb_pub: PublicKey,
     pub case_selector: u8,
 }
 
@@ -146,8 +151,37 @@ fn test_public_key_derivation(private_key_data: &[u8]) {
     }
 }
 
+// Exercise the newtype trait wrappers: Signature Ord/PartialOrd/Deref/AsRef,
+// PublicKey Deref/AsRef/formatting, and the p256 `From` conversions plus
+// PrivateKey equality/formatting.
+fn test_trait_impls(
+    sig_a: &Signature,
+    sig_b: &Signature,
+    pubkey: &PublicKey,
+    private_key_data: &[u8; 32],
+) {
+    // Signature: Ord must agree with PartialOrd; Deref and AsRef expose the same bytes.
+    assert_eq!(sig_a.cmp(sig_b), sig_a.partial_cmp(sig_b).unwrap());
+    let sig_bytes: &[u8] = sig_a;
+    assert_eq!(sig_bytes, sig_a.as_ref());
+
+    // PublicKey: Deref and AsRef expose the same bytes; exercise the formatters.
+    let pub_bytes: &[u8] = pubkey;
+    assert_eq!(pub_bytes, pubkey.as_ref());
+    let _ = format!("{pubkey:?}{pubkey}");
+
+    // p256 `From` conversions for both key types, plus PrivateKey equality.
+    if let Ok(ref_sk) = RefSigningKey::from_slice(private_key_data) {
+        let sk = PrivateKey::from(ref_sk.clone());
+        assert_eq!(sk, sk.clone());
+        let pk = PublicKey::from(*ref_sk.verifying_key());
+        assert_eq!(pk.encode(), sk.public_key().encode());
+        let _ = format!("{sk:?}{sk}");
+    }
+}
+
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 10 {
+    match input.case_selector % 11 {
         0 => test_private_key(&input.private_key_32),
         1 => test_public_key(&input.public_key_33),
         2 => test_signature(&input.signature_64),
@@ -158,6 +192,12 @@ fn fuzz(input: FuzzInput) {
         7 => test_sign_verify(&input.private_key_32, &input.message),
         8 => test_public_key_roundtrip(&input.public_key_33),
         9 => test_public_key_roundtrip(&input.variable_data),
+        10 => test_trait_impls(
+            &input.arb_sig_a,
+            &input.arb_sig_b,
+            &input.arb_pub,
+            &input.private_key_32,
+        ),
         _ => unreachable!(),
     }
 }

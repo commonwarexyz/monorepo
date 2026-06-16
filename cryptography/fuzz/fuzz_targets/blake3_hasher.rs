@@ -7,6 +7,8 @@ use commonware_cryptography::{
     blake3::{Blake3 as OurBlake3, Digest},
     Hasher,
 };
+use commonware_math::algebra::Random;
+use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
 use zeroize::Zeroize;
 
@@ -14,6 +16,8 @@ use zeroize::Zeroize;
 pub struct FuzzInput {
     pub chunks: Vec<Vec<u8>>,
     pub data: Vec<u8>,
+    // Drives `Digest::arbitrary` (hashes fuzzer-chosen bytes into a digest).
+    pub arb_digest: Digest,
     pub case_selector: u8,
 }
 
@@ -149,8 +153,17 @@ fn fuzz_from_hash_and_deref(data: &[u8]) {
     assert_eq!(our_digest.as_ref(), our_hash.as_ref());
 }
 
+// Drives `Digest::random` (via the deterministic FuzzRng) and `Digest::arbitrary`
+// (the `arb_digest` field), asserting both survive an encode/decode round-trip.
+fn fuzz_digest_random_and_arbitrary(seed: &[u8], arb: &Digest) {
+    let mut rng = FuzzRng::new(seed.to_vec());
+    let random = Digest::random(&mut rng);
+    assert_eq!(Digest::decode(random.encode()).unwrap(), random);
+    assert_eq!(Digest::decode(arb.encode()).unwrap(), *arb);
+}
+
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 8 {
+    match input.case_selector % 9 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -159,6 +172,7 @@ fn fuzz(input: FuzzInput) {
         5 => fuzz_clone_and_format(&input.chunks),
         6 => fuzz_digest_operations(&input.data),
         7 => fuzz_from_hash_and_deref(&input.data),
+        8 => fuzz_digest_random_and_arbitrary(&input.data, &input.arb_digest),
         _ => unreachable!(),
     }
 }

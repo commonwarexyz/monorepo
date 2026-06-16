@@ -4,7 +4,7 @@ use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{
     secp256r1::recoverable::{PrivateKey, PublicKey, Signature},
-    Signer, Verifier,
+    Recoverable, Signer, Verifier,
 };
 use libfuzzer_sys::fuzz_target;
 use p256::{
@@ -12,6 +12,10 @@ use p256::{
         Signature as RefSignature, SigningKey as RefSigningKey, VerifyingKey as RefVerifyingKey,
     },
     elliptic_curve::scalar::IsHigh,
+};
+use std::{
+    collections::hash_map::DefaultHasher,
+    hash::{Hash, Hasher},
 };
 
 #[derive(Debug, Arbitrary)]
@@ -26,6 +30,10 @@ pub struct FuzzInput {
     })]
     pub variable_data: Vec<u8>,
     pub message: Vec<u8>,
+    // Arbitrary-constructed signatures drive the `Signature` `Arbitrary` impl and
+    // give us values to exercise its Hash/Ord/PartialOrd wrappers.
+    pub arb_sig_a: Signature,
+    pub arb_sig_b: Signature,
     pub case_selector: u8,
 }
 
@@ -146,6 +154,16 @@ fn test_sign_verify(private_key_data: &[u8; 32], message: &[u8]) {
         let encoded_sig = signature.encode();
         let decoded_sig = Signature::decode(encoded_sig.as_ref()).unwrap();
         assert!(public_key.verify(b"", message, &decoded_sig));
+
+        // Recovering the signer from a recoverable signature yields the signing key.
+        assert_eq!(
+            signature.recover_signer(b"", message),
+            Some(public_key.clone())
+        );
+        assert_eq!(
+            sig_with_ns.recover_signer(namespace, message),
+            Some(public_key)
+        );
     }
 }
 
@@ -158,8 +176,20 @@ fn test_public_key_derivation(private_key_data: &[u8]) {
     }
 }
 
+// Exercise the Signature newtype wrappers: Ord must agree with PartialOrd, and
+// Hash must be deterministic for a given signature.
+fn test_trait_impls(sig_a: &Signature, sig_b: &Signature) {
+    assert_eq!(sig_a.cmp(sig_b), sig_a.partial_cmp(sig_b).unwrap());
+
+    let mut h1 = DefaultHasher::new();
+    let mut h2 = DefaultHasher::new();
+    sig_a.hash(&mut h1);
+    sig_a.hash(&mut h2);
+    assert_eq!(h1.finish(), h2.finish());
+}
+
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 10 {
+    match input.case_selector % 11 {
         0 => test_private_key(&input.private_key_32),
         1 => test_public_key(&input.public_key_33),
         2 => test_signature(&input.signature_65),
@@ -170,6 +200,7 @@ fn fuzz(input: FuzzInput) {
         7 => test_sign_verify(&input.private_key_32, &input.message),
         8 => test_public_key_roundtrip(&input.public_key_33),
         9 => test_public_key_roundtrip(&input.variable_data),
+        10 => test_trait_impls(&input.arb_sig_a, &input.arb_sig_b),
         _ => unreachable!(),
     }
 }

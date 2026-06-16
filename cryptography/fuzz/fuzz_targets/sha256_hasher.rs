@@ -3,6 +3,8 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode};
 use commonware_cryptography::{sha256::Digest, Hasher, Sha256 as OurSha256};
+use commonware_math::algebra::Random;
+use commonware_utils::FuzzRng;
 use libfuzzer_sys::fuzz_target;
 use sha2::{Digest as RefSha2Digest, Sha256 as RefSha256};
 use zeroize::Zeroize;
@@ -136,8 +138,17 @@ fn fuzz_zeroize() {
     assert!(digest.as_ref().iter().all(|&b| b == 0));
 }
 
+// Test Random construction (drives Digest::random) via the deterministic FuzzRng,
+// asserting the random digest survives an encode/decode round-trip.
+fn fuzz_digest_random(seed: &[u8]) {
+    let mut rng = FuzzRng::new(seed.to_vec());
+    let digest = Digest::random(&mut rng);
+    let decoded = Digest::decode(digest.encode()).unwrap();
+    assert_eq!(digest, decoded);
+}
+
 fn fuzz(input: FuzzInput) {
-    match input.case_selector % 8 {
+    match input.case_selector % 9 {
         0 => fuzz_basic_hashing(&input.chunks),
         1 => fuzz_reset_functionality(&input.chunks),
         2 => fuzz_chunked_vs_whole(&input.chunks),
@@ -146,6 +157,7 @@ fn fuzz(input: FuzzInput) {
         5 => fuzz_default_clone(),
         6 => fuzz_fill_and_format(input.data.first().copied().unwrap_or(0)),
         7 => fuzz_zeroize(),
+        8 => fuzz_digest_random(&input.data),
         _ => unreachable!(),
     }
 }
