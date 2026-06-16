@@ -20,14 +20,17 @@
 //! while avoiding unrelated `BufferPool` logic.
 
 use super::utils::{measure, Threading};
-use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer};
+use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer, PooledSlot};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;
 use crossbeam_queue::ArrayQueue;
+use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
+    cell::UnsafeCell,
     hint::black_box,
     num::{NonZeroU32, NonZeroUsize},
+    ptr::NonNull,
     sync::Arc,
 };
 
@@ -49,12 +52,30 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(slot: usize) -> Self {
+    fn new(slot: usize, slots: &[CachePadded<UnsafeCell<PooledSlot>>]) -> Self {
+        let slot_ptr = slots[slot].get();
+        let slot_ptr = NonNull::new(slot_ptr).expect("slot pointers are non-null");
         Self {
             slot: slot as u32,
-            buffer: PooledBuffer::new(BENCH_LAYOUT),
+            // SAFETY: each benchmark slot is initialized once before the
+            // entry is published to the baseline container.
+            buffer: unsafe { PooledBuffer::new_in_slot(slot_ptr, BENCH_LAYOUT, false) },
         }
     }
+}
+
+fn new_slots(capacity: usize) -> Box<[CachePadded<UnsafeCell<PooledSlot>>]> {
+    (0..capacity)
+        .map(|slot| {
+            CachePadded::new(UnsafeCell::new(PooledSlot::new(
+                slot as u32,
+                BENCH_BUFFER_CAPACITY,
+                0,
+                0,
+            )))
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
 }
 
 trait FreelistImplementation: Send + Sync {
@@ -156,7 +177,16 @@ fn bench_name<S: FreelistImplementation>(
     name
 }
 
-struct MutexVec(Mutex<Vec<Entry>>);
+struct MutexVec {
+    _slots: Box<[CachePadded<UnsafeCell<PooledSlot>>]>,
+    entries: Mutex<Vec<Entry>>,
+}
+
+// SAFETY: benchmark slot entries are mutated only while their corresponding
+// `Entry` is exclusively owned by one worker or protected by the container.
+unsafe impl Send for MutexVec {}
+// SAFETY: shared access to entries is synchronized by the mutex.
+unsafe impl Sync for MutexVec {}
 
 impl FreelistImplementation for MutexVec {
     fn as_str() -> &'static str {
@@ -164,13 +194,17 @@ impl FreelistImplementation for MutexVec {
     }
 
     fn with_capacity(capacity: usize, _parallelism: usize) -> Self {
-        let slots = (0..capacity).map(Entry::new).collect();
-        Self(Mutex::new(slots))
+        let slots = new_slots(capacity);
+        let entries = (0..capacity).map(|slot| Entry::new(slot, &slots)).collect();
+        Self {
+            _slots: slots,
+            entries: Mutex::new(entries),
+        }
     }
 
     #[inline]
     fn take_batch(&self, out: &mut Vec<Entry>, max: usize) {
-        let mut slots = self.0.lock();
+        let mut slots = self.entries.lock();
         let count = max.min(slots.len());
         let split = slots.len() - count;
         out.extend(slots.drain(split..));
@@ -178,21 +212,30 @@ impl FreelistImplementation for MutexVec {
 
     #[inline]
     fn put_batch(&self, slots: &mut Vec<Entry>) {
-        let mut inner = self.0.lock();
+        let mut inner = self.entries.lock();
         inner.extend(slots.drain(..));
     }
 }
 
 impl Drop for MutexVec {
     fn drop(&mut self) {
-        for entry in self.0.get_mut().drain(..) {
+        for entry in self.entries.get_mut().drain(..) {
             // SAFETY: benchmark entries are allocated with `BENCH_LAYOUT`.
             unsafe { entry.buffer.deallocate(BENCH_LAYOUT) };
         }
     }
 }
 
-struct ArrayQueueFreelist(ArrayQueue<Entry>);
+struct ArrayQueueFreelist {
+    _slots: Box<[CachePadded<UnsafeCell<PooledSlot>>]>,
+    queue: ArrayQueue<Entry>,
+}
+
+// SAFETY: benchmark slot entries are mutated only while their corresponding
+// `Entry` is exclusively owned by one worker or protected by the queue.
+unsafe impl Send for ArrayQueueFreelist {}
+// SAFETY: shared access to entries is synchronized by `ArrayQueue`.
+unsafe impl Sync for ArrayQueueFreelist {}
 
 impl FreelistImplementation for ArrayQueueFreelist {
     fn as_str() -> &'static str {
@@ -200,19 +243,23 @@ impl FreelistImplementation for ArrayQueueFreelist {
     }
 
     fn with_capacity(capacity: usize, _parallelism: usize) -> Self {
+        let slots = new_slots(capacity);
         let queue = ArrayQueue::new(capacity);
         for slot in 0..capacity {
             queue
-                .push(Entry::new(slot))
+                .push(Entry::new(slot, &slots))
                 .expect("array queue prefill must fit");
         }
-        Self(queue)
+        Self {
+            _slots: slots,
+            queue,
+        }
     }
 
     #[inline]
     fn take_batch(&self, out: &mut Vec<Entry>, mut max: usize) {
         while max > 0 {
-            let Some(entry) = self.0.pop() else {
+            let Some(entry) = self.queue.pop() else {
                 break;
             };
             out.push(entry);
@@ -223,7 +270,7 @@ impl FreelistImplementation for ArrayQueueFreelist {
     #[inline]
     fn put_batch(&self, slots: &mut Vec<Entry>) {
         for entry in slots.drain(..) {
-            self.0
+            self.queue
                 .push(entry)
                 .expect("array queue push must fit in steady state");
         }
@@ -232,7 +279,7 @@ impl FreelistImplementation for ArrayQueueFreelist {
 
 impl Drop for ArrayQueueFreelist {
     fn drop(&mut self) {
-        while let Some(entry) = self.0.pop() {
+        while let Some(entry) = self.queue.pop() {
             // SAFETY: benchmark entries are allocated with `BENCH_LAYOUT`.
             unsafe { entry.buffer.deallocate(BENCH_LAYOUT) };
         }

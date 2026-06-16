@@ -26,12 +26,13 @@
 //! - Slot ownership is managed by the buffer pool.
 //! - Refill and spill paths naturally move buffers in batches.
 //!
-//! Each slot has two pieces of freelist state: a parking cell and a free bit.
-//! The parking cell holds the [`PooledBuffer`] while the slot is globally free.
-//! The bit records whether that cell currently contains an initialized buffer
-//! that can be taken. The bit transition is the synchronization boundary:
-//! returning a buffer writes the cell and then sets the bit, while taking a
-//! buffer clears a set bit and then reads the cell.
+//! Each slot has two pieces of freelist state: a side-table entry and a free
+//! bit. The side-table entry is stable for the lifetime of the size class and
+//! stores the data pointer, capacity, routing fields, refcount, and any live
+//! size-class lease. The free bit records whether that slot is globally
+//! available. Returning a buffer consumes its lease and sets the bit; taking a
+//! buffer clears a set bit and then rebuilds a [`PooledBuffer`] handle from the
+//! side-table entry.
 //!
 //! Free bits are split across cache-line-padded atomic words. The pool passes
 //! its expected parallelism so the freelist can size this bitmap for the
@@ -95,7 +96,7 @@
 //!
 //! The hot paths are fast for a few concrete reasons:
 //!
-//! - `put` is just "write buffer into the parking cell, then `fetch_or` one bit".
+//! - `put` is just "validate the slot, then `fetch_or` one bit".
 //! - `take` uses a stable per-thread home word before scanning others, so
 //!   threads tend to start from different stripes.
 //! - `take` and `take_batch` rotate bit selection inside each word, so threads
@@ -112,14 +113,15 @@
 //! standalone general-purpose container. It relies on the buffer pool's
 //! ownership discipline: a slot is either owned by a pooled backing, parked in a
 //! thread-local cache, or available in this freelist. Only the thread that owns
-//! a slot outside the freelist may access that slot's parking cell.
-use super::buffer::PooledBuffer;
+//! a slot outside the freelist may mutate that slot's side-table entry.
+use super::buffer::{PooledBuffer, PooledSlot};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
     cell::Cell,
     mem::MaybeUninit,
     num::{NonZeroU32, NonZeroUsize},
+    ptr,
     sync::atomic::Ordering,
 };
 
@@ -151,7 +153,7 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 /// [`PooledBuffer`] handles, but those handles must eventually return here so
 /// they can be released with the correct layout. The buffer pool keeps the
 /// freelist alive for those outstanding handles with live leases stored in
-/// pooled headers. Draining or dropping the freelist only deallocates buffers
+/// pooled slot entries. Draining or dropping the freelist only deallocates buffers
 /// currently parked in it.
 ///
 /// The bitmap is intentionally striped over a power-of-two number of words.
@@ -160,12 +162,6 @@ const INLINE_PUT_BATCH_MASKS: usize = 128;
 pub struct Freelist {
     /// Allocation layout shared by every tracked buffer.
     layout: Layout,
-    /// Usable data capacity for newly-created pooled buffers.
-    usable_size: usize,
-    /// Owning size class's dense id, cached in every created buffer's header.
-    class_id: u32,
-    /// Owning size class's per-thread cache capacity, cached likewise.
-    thread_cache_capacity: u32,
     /// Number of slot ids reserved for created buffers.
     ///
     /// This is a monotonic high-water mark for slot assignment. Draining
@@ -178,20 +174,21 @@ pub struct Freelist {
     /// steady state. Without padding, different bitmap words could still share
     /// a cache line even when they represent disjoint slot stripes.
     words: Box<[CachePadded<AtomicU64>]>,
-    /// Per-slot parking place for returned buffers.
+    /// Per-slot pooled owner state.
     ///
-    /// A bit transition is the synchronization boundary. `put` writes the
-    /// buffer into the parking cell before setting the bit, and `take` clears
-    /// the bit before reading the buffer back out.
-    storage: Box<[UnsafeCell<MaybeUninit<PooledBuffer>>]>,
+    /// A slot is mutated only while its free bit is clear and the slot is owned
+    /// by exactly one buffer/cache path. Publishing a slot to the global
+    /// freelist is the bitmap bit's Release transition; taking it is the
+    /// matching Acquire transition.
+    slots: Box<[CachePadded<UnsafeCell<PooledSlot>>]>,
     /// Mask used to map a slot id to its striped bitmap word.
     word_mask: usize,
     /// Number of low slot-id bits consumed by the word index.
     word_shift: u32,
 }
 
-// SAFETY: parking cells are only accessed by the thread that currently
-// owns their slot id. Publication and removal from the global free set are
+// SAFETY: side-table entries are mutated only by the thread that currently owns
+// their slot id. Publication and removal from the global free set are
 // synchronized via bitmap bit transitions.
 unsafe impl Send for Freelist {}
 // SAFETY: Same slot-ownership and bit-transition synchronization as above.
@@ -213,9 +210,7 @@ impl Freelist {
         layout: Layout,
         prefill: bool,
     ) -> Self {
-        let usable_size = layout
-            .size()
-            .saturating_sub(std::mem::size_of::<super::buffer::PooledHeader>());
+        let usable_size = layout.size();
         // Standalone freelists have no owning size class; buffers created here
         // never enter the pool's thread-local cache routing.
         Self::with_usable_size(capacity, parallelism, usable_size, layout, prefill, 0, 0)
@@ -224,7 +219,7 @@ impl Freelist {
     /// Creates a new fixed-capacity freelist with an explicit usable data size.
     ///
     /// `class_id` and `thread_cache_capacity` are the owning size class's
-    /// routing fields, cached in every created buffer's pooled header.
+    /// routing fields, cached in every created buffer's pooled slot entry.
     pub(super) fn with_usable_size(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
@@ -265,19 +260,23 @@ impl Freelist {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let storage = (0..capacity)
-            .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
+        let slots = (0..capacity)
+            .map(|slot| {
+                CachePadded::new(UnsafeCell::new(PooledSlot::new(
+                    slot as u32,
+                    usable_size,
+                    class_id,
+                    thread_cache_capacity,
+                )))
+            })
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
         let freelist = Self {
             layout,
-            usable_size,
-            class_id,
-            thread_cache_capacity,
             created: AtomicUsize::new(0),
             words,
-            storage,
+            slots,
             word_mask,
             word_shift,
         };
@@ -311,28 +310,13 @@ impl Freelist {
         let slot = self
             .created
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |created| {
-                (created < self.storage.len()).then_some(created + 1)
+                (created < self.slots.len()).then_some(created + 1)
             })
             .ok()? as u32;
 
-        let buffer = if zeroed {
-            PooledBuffer::new_zeroed(self.layout)
-        } else {
-            PooledBuffer::new(self.layout)
-        };
-        // SAFETY: `self.layout` is the exact allocation layout for this size
-        // class, `slot` is the stable id just reserved for `buffer`,
-        // `usable_size` is the size-class capacity exposed to callers, and the
-        // routing fields were captured from the owning class at construction.
-        let buffer = unsafe {
-            buffer.init_owner_header(
-                self.layout,
-                slot,
-                self.usable_size,
-                self.class_id,
-                self.thread_cache_capacity,
-            )
-        };
+        // SAFETY: this fetch_update reserved `slot` exactly once, so no other
+        // thread can initialize or publish this side-table entry.
+        let buffer = unsafe { PooledBuffer::new_in_slot(self.slot_ptr(slot), self.layout, zeroed) };
 
         Some((slot, buffer))
     }
@@ -362,9 +346,9 @@ impl Freelist {
 
     /// Puts one tracked buffer into the global freelist.
     ///
-    /// The buffer is first written back into its parking cell, then the slot's
-    /// free bit is set with `Release` ordering. A successful `take` performs
-    /// the matching `Acquire` operation before reading the buffer back out.
+    /// The slot's free bit is set with `Release` ordering. A successful `take`
+    /// performs the matching `Acquire` operation before rebuilding a buffer
+    /// handle from the side-table entry.
     ///
     /// # Safety
     ///
@@ -372,14 +356,14 @@ impl Freelist {
     /// this freelist, and `buffer` must be the buffer this freelist created
     /// for `slot`. A foreign buffer would later be deallocated with this
     /// freelist's layout (undefined behavior), and an unowned or duplicate
-    /// slot would overwrite a parked buffer.
+    /// slot would make the same allocation available to more than one owner.
     #[inline]
     pub unsafe fn put(&self, slot: u32, buffer: PooledBuffer) {
-        // Park the buffer before marking the slot free.
-        self.park(slot, buffer);
+        // SAFETY: guaranteed by the caller.
+        debug_assert_eq!(unsafe { buffer.slot() }, slot);
 
-        // Setting the slot bit makes the parked buffer available. `Release` pairs
-        // with the taker's `Acquire` clear before it reads the parking cell.
+        // Setting the slot bit makes the slot available. `Release` pairs with
+        // the taker's `Acquire` clear before it reuses the side-table entry.
         let (word_index, mask) = self.slot_word(slot);
         let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
         assert_eq!(
@@ -404,7 +388,7 @@ impl Freelist {
     /// within the batch and must not already be available in this freelist;
     /// each buffer must be the one this freelist created for its slot (see
     /// [`Self::put`]). The iterator **must not panic** after yielding an
-    /// entry: parked-but-unpublished buffers would be stranded.
+    /// entry: returned-but-unpublished buffers would be stranded.
     #[inline]
     pub unsafe fn put_batch(&self, entries: impl IntoIterator<Item = (u32, PooledBuffer)>) {
         let mut entries = entries.into_iter();
@@ -457,9 +441,9 @@ impl Freelist {
     /// `put_batch` peels the first two entries before calling this helper, so
     /// this path only handles batches large enough to benefit from coalescing.
     /// `masks` must contain exactly one zeroed entry per bitmap word. Each slot
-    /// is parked first and ORed into its word's scratch mask. Once all entries
-    /// are staged, one `Release` `fetch_or` per non-empty mask makes the
-    /// corresponding parked buffers available.
+    /// is validated and ORed into its word's scratch mask. Once all entries are
+    /// staged, one `Release` `fetch_or` per non-empty mask makes the
+    /// corresponding slots available.
     ///
     /// The caller must own every slot, slots must be unique, none of the slots
     /// may already be available in this freelist, and every buffer must belong
@@ -476,8 +460,9 @@ impl Freelist {
         next_buffer: PooledBuffer,
         entries: impl Iterator<Item = (u32, PooledBuffer)>,
     ) {
-        // Masks are staged by word after parking the buffers. The later
-        // Release `fetch_or` makes every staged slot in that word available.
+        // Masks are staged by word after validating the returned buffers. The
+        // later Release `fetch_or` makes every staged slot in that word
+        // available.
         self.stage_put(masks, slot, buffer);
         self.stage_put(masks, next_slot, next_buffer);
         for (slot, buffer) in entries {
@@ -489,8 +474,8 @@ impl Freelist {
                 continue;
             }
 
-            // One Release operation makes every parked buffer represented
-            // by this word mask.
+            // One Release operation makes every returned slot represented by
+            // this word mask available.
             let previous = self.words[word_index].fetch_or(mask, Ordering::Release);
             assert_eq!(
                 previous & mask,
@@ -500,18 +485,17 @@ impl Freelist {
         }
     }
 
-    /// Parks one buffer and records its slot in the batch scratch mask.
+    /// Records one returned buffer's slot in the batch scratch mask.
     ///
     /// This helper intentionally does not touch the atomic bitmap. The caller
     /// later inserts the accumulated mask for each word, so multiple slots that
-    /// map to the same bitmap word share a single `Release` operation. Parking
-    /// happens before the bit is staged, preserving the same order as `put`.
+    /// map to the same bitmap word share a single `Release` operation.
     ///
     /// `masks` must contain the scratch word for `slot`.
     #[inline(always)]
     fn stage_put(&self, masks: &mut [u64], slot: u32, buffer: PooledBuffer) {
-        // Park first, then stage the bit for the later per-word insert.
-        self.park(slot, buffer);
+        // SAFETY: guaranteed by the caller.
+        debug_assert_eq!(unsafe { buffer.slot() }, slot);
         let (word_index, mask) = self.slot_word(slot);
         masks[word_index] |= mask;
     }
@@ -548,10 +532,9 @@ impl Freelist {
                 let observed = word_ref.fetch_and(!mask, Ordering::Acquire);
                 if observed & mask != 0 {
                     let slot = self.slot_index(word_index, bit);
-                    // Clear the bit before reading the parked buffer. The
-                    // Acquire `fetch_and` above synchronizes with the put-side
-                    // Release operation.
-                    return Some((slot, self.unpark(slot)));
+                    // The Acquire `fetch_and` above synchronizes with the
+                    // put-side Release operation.
+                    return Some((slot, self.buffer(slot)));
                 }
 
                 // Another thread removed that bit first. Reuse the returned
@@ -619,9 +602,8 @@ impl Freelist {
                     let bit = claimed.trailing_zeros() as usize;
                     let slot = self.slot_index(word_index, bit);
                     // These bits were cleared by the Acquire `fetch_and` above,
-                    // so each corresponding parked buffer is now owned by this
-                    // caller.
-                    on_entry(slot, self.unpark(slot));
+                    // so each corresponding slot is now owned by this caller.
+                    on_entry(slot, self.buffer(slot));
                     claimed &= claimed - 1;
                     filled += 1;
                 }
@@ -656,7 +638,7 @@ impl Freelist {
             while claimed != 0 {
                 let bit = claimed.trailing_zeros() as usize;
                 let slot = self.slot_index(word_index, bit);
-                let buffer = self.unpark(slot);
+                let buffer = self.buffer(slot);
                 // SAFETY: every buffer inserted into this freelist must have been
                 // allocated with this freelist's layout.
                 unsafe { buffer.deallocate(self.layout) };
@@ -668,76 +650,38 @@ impl Freelist {
         drained
     }
 
-    /// Parks a buffer in the storage cell for a slot outside the freelist.
-    ///
-    /// The caller must own `slot` and mark the corresponding bit only after
-    /// this write completes.
+    /// Returns the side-table pointer for a slot id.
     #[inline(always)]
-    fn park(&self, slot: u32, buffer: PooledBuffer) {
+    fn slot_ptr(&self, slot: u32) -> ptr::NonNull<PooledSlot> {
         let cell = self
-            .storage
+            .slots
             .get(slot as usize)
             .expect("slot id must refer to an allocated slot");
 
         cfg_if::cfg_if! {
             if #[cfg(not(feature = "loom"))] {
-                // SAFETY: the caller owns this slot while it is outside the
-                // freelist, so no other thread can access the parking cell until
-                // the slot bit is set.
-                unsafe {
-                    (*cell.get()).write(buffer);
-                }
+                ptr::NonNull::new(cell.get()).expect("slot pointers are non-null")
             } else {
-                // Use loom's tracked cell API so the model can detect a
-                // parking-cell access that is not synchronized by the bitmap bit
-                // transition.
-                cell.with_mut(|ptr| {
-                    // SAFETY: the caller owns this slot while it is outside the
-                    // freelist, so no other thread can access the parking cell
-                    // until the slot bit is set.
-                    unsafe { (*ptr).write(buffer) };
-                });
+                cell.with(|ptr| ptr::NonNull::new(ptr.cast_mut()).expect("slot pointers are non-null"))
             }
         }
     }
 
-    /// Removes the parked buffer from a slot whose free bit was just claimed.
+    /// Rebuilds a pooled buffer handle for a claimed slot.
     ///
-    /// The caller must have cleared the slot's bit before reading the cell.
+    /// The caller must have cleared the slot's free bit or freshly reserved
+    /// the slot before calling this method.
     #[inline(always)]
-    fn unpark(&self, slot: u32) -> PooledBuffer {
-        let cell = self
-            .storage
-            .get(slot as usize)
-            .expect("slot id must refer to an allocated slot");
-
-        cfg_if::cfg_if! {
-            if #[cfg(not(feature = "loom"))] {
-                // SAFETY: a successful bit clear removes this slot from the free
-                // set, so we have exclusive access to the initialized buffer that
-                // was made available by the matching put.
-                unsafe { (*cell.get()).assume_init_read() }
-            } else {
-                // Use loom's tracked cell API so the model can detect a
-                // parking-cell access that is not synchronized by the bitmap bit
-                // transition.
-                cell.with_mut(|ptr| {
-                    // SAFETY: a successful bit clear removes this slot from the
-                    // free set, so we have exclusive access to the initialized
-                    // buffer that was made available by the matching put.
-                    unsafe { (*ptr).assume_init_read() }
-                })
-            }
-        }
+    fn buffer(&self, slot: u32) -> PooledBuffer {
+        // SAFETY: the caller owns the slot and its data allocation is live.
+        unsafe { PooledBuffer::from_slot(self.slot_ptr(slot)) }
     }
 }
 
 impl Drop for Freelist {
     fn drop(&mut self) {
-        // Any slot still free in the freelist owns an initialized parked
-        // buffer in its parking cell. Drain them explicitly so the underlying
-        // pooled allocations are released before the raw storage backing the
-        // freelist itself goes away.
+        // Any slot still free in the freelist owns a live pooled allocation.
+        // Drain it explicitly before the side-table storage goes away.
         self.drain();
     }
 }
@@ -1040,8 +984,8 @@ pub(super) mod tests {
         assert_eq!(taken[0].0, 3);
         let single = taken.pop().expect("single entry was taken");
 
-        // Multi-entry batches should make every slot available and preserve ownership
-        // of each parked buffer until it is taken.
+        // Multi-entry batches should make every slot available and preserve
+        // ownership of each returned buffer until it is taken.
         let mut batch = Vec::new();
         for slot in [1, 5, 7] {
             let buffer = created[slot as usize].take().unwrap();
@@ -1399,13 +1343,14 @@ mod loom_tests {
     };
 
     // This module uses loom to model the freelist's ownership protocol between
-    // bitmap bits and parking cells: a producer parks a buffer, publishes its
-    // bit, and exactly one consumer clears that bit before reading the cell.
+    // bitmap bits and side-table slots: a producer publishes a returned slot,
+    // and exactly one consumer clears that bit before rebuilding a buffer
+    // handle from the slot.
     // The models keep capacities small so loom can exhaustively explore the
     // interleavings that stress this protocol: same-word RMW composition,
     // striped scans across independent bitmap words, stale relaxed candidate
-    // loads, and the Release/Acquire edge that makes a parked buffer visible
-    // after its bit is claimed. Geometry-matrix tests cover single-word/single-bit,
+    // loads, and the Release/Acquire edge that transfers slot ownership after
+    // its bit is claimed. Geometry-matrix tests cover single-word/single-bit,
     // single-word/multi-bit, multi-word/single-bit, and multi-word/multi-bit
     // layouts so both degenerate and striped cases stay exercised.
 
@@ -1560,12 +1505,9 @@ mod loom_tests {
 
     #[test]
     fn put_publishes_before_take() {
-        // `put` writes the parking cell before publishing the bit with a
-        // Release RMW. The taker spins until it can clear that bit with an
-        // Acquire RMW, then reads the same cell.
-        //
-        // If the publish/claim edge is weakened, loom should be able to
-        // schedule the cell read without seeing the prior cell write.
+        // `put` publishes the returned slot with a Release RMW. The taker
+        // spins until it can clear that bit with an Acquire RMW, then rebuilds
+        // a buffer handle from the same side-table slot.
         model(&ALL_GEOMETRIES, |geometry, freelist| {
             let slot = geometry.slots()[0];
             let (_, buffer) = freelist.try_create(false).unwrap();
@@ -2098,7 +2040,7 @@ mod loom_tests {
     fn put_batch_publishes_to_take_batch() {
         // This exercises the batch-specific publish and claim path end to end
         // across selected bitmap geometries: Release `fetch_or` publications
-        // make parked cells visible, and Acquire `fetch_and` claims may
+        // make returned slots visible, and Acquire `fetch_and` claims may
         // transfer one or more bits per word.
         //
         // The reader loops because loom may run it before the writer has
@@ -2146,9 +2088,8 @@ mod loom_tests {
         // publication so this model checks the put-side Release edge rather
         // than relying on thread-spawn visibility from pre-populated state.
         //
-        // If the swap does not synchronize with the successful put, loom's
-        // tracked parking cell can observe the drainer reading the buffer
-        // without seeing the writer's earlier cell initialization.
+        // If the swap does not compose with the successful put, the model can
+        // lose or duplicate the returned slot.
         model(&ALL_GEOMETRIES, |geometry, freelist| {
             let drained = Arc::new(AtomicUsize::new(0));
             let slot = geometry.slots()[0];
@@ -2188,13 +2129,13 @@ mod loom_tests {
 
     #[test]
     fn put_batch_publishes_to_drain() {
-        // A batch publish parks multiple cells before publishing the touched
-        // bitmap word masks. The drainer loops until its Acquire swaps have
-        // observed every publication and dropped every parked buffer.
+        // A batch publish stages multiple returned slots before publishing the
+        // touched bitmap word masks. The drainer loops until its Acquire swaps
+        // have observed every publication and dropped every returned buffer.
         //
         // This is the drain analogue of `put_batch_publishes_to_take_batch`:
-        // each whole-word swap must make all cells represented by the returned
-        // word visible before they are dropped.
+        // each whole-word swap must claim all slots represented by the returned
+        // word exactly once before they are dropped.
         model(&BATCH_GEOMETRIES, |geometry, freelist| {
             let drained = Arc::new(AtomicUsize::new(0));
             let slots = geometry.slots();
@@ -2281,7 +2222,7 @@ mod loom_tests {
     fn drain_and_take_do_not_duplicate_or_lose_slots() {
         // `drain` clears a whole word with `swap(0)` while `take` clears one
         // bit with `fetch_and`. Racing them should transfer ownership of each
-        // parked buffer exactly once and leave no free bits behind.
+        // globally free buffer exactly once and leave no free bits behind.
         //
         // This also covers the synchronization shape used by `Drop`, which
         // drains any buffers that remain globally free.
