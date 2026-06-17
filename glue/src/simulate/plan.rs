@@ -600,7 +600,8 @@ impl<D: EngineDefinition> Plan<D> {
             },
             Some(pk) = restart_rx.recv() else break => {
                 let was_delayed = delayed.contains(&pk);
-                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed).await;
+                team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                    .await;
             },
             Some(cmd) = schedule_rx.recv() else break => match cmd {
                 ScheduleCmd::Crash(pk) => {
@@ -610,7 +611,8 @@ impl<D: EngineDefinition> Plan<D> {
                 }
                 ScheduleCmd::Restart(pk) => {
                     let was_delayed = delayed.contains(&pk);
-                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed).await;
+                    team.restart(&ctx, &oracle, pk, monitor_tx.clone(), was_delayed)
+                        .await;
                 }
             },
             _ = crash_rx.recv() => {

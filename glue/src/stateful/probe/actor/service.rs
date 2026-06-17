@@ -85,12 +85,7 @@ where
                 let tag = match wire::Tag::read(&mut message) {
                     Ok(tag) => tag,
                     Err(err) => {
-                        commonware_p2p::block!(
-                            self.blocker,
-                            peer,
-                            ?err,
-                            "tag decode failed"
-                        );
+                        commonware_p2p::block!(self.blocker, peer, ?err, "tag decode failed");
                         continue;
                     }
                 };

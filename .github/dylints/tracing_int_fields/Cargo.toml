@@ -1,0 +1,18 @@
+[package]
+name = "tracing_int_fields"
+version = "0.0.1"
+description = "Require integer-valued tracing span fields to be recorded as integers, not via Display/Debug."
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+dylint_linting = "6.0.0"
+
+[dev-dependencies]
+dylint_testing = "6.0.0"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

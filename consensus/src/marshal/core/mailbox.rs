@@ -14,7 +14,10 @@ use commonware_actor::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
-use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock};
+use commonware_runtime::{
+    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
+    Clock,
+};
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
     collections::{btree_map::Entry, BTreeMap, VecDeque},
@@ -680,7 +683,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     pub async fn get_finalization(&self, height: Height) -> Option<Finalization<S, V::Commitment>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetFinalization {
-            span: info_span!("marshal.mailbox.get_finalization", height = %height),
+            span: info_span!("marshal.mailbox.get_finalization", height = height.traced()),
             height,
             response,
         });
@@ -718,7 +721,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// a scheme for that epoch, the hint is silently dropped.
     pub fn hint_finalized(&self, height: Height, targets: NonEmptyVec<S::PublicKey>) {
         let _ = self.sender.enqueue(Message::HintFinalized {
-            span: info_span!("marshal.mailbox.hint_finalized", height = %height),
+            span: info_span!("marshal.mailbox.hint_finalized", height = height.traced()),
             height,
             targets,
         });
@@ -907,7 +910,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Requests above marshal's current floor are ignored.
     pub fn prune(&self, height: Height) {
         let _ = self.sender.enqueue(Message::Prune {
-            span: info_span!("marshal.mailbox.prune", height = %height),
+            span: info_span!("marshal.mailbox.prune", height = height.traced()),
             height,
         });
     }

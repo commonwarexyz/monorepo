@@ -15,10 +15,10 @@ use cfg_if::cfg_if;
 use std::{net::SocketAddr, sync::Arc};
 use tokio::net::TcpListener;
 use tracing::Level;
-use tracing_subscriber::{layer::SubscriberExt, Layer, Registry};
+use tracing_subscriber::{filter::filter_fn, layer::SubscriberExt, Layer, Registry};
 
-/// Logging configuration.
-pub struct Logging {
+/// Log configuration.
+pub struct Logs {
     /// The level of logging to use.
     pub level: Level,
 
@@ -33,16 +33,10 @@ pub struct Logging {
 /// Initialize telemetry with the given configuration.
 ///
 /// If `metrics` is provided, starts serving metrics at the given address at `/metrics`.
-/// If `traces` is provided, enables OpenTelemetry trace export.
-pub fn init(
-    context: Context,
-    logging: Logging,
-    metrics: Option<SocketAddr>,
-    traces: Option<Config>,
-) {
-    // Create a filter layer to set the maximum level to INFO
-    let filter = tracing_subscriber::EnvFilter::new(logging.level.to_string());
-
+/// If `traces` is provided, enables OpenTelemetry trace export. When `None`, span
+/// callsites in the runtime-provided subscriber are disabled and only log events
+/// are emitted (per [`Logs::level`]).
+pub fn init(context: Context, logs: Logs, metrics: Option<SocketAddr>, traces: Option<Config>) {
     // Create fmt layer for logging
     let log_layer = tracing_subscriber::fmt::layer()
         .with_line_number(true)
@@ -50,16 +44,28 @@ pub fn init(
         .with_file(true);
 
     // Set the format to JSON (if specified)
-    let log_layer = if logging.json {
+    let log_layer = if logs.json {
         log_layer.json().boxed()
     } else {
         log_layer.compact().boxed()
+    };
+    let log_layer = match &traces {
+        None => log_layer
+            .with_filter(filter_fn(move |metadata| {
+                metadata.is_event() && *metadata.level() <= logs.level
+            }))
+            .boxed(),
+        Some(_) => log_layer
+            .with_filter(tracing_subscriber::EnvFilter::new(logs.level.to_string()))
+            .boxed(),
     };
 
     // Create OpenTelemetry layer for tracing
     let trace_layer = traces.map(|cfg| {
         let tracer = export(cfg).expect("Failed to initialize tracer");
-        tracing_opentelemetry::layer().with_tracer(tracer)
+        tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_filter(tracing_subscriber::EnvFilter::new(logs.level.to_string()))
     });
 
     // Create tracing registry.
@@ -67,15 +73,11 @@ pub fn init(
         if #[cfg(feature = "tokio-console")] {
             let console_layer = console_subscriber::spawn();
             let registry = Registry::default()
-                .with(filter)
                 .with(log_layer)
                 .with(trace_layer)
                 .with(console_layer);
         } else {
-            let registry = Registry::default()
-                .with(filter)
-                .with(log_layer)
-                .with(trace_layer);
+            let registry = Registry::default().with(log_layer).with(trace_layer);
         }
     }
 

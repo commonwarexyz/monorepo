@@ -481,8 +481,11 @@ mod tests {
         loop {
             select! {
                 msg = batcher_receiver.recv() => {
-                    if let batcher::Message::Update { current, finalized: found, .. } =
-                        msg.expect("batcher mailbox closed")
+                    if let batcher::Message::Update {
+                        current,
+                        finalized: found,
+                        ..
+                    } = msg.expect("batcher mailbox closed")
                     {
                         assert_eq!(current, finalized.next());
                         assert_eq!(found, finalized);
@@ -490,9 +493,10 @@ mod tests {
                     }
                 },
                 msg = resolver_receiver.recv() => {
-                    if let resolver::MailboxMessage::Certificate(
-                        Certificate::Finalization(finalization)
-                    ) = msg.expect("resolver mailbox closed")
+                    if let resolver::MailboxMessage::Certificate {
+                        certificate: Certificate::Finalization(finalization),
+                        ..
+                    } = msg.expect("resolver mailbox closed")
                     {
                         let view = finalization.view();
                         assert!(
@@ -945,7 +949,10 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Finalization(finalization),
+                    ..
+                } => {
                     assert_eq!(finalization.view(), View::new(100));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -997,7 +1004,10 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Finalization(finalization),
+                    ..
+                } => {
                     assert_eq!(finalization.view(), View::new(300));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1182,7 +1192,10 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Finalization(finalization),
+                    ..
+                } => {
                     assert_eq!(finalization.view(), View::new(50));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1203,7 +1216,10 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Notarization(notarization),
+                    ..
+                } => {
                     assert_eq!(notarization.view(), journal_floor_target);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1228,7 +1244,10 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Notarization(notarization),
+                    ..
+                } => {
                     assert_eq!(notarization.view(), problematic_view);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1269,7 +1288,10 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Finalization(finalization),
+                    ..
+                } => {
                     assert_eq!(finalization.view(), View::new(100));
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1357,7 +1379,10 @@ mod tests {
             let mut finalized_view = None;
             while let Some(message) = resolver_receiver.recv().await {
                 match message {
-                    MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                    MailboxMessage::Certificate {
+                        certificate: Certificate::Finalization(finalization),
+                        ..
+                    } => {
                         finalized_view = Some(finalization.view());
                         break;
                     }
@@ -1486,7 +1511,10 @@ mod tests {
                 .await
                 .expect("failed to receive resolver message");
             match msg {
-                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Notarization(notarization),
+                    ..
+                } => {
                     assert_eq!(notarization.proposal, proposal_b);
                     assert_eq!(notarization, notarization_b);
                 }
@@ -1599,7 +1627,10 @@ mod tests {
             // Verify the certificate was accepted
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
-                MailboxMessage::Certificate(Certificate::Notarization(notarization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Notarization(notarization),
+                    ..
+                } => {
                     assert_eq!(notarization.proposal, proposal_a);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -1772,7 +1803,10 @@ mod tests {
             // The certificate should verify the proposal immediately
             let msg = resolver_receiver.recv().await.unwrap();
             match msg {
-                MailboxMessage::Certificate(Certificate::Notarization(n)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Notarization(n),
+                    ..
+                } => {
                     assert_eq!(n.proposal, proposal);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -2156,7 +2190,10 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.recv().await.unwrap();
             match finalization {
-                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Finalization(finalization),
+                    ..
+                } => {
                     assert_eq!(finalization, expected_finalization);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -2234,7 +2271,10 @@ mod tests {
             // Wait for finalization to be sent to resolver
             let finalization = resolver_receiver.recv().await.unwrap();
             match finalization {
-                MailboxMessage::Certificate(Certificate::Finalization(finalization)) => {
+                MailboxMessage::Certificate {
+                    certificate: Certificate::Finalization(finalization),
+                    ..
+                } => {
                     assert_eq!(finalization, expected_finalization);
                 }
                 _ => panic!("unexpected resolver message"),
@@ -2399,7 +2439,7 @@ mod tests {
                 } => {
                     assert_eq!(current, target_view);
                     assert_eq!(finalized, target_view.previous().unwrap());
-                    mailbox.timeout(current, TimeoutReason::LeaderNullify);
+                    mailbox.timeout(Round::new(Epoch::new(333), current), TimeoutReason::LeaderNullify);
                 }
                 _ => panic!("expected startup update after restart"),
             }
@@ -2990,7 +3030,10 @@ mod tests {
             }
 
             let target_view = current_view;
-            mailbox.timeout(target_view, TimeoutReason::LeaderNullify);
+            mailbox.timeout(
+                Round::new(Epoch::new(333), target_view),
+                TimeoutReason::LeaderNullify,
+            );
 
             // Expect local nullify quickly despite 10s timeouts.
             loop {
@@ -3014,7 +3057,10 @@ mod tests {
             }
 
             // Send the same expire signal again. Duplicates should not retrigger the fast-path.
-            mailbox.timeout(target_view, TimeoutReason::LeaderNullify);
+            mailbox.timeout(
+                Round::new(Epoch::new(333), target_view),
+                TimeoutReason::LeaderNullify,
+            );
 
             let duplicate_window = context.current() + Duration::from_millis(300);
             loop {
@@ -5871,11 +5917,14 @@ mod tests {
                     .await
                     .expect("expected resolver msg");
                 match msg {
-                    MailboxMessage::Certificate(Certificate::Finalization(f)) => {
+                    MailboxMessage::Certificate {
+                        certificate: Certificate::Finalization(f),
+                        ..
+                    } => {
                         assert_eq!(f.view(), view5);
                         break;
                     }
-                    MailboxMessage::Certificate(_) => continue,
+                    MailboxMessage::Certificate { .. } => continue,
                     MailboxMessage::Certified { .. } => {
                         panic!("unexpected Certified message before finalization processed")
                     }
@@ -6040,9 +6089,12 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == view5 =>
-                            break Some(success),
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == view5 =>
+                        {
+                            break Some(success);
+                        }
+                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -6147,10 +6199,12 @@ mod tests {
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
                             break Some(success);
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
+                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         if let batcher::Message::Update { .. } = msg.unwrap() {}
@@ -6726,6 +6780,132 @@ mod tests {
         cancelled_certification_does_not_hang(secp256r1::fixture, traces);
     }
 
+    /// Verifies that per-view work is attributed to view-scoped spans:
+    /// 1. The automaton propose request nests under `simplex.voter.view`.
+    /// 2. Vote broadcast (within notify) nests under `simplex.voter.view`.
+    /// 3. Mailbox messages carry their enqueue span into voter processing.
+    fn view_spans_track_automaton_boundary<S, F>(mut fixture: F, traces: TraceStorage)
+    where
+        S: Scheme<Sha256Digest, PublicKey = PublicKey>,
+        F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
+    {
+        let n = 5;
+        let quorum = quorum(n);
+        let namespace = b"consensus".to_vec();
+        let executor = deterministic::Runner::timed(Duration::from_secs(10));
+        executor.start(|mut context| async move {
+            // Get participants
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = fixture(&mut context, &namespace, n);
+
+            // Create simulated network
+            let oracle =
+                start_test_network_with_peers(context.child("network"), participants.clone(), true)
+                    .await;
+
+            let elector = RoundRobin::<Sha256>::default();
+            let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
+                &mut context,
+                &oracle,
+                &participants,
+                &schemes,
+                elector,
+                Duration::from_secs(5),
+                Duration::from_secs(5),
+                Duration::from_mins(60),
+            )
+            .await;
+
+            // Advance to view 2, where we are the leader.
+            // With RoundRobin, epoch=333, n=5: leader = (333 + view) % 5
+            let target_view = View::new(2);
+            advance_to_view(
+                &mut mailbox,
+                &mut batcher_receiver,
+                &schemes,
+                quorum,
+                target_view,
+            )
+            .await;
+
+            // Wait for the notarize vote on our own proposal.
+            loop {
+                match batcher_receiver.recv().await.unwrap() {
+                    batcher::Message::Constructed(Vote::Notarize(notarize))
+                        if notarize.view() == target_view =>
+                    {
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            // The propose request to the automaton runs under the view span.
+            traces
+                .get_by_level(Level::DEBUG)
+                .expect_event(|event| {
+                    event.metadata.content == "requested proposal from automaton"
+                        && event
+                            .expect_span_at_index(0, |span| {
+                                span.expect_content_exact("simplex.voter.propose")?;
+                                // Operation spans carry both epoch and view so they
+                                // are unambiguous when viewed standalone.
+                                span.expect_field_exact("epoch", "333")?;
+                                span.expect_field_exact("view", "2")
+                            })
+                            .is_ok()
+                        && event
+                            .expect_span(|span| {
+                                span.content == "simplex.voter.view"
+                                    && span.expect_field_exact("epoch", "333").is_ok()
+                                    && span.expect_field_exact("view", "2").is_ok()
+                            })
+                            .is_ok()
+                })
+                .unwrap();
+
+            // The notarize broadcast happens within notify under the view span.
+            traces
+                .get_by_level(Level::DEBUG)
+                .expect_event(|event| {
+                    event.metadata.content == "broadcasting notarize"
+                        && event
+                            .expect_span_at_index(0, |span| {
+                                span.expect_content_exact("simplex.voter.notify")
+                            })
+                            .is_ok()
+                        && event
+                            .expect_span(|span| span.content == "simplex.voter.view")
+                            .is_ok()
+                })
+                .unwrap();
+
+            // Mailbox messages carry their enqueue span into voter processing.
+            traces
+                .get_by_level(Level::TRACE)
+                .expect_event(|event| {
+                    event.metadata.content == "received finalization"
+                        && event
+                            .expect_span_at_index(0, |span| {
+                                span.expect_content_exact("simplex.voter.process")
+                            })
+                            .is_ok()
+                        && event
+                            .expect_span(|span| span.content == "simplex.voter.mailbox.resolved")
+                            .is_ok()
+                })
+                .unwrap();
+        });
+    }
+
+    #[test_collect_traces]
+    fn test_view_spans_track_automaton_boundary(traces: TraceStorage) {
+        view_spans_track_automaton_boundary(ed25519::fixture, traces);
+    }
+
     /// Regression: a canceled certification attempt must not be persisted as failure.
     ///
     /// We first trigger a canceled certify receiver, restart the voter, and then require:
@@ -6945,11 +7125,11 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(success, "expected successful certification after restart for canceled certification view");
                             break;
                         }
-                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate(_) => {}
+                        MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
                         match msg.unwrap() {
@@ -8198,7 +8378,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(success, "expected successful certification");
                             break;
                         }
@@ -8293,7 +8473,7 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
                             assert!(success, "replayed certification should be successful");
                             replayed_certified = true;
                         }
@@ -8466,7 +8646,9 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
                             assert!(!success, "expected failed certification");
                             break;
                         }
@@ -8551,7 +8733,9 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { view, success } if view == target_view => {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;
                         }
@@ -8808,9 +8992,10 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certificate(Certificate::Nullification(n))
-                            if n.view() == target_view =>
-                        {
+                        MailboxMessage::Certificate {
+                            certificate: Certificate::Nullification(n),
+                            ..
+                        } if n.view() == target_view => {
                             replayed_nullification = true;
                         }
                         _ => {}
@@ -8975,7 +9160,10 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Update { current, .. } if current > target_view => {
                             // Signal leader inactivity to trigger the timeout path.
-                            mailbox.timeout(current, TimeoutReason::Inactivity);
+                            mailbox.timeout(
+                                Round::new(Epoch::new(333), current),
+                                TimeoutReason::Inactivity,
+                            );
                             break;
                         }
                         batcher::Message::Update { .. } => {}
