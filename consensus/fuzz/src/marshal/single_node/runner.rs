@@ -211,12 +211,62 @@ fn shadow_repair(
     advance_ready_prefix(finalized_available, ready_prefix);
 }
 
-fn assert_ready_delivery(ready_prefix: u64, height: Height) {
+/// Validate one delivered height, reconciling a resolved-by-fetch height into the
+/// strict model first.
+///
+/// A delivery above the strict `ready_prefix` is legitimate when marshal had a
+/// finalization for that height (`finalization_reported`) but was missing the
+/// block, so it cached the finalization and fetched the block from a peer that
+/// still holds the broadcast (`network_available`). This covers both the floor
+/// anchor and an above-floor finalization whose block was missing when reported
+/// (the harness only records those into `finalized_available` once the block is
+/// locally available, but real marshal stores them via the cached-finalization
+/// fetch path). Observing such a delivery proves the fetch resolved, so we
+/// materialize the height into the strict model (insert it, clear it as the floor
+/// if applicable, replay `shadow_repair`) and let `ready_prefix` advance. This
+/// keeps the strict model (used by the at-least-once and restart invariants) in
+/// sync with what marshal actually delivered, rather than treating the resolution
+/// as speculative forever.
+///
+/// Marshal delivers in order, so the next legitimate delivery is always
+/// `ready_prefix + 1`; we materialize that height (when witnessed) and let
+/// `shadow_repair` extend through the already-available run. A delivery with no
+/// finalization or no fetch witness is rejected, so a marshal that dispatched
+/// through a genuinely unresolved height is still caught.
+fn observe_ready_delivery(
+    height: Height,
+    ready_prefix: &mut u64,
+    pending_floor: &mut Option<u64>,
+    durable_available: &mut HashSet<u64>,
+    variant_available: &HashSet<u64>,
+    finalized_available: &mut HashSet<u64>,
+    network_available: &HashSet<u64>,
+    finalization_reported: &HashSet<u64>,
+    processed_height: u64,
+) {
+    let h = height.get();
+    if h == *ready_prefix + 1
+        && finalization_reported.contains(&h)
+        && (block_available(durable_available, variant_available, h)
+            || network_available.contains(&h))
+    {
+        durable_available.insert(h);
+        finalized_available.insert(h);
+        if *pending_floor == Some(h) {
+            *pending_floor = None;
+        }
+        shadow_repair(
+            processed_height,
+            durable_available,
+            variant_available,
+            finalized_available,
+            ready_prefix,
+        );
+    }
     assert!(
-        height.get() <= ready_prefix,
-        "marshal delivered height {} before the fuzz model made it ready \
-         (ready_prefix={ready_prefix})",
-        height.get(),
+        h <= *ready_prefix,
+        "marshal delivered height {h} before the fuzz model made it ready \
+         (ready_prefix={ready_prefix}, pending_floor={pending_floor:?})",
     );
 }
 
@@ -348,22 +398,39 @@ where
         let mut variant_available: HashSet<u64> = HashSet::new();
         let mut finalized_available: HashSet<u64> = HashSet::new();
         // Heights for which marshal holds a live buffer waiter, created by a
-        // Subscribe for a block it does not yet have. Only such a waiter makes a
-        // later PublishViaVariant actor-observable: it fires the subscription,
-        // marshal ingests the block, and a pending floor anchored on it
-        // completes. Without a waiter a publish only populates the variant cache
-        // and marshal never re-checks it. Cleared on Restart with the actor.
+        // Subscribe for a block it does not yet have. Such a waiter makes a later
+        // PublishViaVariant complete a pending floor in-band: it fires the
+        // subscription, marshal ingests the block, and the floor completes
+        // immediately. Without a waiter a publish only populates the variant
+        // cache; a floor anchored on that height instead resolves later via a
+        // resolver refetch, which the driver reconciles when the delivery is
+        // observed (see `network_available` / `observe_ready_delivery`). Cleared
+        // on Restart with the actor.
         let mut subscribed_heights: HashSet<u64> = HashSet::new();
         // Publish order backing `variant_available`'s FIFO eviction.
         let mut variant_order: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
-        // Heights still fetchable from network peers via the resolver. A variant
-        // publish broadcasts the block to peers, which retain it (bounded by the
-        // same FIFO as the local variant cache). Unlike the local cache, peer
-        // retention survives a marshal restart, so this set is NOT cleared on
-        // Restart: a floor anchored on such a height completes when marshal fetches
-        // the block from a peer.
+        // Witness set: heights broadcast via a variant publish, hence fetchable
+        // by marshal from a peer over the resolver. Used only as an upper-bound
+        // witness when reconciling an observed delivery; never advances strict
+        // readiness on its own. Not cleared on restart, because peer retention is
+        // independent of marshal's local cache.
+        //
+        // This is an intentional over-approximation: real peers bound retention to
+        // the broadcast deque (`deque_size`, currently 10), so a height published
+        // long ago may have been evicted and is no longer fetchable. We do NOT
+        // model that eviction here: a witness that is too narrow would reject a
+        // delivery marshal legitimately made (a false positive), whereas a witness
+        // that is too broad only fails to flag the narrow case of a delivery whose
+        // backing block was already evicted everywhere. We accept that masking to
+        // stay false-positive-free.
         let mut network_available: HashSet<u64> = HashSet::new();
-        let mut network_order: std::collections::VecDeque<u64> = std::collections::VecDeque::new();
+        // Witness set: heights for which a finalization was reported to marshal
+        // (via `report`/`set_floor`), even if the block was missing at the time.
+        // Marshal caches such a finalization and fetches the block, so a later
+        // delivery of that height is legitimate. Survives restart (marshal
+        // persists finalizations). Pairs with `network_available` to justify
+        // reconciling an above-floor fetched delivery, not just the floor anchor.
+        let mut finalization_reported: HashSet<u64> = HashSet::new();
         // ready_prefix is monotone non-decreasing. It advances when the
         // finalized archive becomes contiguous from height 1.
         let mut ready_prefix: u64 = 0;
@@ -460,6 +527,8 @@ where
                     );
                     let finalization = H::make_finalization(proposal, &schemes, QUORUM);
                     handle.mailbox.report(Activity::Finalization(finalization));
+                    // Marshal caches this finalization even if the block is missing.
+                    finalization_reported.insert(height.get());
                     // Marshal stores the finalization (as an anchor)
                     // only if the block is locally available AND
                     // the height is strictly above the persisted
@@ -738,6 +807,7 @@ where
                     {
                         handle.mailbox.set_floor(floor_finalization.clone());
                         handle.mailbox.set_floor(floor_finalization);
+                        finalization_reported.insert(floor_height.get());
                         stale_to_skip.extend(live_pending_acks.iter().copied());
                         pending_floor = Some(floor_height.get());
                         burst_floor = true;
@@ -887,6 +957,7 @@ where
                         let finalization = H::make_finalization(proposal, &schemes, QUORUM);
                         handle.mailbox.report(Activity::Notarization(notarization));
                         handle.mailbox.report(Activity::Finalization(finalization));
+                        finalization_reported.insert(fresh_height.get());
                     }
 
                     if burst_floor {
@@ -947,15 +1018,10 @@ where
                         );
                         let finalization = H::make_finalization(proposal, &schemes, QUORUM);
                         handle.mailbox.set_floor(finalization);
+                        finalization_reported.insert(h);
                         stale_to_skip.extend(live_pending_acks.iter().copied());
                         pending_floor = Some(h);
-                        // The floor completes if marshal can obtain the anchor block:
-                        // either it is locally available, or a peer still holds the
-                        // broadcast and marshal fetches it via the resolver (the case
-                        // that survives a restart of the local variant cache).
-                        if block_available(&durable_available, &variant_available, h)
-                            || network_available.contains(&h)
-                        {
+                        if block_available(&durable_available, &variant_available, h) {
                             repair_wake |= apply_pending_floor(
                                 &mut pending_floor,
                                 height,
@@ -987,6 +1053,9 @@ where
                         // Variant cache is in-memory only; cleared on Restart.
                         let h = height.get();
                         variant_available.insert(h);
+                        // A peer now holds this broadcast and can serve it on a
+                        // resolver fetch; this witness survives a marshal restart.
+                        network_available.insert(h);
                         // Mirror the variant engine's cache bound. A fixed-size
                         // FIFO (buffered engine) refreshes a re-published entry
                         // and evicts the oldest past capacity; an unbounded
@@ -1001,24 +1070,17 @@ where
                                     variant_available.remove(&evicted);
                                 }
                             }
-                            // Peers retain the broadcast under the same FIFO bound,
-                            // but their retention is not reset by a marshal restart.
-                            network_order.retain(|&x| x != h);
-                            network_order.push_back(h);
-                            while network_order.len() > capacity {
-                                if let Some(evicted) = network_order.pop_front() {
-                                    network_available.remove(&evicted);
-                                }
-                            }
                         }
-                        network_available.insert(h);
-                        // A publish only completes a pending floor anchor when
-                        // marshal holds a live waiter for this block (from a
-                        // prior Subscribe): the publish fires the subscription
-                        // and marshal ingests it. Without a waiter the block
-                        // only lands in the variant cache, which marshal does
-                        // not re-check, so the floor stays parked on the
-                        // resolver. This is independent of the variant.
+                        // A publish completes a parked floor anchor in-band only
+                        // when marshal holds a live waiter for this block (from a
+                        // prior Subscribe): the publish fires the subscription and
+                        // marshal ingests it immediately. Without a waiter the block
+                        // only lands in the variant cache, which marshal does not
+                        // re-check here, so the floor stays parked until marshal
+                        // refetches the block from a peer via the resolver. That
+                        // resolver resolution is asynchronous; the model reconciles it
+                        // lazily when the resulting delivery is observed (see
+                        // `observe_ready_delivery` and `network_available`).
                         //
                         // Marshal subscriptions are one-shot: ingest notifies and
                         // removes them. Consume the waiter here unconditionally so
@@ -1044,7 +1106,17 @@ where
                             // Height 0 is the genesis floor block marshal
                             // surfaces on a fresh start; it is not a finalized
                             // container, so it is not recorded or validated.
-                            assert_ready_delivery(ready_prefix, height);
+                            observe_ready_delivery(
+                                height,
+                                &mut ready_prefix,
+                                &mut pending_floor,
+                                &mut durable_available,
+                                &variant_available,
+                                &mut finalized_available,
+                                &network_available,
+                                &finalization_reported,
+                                processed_height,
+                            );
                             delivery_log.push(height);
                             // Marshal persists processed_height in
                             // its metadata as each ack returns.
@@ -1091,7 +1163,17 @@ where
                     let pending_real: Vec<Height> =
                         pending_now.into_iter().filter(|h| h.get() != 0).collect();
                     for h in &pending_real {
-                        assert_ready_delivery(ready_prefix, *h);
+                        observe_ready_delivery(
+                            *h,
+                            &mut ready_prefix,
+                            &mut pending_floor,
+                            &mut durable_available,
+                            &variant_available,
+                            &mut finalized_available,
+                            &network_available,
+                            &finalization_reported,
+                            processed_height,
+                        );
                         delivery_log.push(*h);
                     }
                     expected_redeliveries.push(pending_real);
@@ -1119,9 +1201,9 @@ where
                     // The new buffered / shards engine starts with an
                     // empty cache, so anything that was only available
                     // via the prior variant publish is no longer locally
-                    // visible to marshal. `network_available` is deliberately
-                    // NOT cleared: peers still hold those broadcasts, so marshal
-                    // can refetch them via the resolver after the restart.
+                    // visible to marshal. `network_available` is intentionally
+                    // NOT cleared: peers still hold those broadcasts, so the
+                    // resolver can still serve them to the new instance.
                     variant_available.clear();
                     variant_order.clear();
                     // The new actor starts with no buffer waiters; any
@@ -1166,7 +1248,17 @@ where
                 assert_stale_ack(expected, height);
             } else if height.get() != 0 {
                 // Skip the genesis floor block (height 0); see AckNext.
-                assert_ready_delivery(ready_prefix, height);
+                observe_ready_delivery(
+                    height,
+                    &mut ready_prefix,
+                    &mut pending_floor,
+                    &mut durable_available,
+                    &variant_available,
+                    &mut finalized_available,
+                    &network_available,
+                    &finalization_reported,
+                    processed_height,
+                );
                 delivery_log.push(height);
                 processed_height = processed_height.max(height.get());
             }
