@@ -948,12 +948,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(())
     }
 
-    /// Persist dirty data and offsets sections so committed data survives a crash.
+    /// Persist dirty data sections so committed data survives a crash.
+    ///
+    /// Does not advance the recovery watermark, so reopen may need to replay entries beyond
+    /// the previous `sync()`.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         self.flush_dirty_data().await?;
-        self.offsets.commit().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
         Ok(())
