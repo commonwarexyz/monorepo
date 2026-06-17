@@ -525,12 +525,12 @@ struct SizeClassToken {
 }
 
 impl SizeClassToken {
-    /// Creates a token and owns the initial strong reference for `class`.
+    /// Creates a raw token for a newly allocated size class.
     ///
-    /// The returned token is non-owning in the type system, but the raw pointer
-    /// still represents one strong reference. The caller must wrap it in an
-    /// owning type, such as [`SizeClassHandle`], or otherwise arrange for that
-    /// strong reference to be released.
+    /// `Arc::into_raw` leaves one outstanding strong reference behind the
+    /// pointer. The returned token is still non-owning: the caller must
+    /// immediately place it in an owning wrapper, such as [`SizeClassHandle`],
+    /// or otherwise arrange for that strong reference to be released.
     fn new(class: SizeClass) -> Self {
         let ptr = Arc::into_raw(Arc::new(class)).cast_mut();
         // SAFETY: `Arc::into_raw` never returns null.
@@ -996,7 +996,7 @@ impl TlsSizeClassCache {
     /// Returns the initialized entries in `start..end` to their class-global
     /// freelist as one batch.
     ///
-    /// All entries in one cache belong to the same size class, so their header
+    /// All entries in one cache belong to the same size class, so their slot
     /// leases own strong references represented by one shared token. Each
     /// lease is consumed without being released, the whole batch parks with
     /// one coalesced [`Freelist::put_batch`] (one atomic `fetch_or` per
@@ -1045,7 +1045,7 @@ impl TlsSizeClassCache {
             // Reading moves each entry out and leaves the slot uninitialized.
             let mut entry = unsafe { entries.add(index).read().assume_init() };
             // SAFETY: local cache entries keep a live lease in the pooled
-            // header. The strong reference it owns is intentionally not
+            // slot. The strong reference it owns is intentionally not
             // released here (leases have no drop glue); the token releases
             // below settle it.
             let _ = unsafe { entry.buffer.take_lease() }.into_token();
