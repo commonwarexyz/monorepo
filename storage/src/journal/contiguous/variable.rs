@@ -21,7 +21,7 @@ use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
     buffer::paged::{self, CacheRef, Replay, Writer},
-    Blob, Buf, IoBufMut,
+    Blob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
 use futures::{stream, Stream, StreamExt as _};
@@ -1081,6 +1081,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 "prepared append compression setting does not match journal".into(),
             ));
         }
+        let encoded = IoBuf::from(encoded);
 
         // Reject the append before writing anything (to either the data blobs or offsets
         // journal) if it would push the size past `u64::MAX`.
@@ -1105,11 +1106,12 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
                 .unwrap_or(encoded.len());
 
             // Append pre-encoded data to the tail, then convert relative item starts into
-            // absolute offsets.
-            let base_offset = self.blobs.tail_writer().size().await;
-            self.blobs
+            // absolute offsets. A large batch is written whole-page-direct to the blob; the
+            // returned offset is where this batch's first byte was written.
+            let base_offset = self
+                .blobs
                 .tail_writer()
-                .append(&encoded[batch_start..batch_end])
+                .append_owned(encoded.slice(batch_start..batch_end))
                 .await
                 .map_err(Error::Runtime)?;
 

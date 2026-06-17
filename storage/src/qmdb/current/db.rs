@@ -43,7 +43,6 @@ use commonware_runtime::telemetry::metrics::{
 use commonware_utils::{
     bitmap::{self, Readable as _},
     sequence::prefixed_u64::U64,
-    sync::AsyncMutex,
 };
 use core::{num::NonZeroU64, ops::Range};
 use futures::future::try_join_all;
@@ -155,7 +154,7 @@ pub struct Db<
     /// Persists:
     /// - The number of pruned bitmap chunks at key [PRUNED_CHUNKS_PREFIX]
     /// - The grafted tree pinned nodes at key [NODE_PREFIX]
-    pub(super) metadata: AsyncMutex<Metadata<E, U64, Vec<u8>>>,
+    pub(super) metadata: Metadata<E, U64, Vec<u8>>,
 
     /// Strategy used to parallelize batch operations across the ops tree, the grafted tree,
     /// and grafted leaf computation.
@@ -676,16 +675,16 @@ where
     }
 
     /// Sync the metadata to disk.
-    pub(crate) async fn sync_metadata(&self) -> Result<(), Error<F>> {
-        let mut metadata = self.metadata.lock().await;
-        metadata.clear();
+    pub(crate) async fn sync_metadata(&mut self) -> Result<(), Error<F>> {
+        self.metadata.clear();
 
         // Snapshot the pruning boundary under the read lock; the guard drops before any await.
         let pruned_chunks_u64 = self.any.bitmap.pruned_chunks() as u64;
 
         // Write the number of pruned chunks.
         let key = U64::new(PRUNED_CHUNKS_PREFIX, 0);
-        metadata.put(key, pruned_chunks_u64.to_be_bytes().to_vec());
+        self.metadata
+            .put(key, pruned_chunks_u64.to_be_bytes().to_vec());
 
         // Write the pinned nodes of the grafted tree.
         let pruned_chunks = Location::<F>::new(pruned_chunks_u64);
@@ -695,10 +694,10 @@ where
                 .get_node(grafted_pos)
                 .ok_or(Error::<F>::DataCorrupted("missing grafted pinned node"))?;
             let key = U64::new(NODE_PREFIX, i as u64);
-            metadata.put(key, digest.to_vec());
+            self.metadata.put(key, digest.to_vec());
         }
 
-        metadata.sync().await?;
+        self.metadata.sync().await?;
 
         Ok(())
     }
@@ -791,7 +790,7 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
-        self.metadata.into_inner().destroy().await?;
+        self.metadata.destroy().await?;
         self.any.destroy().await
     }
 }

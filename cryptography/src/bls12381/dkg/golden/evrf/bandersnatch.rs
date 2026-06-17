@@ -31,11 +31,11 @@ use ark_r1cs_std::{
     fields::fp::{AllocatedFp, FpVar},
     groups::CurveVar,
     prelude::{Boolean, ToBitsGadget},
-    R1CSVar,
+    GR1CSVar,
 };
-use ark_relations::r1cs::{
-    ConstraintMatrices, ConstraintSystem, ConstraintSystemRef, OptimizationGoal, SynthesisError,
-    SynthesisMode,
+use ark_relations::gr1cs::{
+    ConstraintSystem, ConstraintSystemRef, Matrix, OptimizationGoal, SynthesisError, SynthesisMode,
+    R1CS_PREDICATE_LABEL,
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
 use bytes::{Buf, BufMut};
@@ -489,15 +489,15 @@ fn vrf_batch_circuit(
         out.push(
             out_i_witness
                 .variable
-                .get_index_unchecked(cs.num_instance_variables())
+                .get_variable_index(cs.num_instance_variables())
                 .expect("new_witness returns witness"),
         );
     }
     Ok(out)
 }
 
-fn constraint_matrices_to_r1cs(matrices: ConstraintMatrices<Fq>) -> R1cs<Scalar> {
-    fn convert_matrix(m: Vec<Vec<(Fq, usize)>>) -> SparseMatrix<Scalar> {
+fn constraint_matrices_to_r1cs(matrices: Vec<Matrix<Fq>>) -> R1cs<Scalar> {
+    fn convert_matrix(m: Matrix<Fq>) -> SparseMatrix<Scalar> {
         let mut out = SparseMatrix::default();
         for (i, m_i) in m.into_iter().enumerate() {
             for (m_ij, j) in m_i {
@@ -506,10 +506,12 @@ fn constraint_matrices_to_r1cs(matrices: ConstraintMatrices<Fq>) -> R1cs<Scalar>
         }
         out
     }
+    let [a, b, c] = <[Matrix<Fq>; 3]>::try_from(matrices)
+        .unwrap_or_else(|_| panic!("R1CS has exactly three matrices"));
     R1cs {
-        a: convert_matrix(matrices.a),
-        b: convert_matrix(matrices.b),
-        c: convert_matrix(matrices.c),
+        a: convert_matrix(a),
+        b: convert_matrix(b),
+        c: convert_matrix(c),
     }
 }
 
@@ -524,6 +526,7 @@ fn vrf_batch_checked_inner(
     if x.is_some() {
         cs.set_mode(SynthesisMode::Prove {
             construct_matrices: true,
+            generate_lc_assignments: true,
         });
     } else {
         cs.set_mode(SynthesisMode::Setup);
@@ -547,20 +550,28 @@ fn vrf_batch_checked_inner(
     let cs = cs
         .into_inner()
         .expect("constraint system should have only one ref");
-    let matrices = cs
+    let mut matrices = cs
         .to_matrices()
         .expect("constraint system should have generated matrices");
+    let matrices = matrices
+        .remove(R1CS_PREDICATE_LABEL)
+        .expect("R1CS matrices should be generated");
     let r1cs = constraint_matrices_to_r1cs(matrices);
     if x.is_some() {
         // Concatenate instance and witness assignments so the resulting vector
         // is column-aligned with the R1CS matrix
         // (`[instance_assignment | witness_assignment]`). The first instance
         // entry is the constant `1`.
-        let witness = cs
-            .instance_assignment
-            .into_iter()
-            .chain(cs.witness_assignment)
-            .map(|x| fq_to_scalar(&x))
+        let instance_assignment = cs
+            .instance_assignment()
+            .expect("instance assignment should be populated");
+        let witness_assignment = cs
+            .witness_assignment()
+            .expect("witness assignment should be populated");
+        let witness = instance_assignment
+            .iter()
+            .chain(witness_assignment.iter())
+            .map(fq_to_scalar)
             .collect::<Vec<_>>();
         let (c, w) =
             r1cs_to_circuit_and_witness(None::<&mut StdRng>, r1cs, witness, &output_indices);

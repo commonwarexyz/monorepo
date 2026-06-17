@@ -62,11 +62,11 @@ fn bench_get(c: &mut Criterion) {
     // Populate the freezer with random keys
     let cfg = Config::default();
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-    let keys = builder.start(|ctx| async move {
-        let mut store = init(ctx).await;
+    let (keys, checkpoint) = builder.start(|ctx| async move {
+        let mut store = init(ctx, None).await;
         let keys = append_random(&mut store, ITEMS).await;
-        store.close().await.unwrap();
-        keys
+        let checkpoint = store.close().await.unwrap();
+        (keys, checkpoint)
     });
 
     // Run the benchmarks
@@ -86,7 +86,7 @@ fn bench_get(c: &mut Criterion) {
                         let keys = keys.clone();
                         async move {
                             let ctx = context::get::<commonware_runtime::tokio::Context>();
-                            let store = init(ctx).await;
+                            let store = init(ctx, Some(checkpoint)).await;
                             let selected_keys = match pattern {
                                 "random" => select_keys(reads, &keys),
                                 "recent" => select_recent_keys(reads, &keys),
@@ -113,7 +113,7 @@ fn bench_get(c: &mut Criterion) {
     // Clean up shared artifacts
     let cleaner = commonware_runtime::tokio::Runner::new(cfg);
     cleaner.start(|ctx| async move {
-        let store = init(ctx).await;
+        let store = init(ctx, None).await;
         store.destroy().await.unwrap();
     });
 }

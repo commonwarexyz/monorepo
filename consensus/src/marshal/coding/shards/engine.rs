@@ -508,12 +508,9 @@ where
                         response.send_lossy(block);
                     }
                     Message::GetByDigest { digest, response } => {
-                        let block = self
-                            .reconstructed_blocks
-                            .values()
-                            .find_map(|entry| {
-                                (entry.block.digest() == digest).then_some(entry.block.clone())
-                            });
+                        let block = self.reconstructed_blocks.values().find_map(|entry| {
+                            (entry.block.digest() == digest).then_some(entry.block.clone())
+                        });
                         response.send_lossy(block);
                     }
                     Message::SubscribeAssignedShardVerified {
