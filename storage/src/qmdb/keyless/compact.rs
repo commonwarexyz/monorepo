@@ -525,8 +525,7 @@ where
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained commit has exactly `target` operations (never synced, or pruned). Any error
-    /// is fatal for this handle: drop it and reopen from storage.
+    /// no retained commit has exactly `target` operations (never synced, or pruned).
     #[tracing::instrument(name = "qmdb.keyless.compact.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, target: Location<F>) -> Result<(), Error<F>>
     where
@@ -567,8 +566,7 @@ where
     /// # Errors
     ///
     /// Fails if a compact-sync import has not yet been persisted by [`Self::commit`] or
-    /// [`Self::sync`]. Any error
-    /// is fatal for this handle: drop it and reopen from storage.
+    /// [`Self::sync`].
     pub async fn prune(&mut self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.witness.prune(pruning_boundary).await
     }
@@ -1020,6 +1018,79 @@ mod tests {
             let db = open_db::<mmr::Family>(context.child("second"), partition).await;
             assert_eq!(db.root(), root);
             assert_eq!(db.get_metadata(), Some(meta));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_import_persists_with_commit() {
+        deterministic::Runner::default().start(|context| async move {
+            let dst = "keyless-import-commit-dst";
+            let src = "keyless-import-commit-src";
+            let meta_a = U64::new(11);
+            let meta_b = U64::new(22);
+
+            // Build state B in a separate source partition and capture its validated state.
+            let target_b = {
+                let mut source = open_db::<mmr::Family>(context.child("src"), src).await;
+                source
+                    .apply_batch(source.new_batch().append(U64::new(2)).merkleize(
+                        &source,
+                        Some(meta_b.clone()),
+                        Location::new(0),
+                    ))
+                    .unwrap();
+                source.sync().await.unwrap();
+                source.target()
+            };
+            let (_, proof_b, pinned_b) = {
+                let journal = open_witness_journal(context.child("src_tip"), src).await;
+                witness::tests::tip(&journal).await
+            };
+            let validated = compact_sync::ValidatedState {
+                state: compact_sync::State {
+                    leaf_count: target_b.leaf_count,
+                    pinned_nodes: pinned_b,
+                    last_commit_op: Operation::Commit(Some(meta_b.clone()), Location::new(0)),
+                    last_commit_proof: proof_b,
+                },
+                root: target_b.root,
+            };
+
+            // Seed the destination partition with a different committed state A.
+            {
+                let mut seeded = open_db::<mmr::Family>(context.child("seed"), dst).await;
+                seeded
+                    .apply_batch(seeded.new_batch().append(U64::new(1)).merkleize(
+                        &seeded,
+                        Some(meta_a),
+                        Location::new(0),
+                    ))
+                    .unwrap();
+                seeded.sync().await.unwrap();
+                assert_ne!(seeded.target(), target_b);
+            }
+
+            // Import state B over the destination and make it durable with commit (not sync).
+            {
+                let journal = open_witness_journal(context.child("import"), dst).await;
+                let imported = TestDb::<mmr::Family>::init_from_validated_state(
+                    Sequential,
+                    journal,
+                    (),
+                    validated,
+                )
+                .unwrap();
+                assert_eq!(imported.target(), target_b);
+                imported.commit().await.unwrap();
+            }
+
+            // Reopen recovers the committed import, replacing state A even though the journal was
+            // never synced.
+            let db = open_db::<mmr::Family>(context.child("reopen"), dst).await;
+            assert_eq!(db.target(), target_b);
+            assert_eq!(db.root(), target_b.root);
+            assert_eq!(db.get_metadata(), Some(meta_b));
             db.destroy().await.unwrap();
         });
     }

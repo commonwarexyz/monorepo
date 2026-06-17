@@ -544,8 +544,7 @@ where
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained commit has exactly `target` operations (never synced, or pruned). Any error
-    /// is fatal for this handle: drop it and reopen from storage.
+    /// no retained commit has exactly `target` operations (never synced, or pruned).
     #[tracing::instrument(name = "qmdb.immutable.compact.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, target: Location<F>) -> Result<(), Error<F>>
     where
@@ -586,7 +585,7 @@ where
     /// # Errors
     ///
     /// Fails if a compact-sync import has not yet been persisted by [`Self::commit`] or
-    /// [`Self::sync`]. Any error is fatal for this handle: drop it and reopen from storage.
+    /// [`Self::sync`].
     pub async fn prune(&mut self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.witness.prune(pruning_boundary).await
     }
@@ -974,6 +973,72 @@ mod tests {
             assert_eq!(db.root(), root_after_second);
             assert_eq!(db.get_metadata(), Some(meta2));
             assert_eq!(db.inactivity_floor_loc(), Location::new(1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_to_committed_entry_after_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-commit-rewind-reopen";
+            let meta1 = Sha256::fill(0xaa);
+            let meta2 = Sha256::fill(0xbb);
+
+            let (root_a, size_a) = {
+                let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[1]), Sha256::fill(11u8))
+                        .merkleize(&db, Some(meta1), Location::new(0)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                let root_a = db.root();
+                let size_a = db.size();
+
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[2]), Sha256::fill(22u8))
+                        .merkleize(&db, Some(meta2), Location::new(1)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                (root_a, size_a)
+            };
+
+            // Both committed witnesses survive the crash: reopen recovers the tip, and the
+            // earlier commit remains a valid rewind target.
+            let mut db = open_db::<mmr::Family>(context.child("second"), partition).await;
+            db.rewind(size_a).await.unwrap();
+            assert_eq!(db.root(), root_a);
+            assert_eq!(db.get_metadata(), Some(meta1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_sync_after_commit() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-sync-after-commit";
+            let meta = Sha256::fill(0xaa);
+
+            let root = {
+                let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[1]), Sha256::fill(11u8))
+                        .merkleize(&db, Some(meta), Location::new(0)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                // The commit already made the state durable, so this is a no-op.
+                db.sync().await.unwrap();
+                db.root()
+            };
+
+            let db = open_db::<mmr::Family>(context.child("second"), partition).await;
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get_metadata(), Some(meta));
             db.destroy().await.unwrap();
         });
     }
