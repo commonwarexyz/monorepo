@@ -481,8 +481,11 @@ mod tests {
         loop {
             select! {
                 msg = batcher_receiver.recv() => {
-                    if let batcher::Message::Update { current, finalized: found, .. } =
-                        msg.expect("batcher mailbox closed")
+                    if let batcher::Message::Update {
+                        current,
+                        finalized: found,
+                        ..
+                    } = msg.expect("batcher mailbox closed")
                     {
                         assert_eq!(current, finalized.next());
                         assert_eq!(found, finalized);
@@ -6086,8 +6089,11 @@ mod tests {
             let reported = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == view5 =>
-                            break Some(success),
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == view5 =>
+                        {
+                            break Some(success);
+                        }
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
                     },
                     msg = batcher_receiver.recv() => {
@@ -6193,7 +6199,9 @@ mod tests {
             let certified = loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
                             break Some(success);
                         }
                         MailboxMessage::Certified { .. } | MailboxMessage::Certificate { .. } => {}
@@ -8638,7 +8646,9 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
                             assert!(!success, "expected failed certification");
                             break;
                         }
@@ -8723,7 +8733,9 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certified { round, success, .. } if round.view() == target_view => {
+                        MailboxMessage::Certified { round, success, .. }
+                            if round.view() == target_view =>
+                        {
                             assert!(!success, "replayed certification should be a failure");
                             replayed_certified = true;
                         }
@@ -8980,9 +8992,10 @@ mod tests {
             loop {
                 select! {
                     msg = resolver_receiver.recv() => match msg.unwrap() {
-                        MailboxMessage::Certificate { certificate: Certificate::Nullification(n), .. }
-                            if n.view() == target_view =>
-                        {
+                        MailboxMessage::Certificate {
+                            certificate: Certificate::Nullification(n),
+                            ..
+                        } if n.view() == target_view => {
                             replayed_nullification = true;
                         }
                         _ => {}
@@ -9147,7 +9160,10 @@ mod tests {
                     msg = batcher_receiver.recv() => match msg.unwrap() {
                         batcher::Message::Update { current, .. } if current > target_view => {
                             // Signal leader inactivity to trigger the timeout path.
-                            mailbox.timeout(Round::new(Epoch::new(333), current), TimeoutReason::Inactivity);
+                            mailbox.timeout(
+                                Round::new(Epoch::new(333), current),
+                                TimeoutReason::Inactivity,
+                            );
                             break;
                         }
                         batcher::Message::Update { .. } => {}
