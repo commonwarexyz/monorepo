@@ -47,8 +47,9 @@ pub struct FetchKey<K, S, M = ()> {
     /// The key to fetch.
     pub key: K,
 
-    /// Subscribers used to decide whether the fetch should be retained.
-    pub subscribers: NonEmptyVec<S>,
+    /// Subscribers used to decide whether the fetch should be retained, each
+    /// paired with the span of the fetch that introduced it.
+    pub subscribers: NonEmptyVec<(S, tracing::Span)>,
 
     /// Fetch metadata merged when duplicate fetches are coalesced.
     pub metadata: M,
@@ -58,7 +59,7 @@ impl<K, S> From<Fetch<K, S>> for FetchKey<K, S> {
     fn from(fetch: Fetch<K, S>) -> Self {
         Self {
             key: fetch.key,
-            subscribers: NonEmptyVec::new(fetch.subscriber),
+            subscribers: NonEmptyVec::new((fetch.subscriber, fetch.span)),
             metadata: (),
         }
     }
@@ -143,16 +144,20 @@ fn retain_fetch<K, S, M>(
     predicate: &(dyn Fn(&K, &S) -> bool + Send),
 ) -> Option<FetchKey<K, S, M>> {
     let mut subscribers = fetch.subscribers.into_vec();
-    subscribers.retain(|subscriber| predicate(&fetch.key, subscriber));
+    subscribers.retain(|(subscriber, _)| predicate(&fetch.key, subscriber));
     fetch.subscribers = NonEmptyVec::try_from(subscribers).ok()?;
     Some(fetch)
 }
 
-/// Add incoming subscribers that are not already attached to the pending fetch.
-fn merge_subscribers<S: Eq>(existing: &mut NonEmptyVec<S>, incoming: NonEmptyVec<S>) {
-    for subscriber in incoming {
-        if !existing.contains(&subscriber) {
-            existing.push(subscriber);
+/// Add incoming subscribers (with their fetch span) that are not already attached
+/// to the pending fetch, keeping the first span seen for each subscriber.
+fn merge_subscribers<S: Eq>(
+    existing: &mut NonEmptyVec<(S, tracing::Span)>,
+    incoming: NonEmptyVec<(S, tracing::Span)>,
+) {
+    for (subscriber, span) in incoming {
+        if !existing.iter().any(|(existing, _)| *existing == subscriber) {
+            existing.push((subscriber, span));
         }
     }
 }
@@ -207,7 +212,7 @@ mod tests {
     fn fetch(key: u8, subscriber: u16) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
+            subscribers: NonEmptyVec::new((subscriber, tracing::Span::none())),
             metadata: (),
         }])
     }
@@ -215,7 +220,12 @@ mod tests {
     fn fetch_with_subscribers(key: u8, subscribers: Vec<u16>) -> TestMessage {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::from_unchecked(subscribers),
+            subscribers: NonEmptyVec::from_unchecked(
+                subscribers
+                    .into_iter()
+                    .map(|subscriber| (subscriber, tracing::Span::none()))
+                    .collect(),
+            ),
             metadata: (),
         }])
     }
@@ -227,7 +237,7 @@ mod tests {
     ) -> Message<u8, u16, Option<NonEmptyVec<u8>>> {
         Message::Fetch(vec![FetchKey {
             key,
-            subscribers: NonEmptyVec::new(subscriber),
+            subscribers: NonEmptyVec::new((subscriber, tracing::Span::none())),
             metadata,
         }])
     }
@@ -255,7 +265,12 @@ mod tests {
         };
         assert_eq!(fetches.len(), 1);
         assert_eq!(fetches[0].key, expected_key);
-        assert_eq!(&fetches[0].subscribers[..], expected_subscribers);
+        let actual: Vec<_> = fetches[0]
+            .subscribers
+            .iter()
+            .map(|(subscriber, _)| *subscriber)
+            .collect();
+        assert_eq!(actual, expected_subscribers);
     }
 
     #[test]
@@ -328,11 +343,13 @@ mod tests {
         let fetch = Fetch {
             key: 7,
             subscriber: 8,
+            span: tracing::Span::none(),
         };
         let key = FetchKey::from(fetch);
 
         assert_eq!(key.key, 7);
-        assert_eq!(key.subscribers, non_empty_vec![8]);
+        assert_eq!(key.subscribers.len().get(), 1);
+        assert_eq!(key.subscribers.first().0, 8);
     }
 
     #[test]

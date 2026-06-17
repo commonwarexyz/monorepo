@@ -97,7 +97,7 @@ use crate::{
     Context,
 };
 use commonware_codec::CodecFixedShared;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::{buffer::paged::CacheRef, IoBuf};
 use commonware_utils::{
     sequence::VecU64,
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
@@ -1159,6 +1159,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         if items_count == 0 {
             return Err(Error::EmptyAppend);
         }
+        let items_buf = IoBuf::from(items_buf);
 
         let _op_guard = self.op_lock.lock().await;
         let mut inner = self.inner.write().await;
@@ -1182,7 +1183,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
             inner
                 .journal
-                .append_raw(section, &items_buf[start..end])
+                .append_raw(section, items_buf.slice(start..end))
                 .await?;
             inner.size += batch_count as u64;
             written += batch_count;
@@ -2615,7 +2616,7 @@ mod tests {
                 let mut inner = journal.inner.write().await;
                 inner
                     .journal
-                    .append_raw(0, extra.as_ref())
+                    .append_raw(0, IoBuf::copy_from_slice(extra.as_ref()))
                     .await
                     .expect("failed to append extra item");
                 inner
@@ -3543,6 +3544,54 @@ mod tests {
                     journal.read(position).await.unwrap(),
                     items[index],
                     "item at position {position} did not match after reopen"
+                );
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_fixed_journal_append_many_exceeding_write_buffer() {
+        // A batch much larger than the write buffer (2048 bytes = 64 digests) takes the direct
+        // blob-write path and spans multiple sections.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(100));
+            let journal = Journal::<_, Digest>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Start mid-page with a couple of single appends so the batch begins unaligned.
+            journal.append(&test_digest(0)).await.unwrap();
+            journal.append(&test_digest(1)).await.unwrap();
+
+            let items: Vec<_> = (2..252u64).map(test_digest).collect();
+            let last = journal.append_many(Many::Flat(&items)).await.unwrap();
+            assert_eq!(last, 251);
+            assert_eq!(journal.bounds().await, 0..252);
+
+            // Every item is readable before any sync.
+            for pos in 0..252u64 {
+                assert_eq!(
+                    journal.read(pos).await.unwrap(),
+                    test_digest(pos),
+                    "item at position {pos} did not match"
+                );
+            }
+
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, Digest>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..252);
+            for pos in 0..252u64 {
+                assert_eq!(
+                    journal.read(pos).await.unwrap(),
+                    test_digest(pos),
+                    "item at position {pos} did not match after reopen"
                 );
             }
 

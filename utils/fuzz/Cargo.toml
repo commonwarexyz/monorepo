@@ -42,6 +42,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "cache"
+path = "fuzz_targets/cache.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "priority_set"
 path = "fuzz_targets/priority_set.rs"
 test = false

@@ -38,7 +38,10 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select;
-use commonware_runtime::{telemetry::metrics::GaugeExt, Clock, Metrics, Spawner};
+use commonware_runtime::{
+    telemetry::{metrics::GaugeExt, traces::TracedExt as _},
+    Clock, Metrics, Spawner,
+};
 use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::{stream, Stream, StreamExt};
 use rand::Rng;
@@ -841,7 +844,7 @@ where
     name = "stateful.processor.is_already_processed",
     level = "info",
     skip_all,
-    fields(height = %block.height(), digest = %block.digest())
+    fields(height = block.height().traced(), digest = %block.digest())
 )]
 async fn is_already_processed<S, V, Response>(
     last_processed: Anchor<<V::ApplicationBlock as Digestible>::Digest>,

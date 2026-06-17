@@ -25,7 +25,7 @@ use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{CacheRef, Replay},
-    Blob, Buf, Metrics, Storage,
+    Blob, Buf, IoBuf, Metrics, Storage,
 };
 use commonware_utils::NZUsize;
 use futures::{
@@ -124,15 +124,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn append(&mut self, section: u64, item: &A) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
 
-        let size = blob.size().await;
-        if !size.is_multiple_of(Self::CHUNK_SIZE_U64) {
-            return Err(Error::InvalidBlobSize(section, size));
-        }
-        let position = size / Self::CHUNK_SIZE_U64;
-
         // Encode the item
         let buf = item.encode_mut();
-        blob.append(&buf).await?;
+        let offset = blob.append(&buf).await?;
+        if !offset.is_multiple_of(Self::CHUNK_SIZE_U64) {
+            return Err(Error::InvalidBlobSize(section, offset));
+        }
+        let position = offset / Self::CHUNK_SIZE_U64;
         trace!(section, position, "appended item");
 
         Ok(position)
@@ -145,16 +143,13 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// # Panics
     ///
     /// Panics if `buf` is empty or not a multiple of [Self::CHUNK_SIZE].
-    pub(crate) async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<(), Error> {
+    pub(crate) async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<(), Error> {
         assert!(!buf.is_empty());
         assert!(buf.len().is_multiple_of(Self::CHUNK_SIZE));
+        let count = buf.len() / Self::CHUNK_SIZE;
         let blob = self.manager.get_or_create(section).await?;
-        blob.append(buf).await?;
-        trace!(
-            section,
-            count = buf.len() / Self::CHUNK_SIZE,
-            "appended items"
-        );
+        blob.append_owned(buf).await?;
+        trace!(section, count, "appended items");
         Ok(())
     }
 
@@ -174,14 +169,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         let offset = position
             .checked_mul(Self::CHUNK_SIZE_U64)
             .ok_or(Error::ItemOutOfRange(position))?;
-        let end = offset
-            .checked_add(Self::CHUNK_SIZE_U64)
-            .ok_or(Error::ItemOutOfRange(position))?;
-        if end > blob.size().await {
-            return Err(Error::ItemOutOfRange(position));
-        }
 
-        let buf = blob.read_at(offset, Self::CHUNK_SIZE).await?;
+        // The read validates bounds against the blob's logical size.
+        let buf = blob
+            .read_at(offset, Self::CHUNK_SIZE)
+            .await
+            .map_err(|err| match err {
+                commonware_runtime::Error::BlobInsufficientLength
+                | commonware_runtime::Error::OffsetOverflow => Error::ItemOutOfRange(position),
+                err => Error::Runtime(err),
+            })?;
         A::decode(buf.coalesce()).map_err(Error::Codec)
     }
 

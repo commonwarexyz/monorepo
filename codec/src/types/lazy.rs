@@ -83,10 +83,20 @@ struct Pending<T: Read> {
 impl<T: Read> Lazy<T> {
     // I considered calling this "now", but this was too close to "new".
     /// Create a [`Lazy`] using a value.
+    #[cfg(feature = "std")]
     pub fn new(value: T) -> Self {
         Self {
             pending: None,
-            value: Some(value).into(),
+            value: OnceLock::from(Some(value)),
+        }
+    }
+
+    /// Create a [`Lazy`] using a value.
+    #[cfg(not(feature = "std"))]
+    pub const fn new(value: T) -> Self {
+        Self {
+            pending: None,
+            value: Some(value),
         }
     }
 
@@ -121,22 +131,23 @@ impl<T: Read> Lazy<T> {
     ///
     /// This function wil incur the cost of decoding the value only once,
     /// so there's no need to cache its output.
+    #[cfg(feature = "std")]
     pub fn get(&self) -> Option<&T> {
-        cfg_if::cfg_if! {
-            if #[cfg(feature = "std")] {
-                self.value
-                    .get_or_init(|| {
-                        let Pending { bytes, cfg } = self
-                            .pending
-                            .as_ref()
-                            .expect("Lazy should have pending if value is not initialized");
-                        T::decode_cfg(bytes.as_ref(), cfg).ok()
-                    })
+        self.value
+            .get_or_init(|| {
+                let Pending { bytes, cfg } = self
+                    .pending
                     .as_ref()
-            } else {
-                self.value.as_ref()
-            }
-        }
+                    .expect("Lazy should have pending if value is not initialized");
+                T::decode_cfg(bytes.as_ref(), cfg).ok()
+            })
+            .as_ref()
+    }
+
+    /// Returns a reference to the underlying value, or `None` if decoding failed.
+    #[cfg(not(feature = "std"))]
+    pub const fn get(&self) -> Option<&T> {
+        self.value.as_ref()
     }
 }
 
