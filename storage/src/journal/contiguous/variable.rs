@@ -1218,12 +1218,14 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         self.blobs.sync_from(start_blob).await
     }
 
-    /// Persist dirty data and offsets blobs so committed data survives a crash.
+    /// Persist dirty data blobs so committed data survives a crash.
+    ///
+    /// Does not advance the recovery watermark, so reopen may need to replay entries beyond
+    /// the previous `sync()`.
     pub async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         self.flush_dirty_data().await?;
-        self.offsets.commit().await?;
         self.dirty_from_blob = None;
         Ok(())
     }
