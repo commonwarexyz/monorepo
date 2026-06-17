@@ -43,10 +43,19 @@ enum Position {
     Overflow(usize),
 }
 
+/// An occupied entry in an index's map, abstracting over the hash- and tree-map entry types so
+/// the shared [Cursor] can operate on either.
 pub trait IndexEntry<V: Send + Sync>: Send + Sync {
+    /// The translated key type of the entry.
     type Key;
+
+    /// Returns the entry's translated key.
     fn key(&self) -> &Self::Key;
+
+    /// Returns a mutable reference to the entry's inline value.
     fn get_mut(&mut self) -> &mut V;
+
+    /// Removes the entry from the map.
     fn remove(self);
 }
 
@@ -87,8 +96,13 @@ enum State {
 ///   may hold the index of a just-deleted slot, which is only ever stepped down from, never
 ///   read).
 /// - [`State::EntryRemoved`] implies the chain was taken and is empty.
-pub struct Cursor<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHasher>
-{
+pub struct Cursor<
+    'a,
+    K: Hash + Eq + Copy,
+    V: Send + Sync,
+    E: IndexEntry<V, Key = K>,
+    S: BuildHasher,
+> {
     // The occupied index entry holding the inline value (and its key) while the cursor exists.
     entry: Option<E>,
     // The overflow values for all keys in the index, used to take and reinstall `chain`.
@@ -134,13 +148,13 @@ impl<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: Buil
 
     /// Returns the key's overflow chain, taking it from the overflow map on first use.
     fn chain_mut(&mut self) -> &mut Vec<V> {
-        let key = *self.entry.as_ref().unwrap().key();
+        let key = self.entry.as_ref().unwrap().key();
         let overflow = &mut self.overflow;
         self.chain.get_or_insert_with(|| {
             if overflow.is_empty() {
                 Vec::new()
             } else {
-                overflow.remove(&key).unwrap_or_default()
+                overflow.remove(key).unwrap_or_default()
             }
         })
     }

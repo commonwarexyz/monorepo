@@ -29,12 +29,15 @@ use std::{
 /// Implementation of [IndexEntry] for [BTreeOccupiedEntry].
 impl<K: Ord + Send + Sync, V: Send + Sync> IndexEntry<V> for BTreeOccupiedEntry<'_, K, V> {
     type Key = K;
+
     fn key(&self) -> &K {
         BTreeOccupiedEntry::key(self)
     }
+
     fn get_mut(&mut self) -> &mut V {
         self.get_mut()
     }
+
     fn remove(self) {
         self.remove_entry();
     }

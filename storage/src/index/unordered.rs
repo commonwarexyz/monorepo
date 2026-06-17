@@ -26,12 +26,15 @@ const INITIAL_CAPACITY: usize = 256;
 /// Implementation of [IndexEntry] for [OccupiedEntry].
 impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
     type Key = K;
+
     fn key(&self) -> &K {
         OccupiedEntry::key(self)
     }
+
     fn get_mut(&mut self) -> &mut V {
         self.get_mut()
     }
+
     fn remove(self) {
         OccupiedEntry::remove(self);
     }
