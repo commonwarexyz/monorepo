@@ -4816,7 +4816,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_read_many_sparse_sections_and_hit_accounting() {
+    fn test_read_many_sparse_blobs_and_hit_accounting() {
         // Verify the batched read path is byte-identical to per-item reads across multiple
         // blobs, with a mid-blob pruning boundary, a sparse subset of positions, and
         // exact hit/miss accounting over a mixed cached/uncached batch.

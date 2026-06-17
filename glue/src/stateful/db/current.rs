@@ -1087,7 +1087,7 @@ mod tests {
             },
             journal_config: VariableJournalConfig {
                 partition: format!("stateful-current-log-{suffix}"),
-                items_per_section: NZU64!(7),
+                items_per_blob: NZU64!(7),
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,

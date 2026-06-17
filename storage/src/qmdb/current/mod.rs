@@ -587,7 +587,7 @@ pub mod tests {
             },
             journal_config: VConfig {
                 partition: format!("{partition_prefix}-partition-prefix"),
-                items_per_section: NZU64!(7),
+                items_per_blob: NZU64!(7),
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,

@@ -786,7 +786,7 @@ pub(super) mod test {
     use core::{future::Future, pin::Pin};
     use std::ops::Range;
 
-    const ITEMS_PER_SECTION: u64 = 5;
+    const ITEMS_PER_BLOB: u64 = 5;
 
     type TestDb<F, V, C> = Immutable<
         F,
@@ -1261,8 +1261,8 @@ pub(super) mod test {
             batch = batch.set(k, v);
         }
         // The inactivity floor must cover both prune targets in this test.
-        // Second prune request is at ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1.
-        let inactivity_floor = Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1);
+        // Second prune request is at ELEMENTS / 2 + ITEMS_PER_BLOB * 2 - 1.
+        let inactivity_floor = Location::new(ELEMENTS / 2 + ITEMS_PER_BLOB * 2 - 1);
         let merkleized = batch.merkleize(&db, None, inactivity_floor);
         db.apply_batch(merkleized).await.unwrap();
         assert_eq!(db.bounds().await.end, ELEMENTS + 2);
@@ -1272,7 +1272,7 @@ pub(super) mod test {
         let bounds = db.bounds().await;
         assert_eq!(bounds.end, ELEMENTS + 2);
 
-        // items_per_section is 5, so half should be exactly at a blob boundary, in which case
+        // items_per_blob is 5, so half should be exactly at a blob boundary, in which case
         // the actual pruning location should match the requested.
         let oldest_retained_loc = bounds.start;
         assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
@@ -1298,13 +1298,13 @@ pub(super) mod test {
         assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
 
         // Prune to a non-blob boundary.
-        let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
+        let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_BLOB * 2 - 1));
         db.prune(loc).await.unwrap();
         // Actual boundary should be a multiple of 5.
         let oldest_retained_loc = db.bounds().await.start;
         assert_eq!(
             oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
+            Location::new(ELEMENTS / 2 + ITEMS_PER_BLOB)
         );
 
         // Confirm boundary persists across restart.
@@ -1314,11 +1314,11 @@ pub(super) mod test {
         let oldest_retained_loc = db.bounds().await.start;
         assert_eq!(
             oldest_retained_loc,
-            Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
+            Location::new(ELEMENTS / 2 + ITEMS_PER_BLOB)
         );
 
         // Try to fetch a key before the inactivity floor (not in snapshot after reopen).
-        let floor_val = ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1;
+        let floor_val = ELEMENTS / 2 + ITEMS_PER_BLOB * 2 - 1;
         let inactive_key = sorted_keys[floor_val as usize - 2];
         assert!(db.get(&inactive_key).await.unwrap().is_none());
 
@@ -1552,16 +1552,15 @@ pub(super) mod test {
     #[boxed]
     pub(crate) async fn test_immutable_rewind_pruned_target_errors<F: Family, V, C>(
         context: deterministic::Context,
-        open_small_sections_db: impl Fn(
+        open_small_blobs_db: impl Fn(
             deterministic::Context,
-        )
-            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let mut db = open_small_sections_db(context.child("db")).await;
+        let mut db = open_small_blobs_db(context.child("db")).await;
 
         let first_range = commit_sets(
             &mut db,
@@ -2110,21 +2109,20 @@ pub(super) mod test {
     /// keeps all versions -- `get()` returns the earliest non-pruned value.
     /// After pruning the first version, `get()` returns the second.
     ///
-    /// `open_db_small_sections` must return a DB whose log has `items_per_section=1`
+    /// `open_db_small_blobs` must return a DB whose log has `items_per_blob=1`
     /// so pruning is per-item.
     #[boxed]
     pub(crate) async fn test_immutable_batch_sequential_key_override<F: Family, V, C>(
         context: deterministic::Context,
-        open_db_small_sections: impl Fn(
+        open_db_small_blobs: impl Fn(
             deterministic::Context,
-        )
-            -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
+        ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
         C: Mutable<Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
-        let mut db = open_db_small_sections(context.child("db")).await;
+        let mut db = open_db_small_blobs(context.child("db")).await;
 
         let key = Sha256::hash(&0u64.to_be_bytes());
         let v1 = Sha256::fill(1u8);
@@ -2155,7 +2153,7 @@ pub(super) mod test {
         // Immutable DB returns the earliest non-pruned value.
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
-        // Prune past the first Set (loc 1). With items_per_section=1,
+        // Prune past the first Set (loc 1). With items_per_blob=1,
         // pruning to loc 2 should remove the blob containing loc 1.
         db.prune(Location::new(2)).await.unwrap();
         assert_eq!(db.get(&key).await.unwrap(), Some(v2));

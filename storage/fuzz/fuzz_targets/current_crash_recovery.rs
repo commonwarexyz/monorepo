@@ -112,7 +112,7 @@ fn make_config(
         },
         journal_config: VConfig {
             partition: format!("crash-log-{suffix}"),
-            items_per_section: NZU64!(log_items_per_blob),
+            items_per_blob: NZU64!(log_items_per_blob),
             write_buffer,
             compression: None,
             codec_config: ((), ()),

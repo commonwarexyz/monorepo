@@ -27,7 +27,7 @@
 //!             write_buffer: NZUsize!(64 * 1024),
 //!             compression: None,
 //!             codec_config: ((), ()),
-//!             items_per_section: NZU64!(4),
+//!             items_per_blob: NZU64!(4),
 //!             page_cache: CacheRef::from_pooler(&ctx, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
 //!         },
 //!         translator: TwoCap,
@@ -316,7 +316,7 @@ where
             ));
         }
 
-        // Prune the log. The log will prune at section boundaries, so the actual oldest retained
+        // Prune the log. The log will prune at blob boundaries, so the actual oldest retained
         // location may be less than requested.
         if !self.log.prune(*prune_loc).await? {
             return Ok(());
@@ -516,7 +516,7 @@ mod test {
                 write_buffer: NZUsize!(64 * 1024),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
-                items_per_section: NZU64!(7),
+                items_per_blob: NZU64!(7),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
             },
             translator: TwoCap,
@@ -659,7 +659,7 @@ mod test {
             let fetched_value = db.get(&key).await.unwrap();
             assert_eq!(fetched_value.unwrap(), value);
 
-            // Insert two new k/v pairs to force pruning of the first section.
+            // Insert two new k/v pairs to force pruning of the first blob.
             let (k1, v1) = (Digest::random(&mut ctx), vec![2, 3, 4, 5, 6]);
             let (k2, v2) = (Digest::random(&mut ctx), vec![6, 7, 8]);
             apply_entries(&mut db, [(k1, Some(v1.clone()))]).await;
@@ -679,7 +679,7 @@ mod test {
             assert_eq!(*db.bounds().end, 10);
             assert_eq!(*db.inactivity_floor_loc, 5);
 
-            // Ensure all keys can be accessed, despite the first section being pruned.
+            // Ensure all keys can be accessed, despite the first blob being pruned.
             assert_eq!(db.get(&key).await.unwrap().unwrap(), value);
             assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
             assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);

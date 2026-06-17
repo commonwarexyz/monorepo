@@ -592,7 +592,7 @@ mod tests {
     fn witness_config(partition: &str, pooler: &impl BufferPooler) -> variable::Config<()> {
         variable::Config {
             partition: format!("{partition}-witness"),
-            items_per_section: NZU64!(64),
+            items_per_blob: NZU64!(64),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(pooler, WITNESS_PAGE_SIZE, WITNESS_PAGE_CACHE_SIZE),
@@ -1316,10 +1316,10 @@ mod tests {
     #[test_traced("INFO")]
     fn test_compact_prune_then_rewind() {
         deterministic::Runner::default().start(|context| async move {
-            // One entry per section so pruning takes effect at entry granularity (pruning is
-            // section-aligned and never drops a partial section).
+            // One entry per blob so pruning takes effect at entry granularity (pruning is
+            // blob-aligned and never drops a partial blob).
             let mut witness_cfg = witness_config("keyless-prune-rewind", &context);
-            witness_cfg.items_per_section = NZU64!(1);
+            witness_cfg.items_per_blob = NZU64!(1);
             let merkle = crate::merkle::compact::Merkle::new(Sequential);
             let mut db: TestDb<mmr::Family> =
                 Db::init_from_merkle(merkle, context.child("witness"), witness_cfg, ())

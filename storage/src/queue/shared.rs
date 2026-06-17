@@ -259,7 +259,7 @@ mod tests {
     fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.into(),
-            items_per_section: NZU64!(10),
+            items_per_blob: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),

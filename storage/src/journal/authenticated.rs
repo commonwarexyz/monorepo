@@ -1302,7 +1302,7 @@ mod tests {
             .await
             .unwrap();
 
-            // Add operations and a commit at position 10 (past first section boundary of 7)
+            // Add operations and a commit at position 10 (past first blob boundary of 7)
             for i in 0..10 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
@@ -1315,7 +1315,7 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            // Prune up to position 8 (this will prune section 0, items 0-6, keeping 7+)
+            // Prune up to position 8 (this will prune blob 0, items 0-6, keeping 7+)
             journal.prune(8).await.unwrap();
             assert_eq!(journal.reader().bounds().start, 7);
 
@@ -1342,7 +1342,7 @@ mod tests {
             .await
             .unwrap();
 
-            // Add operations with a commit at position 5 (in section 0: 0-6)
+            // Add operations with a commit at position 5 (in blob 0: 0-6)
             for i in 0..5 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
@@ -1355,12 +1355,12 @@ mod tests {
             }
             journal.sync().await.unwrap();
 
-            // Prune up to position 8 (this prunes section 0, including the commit at pos 5)
-            // Pruning boundary will be at position 7 (start of section 1)
+            // Prune up to position 8 (this prunes blob 0, including the commit at pos 5)
+            // Pruning boundary will be at position 7 (start of blob 1)
             journal.prune(8).await.unwrap();
             assert_eq!(journal.reader().bounds().start, 7);
 
-            // Add uncommitted operations with no commits (in section 1: 7-13)
+            // Add uncommitted operations with no commits (in blob 1: 7-13)
             for i in 10..14 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
@@ -1403,7 +1403,7 @@ mod tests {
             .await
             .unwrap();
 
-            // Add operations with a commit at position 5 (in section 0: 0-6)
+            // Add operations with a commit at position 5 (in blob 0: 0-6)
             for i in 0..5 {
                 journal.append(&create_operation::<F>(i)).await.unwrap();
             }
@@ -1720,7 +1720,7 @@ mod tests {
 
         let boundary = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Boundary should be <= requested location (may align to section boundary)
+        // Boundary should be <= requested location (may align to blob boundary)
         assert!(boundary <= Location::<F>::new(50));
     }
 
@@ -1754,7 +1754,7 @@ mod tests {
         assert!(!bounds.is_empty());
         assert_eq!(actual, bounds.start);
 
-        // Actual may be <= requested due to section alignment
+        // Actual may be <= requested due to blob alignment
         assert!(actual <= requested);
     }
 
@@ -1866,7 +1866,7 @@ mod tests {
 
         let pruned_boundary = journal.prune(Location::<F>::new(50)).await.unwrap();
 
-        // Should match the pruned boundary (may be <= 50 due to section alignment)
+        // Should match the pruned boundary (may be <= 50 due to blob alignment)
         let bounds = journal.reader().await.bounds();
         assert!(!bounds.is_empty());
         assert_eq!(bounds.start, pruned_boundary);
@@ -1941,7 +1941,7 @@ mod tests {
         assert!(!bounds.is_empty());
         assert_eq!(pruned_boundary, bounds.start);
 
-        // Verify boundary is at or before requested (due to section alignment)
+        // Verify boundary is at or before requested (due to blob alignment)
         assert!(pruned_boundary <= Location::<F>::new(25));
 
         // Verify operation count is unchanged

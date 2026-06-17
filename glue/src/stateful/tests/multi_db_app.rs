@@ -447,7 +447,7 @@ impl EngineDefinition for MultiDbEngine {
             strategy: Sequential,
             witness: VariableLogConfig {
                 partition: format!("{partition_prefix}-qmdb-b-witness"),
-                items_per_section: NZU64!(1),
+                items_per_blob: NZU64!(1),
                 compression: None,
                 codec_config: (),
                 page_cache: page_cache.clone(),

@@ -18,11 +18,11 @@ pub struct Config<C> {
     /// The storage partition name for the queue's journal.
     pub partition: String,
 
-    /// The number of items to store in each journal section.
+    /// The number of items to store in each journal blob.
     ///
     /// Larger values reduce file overhead but increase minimum pruning granularity.
     /// Once set, this value cannot be changed across restarts.
-    pub items_per_section: NonZeroU64,
+    pub items_per_blob: NonZeroU64,
 
     /// Optional zstd compression level for stored items.
     ///
@@ -36,7 +36,7 @@ pub struct Config<C> {
     /// Page cache for buffering reads from the underlying journal.
     pub page_cache: CacheRef,
 
-    /// Write buffer size for each section.
+    /// Write buffer size for each blob.
     pub write_buffer: NonZeroUsize,
 }
 
@@ -54,7 +54,7 @@ pub struct Config<C> {
 /// - [enqueue](Self::enqueue): Append + commit in one step; the item is durable before return.
 /// - [dequeue](Self::dequeue): Return the next unacked item in FIFO order.
 /// - [ack](Self::ack) / [ack_up_to](Self::ack_up_to): Mark items as processed (in-memory only).
-/// - [sync](Self::sync): Commit, then prune completed sections below the ack floor.
+/// - [sync](Self::sync): Commit, then prune completed blobs below the ack floor.
 ///
 /// # Acknowledgment
 ///
@@ -115,7 +115,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
             context.child("journal"),
             variable::Config {
                 partition: cfg.partition,
-                items_per_section: cfg.items_per_section,
+                items_per_blob: cfg.items_per_blob,
                 compression: cfg.compression,
                 codec_config: cfg.codec_config,
                 page_cache: cfg.page_cache,
@@ -377,7 +377,7 @@ mod tests {
     fn test_config(partition: &str, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
         Config {
             partition: partition.into(),
-            items_per_section: NZU64!(10),
+            items_per_blob: NZU64!(10),
             compression: None,
             codec_config: ((0..).into(), ()),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -802,7 +802,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Enqueue items (more than items_per_section to test pruning)
+            // Enqueue items (more than items_per_blob to test pruning)
             for i in 0..25u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
@@ -823,7 +823,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_ack_across_sections() {
+    fn test_ack_across_blobs() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = test_config("test_multi_prune", &context);
@@ -831,7 +831,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            // Enqueue many items across multiple sections (items_per_section = 10)
+            // Enqueue many items across multiple blobs (items_per_blob = 10)
             for i in 0..50u8 {
                 queue.enqueue(vec![i]).await.unwrap();
             }
@@ -893,7 +893,7 @@ mod tests {
                     queue.enqueue(vec![i]).await.unwrap();
                 }
 
-                // Ack items 0, 1, 2 - but items_per_section=10, so no pruning
+                // Ack items 0, 1, 2 - but items_per_blob=10, so no pruning
                 queue.ack(0).unwrap();
                 queue.ack(1).unwrap();
                 queue.ack(2).unwrap();
@@ -933,12 +933,12 @@ mod tests {
                     .await
                     .unwrap();
 
-                // Enqueue items across multiple sections (items_per_section = 10)
+                // Enqueue items across multiple blobs (items_per_blob = 10)
                 for i in 0..25u8 {
                     queue.enqueue(vec![i]).await.unwrap();
                 }
 
-                // Ack items 0-14 to advance floor past section 0
+                // Ack items 0-14 to advance floor past blob 0
                 for i in 0..15 {
                     queue.ack(i).unwrap();
                 }

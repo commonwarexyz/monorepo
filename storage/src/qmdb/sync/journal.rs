@@ -187,14 +187,14 @@ mod tests {
         executor.start(|context| async move {
             let cfg = test_cfg(&context);
 
-            // Create a journal at pruning_boundary=9 (mid-section in section 1).
+            // Create a journal at pruning_boundary=9 (mid-blob in blob 1).
             let mut journal = FixedJournal::init_at_size(context.child("setup"), cfg.clone(), 9)
                 .await
                 .unwrap();
             journal.sync().await.unwrap();
             drop(journal);
 
-            // Simulate clear_to_size(7) crash: blobs cleared, section 1 recreated
+            // Simulate clear_to_size(7) crash: blobs cleared, blob 1 recreated
             // empty, but metadata still says pruning_boundary=9.
             let blob_part = format!("{}-blobs", cfg.partition);
             context.remove(&blob_part, None).await.unwrap();

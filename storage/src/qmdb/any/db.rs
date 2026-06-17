@@ -342,7 +342,7 @@ where
 
     /// Prune the operations log to `prune_loc`. Does not touch the bitmap.
     ///
-    /// Journal pruning is section-granular, so the actual pruned boundary may be less than
+    /// Journal pruning is blob-granular, so the actual pruned boundary may be less than
     /// the requested `prune_loc`. Returns that actual boundary so callers can keep the bitmap
     /// aligned with the journal's retained start.
     ///

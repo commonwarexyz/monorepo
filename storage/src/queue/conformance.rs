@@ -11,14 +11,14 @@ use core::num::{NonZeroU16, NonZeroU64, NonZeroUsize};
 use rand::Rng;
 
 const WRITE_BUFFER: NonZeroUsize = NZUsize!(1024);
-const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(64);
+const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(64);
 const PAGE_SIZE: NonZeroU16 = NZU16!(1024);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 
 fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())> {
     Config {
         partition: format!("queue-conformance-{seed}"),
-        items_per_section: ITEMS_PER_SECTION,
+        items_per_blob: ITEMS_PER_BLOB,
         page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
         write_buffer: WRITE_BUFFER,
         compression: None,
@@ -39,8 +39,8 @@ impl Conformance for QueueConformance {
             .await
             .unwrap();
 
-            // Enqueue random variable-length items across multiple sections
-            let items_count = context.gen_range(1..(ITEMS_PER_SECTION.get() as usize) * 4);
+            // Enqueue random variable-length items across multiple blobs
+            let items_count = context.gen_range(1..(ITEMS_PER_BLOB.get() as usize) * 4);
             let mut data = vec![Vec::new(); items_count];
             for item in data.iter_mut() {
                 let size = context.gen_range(0..256);

@@ -364,7 +364,7 @@ fn main() {
                     merkle_config,
                     journal_config: VConfig {
                         partition: "constantinople-var-log".into(),
-                        items_per_section: ITEMS_PER_BLOB,
+                        items_per_blob: ITEMS_PER_BLOB,
                         compression: None,
                         codec_config: ((), ()),
                         page_cache: pc_var,

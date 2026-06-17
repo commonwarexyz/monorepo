@@ -309,7 +309,7 @@ fn fix_log_cfg(pc: CacheRef) -> FConfig {
 fn var_log_cfg(pc: CacheRef) -> VConfig<((), ())> {
     VConfig {
         partition: format!("log-journal-{PARTITION}"),
-        items_per_section: ITEMS_PER_BLOB,
+        items_per_blob: ITEMS_PER_BLOB,
         compression: None,
         codec_config: ((), ()),
         page_cache: pc,

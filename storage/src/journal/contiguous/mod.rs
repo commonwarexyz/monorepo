@@ -188,7 +188,7 @@ pub trait Mutable: Contiguous + Send + Sync {
     ///
     /// - If `min_position > bounds.end`, the prune is capped to `bounds.end` (no error is returned)
     /// - Some items with positions less than `min_position` may be retained due to
-    ///   section/blob alignment
+    ///   blob alignment
     /// - This operation is not atomic, but implementations guarantee the journal is left in a
     ///   recoverable state if a crash occurs during pruning
     ///

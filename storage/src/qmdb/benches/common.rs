@@ -118,11 +118,11 @@ fn var_log_cfg<C>(
     suffix: &str,
     page_cache: CacheRef,
     codec_config: C,
-    items_per_section: NonZeroU64,
+    items_per_blob: NonZeroU64,
 ) -> VConfig<C> {
     VConfig {
         partition: format!("log-journal-{suffix}"),
-        items_per_section,
+        items_per_blob,
         compression: None,
         codec_config,
         page_cache,

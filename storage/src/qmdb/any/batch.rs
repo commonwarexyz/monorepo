@@ -567,7 +567,7 @@ where
     ///
     /// Batch and ancestor regions resolve in memory. All committed locations are served by
     /// one batched read, which serves page-cache hits under a single lock acquisition per
-    /// section instead of paying a cache lock acquisition per location.
+    /// blob instead of paying a cache lock acquisition per location.
     async fn read_ops<R: Reader<Item = Operation<F, U>>>(
         &self,
         locations: &[Location<F>],

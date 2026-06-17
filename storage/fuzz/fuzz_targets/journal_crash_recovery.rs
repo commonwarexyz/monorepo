@@ -17,7 +17,7 @@
 //!   4. Drop the journal without a clean shutdown: the crash. Unsynced data is lost.
 //!
 //! `Crash` markers split the op list into one `ops` list per cycle. Driving recovery repeatedly on
-//! the same journal is the point: watermark, pruning-metadata, and section-layout bugs often need a
+//! the same journal is the point: watermark, pruning-metadata, and blob-layout bugs often need a
 //! recover-then-mutate-then-recover sequence to appear, not just a single crash.
 //!
 //! # Expected
@@ -90,7 +90,7 @@ fn bounded_page_cache_size(u: &mut Unstructured<'_>) -> arbitrary::Result<usize>
     u.int_in_range(1..=16)
 }
 
-fn bounded_items_per_section(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
+fn bounded_items_per_blob(u: &mut Unstructured<'_>) -> arbitrary::Result<u64> {
     u.int_in_range(1..=64)
 }
 
@@ -157,9 +157,9 @@ struct FuzzInput {
     /// Number of pages in the buffer pool cache.
     #[arbitrary(with = bounded_page_cache_size)]
     page_cache_size: usize,
-    /// Items per section/blob.
-    #[arbitrary(with = bounded_items_per_section)]
-    items_per_section: u64,
+    /// Items per blob.
+    #[arbitrary(with = bounded_items_per_blob)]
+    items_per_blob: u64,
     /// Write buffer size.
     #[arbitrary(with = bounded_write_buffer)]
     write_buffer: usize,
@@ -188,7 +188,7 @@ struct FuzzInput {
 struct Params {
     page_size: NonZeroU16,
     page_cache_size: NonZeroUsize,
-    items_per_section: u64,
+    items_per_blob: u64,
     write_buffer: NonZeroUsize,
     write_rate: f64,
     partial_write_rate: f64,
@@ -262,14 +262,14 @@ impl Expected {
         self.max_size = self.max_size.max(prev_size);
     }
 
-    /// Successful prune durably deletes whole sections, so recovery can never reopen below
+    /// Successful prune durably deletes whole blobs, so recovery can never reopen below
     /// `boundary`; pin it exactly. (The boundary only moves forward.)
     fn pruned(&mut self, boundary: u64) {
         self.durable_prune = boundary;
         self.max_prune = boundary;
     }
 
-    /// Failed prune may have deleted sections (oldest-first) up to `ceiling`, but not certain.
+    /// Failed prune may have deleted blobs (oldest-first) up to `ceiling`, but not certain.
     fn prune_failed(&mut self, ceiling: u64) {
         self.max_prune = self.max_prune.max(ceiling);
     }
@@ -326,7 +326,7 @@ impl FuzzJournal for FixedJournal<deterministic::Context, Item> {
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
         FixedConfig {
             partition: partition.into(),
-            items_per_blob: NZU64!(params.items_per_section),
+            items_per_blob: NZU64!(params.items_per_blob),
             page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
                 pooler,
                 params.page_size,
@@ -397,7 +397,7 @@ impl FuzzJournal for VariableJournal<deterministic::Context, Item> {
     fn config(partition: &str, pooler: &impl BufferPooler, params: &Params) -> Self::Config {
         VariableConfig {
             partition: partition.into(),
-            items_per_section: NZU64!(params.items_per_section),
+            items_per_blob: NZU64!(params.items_per_blob),
             compression: None,
             codec_config: (),
             page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(
@@ -722,11 +722,10 @@ async fn run_ops<J: FuzzJournal>(
                         true
                     }
                     Err(_) => {
-                        // A failed prune advances the boundary at most to the section floor.
+                        // A failed prune advances the boundary at most to the blob floor.
                         let capped = (*min_pos).min(size);
-                        let section_floor =
-                            capped / params.items_per_section * params.items_per_section;
-                        expected.prune_failed(section_floor);
+                        let blob_floor = capped / params.items_per_blob * params.items_per_blob;
+                        expected.prune_failed(blob_floor);
                         false
                     }
                 }
@@ -827,7 +826,7 @@ where
     let params = Params {
         page_size: NonZeroU16::new(input.page_size).unwrap(),
         page_cache_size: NonZeroUsize::new(input.page_cache_size).unwrap(),
-        items_per_section: input.items_per_section,
+        items_per_blob: input.items_per_blob,
         write_buffer: NonZeroUsize::new(input.write_buffer).unwrap(),
         write_rate: input.write_failure_rate,
         partial_write_rate: input.partial_write_rate,

@@ -155,7 +155,7 @@ fn test_config(
         },
         journal_config: VConfig {
             partition: format!("{test_name}-log"),
-            items_per_section: NZU64!(3),
+            items_per_blob: NZU64!(3),
             write_buffer: NZUsize!(1024),
             compression: None,
             codec_config: ((), ((0..=100000).into(), ())),

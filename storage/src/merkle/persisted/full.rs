@@ -420,7 +420,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     ///
     /// 2. **Reuse**: range.start < existing_size <= range.end
     ///    - Keeps existing journal data
-    ///    - Prunes the journal toward `range.start` (section-aligned)
+    ///    - Prunes the journal toward `range.start` (blob-aligned)
     ///
     /// 3. **Error**: existing_size > range.end
     ///    - Returns [crate::journal::Error::ItemOutOfRange]
@@ -2518,7 +2518,7 @@ mod tests {
         drop(mmr);
 
         // Reopen the structure - should recover correctly with metadata ahead of
-        // journal boundary (metadata says 30, journal is section-aligned to 28)
+        // journal boundary (metadata says 30, journal is blob-aligned to 28)
         let mmr = Merkle::<F, _, Digest, Sequential>::init(
             context.child("reopened"),
             &hasher,
@@ -2557,7 +2557,7 @@ mod tests {
     ) {
         let hasher = Standard::<Sha256>::new(ForwardFold);
 
-        // Use small items_per_blob to create many sections and trigger pruning.
+        // Use small items_per_blob to create many blobs and trigger pruning.
         let cfg = Config {
             journal_partition: "mmr-journal".into(),
             metadata_partition: "mmr-metadata".into(),
@@ -2567,7 +2567,7 @@ mod tests {
             page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
         };
 
-        // Create structure with enough elements to span multiple sections.
+        // Create structure with enough elements to span multiple blobs.
         let mut mmr =
             Merkle::<F, _, Digest, Sequential>::init(context.child("init"), &hasher, cfg.clone())
                 .await
