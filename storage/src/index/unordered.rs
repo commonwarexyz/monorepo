@@ -39,9 +39,9 @@ pub type Cursor<'a, K, V> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>>;
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
 ///
-/// Each translated key maps directly to its most recently inserted value; conflicting values (from
-/// key collisions or repeated insertions) are stored in a separate overflow map so the common
-/// (collision-free) case stays as compact as possible.
+/// Each translated key maps directly to its most recently inserted value. Conflicting values (from
+/// key collisions or repeated insertions) live in a separate overflow map, keeping the common
+/// (collision-free) case compact.
 pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: HashMap<T::Key, V, T>,
@@ -147,9 +147,8 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
             Entry::Occupied(mut entry) => {
-                // Optimized fast path for the common case of no overflow chain. The cases below
-                // match the cursor's value ordering and metric accounting exactly.
-                #[allow(clippy::map_entry)] // suppress lint false positive
+                // Optimized fast path for the common case of no overflow chain.
+                #[allow(clippy::map_entry)]
                 if !self.overflow.contains_key(&k) {
                     match (should_retain(entry.get()), should_retain(&value)) {
                         // Keep both, with the new value placed at the end of the overflow chain.
