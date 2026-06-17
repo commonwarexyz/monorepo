@@ -296,7 +296,6 @@ function injectStyles() {
     .cw-magic-copy {
       font-family: inherit;
       margin: 8px auto 0;
-      min-height: 170px;
       position: relative;
       width: min(86%, 880px);
     }
@@ -306,8 +305,6 @@ function injectStyles() {
       font-family: inherit;
       left: 0;
       opacity: 0;
-      position: absolute;
-      top: 0;
       width: 100%;
       will-change: opacity, transform;
       z-index: 6;
@@ -323,12 +320,32 @@ function injectStyles() {
       font-family: inherit;
       left: 0;
       opacity: 0;
-      position: absolute;
       text-align: left;
-      top: 0;
       width: 100%;
       will-change: opacity, transform;
       z-index: 7;
+    }
+
+    .cw-magic-scroll-hint {
+      --cw-scroll-hint-opacity: 1;
+      animation: cw-magic-scroll-pulse 1.6s ease-in-out infinite;
+      color: gray;
+      font-family: inherit;
+      left: 50%;
+      margin: 0;
+      pointer-events: none;
+      position: fixed;
+      bottom: 18px;
+      text-align: center;
+      transform: translateX(-50%);
+      transition: opacity 120ms linear;
+      width: auto;
+      z-index: 20;
+    }
+
+    @keyframes cw-magic-scroll-pulse {
+      0%, 100% { opacity: calc(var(--cw-scroll-hint-opacity) * 0.25); }
+      50% { opacity: calc(var(--cw-scroll-hint-opacity) * 0.8); }
     }
 
     .cw-magic-dream p {
@@ -367,6 +384,10 @@ function injectStyles() {
       .cw-magic-sticky {
         display: block;
         position: static;
+      }
+
+      .cw-magic-scroll-hint {
+        animation: none;
       }
     }
   `;
@@ -455,9 +476,13 @@ function initMagicMove(mount) {
   copy.className = 'cw-magic-copy';
   copy.append(story, dream);
 
+  const scrollHint = document.createElement('div');
+  scrollHint.className = 'cw-magic-scroll-hint';
+  scrollHint.textContent = 'scroll';
+
   canvas.append(arrowLayer);
   stage.append(canvas);
-  sticky.append(headline, stage, copy);
+  sticky.append(headline, stage, copy, scrollHint);
   mount.append(sticky);
 
   const boxById = {};
@@ -716,6 +741,7 @@ function initMagicMove(mount) {
     const unmatchedOut = 1 - window01(p, WINDOWS.unmatchedFade);
     const slide2In = window01(p, WINDOWS.slide2Fade);
     const dreamIn = window01(p, WINDOWS.dreamFade);
+    scrollHint.style.setProperty('--cw-scroll-hint-opacity', 1 - window01(p, [0.00, 0.015]));
 
     if (storyBody.dataset.step !== String(stepIndex)) {
       storyBody.innerHTML = markdownSource.storyBodies[stepIndex] ?? '';
@@ -725,13 +751,16 @@ function initMagicMove(mount) {
     const storyIn = window01(stepLocal, STEP_PHASE.textIn);
     const storyOut = 1 - window01(stepLocal, STEP_PHASE.textOut);
     const storyOpacity = Math.min(storyIn, storyOut) * (1 - window01(p, [0.78, 0.84]));
+    story.style.display = storyOpacity > 0 || dreamIn === 0 ? 'block' : 'none';
     story.style.opacity = storyOpacity;
     story.style.transform = `translateY(${lerp(24, 0, easeInOutCubic(storyIn))}px)`;
 
     for (const { config, el } of boxEls) {
       const revealStep = NODE_REVEAL_STEP[config.id] ?? 0;
       const hasIncomingArrow = NODE_HAS_INCOMING_AT_REVEAL[config.id];
-      const reveal = stepProgress(revealStep, hasIncomingArrow ? STEP_PHASE.childNode : STEP_PHASE.rootNode);
+      const reveal = config.id === 'bte'
+        ? 1
+        : stepProgress(revealStep, hasIncomingArrow ? STEP_PHASE.childNode : STEP_PHASE.rootNode);
       const active = currentStep.nodes.includes(config.id) && reveal > 0.85 && !allNodesActive;
       const inactiveOpacity = allNodesActive ? 1 : 0.38;
       const nodeOpacity = reveal * (active ? 1 : inactiveOpacity);
@@ -766,6 +795,7 @@ function initMagicMove(mount) {
     }
     for (const el of dividerEls) el.style.opacity = slide2In;
 
+    dream.style.display = dreamIn > 0 ? 'block' : 'none';
     dream.style.opacity = dreamIn;
     dream.style.transform = `translateY(${lerp(24, 0, easeInOutCubic(dreamIn))}px)`;
   }
