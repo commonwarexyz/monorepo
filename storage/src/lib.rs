@@ -48,7 +48,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         > Context for T
     {
     }
-
 });
 commonware_macros::stability_scope!(BETA {
     pub mod translator;

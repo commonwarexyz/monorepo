@@ -18,7 +18,7 @@ stability_scope!(BETA {
     pub mod simplex;
 
     pub mod types;
-    use types::{Epoch, Height, View, Round};
+    use types::{Epoch, Height, Round, View};
 
     /// Epochable is a trait that provides access to the epoch number.
     /// Any consensus message or object that is associated with a specific epoch should implement this.
@@ -248,8 +248,8 @@ stability_scope!(ALPHA {
     pub mod ordered_broadcast;
 });
 stability_scope!(ALPHA, cfg(not(target_arch = "wasm32")) {
-    use commonware_cryptography::certificate::Scheme;
     use crate::marshal::ancestry::Ancestry;
+    use commonware_cryptography::certificate::Scheme;
     use commonware_runtime::{Clock, Metrics, Spawner};
     use rand::Rng;
 

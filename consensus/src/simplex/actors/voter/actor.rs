@@ -1067,9 +1067,10 @@ impl<
                         Either::Left(ready(Ok(true)))
                     } else {
                         #[allow(clippy::async_yields_async)]
-                        let receiver = async { self.automaton.certify(round, proposal.payload).await }
-                            .instrument(span.clone())
-                            .await;
+                        let receiver =
+                            async { self.automaton.certify(round, proposal.payload).await }
+                                .instrument(span.clone())
+                                .await;
                         Either::Right(receiver)
                     };
                     let handle = certify_pool.push(async move { (round, span, result.await) });
@@ -1109,7 +1110,9 @@ impl<
                 pending_propose = None;
 
                 // Process the automaton's response
-                let Some(proposed_view) = span.in_scope(|| self.process_proposed(context, proposed)) else {
+                let Some(proposed_view) =
+                    span.in_scope(|| self.process_proposed(context, proposed))
+                else {
                     continue;
                 };
                 view = proposed_view;

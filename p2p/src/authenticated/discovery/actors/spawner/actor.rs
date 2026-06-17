@@ -124,9 +124,8 @@ impl<
                                 );
 
                                 // Get greeting from tracker (returns None if not eligible)
-                                let Some(greeting) = tracker
-                                    .connect(peer.clone(), peer_mailbox, is_dialer)
-                                    .await
+                                let Some(greeting) =
+                                    tracker.connect(peer.clone(), peer_mailbox, is_dialer).await
                                 else {
                                     debug!(?peer, "peer not eligible");
                                     drop(reservation);
