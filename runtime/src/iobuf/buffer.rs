@@ -978,17 +978,10 @@ pub(crate) fn try_adopt_vec(
 ) -> Result<(NonNull<u8>, usize, usize, OwnerRef), Vec<u8>> {
     let len = vec.len();
     let cap = vec.capacity();
-    if cap < size_of::<HeapHeader>() {
-        return Err(vec);
-    }
     let base_addr = vec.as_ptr() as usize;
-    let header_offset = round_down(
-        base_addr + cap - size_of::<HeapHeader>(),
-        align_of::<HeapHeader>(),
-    ) - base_addr;
-    if header_offset < len {
+    let Some(header_offset) = vec_adoption_header_offset(base_addr, len, cap) else {
         return Err(vec);
-    }
+    };
 
     // Adopt: dismantle the vec and place the header in its spare capacity.
     let mut vec = ManuallyDrop::new(vec);
@@ -1126,6 +1119,21 @@ fn heap_usable_capacity(header: NonNull<HeapHeader>, header_ref: &HeapHeader) ->
 fn round_down(value: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
     value & !(align - 1)
+}
+
+#[inline(always)]
+fn vec_adoption_header_offset(base_addr: usize, len: usize, cap: usize) -> Option<usize> {
+    if cap < size_of::<HeapHeader>() {
+        return None;
+    }
+    let header_addr = round_down(
+        base_addr.checked_add(cap - size_of::<HeapHeader>())?,
+        align_of::<HeapHeader>(),
+    );
+    if header_addr < base_addr || header_addr < base_addr.checked_add(len)? {
+        return None;
+    }
+    Some(header_addr - base_addr)
 }
 
 /// Releases a unique pooled owner into the thread-cache push fast path.
@@ -1397,10 +1405,7 @@ mod tests {
         assert!(!owner.is_pooled());
         assert!(!owner.is_empty());
 
-        let expected_header = round_down(
-            base_addr + cap - size_of::<HeapHeader>(),
-            align_of::<HeapHeader>(),
-        );
+        let expected_header = base_addr + vec_adoption_header_offset(base_addr, len, cap).unwrap();
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }.as_ptr() as usize, base_addr);
         // SAFETY: owner is unique and live.
@@ -1442,11 +1447,7 @@ mod tests {
             vec.extend_from_slice(&[9u8; 16]);
             let base_addr = vec.as_ptr() as usize;
             let cap = vec.capacity();
-            let fits = cap >= size_of::<HeapHeader>()
-                && round_down(
-                    base_addr + cap - size_of::<HeapHeader>(),
-                    align_of::<HeapHeader>(),
-                ) >= base_addr + len;
+            let fits = vec_adoption_header_offset(base_addr, len, cap).is_some();
             let (_, _, owner) = owner_from_vec(vec);
             assert_eq!(
                 owner.is_external(),
@@ -1456,6 +1457,16 @@ mod tests {
             // SAFETY: final drop releases the owner.
             unsafe { owner.drop_shared() };
         }
+    }
+
+    #[test]
+    fn test_vec_adoption_rejects_header_before_base() {
+        let align = align_of::<HeapHeader>();
+        let base_addr = align - 1;
+        let cap = size_of::<HeapHeader>();
+        let header_addr = round_down(base_addr + cap - size_of::<HeapHeader>(), align);
+        assert!(header_addr < base_addr);
+        assert_eq!(vec_adoption_header_offset(base_addr, 0, cap), None);
     }
 
     #[test]
