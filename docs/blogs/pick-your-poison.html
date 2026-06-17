@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta content="text/html; charset=utf-8" http-equiv="Content-Type">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1" />
+    <link rel="preload" href="/style.css" as="style">
+    <link rel="preload" href="/shared.js" as="script">
+    <link rel="icon" href="/favicon.ico" type="image/x-icon">
+
+    <title>commonware > </title>
+    <meta name="description" content="">
+    <meta name="author" content="">
+    <meta name="keywords" content="commonware, open source, common goods, software, internet, ownership, trust, blockchain, decentralization, crypto">
+
+    <meta property="og:url" content="" />
+    <meta property="og:type" content="article" />
+    <meta property="og:site_name" content="commonware" />
+    <meta property="og:image" content="" />
+    <meta property="og:title" content="" />
+    <meta property="og:description" content="" />
+    <meta property="article:author" content="" />
+    <meta property="article:published_time" content="" />
+    <meta property="article:modified_time" content="" />
+
+    <link rel="canonical" href="" />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta property="twitter:domain" content="commonware.xyz" />
+    <meta property="twitter:url" content="" />
+    <meta property="twitter:title" content="" />
+    <meta property="twitter:description" content="" />
+    <meta property="twitter:image" content="" />
+    <meta property="twitter:site" content="@commonwarexyz" />
+    
+    
+    <link rel="stylesheet" type="text/css" href="/style.css">
+</head>
+
+<body>
+    <div id="logo-placeholder">
+        <div class="logo-line">
+            <span class="edge-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="edge-logo-symbol">*</span>
+        </div>
+        <div class="logo-line">
+            <span class="vertical-logo-symbol">|</span>
+            <span class="logo-text"> commonware </span>
+            <span class="vertical-logo-symbol"> </span>
+        </div>
+        <div class="logo-line">
+            <span class="edge-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">~</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">+</span>
+            <span class="horizontal-logo-symbol"> </span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="horizontal-logo-symbol">*</span>
+            <span class="horizontal-logo-symbol">-</span>
+            <span class="edge-logo-symbol">+</span>
+        </div>
+    </div>
+    <div class="content">
+        <h1></h1>
+        <div class="meta">
+
+                        <div class="author">By </div>
+                        <div class="date"></div>
+        </div>
+        <h1 id="pick-your-poison">Pick Your Poison</h1>
+        <p>Encrypted mempools are an attractive way of building. Users
+        encrypt transactions to the validators set which protects the
+        privacy of pending transactions from block producers before
+        transactions have been included on chain. Once the chain fixes
+        an ordering, validators need to quickly decrypt
+        transactions.</p>
+        <p>However, if we use a standard threshold encryption scheme
+        such as ElGamal, each of the <span class="math inline">n</span>
+        committee members must broadcast a decryption share for each of
+        the <span class="math inline">B</span> ciphertexts in the block,
+        for a total of <span class="math inline">O(nB)</span>
+        communication, which can be orders of magnitude larger than the
+        block itself. Batched threshold encryption (BTE) was introduced
+        to address exactly this bottleneck. Instead of decrypting each
+        ciphertext independently, the committee decrypts an entire batch
+        using sublinear communication. Since the original construction
+        of <a href="https://eprint.iacr.org/2024/669">CGPP24</a>, a long
+        line of work has pushed (silent) batched threshold encryption
+        schemes closer to practicality.</p>
+        <div id="pick-your-poison-magic-move" class="cw-magic-move" role="img" aria-label="Animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.">
+          <noscript>
+            This section contains an animated transition from the batched threshold encryption landscape to pick-your-poison tradeoffs.
+          </noscript>
+        </div>
+        <script type="module" src="pick-your-poison.magic-move.js"></script>
+        <div id="pick-your-poison-story-source"
+        class="cw-magic-story-source">
+        <p>The inital work of <a
+        href="https://eprint.iacr.org/2024/669">CGPP24</a> required a
+        setup involving secure multiplications in MPC and the size of
+        secret keys held by each party grows with the batch size. They
+        additionally required a interactive setup involving a constant
+        number of secure multiplications for every batch that was
+        decrypted.</p>
+        <p>Follow-up work <a
+        href="https://eprint.iacr.org/2024/1516">CGPW25</a> and <a
+        href="https://eprint.iacr.org/2024/1575">AFP25</a> simplified
+        the construction to a one-time DKG setup at the start of the
+        protocol, but ciphertexts needed to be encrypted to a particular
+        batch number, which we refer to as an “epoch restriction”.
+        Failing to be included in the chosen batch would result in the
+        ciphertext never being decrypted.</p>
+        <p>Concurrently, <a
+        href="https://eprint.iacr.org/2024/1533">BFOQ25</a> used very
+        different techniques to also just require a one-time DKG setup,
+        and without the epoch restriction. However, the ciphertexts
+        needed to be encrypted to a particular <em>index</em> in the
+        batch. As a result, two conflicting transactions encrypted to
+        the same index could not be included in the same batch. This
+        gives rise to a censorship issue, where an attacker can censor a
+        victim’s transaction by paying a slightly higher priority fee.
+        We quantify censorship resistance as the minimum number of
+        ciphertexts an attacker can include in a batch before a victim’s
+        transaction is forced to be excluded. Ideally, censorship
+        resistance is the same as maximum batch size <span
+        class="math inline">B</span>. In other words, censorsing a
+        transaction is as expensive as buying up the entire block. But
+        <a href="https://eprint.iacr.org/2024/1533">BFOQ25</a> only
+        achieves a censorship resistance of <span
+        class="math inline">1</span>.</p>
+        <p><a href="https://eprint.iacr.org/2025/2115">ABDGMPRY25</a>
+        improved <a href="https://eprint.iacr.org/2024/1533">BFOQ25</a>
+        to support quasi-linear decryption <span class="math inline">O(B
+        \log{B})</span> and weighted threshold decryption but still had
+        a censorship resistance of <span class="math inline">1</span>.
+        They also propose a variant where censorship resistance scales
+        linearly with the ciphertext size by essentially encrypting to
+        multiple indices in the batch.</p>
+        <p>Next, <a href="https://eprint.iacr.org/2025/2032">FPTX25</a>
+        show that the epoch restriction in <a
+        href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
+        href="https://eprint.iacr.org/2024/1575">AFP25</a> can be
+        avoided if the CRS is allowed to grow with the number of batched
+        that will ever be decrypted. After which, the public key must be
+        sampled from scratch. This may be a reasonable tradeoff if the
+        system refreshes its public key periodically regaradless, to
+        handle committee members joining/leaving. One caveat to note is
+        that the decryption complexity of <a
+        href="https://eprint.iacr.org/2025/2032">FPTX25</a>, <a
+        href="https://eprint.iacr.org/2024/1516">CGPW25</a> and <a
+        href="https://eprint.iacr.org/2024/1575">AFP25</a> is <span
+        class="math inline">O(B\log^2{B})</span> which is slower than
+        the quasi-linear <span class="math inline">O(B \log{B})</span>
+        achieved by other works.</p>
+        <p><a href="https://eprint.iacr.org/2026/674">BNRT26</a> took a
+        different approach and showed that if the committee is willing
+        to pay for a more complicated setup, it is possible to avoid
+        both the epoch restriction and censorship issues. Concretely,
+        they use partial fraction techniques and their setup involves
+        secure inversions in MPC and the size of secret keys held by
+        each party grows with the batch size.</p>
+        <p><a href="https://eprint.iacr.org/2026/760">Pol26</a> and <a
+        href="https://eprint.iacr.org/2026/754">ADGRS26</a> use a
+        similar strategy of a more complicated setup but use a different
+        algebraic structure – “punctured power-of-tau” – to avoid the
+        epoch restriction and censorship issues. Their setup uses secure
+        multiplications and the size of secret keys held by each party
+        grows with the batch size.</p>
+        <p>In a different line of work <a
+        href="https://eprint.iacr.org/2025/1419">BCFGOPQW25</a>
+        (censorship issues) and <a
+        href="https://eprint.iacr.org/2025/2103">GWWW25</a> (epoch
+        restrictions) avoid interactive setup entirely and show that it
+        is possible to have a batched threshold encryption scheme with
+        Silent Setup (just a PKI).</p>
+        </div>
+        <div id="pick-your-poison-dream-source"
+        class="cw-magic-dream-source">
+        <p>Of course, the dream goal is:</p>
+        <blockquote>
+        <p><em>A batched threshold encryption scheme with a
+        constant-sized ciphertext, DKG/silent setup, quasi-linear
+        decryption, and no censorship issues/epoch restrictions</em></p>
+        </blockquote>
+        <p>but so far, all constructions fall short. It appears that
+        system designers must pick their poison.</p>
+        </div>
+        <h2 id="just-a-little-bit-of-everything">(Just) A Little Bit of
+        Everything</h2>
+        <p>Observe that all constructions pick a “maxima” in the
+        tradeoff space.</p>
+        <ul>
+        <li><a href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
+        href="https://eprint.iacr.org/2024/1575">AFP25</a>, <a
+        href="https://eprint.iacr.org/2025/2103">GWWW25</a>: no
+        censorship issues and DKG Setup at the cost of epoch
+        restrictions</li>
+        <li><a href="https://eprint.iacr.org/2024/1533">BFOQ25</a>, <a
+        href="https://eprint.iacr.org/2025/2115">ABDGMPRY25</a>, <a
+        href="https://eprint.iacr.org/2025/1419">BCFGOPQW25</a>: no
+        epoch restrictions and DKG/Silent Setup at the cost of
+        censorship issues</li>
+        <li><a href="https://eprint.iacr.org/2025/2032">FPTX25</a>: no
+        censorship issues/epoch restrictions and DKG setup at the cost
+        of a much larger CRS and forced DKG re-setup after a
+        predetermined number of batches</li>
+        <li><a href="https://eprint.iacr.org/2026/674">BNRT26</a>, <a
+        href="https://eprint.iacr.org/2026/760">Pol26</a>, <a
+        href="https://eprint.iacr.org/2026/754">ADGRS26</a>: no
+        censorship issues/epoch restrictions at the cost of a
+        complicated <span class="math inline">O(B)</span> circuit size
+        MPC setup and <span class="math inline">O(B)</span> secret key
+        size</li>
+        </ul>
+        <p>In practice, it may be more interesting to consider a smooth
+        tradeoff on the pareto frontier.</p>
+        <h3 id="cenosrship-resistance-v-secret-key-size">Cenosrship
+        Resistance v Secret Key Size</h3>
+        <p><a href="https://eprint.iacr.org/2026/674">BNRT26</a>, <a
+        href="https://eprint.iacr.org/2026/760">Pol26</a>, <a
+        href="https://eprint.iacr.org/2026/754">ADGRS26</a> achieve
+        maximum censorship resistance <span class="math inline">B</span>
+        but they all have an <span class="math inline">O(B)</span>
+        secret key size. This makes changing the committee at large
+        batch sizes <span class="math inline">B \gg n</span> quite
+        expensive as it requires <span class="math inline">O(B/n)</span>
+        DKGs to reshare the secrets to the new committee even with the
+        trick of <a
+        href="https://cs.au.dk/fileadmin/www.cfem.au.dk/Downloads/MPC_workshop/Martin_Hirt_slides-stacked.pdf">Hyper-Invertible
+        Matrices</a>.</p>
+        <blockquote>
+        <p>What if we could give up <em>some</em> censorship resistance
+        in exchange for <em>shorter</em> secret keys?</p>
+        </blockquote>
+        <p>It may be worth the tradeoff to reduce the price of
+        censorship to buying <span class="math inline">10\%</span> of
+        the block (say), if we can proportionally reduce the cost of
+        resharing secrets.</p>
+        <h3 id="epoch-restrictions-v-forced-dkg-re-setup">Epoch
+        Restrictions v Forced DKG Re-setup</h3>
+        <p><a href="https://eprint.iacr.org/2025/2032">FPTX25</a> avoids
+        censorship issues and epoch restrictions at the cost of a much
+        larger <span class="math inline">O(KB)</span> CRS and a forced
+        DKG re-setup after decrypting <span class="math inline">K</span>
+        batches. In practice, deployments would choose K large enough to
+        support the <em>expected</em> number of batch decryptions over
+        the committee rotation period, which typically lasts from a few
+        hours to a few days.</p>
+        <p>But this might be overkill for the epoch restriction issue.
+        Recall that in <a
+        href="https://eprint.iacr.org/2024/1516">CGPW25</a>, <a
+        href="https://eprint.iacr.org/2024/1575">AFP25</a>, users had to
+        “guess” the block height at which their transaction would be
+        included. Naively, one can encrypt to multiple block heights,
+        but this increases the ciphertext size.</p>
+        <blockquote>
+        <p>What if we accept <em>some</em> epoch restrictions but are
+        able to avoid a forced DKG re-setup?</p>
+        </blockquote>
+        <p>Concretely, what if the user could instead select a window of
+        block heights spanning 20 minutes (say) in which their
+        transaction could be included and we paid for this privilege
+        with an increase in the CRS size instead of the ciphertext size?
+        This could also be a way to avoid the forced DKG re-setup in <a
+        href="https://eprint.iacr.org/2025/2032">FPTX25</a>.</p>
+        <!-- ## References
+
+        - CGPP24: [2024/669](https://eprint.iacr.org/2024/669)
+        - GKPW24: [2024/263](https://eprint.iacr.org/2024/263)
+        - CGPW25: [2024/1516](https://eprint.iacr.org/2024/1516)
+        - BFOQ25: [2024/1533](https://eprint.iacr.org/2024/1533)
+        - AFP25: [2024/1575](https://eprint.iacr.org/2024/1575)
+        - BLT25: [2025/1254](https://eprint.iacr.org/2025/1254)
+        - BCFGOPQW25: [2025/1419](https://eprint.iacr.org/2025/1419)
+        - WW25: [2025/1547](https://eprint.iacr.org/2025/1547)
+        - FPTX25: [2025/2032](https://eprint.iacr.org/2025/2032)
+        - GWWW25: [2025/2103](https://eprint.iacr.org/2025/2103)
+        - ABDGMPRY25: [2025/2115](https://eprint.iacr.org/2025/2115)
+        - BNRT26: [2026/674](https://eprint.iacr.org/2026/674)
+        - ADGRS26: [2026/754](https://eprint.iacr.org/2026/754)
+        - Pol26: [2026/760](https://eprint.iacr.org/2026/760) -->
+        <div id="footer-placeholder"></div>
+        <script src="/shared.js"></script>
+</body>
+
+</html>
