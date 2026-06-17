@@ -662,6 +662,14 @@ compactor:
   compaction:
     block_retention: 1h
     compaction_cycle: 1h
+overrides:
+  defaults:
+    ingestion:
+      rate_limit_bytes: 1000000000
+      burst_size_bytes: 2000000000
+      max_traces_per_user: 500000
+    global:
+      max_bytes_per_trace: 100000000
 "#;
 
 /// URLs for monitoring service installation

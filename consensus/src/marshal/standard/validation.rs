@@ -12,7 +12,10 @@ use crate::{
 };
 use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
-use commonware_runtime::{telemetry::metrics::histogram::Timed, Clock, Metrics, Spawner};
+use commonware_runtime::{
+    telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
+    Clock, Metrics, Spawner,
+};
 use commonware_utils::channel::oneshot;
 use rand::Rng;
 use std::sync::Arc;
@@ -191,7 +194,7 @@ where
             "marshal.standard.application.verify",
             round = %context.round,
             digest = %block.digest(),
-            parent_view = %parent_view,
+            parent_view = parent_view.traced(),
             parent = %parent_commitment
         ));
     // If consensus drops the receiver, we can stop work early.

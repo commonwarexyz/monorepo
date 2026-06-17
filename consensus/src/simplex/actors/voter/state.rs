@@ -27,7 +27,7 @@ use std::{
     mem::{replace, take},
     time::{Duration, SystemTime},
 };
-use tracing::{debug, warn};
+use tracing::{debug, warn, Span};
 
 /// The view number of the genesis block.
 const GENESIS_VIEW: View = View::zero();
@@ -220,6 +220,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
         let certification_deadline = now + self.certification_timeout;
 
         let round = self.create_round(view);
+        round.open_span();
         round.set_deadlines(leader_deadline, certification_deadline);
         self.view = view;
 
@@ -247,6 +248,30 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 self.context.current(),
             )
         })
+    }
+
+    /// Returns the root span for `view`, or a disabled span if the view is not
+    /// tracked or already decided.
+    pub fn view_span(&self, view: View) -> Span {
+        self.views
+            .get(&view)
+            .map(|round| round.span())
+            .unwrap_or_else(Span::none)
+    }
+
+    /// Closes the root span of every decided view (at or below the finalized
+    /// view) so each view trace ends when the chain commits it rather than when
+    /// the round is later pruned.
+    pub fn close_decided_spans(&mut self) {
+        for (_, round) in self.views.range_mut(..=self.last_finalized) {
+            round.close_span();
+        }
+    }
+
+    /// Returns the root span for `view` and the finalized view, the two state
+    /// values a batcher update carries.
+    pub fn batcher_context(&self, view: View) -> (Span, View) {
+        (self.view_span(view), self.last_finalized)
     }
 
     /// Returns the deadline for the next timeout (leader, certification, or retry).
@@ -788,6 +813,7 @@ mod tests {
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
+    use commonware_macros::test_traced;
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::futures::AbortablePool;
@@ -795,6 +821,60 @@ mod tests {
 
     fn test_genesis() -> Sha256Digest {
         Sha256Digest::from([0u8; 32])
+    }
+
+    #[test_traced]
+    fn decided_views_close_their_view_span() {
+        let runtime = deterministic::Runner::default();
+        runtime.start(|mut context| async move {
+            let namespace = b"ns".to_vec();
+            let Fixture {
+                schemes, verifier, ..
+            } = ed25519::fixture(&mut context, &namespace, 4);
+            let epoch = Epoch::new(7);
+            let mut state = State::new(
+                context,
+                Config {
+                    scheme: verifier.clone(),
+                    elector: <RoundRobin>::default(),
+                    epoch,
+                    activity_timeout: ViewDelta::new(10),
+                    leader_timeout: Duration::from_secs(1),
+                    certification_timeout: Duration::from_secs(2),
+                    timeout_retry: Duration::from_secs(3),
+                },
+            );
+            state.set_genesis(test_genesis());
+
+            // Finalize view 2, advancing the finalized view and entering view 3.
+            let finalize_view = View::new(2);
+            let finalize_round = Rnd::new(epoch, finalize_view);
+            let proposal =
+                Proposal::new(finalize_round, GENESIS_VIEW, Sha256Digest::from([7u8; 32]));
+            let votes: Vec<_> = schemes
+                .iter()
+                .map(|scheme| Finalize::sign(scheme, proposal.clone()).unwrap())
+                .collect();
+            let finalization = Finalization::from_finalizes(&verifier, votes.iter(), &Sequential)
+                .expect("finalization");
+            state.add_finalization(finalization);
+            assert_eq!(state.last_finalized(), finalize_view);
+
+            // Finalizing does not close entered spans on its own; follow-up work
+            // for an entered view can still run under the span until notification
+            // completes. This finalization skips over view 2, so that prepared
+            // future view never opened a span.
+            assert!(!state.view_span(View::new(1)).is_none());
+            assert!(state.view_span(finalize_view).is_none());
+            assert!(!state.view_span(View::new(3)).is_none());
+
+            // Closing decided spans releases every view at or below the
+            // finalized view, while the active view keeps its span.
+            state.close_decided_spans();
+            assert!(state.view_span(View::new(1)).is_none());
+            assert!(state.view_span(finalize_view).is_none());
+            assert!(!state.view_span(View::new(3)).is_none());
+        });
     }
 
     #[test]

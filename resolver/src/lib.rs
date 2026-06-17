@@ -9,6 +9,7 @@ commonware_macros::stability_scope!(BETA {
     use commonware_actor::Feedback;
     use commonware_cryptography::PublicKey;
     use commonware_utils::{channel::oneshot, vec::NonEmptyVec, Span};
+    use core::cmp::Ordering;
 
     pub mod delivery;
     mod ingress;
@@ -17,12 +18,39 @@ commonware_macros::stability_scope!(BETA {
     mod subscribers;
 
     /// A key to fetch data for a subscriber.
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    #[derive(Clone, Debug)]
     pub struct Fetch<K, S = ()> {
         /// The peer-visible key.
         pub key: K,
         /// Subscriber attached to the key.
         pub subscriber: S,
+        /// Trace span carried from issuance to delivery.
+        pub span: tracing::Span,
+    }
+
+    impl<K: PartialEq, S: PartialEq> PartialEq for Fetch<K, S> {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key && self.subscriber == other.subscriber
+        }
+    }
+
+    impl<K: Eq, S: Eq> Eq for Fetch<K, S> {}
+
+    impl<K: PartialOrd, S: PartialOrd> PartialOrd for Fetch<K, S> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            match self.key.partial_cmp(&other.key)? {
+                Ordering::Equal => self.subscriber.partial_cmp(&other.subscriber),
+                ordering => Some(ordering),
+            }
+        }
+    }
+
+    impl<K: Ord, S: Ord> Ord for Fetch<K, S> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.key
+                .cmp(&other.key)
+                .then_with(|| self.subscriber.cmp(&other.subscriber))
+        }
     }
 
     impl<K, S: Default> From<K> for Fetch<K, S> {
@@ -30,17 +58,57 @@ commonware_macros::stability_scope!(BETA {
             Self {
                 key,
                 subscriber: S::default(),
+                span: tracing::Span::none(),
             }
         }
     }
 
     /// Data delivered for a resolved fetch.
-    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    #[derive(Clone, Debug)]
     pub struct Delivery<K, S> {
         /// The peer-visible key used to validate the response.
         pub key: K,
-        /// Subscribers that were still retained when the response arrived.
-        pub subscribers: NonEmptyVec<S>,
+        /// Subscribers that were still retained when the response arrived, each
+        /// paired with the trace span of the fetch that requested it.
+        pub subscribers: NonEmptyVec<(S, tracing::Span)>,
+    }
+
+    impl<K: PartialEq, S: PartialEq> PartialEq for Delivery<K, S> {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key
+                && self.subscribers.len() == other.subscribers.len()
+                && self
+                    .subscribers
+                    .iter()
+                    .zip(other.subscribers.iter())
+                    .all(|((a, _), (b, _))| a == b)
+        }
+    }
+
+    impl<K: Eq, S: Eq> Eq for Delivery<K, S> {}
+
+    impl<K: PartialOrd, S: PartialOrd> PartialOrd for Delivery<K, S> {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            match self.key.partial_cmp(&other.key)? {
+                Ordering::Equal => self
+                    .subscribers
+                    .iter()
+                    .map(|(subscriber, _)| subscriber)
+                    .partial_cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber)),
+                ordering => Some(ordering),
+            }
+        }
+    }
+
+    impl<K: Ord, S: Ord> Ord for Delivery<K, S> {
+        fn cmp(&self, other: &Self) -> Ordering {
+            self.key.cmp(&other.key).then_with(|| {
+                self.subscribers
+                    .iter()
+                    .map(|(subscriber, _)| subscriber)
+                    .cmp(other.subscribers.iter().map(|(subscriber, _)| subscriber))
+            })
+        }
     }
 
     /// Notified when data is available, and must validate it.

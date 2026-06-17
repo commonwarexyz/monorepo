@@ -422,6 +422,7 @@ where
         let Delivery {
             key,
             subscribers: delivered,
+            ..
         } = delivery;
 
         if valid {
@@ -430,7 +431,9 @@ where
             // Remove only the subscribers that accepted this response. If other
             // subscribers still need the key, deliver the same accepted response
             // locally with the remaining annotations.
-            let remaining = self.subscribers.remove_delivered(&key, delivered);
+            let remaining = self
+                .subscribers
+                .remove_delivered(&key, delivered.map_into(|(subscriber, _)| subscriber));
 
             if let Some(subscribers) = remaining {
                 if !already_accepted {

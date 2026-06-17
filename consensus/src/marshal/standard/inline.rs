@@ -61,9 +61,12 @@ use commonware_cryptography::certificate::Scheme;
 use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_runtime::{
-    telemetry::metrics::{
-        histogram::{Buckets, Timed},
-        MetricsExt as _,
+    telemetry::{
+        metrics::{
+            histogram::{Buckets, Timed},
+            MetricsExt as _,
+        },
+        traces::TracedExt as _,
     },
     Clock, Metrics, Spawner,
 };
@@ -354,7 +357,7 @@ where
                     .instrument(info_span!(
                         "marshal.inline.application.propose",
                         round = %consensus_context.round,
-                        parent_view = %parent_view,
+                        parent_view = parent_view.traced(),
                         parent = %parent_commitment
                     ));
 
