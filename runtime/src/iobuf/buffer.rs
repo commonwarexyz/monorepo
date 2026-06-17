@@ -173,7 +173,7 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 const _: () = assert!(align_of::<HeapHeader>() >= 4);
 const _: () = assert!(align_of::<PooledSlot>() >= 4);
 const _: () = assert!(align_of::<ExternalOwner>() >= 4);
-const _: () = assert!(size_of::<HeapHeader>() % align_of::<HeapHeader>() == 0);
+const _: () = assert!(size_of::<HeapHeader>().is_multiple_of(align_of::<HeapHeader>()));
 
 // `OwnerRef::refs` reads the refcount directly through the untagged pointer,
 // which is only sound if every owner type stores it at offset 0.
@@ -505,7 +505,7 @@ impl OwnerRef {
                 alloc_size,
                 alloc_align: align_of::<HeapHeader>(),
             });
-            *self = OwnerRef::from_heap(base);
+            *self = Self::from_heap(base);
         }
     }
 
@@ -655,7 +655,12 @@ impl PooledSlot {
     /// allocation for this slot. Until the slot is created, no free bit points
     /// at it and no [`PooledBuffer`] may be built from it.
     #[inline]
-    pub fn new(slot: u32, capacity: usize, class_id: u32, thread_cache_capacity: u32) -> Self {
+    pub const fn new(
+        slot: u32,
+        capacity: usize,
+        class_id: u32,
+        thread_cache_capacity: u32,
+    ) -> Self {
         Self {
             refs: AtomicUsize::new(1),
             lease: MaybeUninit::uninit(),
@@ -727,10 +732,11 @@ impl PooledBuffer {
     #[inline]
     pub unsafe fn new_in_slot(slot: NonNull<PooledSlot>, layout: Layout, zeroed: bool) -> Self {
         assert!(layout.size() > 0, "pooled data layout must be non-zero");
-        // SAFETY: layout is valid and non-zero sized (asserted above).
         let ptr = if zeroed {
+            // SAFETY: layout is valid and non-zero sized (asserted above).
             unsafe { alloc_zeroed(layout) }
         } else {
+            // SAFETY: layout is valid and non-zero sized (asserted above).
             unsafe { alloc(layout) }
         };
         let ptr = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
@@ -757,13 +763,13 @@ impl PooledBuffer {
     /// Returns the usable data base pointer.
     #[cfg(any(test, feature = "bench"))]
     #[inline(always)]
-    pub fn as_ptr(&self) -> *mut u8 {
+    pub const fn as_ptr(&self) -> *mut u8 {
         self.data_ptr().as_ptr()
     }
 
     /// Returns the usable data base pointer without discarding non-nullness.
     #[inline(always)]
-    pub(crate) fn data_ptr(&self) -> NonNull<u8> {
+    pub(crate) const fn data_ptr(&self) -> NonNull<u8> {
         // SAFETY: pooled buffers are built only for created slots.
         unsafe { self.slot.as_ref().data_base }
     }
@@ -773,7 +779,7 @@ impl PooledBuffer {
     /// # Safety
     ///
     #[inline(always)]
-    pub(crate) unsafe fn capacity(&self) -> usize {
+    pub(crate) const unsafe fn capacity(&self) -> usize {
         // SAFETY: guaranteed by the caller.
         unsafe { self.slot.as_ref().capacity }
     }
@@ -787,7 +793,7 @@ impl PooledBuffer {
     /// # Safety
     ///
     #[inline(always)]
-    pub(crate) unsafe fn slot(&self) -> u32 {
+    pub(crate) const unsafe fn slot(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
         unsafe { self.slot.as_ref().slot }
     }
@@ -797,7 +803,7 @@ impl PooledBuffer {
     /// Cached in the slot so the buffer-return fast path can route into the
     /// right thread-local cache without dereferencing the class object.
     #[inline(always)]
-    pub(crate) unsafe fn class_id(&self) -> u32 {
+    pub(crate) const unsafe fn class_id(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
         unsafe { self.slot.as_ref().class_id }
     }
@@ -806,7 +812,7 @@ impl PooledBuffer {
     ///
     /// Cached in the slot for the same reason as [`Self::class_id`].
     #[inline(always)]
-    pub(crate) unsafe fn thread_cache_capacity(&self) -> u32 {
+    pub(crate) const unsafe fn thread_cache_capacity(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
         unsafe { self.slot.as_ref().thread_cache_capacity }
     }
@@ -1077,7 +1083,7 @@ fn heap_layout(capacity: usize, alignment: usize) -> (Layout, usize) {
 
 /// Returns the full layout for a low-alignment front-header allocation.
 #[inline(always)]
-fn front_heap_layout(capacity: usize) -> Layout {
+const fn front_heap_layout(capacity: usize) -> Layout {
     let total = size_of::<HeapHeader>()
         .checked_add(capacity)
         .expect("front heap layout size overflow");
@@ -1087,7 +1093,7 @@ fn front_heap_layout(capacity: usize) -> Layout {
 }
 
 #[inline(always)]
-fn front_heap_data_base(base: NonNull<HeapHeader>) -> NonNull<u8> {
+const fn front_heap_data_base(base: NonNull<HeapHeader>) -> NonNull<u8> {
     // SAFETY: the front layout reserves the header at the allocation base and
     // the usable data starts immediately after it.
     unsafe { NonNull::new_unchecked(base.as_ptr().cast::<u8>().add(size_of::<HeapHeader>())) }
