@@ -26,10 +26,7 @@ use commonware_runtime::{
 };
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
-use std::{
-    num::NonZeroUsize,
-    time::Duration,
-};
+use std::{num::NonZeroUsize, time::Duration};
 use tracing::{debug, info_span};
 
 /// Requests are made concurrently to multiple peers.
@@ -183,8 +180,8 @@ impl<
                 Effect::RetainOutside { start, end } => {
                     let start = U64::from(start);
                     let end = U64::from(end);
-                    let _ = resolver
-                        .retain(move |candidate, _| *candidate < start || *candidate > end);
+                    let _ =
+                        resolver.retain(move |candidate, _| *candidate < start || *candidate > end);
                 }
                 Effect::RetainAbove(floor) => {
                     let floor = U64::from(floor);

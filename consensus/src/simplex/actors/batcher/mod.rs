@@ -3087,9 +3087,7 @@ mod tests {
 
             let self_vote = Nullify::sign::<Sha256Digest>(&schemes[0], Round::new(epoch, current))
                 .expect("self nullify");
-            batcher_mailbox.constructed(Vote::<ed25519::Scheme, Sha256Digest>::Nullify(
-                self_vote,
-            ));
+            batcher_mailbox.constructed(Vote::<ed25519::Scheme, Sha256Digest>::Nullify(self_vote));
 
             for (idx, mut sender) in participant_senders {
                 let vote = Nullify::sign::<Sha256Digest>(&schemes[idx], Round::new(epoch, current))

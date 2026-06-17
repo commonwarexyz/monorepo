@@ -281,7 +281,7 @@ mod tests {
     };
     use commonware_cryptography::{certificate::mocks::Fixture, sha256::Digest as Sha256Digest};
     use commonware_parallel::Sequential;
-    use commonware_utils::{test_rng, NZU64, NZUsize};
+    use commonware_utils::{test_rng, NZUsize, NZU64};
 
     const NAMESPACE: &[u8] = b"resolver-state";
     const EPOCH: Epoch = Epoch::new(9);
@@ -508,8 +508,7 @@ mod tests {
     #[test]
     fn floor_prunes_outstanding_requests() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::ONE);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
         let mut outstanding = BTreeSet::new();
 
         for view in 4..=6 {
@@ -584,8 +583,7 @@ mod tests {
     #[test]
     fn certification_failure_re_requests_satisfied_views() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::ONE);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
         let effects = state.handle(
@@ -622,8 +620,7 @@ mod tests {
     #[test]
     fn certification_success_clears_tracking() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::ONE);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
         let effects = state.handle(
@@ -684,8 +681,7 @@ mod tests {
     #[test]
     fn finalization_upgrades_certified_notarization_at_same_view() {
         let (schemes, verifier) = ed25519_fixture();
-        let mut state: State<TestScheme, Sha256Digest> =
-            State::new(NZUsize!(10), TermLength::ONE);
+        let mut state: State<TestScheme, Sha256Digest> = State::new(NZUsize!(10), TermLength::ONE);
 
         let notarization_v5 = build_notarization(&schemes, &verifier, View::new(5));
         let effects = state.handle(Certificate::Notarization(notarization_v5.clone()), None);
