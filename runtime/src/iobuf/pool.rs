@@ -487,8 +487,9 @@ unsafe impl Sync for SizeClass {}
 ///   class.
 /// - Thread-local cache: each initialized [`TlsSizeClassCacheEntry`] owns a
 ///   [`PooledBuffer`] whose side-table slot contains a live
-///   [`SizeClassLease`]. Increasing or decreasing `len` moves that live
-///   checked-out state, but does not touch the `Arc` strong count.
+///   [`SizeClassLease`]. Increasing or decreasing the cache `len` moves entries
+///   into or out of the initialized prefix, but does not touch the `Arc` strong
+///   count.
 ///
 /// Moving a buffer from the global freelist to pooled view or TLS state retains
 /// one class reference. Moving it back to the global freelist releases that
@@ -518,6 +519,7 @@ unsafe impl Sync for SizeClass {}
 /// owned strong references; a non-empty [`TlsSizeClassCache`] proves liveness
 /// through the live leases stored in its entries' pooled slots.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
 struct SizeClassToken {
     ptr: ptr::NonNull<SizeClass>,
 }
@@ -585,6 +587,7 @@ impl SizeClassToken {
 /// form keeps the already-loaded class pointer usable for
 /// explicit refcount operations without calling [`Arc::as_ptr`] or storing a
 /// second token alongside an `Arc`.
+#[repr(transparent)]
 struct SizeClassHandle {
     token: SizeClassToken,
 }
@@ -723,6 +726,7 @@ impl std::ops::Deref for SizeClassHandle {
 /// global freelist retains the class, and returning to the global freelist
 /// releases it.
 #[must_use]
+#[repr(transparent)]
 pub(crate) struct SizeClassLease {
     token: SizeClassToken,
 }

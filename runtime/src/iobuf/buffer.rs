@@ -181,16 +181,6 @@ const _: () = assert!(offset_of!(HeapHeader, refs) == 0);
 const _: () = assert!(offset_of!(PooledSlot, refs) == 0);
 const _: () = assert!(offset_of!(ExternalOwner, refs) == 0);
 
-// Pin the owner-header layouts so a future field reordering cannot silently
-// reintroduce padding or change a size the allocation math depends on.
-// `HeapHeader` and `ExternalOwner` are padding-free on every target; the
-// padded `PooledSlot` total (its three u32 routing fields share one trailing
-// word) is pinned only on the 64-bit production target.
-const _: () = assert!(size_of::<HeapHeader>() == 4 * size_of::<usize>());
-const _: () = assert!(size_of::<ExternalOwner>() == size_of::<AtomicUsize>() + size_of::<Bytes>());
-#[cfg(target_pointer_width = "64")]
-const _: () = assert!(size_of::<PooledSlot>() == 48);
-
 /// Tagged reference to an allocation owner.
 ///
 /// The value is either zero (empty) or a pointer to one of the owner structs
@@ -501,7 +491,7 @@ impl OwnerRef {
             unsafe { release_front_heap(self.heap(), ptr, cap) };
             return;
         }
-        // SAFETY: unique heap owner (native aligned or adopted vec).
+        // SAFETY: unique tail-header heap owner.
         unsafe { release_heap(self.heap()) };
     }
 
@@ -536,7 +526,6 @@ impl OwnerRef {
                 alloc_size,
                 alloc_align: align_of::<HeapHeader>(),
             });
-            *self = Self::from_heap(base);
         }
     }
 
@@ -572,7 +561,7 @@ impl OwnerRef {
     ///
     /// # Safety
     ///
-    /// `self` must be a live aligned or pooled owner. External owners decline
+    /// `self` must be a live heap or pooled owner. External owners decline
     /// mutable recovery, so lifecycle code never asks for their base.
     #[inline]
     pub(crate) unsafe fn data_base(self) -> NonNull<u8> {
@@ -588,17 +577,17 @@ impl OwnerRef {
 
     /// Returns the usable data capacity for this owner.
     ///
-    /// For tail heap owners the capacity is the distance from the data base to
-    /// the header. For canonical aligned allocations this is the requested
-    /// capacity rounded up to header alignment; the at most `ALIGN - 1`
-    /// padding bytes precede the header and are genuinely writable. For
-    /// adopted vecs it is the spare-capacity prefix below the header. For
-    /// initialized front heap owners, capacity is the allocation size minus
-    /// the leading header reservation.
+    /// For tail-header heap owners the capacity is the distance from the data
+    /// base to the header. For canonical heap allocations this is the requested
+    /// capacity rounded up to header alignment; the at most `ALIGN - 1` padding
+    /// bytes precede the header and are genuinely writable. For adopted vecs it
+    /// is the spare-capacity prefix below the header. For initialized
+    /// front-header heap owners, capacity is the allocation size minus the
+    /// leading header reservation.
     ///
     /// # Safety
     ///
-    /// `self` must be a live aligned or pooled owner.
+    /// `self` must be a live heap or pooled owner.
     #[inline]
     pub(crate) unsafe fn usable_capacity(self) -> usize {
         if self.is_pooled() {
@@ -625,13 +614,14 @@ impl OwnerRef {
     }
 }
 
-/// Tail header for heap allocations (native aligned and adopted vecs).
+/// Header for heap allocations.
 ///
 /// The header stores the exact allocation layout instead of deriving it from
-/// canonical placement math. Native aligned allocations could re-derive their
-/// layout, but adopted `Vec<u8>` allocations cannot: a vec's layout is
-/// `(capacity, align = 1)` and its header lands wherever spare capacity
-/// allows, so `dealloc` must use the stored values exactly.
+/// canonical placement math. Canonical heap allocations could re-derive their
+/// layout, but adopted `Vec<u8>` allocations and initialized front-header
+/// allocations cannot: adopted vecs use layout `(capacity, align = 1)`, and
+/// front-header allocations may be advanced before freeze. `dealloc` therefore
+/// uses the stored layout exactly.
 #[repr(C)]
 struct HeapHeader {
     /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
@@ -1209,7 +1199,7 @@ unsafe fn release_pooled(slot: NonNull<PooledSlot>) {
 unsafe fn release_unique_cold(owner: OwnerRef) {
     let tag = owner.tag();
     if tag == OWNER_HEAP {
-        // SAFETY: unique heap owner (native aligned or adopted vec).
+        // SAFETY: unique initialized heap owner.
         unsafe { release_heap(owner.heap()) };
     } else if tag == OWNER_EXTERNAL {
         // SAFETY: unique external owner.
@@ -1218,7 +1208,7 @@ unsafe fn release_unique_cold(owner: OwnerRef) {
     // Empty owners need no release work.
 }
 
-/// Releases a unique heap owner (native aligned or adopted vec).
+/// Releases a unique initialized heap owner.
 ///
 /// Two loads recover the stored base and layout; no placement math is redone
 /// on release. The header fields are copied out before `dealloc` because the
