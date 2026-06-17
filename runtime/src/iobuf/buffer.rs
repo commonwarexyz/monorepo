@@ -23,8 +23,8 @@
 //!
 //! ```text
 //! 0 (entire value)        EMPTY     no owner; empty views and 'static slices
-//! header ptr | 0b01       ALIGNED   tail HeapHeader; native aligned
-//!                                   allocations and adopted vecs
+//! header ptr | 0b01       HEAP      HeapHeader; native aligned allocations,
+//!                                   adopted vecs, and front-block mutables
 //! slot ptr   | 0b10       POOLED    PooledSlot side-table entry
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
@@ -155,7 +155,7 @@ cfg_if::cfg_if! {
 }
 
 const OWNER_EMPTY: usize = 0b00;
-const OWNER_ALIGNED: usize = 0b01;
+const OWNER_HEAP: usize = 0b01;
 const OWNER_POOLED: usize = 0b10;
 const OWNER_EXTERNAL: usize = 0b11;
 const OWNER_TAG_MASK: usize = 0b11;
@@ -181,6 +181,16 @@ const _: () = assert!(offset_of!(HeapHeader, refs) == 0);
 const _: () = assert!(offset_of!(PooledSlot, refs) == 0);
 const _: () = assert!(offset_of!(ExternalOwner, refs) == 0);
 
+// Pin the owner-header layouts so a future field reordering cannot silently
+// reintroduce padding or change a size the allocation math depends on.
+// `HeapHeader` and `ExternalOwner` are padding-free on every target; the
+// padded `PooledSlot` total (its three u32 routing fields share one trailing
+// word) is pinned only on the 64-bit production target.
+const _: () = assert!(size_of::<HeapHeader>() == 4 * size_of::<usize>());
+const _: () = assert!(size_of::<ExternalOwner>() == size_of::<AtomicUsize>() + size_of::<Bytes>());
+#[cfg(target_pointer_width = "64")]
+const _: () = assert!(size_of::<PooledSlot>() == 48);
+
 /// Tagged reference to an allocation owner.
 ///
 /// The value is either zero (empty) or a pointer to one of the owner structs
@@ -203,39 +213,60 @@ impl OwnerRef {
         self.0 == OWNER_EMPTY
     }
 
+    /// Returns the kind tag stored in the low pointer bits.
+    #[inline(always)]
+    const fn tag(self) -> usize {
+        self.0 & OWNER_TAG_MASK
+    }
+
     #[inline(always)]
     pub(crate) const fn is_pooled(self) -> bool {
-        (self.0 & OWNER_TAG_MASK) == OWNER_POOLED
+        self.tag() == OWNER_POOLED
     }
 
     #[inline(always)]
     pub(crate) const fn is_external(self) -> bool {
-        (self.0 & OWNER_TAG_MASK) == OWNER_EXTERNAL
+        self.tag() == OWNER_EXTERNAL
     }
 
-    /// Creates a heap owner ref from a tail header pointer.
+    /// Builds an owner ref from an owner pointer and its kind tag.
+    ///
+    /// The pointer's provenance is exposed so [`Self::untag`] can recover a
+    /// usable pointer from the stored address. Construction reads no bytes
+    /// through `ptr`, so the pointed-to header may be uninitialized.
+    #[inline(always)]
+    fn from_tagged<T>(ptr: NonNull<T>, tag: usize) -> Self {
+        debug_assert_eq!(ptr.as_ptr().addr() & OWNER_TAG_MASK, 0);
+        Self(ptr.as_ptr().expose_provenance() | tag)
+    }
+
+    /// Recovers the untagged owner pointer.
+    ///
+    /// Restores the provenance exposed by [`Self::from_tagged`].
     ///
     /// # Safety
     ///
-    /// `header` must point to a live, initialized [`HeapHeader`] whose low tag
-    /// bits are zero and whose backing allocation is owned by this owner ref.
+    /// `self` must be a live non-empty owner whose pointer targets a `T`.
+    #[inline(always)]
+    unsafe fn untag<T>(self) -> NonNull<T> {
+        debug_assert!(!self.is_empty());
+        let ptr = std::ptr::with_exposed_provenance_mut::<T>(self.0 & !OWNER_TAG_MASK);
+        // SAFETY: non-empty owner refs are built from non-null pointers, and
+        // masking the tag bits cannot zero a heap/box/slot address.
+        unsafe { NonNull::new_unchecked(ptr) }
+    }
+
+    /// Creates a heap owner ref from a [`HeapHeader`] pointer.
+    ///
+    /// # Safety
+    ///
+    /// `header` must point to the [`HeapHeader`] of an allocation owned by this
+    /// owner ref, with its low tag bits zero. The contents may be uninitialized
+    /// (for example a reserved front block before `freeze`); they must be
+    /// initialized before any clone, drop, or freeze that reads them.
     #[inline(always)]
     unsafe fn from_heap(header: NonNull<HeapHeader>) -> Self {
-        debug_assert_eq!(header.as_ptr() as usize & OWNER_TAG_MASK, 0);
-        Self(header.as_ptr() as usize | OWNER_ALIGNED)
-    }
-
-    /// Creates a heap owner ref from a reserved low-alignment front header.
-    ///
-    /// # Safety
-    ///
-    /// `base` must point to the reserved front [`HeapHeader`] of an allocation
-    /// created by [`allocate_aligned_mut`] on its low-alignment branch. The
-    /// header may be uninitialized until the mutable buffer is frozen.
-    #[inline(always)]
-    unsafe fn from_front_heap_base(base: NonNull<HeapHeader>) -> Self {
-        debug_assert_eq!(base.as_ptr() as usize & OWNER_TAG_MASK, 0);
-        Self(base.as_ptr() as usize | OWNER_ALIGNED)
+        Self::from_tagged(header, OWNER_HEAP)
     }
 
     /// Creates a pooled owner ref from a side-table slot pointer.
@@ -246,8 +277,7 @@ impl OwnerRef {
     /// and whose lease is initialized.
     #[inline(always)]
     pub(crate) unsafe fn from_pooled(slot: NonNull<PooledSlot>) -> Self {
-        debug_assert_eq!(slot.as_ptr() as usize & OWNER_TAG_MASK, 0);
-        Self(slot.as_ptr() as usize | OWNER_POOLED)
+        Self::from_tagged(slot, OWNER_POOLED)
     }
 
     /// Creates an external owner ref.
@@ -258,20 +288,19 @@ impl OwnerRef {
     /// uniquely represented by this owner ref.
     #[inline(always)]
     unsafe fn from_external(owner: NonNull<ExternalOwner>) -> Self {
-        debug_assert_eq!(owner.as_ptr() as usize & OWNER_TAG_MASK, 0);
-        Self(owner.as_ptr() as usize | OWNER_EXTERNAL)
+        Self::from_tagged(owner, OWNER_EXTERNAL)
     }
 
-    /// Returns the heap header for an aligned (native or adopted) owner.
+    /// Returns the heap header for a heap owner (native, adopted, or front).
     ///
     /// # Safety
     ///
-    /// `self` must be a live aligned owner.
+    /// `self` must be a live heap owner.
     #[inline(always)]
     unsafe fn heap(self) -> NonNull<HeapHeader> {
-        debug_assert_eq!(self.0 & OWNER_TAG_MASK, OWNER_ALIGNED);
-        // SAFETY: aligned owner refs are created from non-null header pointers.
-        unsafe { NonNull::new_unchecked((self.0 & !OWNER_TAG_MASK) as *mut HeapHeader) }
+        debug_assert_eq!(self.tag(), OWNER_HEAP);
+        // SAFETY: a live heap owner's address targets a `HeapHeader`.
+        unsafe { self.untag() }
     }
 
     /// Returns the side-table slot for a pooled owner.
@@ -282,8 +311,8 @@ impl OwnerRef {
     #[inline(always)]
     unsafe fn pooled(self) -> NonNull<PooledSlot> {
         debug_assert!(self.is_pooled());
-        // SAFETY: pooled owner refs are created from non-null slot pointers.
-        unsafe { NonNull::new_unchecked((self.0 & !OWNER_TAG_MASK) as *mut PooledSlot) }
+        // SAFETY: a live pooled owner's address targets a `PooledSlot`.
+        unsafe { self.untag() }
     }
 
     /// Returns the external owner box pointer.
@@ -294,8 +323,8 @@ impl OwnerRef {
     #[inline(always)]
     unsafe fn external(self) -> NonNull<ExternalOwner> {
         debug_assert!(self.is_external());
-        // SAFETY: external owner refs are created from non-null box pointers.
-        unsafe { NonNull::new_unchecked((self.0 & !OWNER_TAG_MASK) as *mut ExternalOwner) }
+        // SAFETY: a live external owner's address targets an `ExternalOwner`.
+        unsafe { self.untag() }
     }
 
     /// Returns the shared refcount for a non-empty owner.
@@ -312,9 +341,9 @@ impl OwnerRef {
     #[inline(always)]
     unsafe fn refs(self) -> &'static AtomicUsize {
         debug_assert!(!self.is_empty());
-        // SAFETY: caller guarantees a live non-empty owner; all owner types
-        // are repr(C) with `refs` at offset 0.
-        unsafe { &*((self.0 & !OWNER_TAG_MASK) as *const AtomicUsize) }
+        // SAFETY: every owner kind is repr(C) with `refs` at offset 0, so the
+        // untagged address targets the shared refcount regardless of kind.
+        unsafe { self.untag::<AtomicUsize>().as_ref() }
     }
 
     /// Returns the inner [`Bytes`] of an external owner.
@@ -433,7 +462,7 @@ impl OwnerRef {
     /// an initialized lease.
     #[inline(always)]
     pub(crate) unsafe fn release_unique(self) {
-        if self.0 & OWNER_TAG_MASK == OWNER_POOLED {
+        if self.tag() == OWNER_POOLED {
             // SAFETY: unique pooled owner with initialized lease.
             unsafe { release_pooled(self.pooled()) };
             return;
@@ -456,7 +485,7 @@ impl OwnerRef {
     /// This must be called only for a uniquely-owned mutable handle.
     #[inline(always)]
     pub(crate) unsafe fn release_unique_mut_at(self, ptr: NonNull<u8>, cap: usize) {
-        let tag = self.0 & OWNER_TAG_MASK;
+        let tag = self.tag();
         if tag == OWNER_POOLED {
             // SAFETY: unique pooled owner with initialized lease.
             unsafe { release_pooled(self.pooled()) };
@@ -465,11 +494,11 @@ impl OwnerRef {
         if tag == OWNER_EMPTY {
             return;
         }
-        debug_assert_eq!(tag, OWNER_ALIGNED, "IoBufMut owner is never external");
+        debug_assert_eq!(tag, OWNER_HEAP, "IoBufMut owner is never external");
         if self.is_front_heap_for_mut(ptr) {
             // SAFETY: front heap owners are allocated with `front_heap_layout`
             // and `ptr + cap` is the allocation end.
-            unsafe { release_front_heap(self.front_heap_base(), ptr, cap) };
+            unsafe { release_front_heap(self.heap(), ptr, cap) };
             return;
         }
         // SAFETY: unique heap owner (native aligned or adopted vec).
@@ -493,7 +522,9 @@ impl OwnerRef {
             return;
         }
 
-        let base = self.front_heap_base();
+        // SAFETY: a front-heap mutable owner carries the reserved header base
+        // in its tagged pointer; its contents are written below before sharing.
+        let base = unsafe { self.heap() };
         let data_base = front_heap_data_base(base);
         let alloc_size = front_heap_alloc_size(base, ptr, cap);
         // SAFETY: `base` points at the reserved header region of a uniquely
@@ -509,18 +540,15 @@ impl OwnerRef {
         }
     }
 
+    /// Returns true when this owner is a front-block heap owner relative to a
+    /// mutable handle's current pointer.
+    ///
+    /// Front blocks place the header before the data, so the owner address is
+    /// below the data pointer; tail headers sit above it. This distinguishes
+    /// the two heap layouts without spending a tag bit.
     #[inline(always)]
     fn is_front_heap_for_mut(self, ptr: NonNull<u8>) -> bool {
-        (self.0 & OWNER_TAG_MASK) == OWNER_ALIGNED
-            && (self.0 & !OWNER_TAG_MASK) < ptr.as_ptr() as usize
-    }
-
-    #[inline(always)]
-    fn front_heap_base(self) -> NonNull<HeapHeader> {
-        debug_assert_eq!(self.0 & OWNER_TAG_MASK, OWNER_ALIGNED);
-        // SAFETY: front heap owner refs are created from non-null header
-        // pointers.
-        unsafe { NonNull::new_unchecked((self.0 & !OWNER_TAG_MASK) as *mut HeapHeader) }
+        self.tag() == OWNER_HEAP && (self.0 & !OWNER_TAG_MASK) < ptr.as_ptr().addr()
     }
 
     /// Returns true when this owner has exactly one live reference.
@@ -552,7 +580,7 @@ impl OwnerRef {
             // SAFETY: guaranteed by the caller.
             unsafe { self.pooled().as_ref().data_base }
         } else {
-            debug_assert_eq!(self.0 & OWNER_TAG_MASK, OWNER_ALIGNED);
+            debug_assert_eq!(self.tag(), OWNER_HEAP);
             // SAFETY: guaranteed by the caller.
             unsafe { self.heap().as_ref().data_base }
         }
@@ -577,7 +605,7 @@ impl OwnerRef {
             // SAFETY: guaranteed by the caller.
             unsafe { self.pooled().as_ref().capacity }
         } else {
-            debug_assert_eq!(self.0 & OWNER_TAG_MASK, OWNER_ALIGNED);
+            debug_assert_eq!(self.tag(), OWNER_HEAP);
             // SAFETY: guaranteed by the caller.
             let header = unsafe { self.heap() };
             // SAFETY: guaranteed by the caller.
@@ -774,6 +802,8 @@ impl PooledBuffer {
     ///
     /// # Safety
     ///
+    /// `self` must reference a created slot (its stable side-table fields are
+    /// initialized).
     #[inline(always)]
     pub(crate) const unsafe fn capacity(&self) -> usize {
         // SAFETY: guaranteed by the caller.
@@ -788,6 +818,8 @@ impl PooledBuffer {
     ///
     /// # Safety
     ///
+    /// `self` must reference a created slot (its stable side-table fields are
+    /// initialized).
     #[inline(always)]
     pub(crate) const unsafe fn slot(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
@@ -798,6 +830,11 @@ impl PooledBuffer {
     ///
     /// Cached in the slot so the buffer-return fast path can route into the
     /// right thread-local cache without dereferencing the class object.
+    ///
+    /// # Safety
+    ///
+    /// `self` must reference a created slot (its stable side-table fields are
+    /// initialized).
     #[inline(always)]
     pub(crate) const unsafe fn class_id(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
@@ -807,6 +844,11 @@ impl PooledBuffer {
     /// Returns the owning size class's per-thread cache capacity.
     ///
     /// Cached in the slot for the same reason as [`Self::class_id`].
+    ///
+    /// # Safety
+    ///
+    /// `self` must reference a created slot (its stable side-table fields are
+    /// initialized).
     #[inline(always)]
     pub(crate) const unsafe fn thread_cache_capacity(&self) -> u32 {
         // SAFETY: guaranteed by the caller.
@@ -956,9 +998,10 @@ pub(crate) fn allocate_aligned_mut(
     let base = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
     let header = base.cast::<HeapHeader>();
     let data = front_heap_data_base(header);
-    // SAFETY: `header` points at the reserved front header region. It will be
-    // initialized before the owner is shared.
-    let owner = unsafe { OwnerRef::from_front_heap_base(header) };
+    // SAFETY: `header` points at the reserved front header region of an
+    // allocation owned by this owner ref. The contents are left uninitialized
+    // and written before the owner is shared (`from_heap` reads nothing).
+    let owner = unsafe { OwnerRef::from_heap(header) };
     (data, owner)
 }
 
@@ -1164,8 +1207,8 @@ unsafe fn release_pooled(slot: NonNull<PooledSlot>) {
 #[cold]
 #[inline(never)]
 unsafe fn release_unique_cold(owner: OwnerRef) {
-    let tag = owner.0 & OWNER_TAG_MASK;
-    if tag == OWNER_ALIGNED {
+    let tag = owner.tag();
+    if tag == OWNER_HEAP {
         // SAFETY: unique heap owner (native aligned or adopted vec).
         unsafe { release_heap(owner.heap()) };
     } else if tag == OWNER_EXTERNAL {
