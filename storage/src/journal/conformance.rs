@@ -58,7 +58,7 @@ impl Conformance for ContiguousVariable {
         runner.start(|mut context| async move {
             let config = variable::Config {
                 partition: format!("contiguous-variable-conformance-{seed}"),
-                items_per_section: ITEMS_PER_BLOB,
+                items_per_blob: ITEMS_PER_BLOB,
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
                 write_buffer: WRITE_BUFFER,
                 compression: None,

@@ -81,12 +81,12 @@ where
 async fn get_variable_journal<const ITEM_SIZE: usize>(
     context: Context,
     partition_name: &str,
-    items_per_section: NonZeroU64,
+    items_per_blob: NonZeroU64,
 ) -> VariableJournal<Context, FixedBytes<ITEM_SIZE>> {
     // Initialize the journal at the given partition.
     let journal_config = VariableConfig {
         partition: partition_name.into(),
-        items_per_section,
+        items_per_blob,
         compression: None,
         codec_config: (),
         page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),

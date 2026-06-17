@@ -874,7 +874,7 @@ pub(crate) mod harnesses {
         suffix: &str,
         pooler: &(impl BufferPooler + Metrics),
     ) -> immutable::variable::Config<TwoCap, ((), ()), Sequential> {
-        const ITEMS_PER_SECTION: NonZeroU64 = NZU64!(5);
+        const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(5);
 
         let page_cache = CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE);
         immutable::Config {
@@ -888,7 +888,7 @@ pub(crate) mod harnesses {
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
-                items_per_section: ITEMS_PER_SECTION,
+                items_per_blob: ITEMS_PER_BLOB,
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,
@@ -1186,7 +1186,7 @@ mod compact_variable_mmr {
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 page_cache,
@@ -1205,7 +1205,7 @@ mod compact_variable_mmr {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: format!("compact-{suffix}-witness"),
-                items_per_section: NZU64!(64),
+                items_per_blob: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -1715,7 +1715,7 @@ mod compact_variable_mmr {
 
             // Seed the client partition with several commits, then prune its witness journal.
             let mut client_cfg = client_config(&suffix, &context);
-            client_cfg.witness.items_per_section = NZU64!(1);
+            client_cfg.witness.items_per_blob = NZU64!(1);
             let mut seeded = ClientDb::init(context.child("seed"), client_cfg.clone())
                 .await
                 .unwrap();
@@ -1892,7 +1892,7 @@ mod compact_variable_mmb {
             },
             log: crate::journal::contiguous::variable::Config {
                 partition: format!("log-{suffix}"),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),
                 page_cache,
@@ -1911,7 +1911,7 @@ mod compact_variable_mmb {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: format!("compact-{suffix}-witness"),
-                items_per_section: NZU64!(64),
+                items_per_blob: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, PAGE_CACHE_SIZE),

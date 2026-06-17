@@ -27,7 +27,7 @@ pub fn create_config(context: &impl BufferPooler) -> CompactConfig<Sequential> {
         strategy: Sequential,
         witness: variable::Config {
             partition: "compact-immutable-witness".into(),
-            items_per_section: NZU64!(4096),
+            items_per_blob: NZU64!(4096),
             compression: None,
             codec_config: (),
             page_cache: CacheRef::from_pooler(context, NZU16!(1024), NZUsize!(64)),

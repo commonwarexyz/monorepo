@@ -234,11 +234,11 @@ where
     test_rewind_then_append(&indexed_factory).await;
     test_rewind_zero_then_append(&indexed_factory).await;
     test_rewind_after_prune(&indexed_factory).await;
-    test_section_boundary_behavior(&indexed_factory).await;
+    test_blob_boundary_behavior(&indexed_factory).await;
     test_destroy_and_reinit(&indexed_factory).await;
     test_append_many_empty(&indexed_factory).await;
     test_append_many_basic(&indexed_factory).await;
-    test_append_many_across_sections(&indexed_factory).await;
+    test_append_many_across_blobs(&indexed_factory).await;
     test_append_many_then_append(&indexed_factory).await;
     test_append_many_single_item(&indexed_factory).await;
 }
@@ -287,7 +287,7 @@ where
 {
     let mut journal = factory("bounds-after-prune".into()).await.unwrap();
 
-    // Append items across multiple sections
+    // Append items across multiple blobs
     for i in 0..30 {
         journal.append(&(i * 100)).await.unwrap();
     }
@@ -297,7 +297,7 @@ where
     assert_eq!(bounds.start, 0);
     assert_eq!(bounds.end, 30);
 
-    // Prune first section - trait only guarantees section-aligned pruning
+    // Prune first blob - trait only guarantees blob-aligned pruning
     journal.prune(10).await.unwrap();
 
     // Assumed blob-aligned pruning and items_per_blob = 10.
@@ -308,7 +308,7 @@ where
     // Prune more
     journal.prune(25).await.unwrap();
 
-    // bounds.start should have advanced to 20 (section-aligned)
+    // bounds.start should have advanced to 20 (blob-aligned)
     let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 20);
     assert_eq!(bounds.end, 30);
@@ -354,7 +354,7 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test appending many items across section boundaries.
+/// Test appending many items across blob boundaries.
 async fn test_sequential_appends<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
@@ -508,7 +508,7 @@ where
     journal.prune(10).await.unwrap();
 
     {
-        // Replay from a position that may or may not be pruned (section-aligned)
+        // Replay from a position that may or may not be pruned (blob-aligned)
         // We replay from position 10 which should be safe
         let reader = journal.reader().await;
         let stream = reader.replay(NZUsize!(1024), 10).await.unwrap();
@@ -540,7 +540,7 @@ where
 {
     let mut journal = factory("prune-then-append".into()).await.unwrap();
 
-    // Append exactly one section (10 items)
+    // Append exactly one blob (10 items)
     for i in 0..10u64 {
         journal.append(&i).await.unwrap();
     }
@@ -1084,7 +1084,7 @@ where
         journal.append(&i).await.unwrap();
     }
 
-    // Rewind to position 8 (within first section, not at boundary)
+    // Rewind to position 8 (within first blob, not at boundary)
     journal.rewind(8).await.unwrap();
 
     // Append should continue from position 8
@@ -1143,7 +1143,7 @@ where
         journal.append(&(i * 100)).await.unwrap();
     }
 
-    // Prune first section (items 0-9)
+    // Prune first blob (items 0-9)
     journal.prune(10).await.unwrap();
     let bounds = get_bounds(&journal).await;
     assert_eq!(bounds.start, 10);
@@ -1177,16 +1177,16 @@ where
     journal.destroy().await.unwrap();
 }
 
-/// Test behavior at section boundaries.
+/// Test behavior at blob boundaries.
 /// Assumes items_per_blob = 10.
-async fn test_section_boundary_behavior<F, J>(factory: &F)
+async fn test_blob_boundary_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
 {
-    let mut journal = factory("section-boundary".into()).await.unwrap();
+    let mut journal = factory("blob-boundary".into()).await.unwrap();
 
-    // Append exactly one section worth of items (10 items)
+    // Append exactly one blob worth of items (10 items)
     for i in 0..10u64 {
         let pos = journal.append(&(i * 100)).await.unwrap();
         assert_eq!(pos, i);
@@ -1331,14 +1331,14 @@ where
 }
 
 /// Test append_many across blob boundaries (items_per_blob = 10).
-async fn test_append_many_across_sections<F, J>(factory: &F)
+async fn test_append_many_across_blobs<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
     J: Mutable<Item = u64>,
 {
-    let mut journal = factory("append-many-sections".into()).await.unwrap();
+    let mut journal = factory("append-many-blobs".into()).await.unwrap();
 
-    // Append 25 items in one call, crossing section boundaries at 10 and 20.
+    // Append 25 items in one call, crossing blob boundaries at 10 and 20.
     let items: Vec<u64> = (0..25).map(|i| i * 10).collect();
     let pos = journal.append_many(Many::Flat(&items)).await.unwrap();
     assert_eq!(pos, 24);

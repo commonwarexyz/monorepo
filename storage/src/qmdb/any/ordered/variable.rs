@@ -181,7 +181,7 @@ pub(crate) mod test {
             },
             journal_config: crate::journal::contiguous::variable::Config {
                 partition: format!("log-journal-{seed}"),
-                items_per_section: NZU64!(14), // intentionally small and janky size
+                items_per_blob: NZU64!(14), // intentionally small and janky size
                 write_buffer: NZUsize!(64),
                 compression: None,
                 codec_config: ((), ((0..=10000).into(), ())),

@@ -103,7 +103,7 @@ fn test_config(
             write_buffer: NZUsize!(1024),
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
-            items_per_section: NZU64!(7),
+            items_per_blob: NZU64!(7),
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,

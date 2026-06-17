@@ -120,7 +120,7 @@ mod test {
             },
             log: JournalConfig {
                 partition: format!("log-journal-{suffix}"),
-                items_per_section: NZU64!(7),
+                items_per_blob: NZU64!(7),
                 compression: None,
                 codec_config: ((0..=10000).into(), ()),
                 page_cache,
@@ -159,7 +159,7 @@ mod test {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: "compact-keyless-variable-witness".into(),
-                items_per_section: NZU64!(64),
+                items_per_blob: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -244,7 +244,7 @@ mod test {
     /// (the floor metadata is gone) rather than the misleading `UnexpectedData` (which sounds like
     /// data corruption).
     ///
-    /// Items_per_section=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
+    /// Items_per_blob=7 with batches of 3 appends + 1 commit places commits at locations 0, 4,
     /// 8, 12, .... Pruning to loc=8 removes blob 0 (end=7 <=
     /// 8) and retains blob 1 ([7, 14)). `bounds.start = 7` is a non-commit op (an Append), and the
     /// previous commit at location 4 was pruned. `historical_proof(op_count=8, ...)` asks for the

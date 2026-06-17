@@ -128,7 +128,7 @@ mod tests {
             },
             log: JournalConfig {
                 partition: format!("log-{suffix}"),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,
@@ -152,7 +152,7 @@ mod tests {
             strategy: Sequential,
             witness: crate::journal::contiguous::variable::Config {
                 partition: "compact-immutable-variable-witness".into(),
-                items_per_section: NZU64!(64),
+                items_per_blob: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
@@ -207,24 +207,24 @@ mod tests {
         is_send(db.rewind(loc));
     }
 
-    fn small_sections_config(
+    fn small_blobs_config(
         suffix: &str,
         pooler: &impl BufferPooler,
     ) -> Config<TwoCap, ((), ()), Sequential> {
         let mut cfg = config(suffix, pooler);
-        cfg.log.items_per_section = NZU64!(1);
+        cfg.log.items_per_blob = NZU64!(1);
         cfg
     }
 
-    async fn open_small_sections_db<F: Family>(
+    async fn open_small_blobs_db<F: Family>(
         context: deterministic::Context,
     ) -> Db<F, deterministic::Context, Digest, Digest, Sha256, TwoCap, Sequential> {
-        let cfg = small_sections_config("partition", &context);
+        let cfg = small_blobs_config("partition", &context);
         Db::init(context, cfg).await.unwrap()
     }
 
     #[allow(clippy::type_complexity)]
-    fn open_small_sections<F: Family>(
+    fn open_small_blobs<F: Family>(
         ctx: deterministic::Context,
     ) -> Pin<
         Box<
@@ -241,7 +241,7 @@ mod tests {
                 > + Send,
         >,
     > {
-        Box::pin(open_small_sections_db::<F>(ctx))
+        Box::pin(open_small_blobs_db::<F>(ctx))
     }
 
     #[test_traced("WARN")]
@@ -486,7 +486,7 @@ mod tests {
         executor.start(|ctx| async move {
             test::test_immutable_batch_sequential_key_override(
                 ctx,
-                open_small_sections::<mmr::Family>,
+                open_small_blobs::<mmr::Family>,
             )
             .await;
         });
@@ -571,11 +571,8 @@ mod tests {
     fn test_variable_rewind_pruned_target_errors() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_rewind_pruned_target_errors(
-                ctx,
-                open_small_sections::<mmr::Family>,
-            )
-            .await;
+            test::test_immutable_rewind_pruned_target_errors(ctx, open_small_blobs::<mmr::Family>)
+                .await;
         });
     }
 
@@ -771,7 +768,7 @@ mod tests {
         executor.start(|ctx| async move {
             test::test_immutable_batch_sequential_key_override(
                 ctx,
-                open_small_sections::<mmb::Family>,
+                open_small_blobs::<mmb::Family>,
             )
             .await;
         });
@@ -856,11 +853,8 @@ mod tests {
     fn test_variable_rewind_pruned_target_errors_mmb() {
         let executor = deterministic::Runner::default();
         executor.start(|ctx| async move {
-            test::test_immutable_rewind_pruned_target_errors(
-                ctx,
-                open_small_sections::<mmb::Family>,
-            )
-            .await;
+            test::test_immutable_rewind_pruned_target_errors(ctx, open_small_blobs::<mmb::Family>)
+                .await;
         });
     }
 

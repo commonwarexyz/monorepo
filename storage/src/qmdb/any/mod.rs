@@ -252,7 +252,7 @@ pub(crate) mod test {
             },
             journal_config: VConfig {
                 partition: format!("log-journal-{suffix}"),
-                items_per_section: NZU64!(7),
+                items_per_blob: NZU64!(7),
                 compression: None,
                 codec_config: ((), ()),
                 page_cache,
@@ -2322,8 +2322,8 @@ pub(crate) mod test {
     }
 
     /// `prune()` must advance the bitmap only as far as the authenticated journal actually
-    /// pruned. Journal pruning is section-granular while bitmap pruning rounds to chunk
-    /// boundaries, so a coarse `items_per_section` can leave the journal retaining from the
+    /// pruned. Journal pruning is blob-granular while bitmap pruning rounds to chunk
+    /// boundaries, so a coarse `items_per_blob` can leave the journal retaining from the
     /// start while the bitmap has already crossed the next chunk boundary. A subsequent
     /// `rewind()` to a still-retained early commit must still succeed.
     #[test_traced("INFO")]
@@ -2331,18 +2331,18 @@ pub(crate) mod test {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             // Bitmap chunk size in bits. The bug requires the bitmap to round across at least
-            // one chunk boundary while the journal cannot prune any section.
+            // one chunk boundary while the journal cannot prune any blob.
             const BITMAP_CHUNK_BITS: u64 =
                 commonware_utils::bitmap::Prunable::<BITMAP_CHUNK_BYTES>::CHUNK_SIZE_BITS;
-            // Items-per-section is chosen so that no full section fits in the test's op count,
+            // Items-per-blob is chosen so that no full blob fits in the test's op count,
             // forcing the journal to retain from 0 even when prune is requested past the first
             // bitmap chunk boundary.
-            const ITEMS_PER_SECTION: u64 = 2048;
-            const { assert!(ITEMS_PER_SECTION > BITMAP_CHUNK_BITS) };
+            const ITEMS_PER_BLOB: u64 = 2048;
+            const { assert!(ITEMS_PER_BLOB > BITMAP_CHUNK_BITS) };
 
             let ctx = context.child("db");
             let mut cfg = variable_db_config::<OneCap>("rg", &ctx);
-            cfg.journal_config.items_per_section = NZU64!(ITEMS_PER_SECTION);
+            cfg.journal_config.items_per_blob = NZU64!(ITEMS_PER_BLOB);
 
             let mut db: UnorderedVariable =
                 UnorderedVariableDb::init(ctx.child("storage"), cfg).await.unwrap();
@@ -2382,17 +2382,17 @@ pub(crate) mod test {
                 *prune_loc > BITMAP_CHUNK_BITS,
                 "prune_loc {prune_loc:?} must exceed one bitmap chunk ({BITMAP_CHUNK_BITS} bits)"
             );
-            // prune_loc must lie within the first journal section so the journal cannot
-            // prune any section, leaving bounds.start at 0 to expose the bitmap drift.
+            // prune_loc must lie within the first journal blob so the journal cannot
+            // prune any blob, leaving bounds.start at 0 to expose the bitmap drift.
             assert!(
-                *prune_loc < ITEMS_PER_SECTION,
-                "prune_loc {prune_loc:?} must be < {ITEMS_PER_SECTION} so the journal retains section 0"
+                *prune_loc < ITEMS_PER_BLOB,
+                "prune_loc {prune_loc:?} must be < {ITEMS_PER_BLOB} so the journal retains blob 0"
             );
             assert!(db.inactivity_floor_loc() >= prune_loc);
 
             db.prune(prune_loc).await.unwrap();
 
-            // Journal could not prune any section, so it still retains from 0. The bitmap
+            // Journal could not prune any blob, so it still retains from 0. The bitmap
             // must therefore also remain at 0.
             let bounds = db.bounds().await;
             assert_eq!(bounds.start, Location::new(0));

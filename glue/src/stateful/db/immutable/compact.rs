@@ -553,7 +553,7 @@ mod tests {
             strategy: Sequential,
             witness: commonware_storage::journal::contiguous::variable::Config {
                 partition: format!("stateful-immutable-unjournaled-{suffix}-witness"),
-                items_per_section: NZU64!(64),
+                items_per_blob: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(pooler, NZU16!(101), NZUsize!(11)),
@@ -832,7 +832,7 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             // One witness entry per section so pruning takes effect at entry granularity.
             let mut config = fixed_config("prune", &context);
-            config.witness.items_per_section = NZU64!(1);
+            config.witness.items_per_blob = NZU64!(1);
             let mut db = FixedDb::init(context.child("db"), config).await.unwrap();
 
             // Commit three ranges, recording each target.

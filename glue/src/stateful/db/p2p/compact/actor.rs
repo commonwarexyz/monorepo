@@ -425,7 +425,7 @@ mod tests {
     async fn init_db(context: deterministic::Context) -> TestDb {
         let witness = commonware_storage::journal::contiguous::variable::Config {
             partition: "compact-p2p-test-witness".into(),
-            items_per_section: commonware_utils::NZU64!(64),
+            items_per_blob: commonware_utils::NZU64!(64),
             compression: None,
             codec_config: (),
             page_cache: commonware_runtime::buffer::paged::CacheRef::from_pooler(

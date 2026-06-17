@@ -187,7 +187,7 @@ pub struct Config<C> {
     ///
     /// Once set, this value cannot be changed across restarts.
     /// All non-final blobs are logically full.
-    pub items_per_section: NonZeroU64,
+    pub items_per_blob: NonZeroU64,
 
     /// Optional compression level for stored items.
     pub compression: Option<u8>,
@@ -394,7 +394,7 @@ impl<E: Context, V: CodecShared> Reader<E, V> {
             let actual_len = size.checked_add(varint_len).ok_or(Error::OffsetOverflow)?;
             if actual_len != item_len {
                 return Err(Error::OffsetDataMismatch {
-                    section: blob,
+                    blob,
                     offset,
                     expected_len: item_len,
                     actual_len,
@@ -714,7 +714,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// it will be updated to match the data blobs.
     #[boxed]
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
-        let items_per_blob = cfg.items_per_section.get();
+        let items_per_blob = cfg.items_per_blob.get();
         let data_partition = cfg.data_partition();
         let data_context = context.child("data");
 
@@ -725,7 +725,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             context.child("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
+                items_per_blob: cfg.items_per_blob,
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             },
@@ -764,7 +764,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             bounds,
             dirty_from_blob: None,
-            items_per_blob: cfg.items_per_section,
+            items_per_blob: cfg.items_per_blob,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
@@ -781,7 +781,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// and next append at position `size`.
     #[commonware_macros::stability(ALPHA)]
     pub async fn init_at_size(context: E, cfg: Config<V::Cfg>, size: u64) -> Result<Self, Error> {
-        let items_per_blob = cfg.items_per_section.get();
+        let items_per_blob = cfg.items_per_blob.get();
         let data_partition = cfg.data_partition();
         let data_context = context.child("data");
 
@@ -792,7 +792,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             context.child("offsets"),
             fixed::Config {
                 partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
+                items_per_blob: cfg.items_per_blob,
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             },
@@ -822,7 +822,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             offsets,
             bounds: size..size,
             dirty_from_blob: None,
-            items_per_blob: cfg.items_per_section,
+            items_per_blob: cfg.items_per_blob,
             compression: cfg.compression,
             codec_config: cfg.codec_config,
             metrics: Arc::new(metrics),
@@ -865,7 +865,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         debug!(
             range.start,
             range.end,
-            items_per_blob = cfg.items_per_section.get(),
+            items_per_blob = cfg.items_per_blob.get(),
             "initializing contiguous variable journal for sync"
         );
 
@@ -2077,7 +2077,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-adopted-variable".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2120,7 +2120,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "append-many-compressed".into(),
-                items_per_section: NZU64!(3),
+                items_per_blob: NZU64!(3),
                 compression: Some(1),
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2153,7 +2153,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-max".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2174,7 +2174,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "append-size-overflow".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2205,7 +2205,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "read-many-after-reopen".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2244,7 +2244,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "read-many-unsorted".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2279,7 +2279,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "read-many-consecutive-after-reopen".into(),
-                items_per_section: NZU64!(20),
+                items_per_blob: NZU64!(20),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -2323,7 +2323,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "offsets-loss-after-prune".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2379,7 +2379,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "data-loss-test".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2440,7 +2440,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "replay".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2555,7 +2555,7 @@ mod tests {
                 async move {
                     let cfg = Config {
                         partition: format!("generic-test-{test_name}"),
-                        items_per_section: NZU64!(10),
+                        items_per_blob: NZU64!(10),
                         compression: None,
                         codec_config: (),
                         page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2576,7 +2576,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "sequential-prunes".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2662,7 +2662,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "prune-all-reinit".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2749,7 +2749,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery-prune-crash".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2812,7 +2812,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery-offsets-ahead".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2849,7 +2849,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "offsets-empty-diff-blob".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2883,7 +2883,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "offsets-end-behind-data-oldest".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2918,7 +2918,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "offsets-mid-blob-ahead".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2957,7 +2957,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "watermark-below-start".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -2999,7 +2999,7 @@ mod tests {
             // === Setup: Create Variable wrapper with partial data ===
             let cfg = Config {
                 partition: "recovery-append-crash".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3054,7 +3054,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-overlong-data-blob".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3086,7 +3086,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-over-capacity-non-newest".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3119,7 +3119,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config::<()> {
                 partition: "recovery-empty-data-tail".into(),
-                items_per_section: NZU64!(1),
+                items_per_blob: NZU64!(1),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3179,7 +3179,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config::<()> {
                 partition: "recovery-empty-data-no-items".into(),
-                items_per_section: NZU64!(1),
+                items_per_blob: NZU64!(1),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3190,7 +3190,7 @@ mod tests {
                 .unwrap();
 
             // Append across multiple blob boundaries without ever syncing. Each
-            // append opens a fresh blob blob, but no item bytes (and no offsets)
+            // append opens a fresh blob, but no item bytes (and no offsets)
             // become durable, so recovery sees multiple empty blobs and no
             // durable data.
             assert_eq!(journal.append(&10).await.unwrap(), 0);
@@ -3233,7 +3233,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-rollback-after-gap".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3320,7 +3320,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-empty-oldest-blob".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3391,7 +3391,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-clean-short-oldest-blob".into(),
-                items_per_section: NZU64!(64),
+                items_per_blob: NZU64!(64),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3412,7 +3412,7 @@ mod tests {
 
             let physical_page_size = LARGE_PAGE_SIZE.get() as u64 + 12;
             let items_in_page = LARGE_PAGE_SIZE.get() as u64 / 32;
-            assert!(items_in_page < cfg.items_per_section.get());
+            assert!(items_in_page < cfg.items_per_blob.get());
 
             let data_partition = cfg.data_partition();
             let mut names = context.scan(&data_partition).await.unwrap();
@@ -3486,7 +3486,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-partial-sync-loop".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3557,7 +3557,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data ===
             let cfg = Config {
                 partition: "recovery-multiple-prunes".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3625,7 +3625,7 @@ mod tests {
             // === Setup: Create Variable wrapper with data across multiple blobs ===
             let cfg = Config {
                 partition: "recovery-rewind-crash".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3734,7 +3734,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-anchor-too-far".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3784,7 +3784,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-short-middle-retry".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3846,7 +3846,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "rewind-commit-reopen".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3888,7 +3888,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-boundary-data-rewind".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3931,7 +3931,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-short-blob-after-anchor".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -3996,7 +3996,7 @@ mod tests {
             executor.start_and_recover(|context| async move {
                 let cfg = Config {
                     partition: "offsets-init-repair-sync".into(),
-                    items_per_section: NZU64!(10),
+                    items_per_blob: NZU64!(10),
                     compression: None,
                     codec_config: (),
                     page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -4063,7 +4063,7 @@ mod tests {
             executor.start_and_recover(|context| async move {
                 let cfg = Config {
                     partition: "data-init-repair-sync".into(),
-                    items_per_section: NZU64!(10),
+                    items_per_blob: NZU64!(10),
                     compression: None,
                     codec_config: (),
                     page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -4130,7 +4130,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-empty-after-prune".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -4200,7 +4200,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "concurrent-sync-recovery".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -4242,7 +4242,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "mid-blob-durable-anchor".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4280,7 +4280,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-zero".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4314,14 +4314,14 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-boundary".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize at position 10 (exactly at blob 1 boundary with items_per_section=5)
+            // Initialize at position 10 (exactly at blob 1 boundary with items_per_blob=5)
             let mut journal =
                 Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 10)
                     .await
@@ -4355,14 +4355,14 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-mid".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
                 write_buffer: NZUsize!(1024),
             };
 
-            // Initialize at position 7 (middle of blob 1 with items_per_section=5)
+            // Initialize at position 7 (middle of blob 1 with items_per_blob=5)
             let mut journal =
                 Journal::<_, u64>::init_at_size(context.child("storage"), cfg.clone(), 7)
                     .await
@@ -4391,7 +4391,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-persist".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4445,7 +4445,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-persist-empty".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4488,7 +4488,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-clears-existing".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4537,7 +4537,7 @@ mod tests {
             |context| async move {
                 let cfg = Config {
                     partition,
-                    items_per_section: NZU64!(5),
+                    items_per_blob: NZU64!(5),
                     compression: None,
                     codec_config: (),
                     page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4569,7 +4569,7 @@ mod tests {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = Config {
                 partition,
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4597,7 +4597,7 @@ mod tests {
             |context| async move {
                 let cfg = Config {
                     partition,
-                    items_per_section: NZU64!(5),
+                    items_per_blob: NZU64!(5),
                     compression: None,
                     codec_config: (),
                     page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4626,7 +4626,7 @@ mod tests {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = Config {
                 partition,
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4654,7 +4654,7 @@ mod tests {
             |context| async move {
                 let cfg = Config {
                     partition,
-                    items_per_section: NZU64!(5),
+                    items_per_blob: NZU64!(5),
                     compression: None,
                     codec_config: (),
                     page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4684,7 +4684,7 @@ mod tests {
             *context.storage_fault_config().write() = deterministic::FaultConfig::default();
             let cfg = Config {
                 partition,
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4718,7 +4718,7 @@ mod tests {
             for (index, clear_data) in [false, true].into_iter().enumerate() {
                 let cfg = Config {
                     partition: format!("init-at-size-staged-reset-crash-{index}"),
-                    items_per_section: NZU64!(5),
+                    items_per_blob: NZU64!(5),
                     compression: None,
                     codec_config: (),
                     page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4739,7 +4739,7 @@ mod tests {
 
                 let offsets_cfg = fixed::Config {
                     partition: cfg.offsets_partition(),
-                    items_per_blob: cfg.items_per_section,
+                    items_per_blob: cfg.items_per_blob,
                     page_cache: cfg.page_cache.clone(),
                     write_buffer: cfg.write_buffer,
                 };
@@ -4795,7 +4795,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-overwrites-pending-target".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4815,7 +4815,7 @@ mod tests {
             // checkpoint carries a clear target of 5 while the data blobs still holds all 12 items.
             let offsets_cfg = fixed::Config {
                 partition: cfg.offsets_partition(),
-                items_per_blob: cfg.items_per_section,
+                items_per_blob: cfg.items_per_blob,
                 page_cache: cfg.page_cache.clone(),
                 write_buffer: cfg.write_buffer,
             };
@@ -4855,7 +4855,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-discards-same-blob-stale-data".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4911,7 +4911,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-mid-blob".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -4967,7 +4967,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-multi-blob".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -5020,7 +5020,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "align-journals-mid-blob-pruning-boundary".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -5080,7 +5080,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-crash-recovery".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -5129,7 +5129,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "prune-no-backwards".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -5164,7 +5164,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-large".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -5197,7 +5197,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "init-at-size-prune".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
@@ -5244,7 +5244,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test-fresh-start".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5286,7 +5286,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test-overlap".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5299,7 +5299,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            // Add data at positions 0-19 (blobs 0-3 with items_per_section=5)
+            // Add data at positions 0-19 (blobs 0-3 with items_per_blob=5)
             for i in 0..20u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
@@ -5355,7 +5355,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test-invalid".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5377,10 +5377,10 @@ mod tests {
     fn test_init_sync_existing_data_exact_match() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
+            let items_per_blob = NZU64!(5);
             let cfg = Config {
                 partition: "test-exact-match".into(),
-                items_per_section,
+                items_per_blob,
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5393,7 +5393,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            // Add data at positions 0-19 (blobs 0-3 with items_per_section=5)
+            // Add data at positions 0-19 (blobs 0-3 with items_per_blob=5)
             for i in 0..20u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
@@ -5446,10 +5446,10 @@ mod tests {
     fn test_init_sync_existing_data_exceeds_upper_bound() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
+            let items_per_blob = NZU64!(5);
             let cfg = Config {
                 partition: "test-unexpected-data".into(),
-                items_per_section,
+                items_per_blob,
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5462,7 +5462,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            // Add data at positions 0-29 (blobs 0-5 with items_per_section=5)
+            // Add data at positions 0-29 (blobs 0-5 with items_per_blob=5)
             for i in 0..30u64 {
                 journal.append(&(i * 1000)).await.unwrap();
             }
@@ -5492,7 +5492,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test-empty-stale-position".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5539,7 +5539,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "test-stale-clear-to-size".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5587,10 +5587,10 @@ mod tests {
     fn test_init_sync_existing_data_stale() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
+            let items_per_blob = NZU64!(5);
             let cfg = Config {
                 partition: "test-stale".into(),
-                items_per_section,
+                items_per_blob,
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5603,7 +5603,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            // Add data at positions 0-9 (blobs 0-1 with items_per_section=5)
+            // Add data at positions 0-9 (blobs 0-1 with items_per_blob=5)
             for i in 0..10u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
@@ -5640,10 +5640,10 @@ mod tests {
     fn test_init_sync_blob_boundaries() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
+            let items_per_blob = NZU64!(5);
             let cfg = Config {
                 partition: "test-boundaries".into(),
-                items_per_section,
+                items_per_blob,
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5656,7 +5656,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            // Add data at positions 0-24 (blobs 0-4 with items_per_section=5)
+            // Add data at positions 0-24 (blobs 0-4 with items_per_blob=5)
             for i in 0..25u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
@@ -5708,10 +5708,10 @@ mod tests {
     fn test_init_sync_same_blob_bounds() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let items_per_section = NZU64!(5);
+            let items_per_blob = NZU64!(5);
             let cfg = Config {
                 partition: "test-same-blob".into(),
-                items_per_section,
+                items_per_blob,
                 compression: None,
                 codec_config: (),
                 write_buffer: NZUsize!(1024),
@@ -5724,7 +5724,7 @@ mod tests {
                     .await
                     .expect("Failed to create initial journal");
 
-            // Add data at positions 0-14 (blobs 0-2 with items_per_section=5)
+            // Add data at positions 0-14 (blobs 0-2 with items_per_blob=5)
             for i in 0..15u64 {
                 journal.append(&(i * 100)).await.unwrap();
             }
@@ -5772,17 +5772,17 @@ mod tests {
         });
     }
 
-    /// Test contiguous variable journal with items_per_section=1.
+    /// Test contiguous variable journal with items_per_blob=1.
     ///
     /// This is a regression test for a bug where reading from size()-1 fails
-    /// when using items_per_section=1, particularly after pruning and restart.
+    /// when using items_per_blob=1, particularly after pruning and restart.
     #[test_traced]
     fn test_single_item_per_blob() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "single-item-per-blob".into(),
-                items_per_section: NZU64!(1),
+                items_per_blob: NZU64!(1),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -5972,7 +5972,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "clear-test".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6055,7 +6055,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "metrics".into(),
-                items_per_section: NZU64!(2),
+                items_per_blob: NZU64!(2),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
@@ -6124,7 +6124,7 @@ mod tests {
             // page cache rather than staying resident in each blob's partial tail page.
             let cfg = Config {
                 partition: "miss".into(),
-                items_per_section: NZU64!(50),
+                items_per_blob: NZU64!(50),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(10)),
@@ -6159,7 +6159,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "snapshot-frozen".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6205,7 +6205,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "snapshot-prune".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: Some(3),
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6248,7 +6248,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "snapshot-rewind-sealed".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6286,7 +6286,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "snapshot-rewind-tail".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6330,7 +6330,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "snapshot-concurrent".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6376,7 +6376,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "snapshot-replay".into(),
-                items_per_section: NZU64!(5),
+                items_per_blob: NZU64!(5),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6425,7 +6425,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-full-newest-no-successor".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6472,7 +6472,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "rewind-crash-offsets-only".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
@@ -6511,7 +6511,7 @@ mod tests {
         executor.start(|context| async move {
             let cfg = Config {
                 partition: "recovery-gap-in-retained-blobs".into(),
-                items_per_section: NZU64!(10),
+                items_per_blob: NZU64!(10),
                 compression: None,
                 codec_config: (),
                 page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),

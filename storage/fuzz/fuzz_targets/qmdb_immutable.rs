@@ -26,7 +26,7 @@ const MAX_VALUE_SIZE: usize = 256;
 const MAX_PROOF_OPS: u64 = 100;
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: usize = 9;
-const ITEMS_PER_SECTION: u64 = 5;
+const LOG_ITEMS_PER_BLOB: u64 = 5;
 const ITEMS_PER_BLOB: u64 = 11;
 
 #[derive(Arbitrary, Debug, Clone)]
@@ -111,7 +111,7 @@ fn db_config(
         },
         log: VConfig {
             partition: format!("log-{suffix}"),
-            items_per_section: NZU64!(ITEMS_PER_SECTION),
+            items_per_blob: NZU64!(LOG_ITEMS_PER_BLOB),
             compression: None,
             codec_config: ((), ((0..=10000).into(), ())),
             write_buffer: NZUsize!(1024),
