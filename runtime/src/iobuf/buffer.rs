@@ -655,12 +655,7 @@ impl PooledSlot {
     /// allocation for this slot. Until the slot is created, no free bit points
     /// at it and no [`PooledBuffer`] may be built from it.
     #[inline]
-    pub fn new(
-        slot: u32,
-        capacity: usize,
-        class_id: u32,
-        thread_cache_capacity: u32,
-    ) -> Self {
+    pub fn new(slot: u32, capacity: usize, class_id: u32, thread_cache_capacity: u32) -> Self {
         Self {
             refs: AtomicUsize::new(1),
             lease: MaybeUninit::uninit(),
@@ -939,7 +934,10 @@ pub(crate) fn allocate_aligned_mut(
     zeroed: bool,
 ) -> (NonNull<u8>, OwnerRef) {
     assert!(capacity > 0, "capacity must be greater than zero");
-    assert!(alignment.is_power_of_two(), "alignment must be a power of two");
+    assert!(
+        alignment.is_power_of_two(),
+        "alignment must be a power of two"
+    );
     if alignment > align_of::<HeapHeader>() {
         let (ptr, _, owner) = allocate_aligned(capacity, alignment, zeroed);
         return (ptr, owner);
@@ -1208,8 +1206,7 @@ unsafe fn release_heap(header: NonNull<HeapHeader>) {
 unsafe fn release_front_heap(base: NonNull<HeapHeader>, ptr: NonNull<u8>, cap: usize) {
     let alloc_size = front_heap_alloc_size(base, ptr, cap);
     // SAFETY: front heap allocations are created with this exact layout.
-    let layout =
-        unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<HeapHeader>()) };
+    let layout = unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<HeapHeader>()) };
     // SAFETY: base/layout came from the global allocator on the front branch.
     unsafe { dealloc(base.as_ptr().cast::<u8>(), layout) };
 }
