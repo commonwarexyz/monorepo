@@ -1,18 +1,20 @@
 use super::slot::{Change as ProposalChange, Slot as ProposalSlot, Status as ProposalStatus};
 use crate::{
     simplex::{
+        actors::span::ViewSpan,
         metrics::TimeoutReason,
         types::{Artifact, Attributable, Finalization, Notarization, Nullification, Proposal},
     },
     types::{Participant, Round as Rnd},
 };
 use commonware_cryptography::{certificate::Scheme, Digest, PublicKey};
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{futures::Aborter, ordered::Quorum};
 use std::{
     mem::replace,
     time::{Duration, SystemTime},
 };
-use tracing::debug;
+use tracing::{debug, info_span, Span};
 
 /// Tracks the leader of a round.
 #[derive(Debug, Clone)]
@@ -39,6 +41,9 @@ pub struct Round<S: Scheme, D: Digest> {
     scheme: S,
 
     round: Rnd,
+
+    // Root span for all work attributed to this view.
+    span: ViewSpan,
 
     // Leader is set as soon as we know the seed for the view (if any).
     leader: Option<Leader<S::PublicKey>>,
@@ -68,6 +73,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             start,
             scheme,
             round,
+            span: ViewSpan::new(),
             leader: None,
             proposal: ProposalSlot::new(),
             leader_deadline: None,
@@ -173,6 +179,34 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             return;
         }
         self.certify = CertifyState::Aborted;
+    }
+
+    /// Returns the root span for all work attributed to this view.
+    ///
+    /// Disabled once the view is decided (see [Self::close_span]).
+    pub fn span(&self) -> Span {
+        self.span.get()
+    }
+
+    /// Opens the view's root span when the round becomes the active view.
+    pub fn open_span(&mut self) {
+        let round = self.round;
+        self.span.open(|| {
+            info_span!(
+                parent: None,
+                "simplex.voter.view",
+                epoch = round.epoch().traced(),
+                view = round.view().traced()
+            )
+        });
+    }
+
+    /// Closes the view's root span once the view is decided.
+    ///
+    /// The round is retained for backfill and deduplication, but its work no
+    /// longer anchors a trace.
+    pub fn close_span(&mut self) {
+        self.span.close();
     }
 
     /// Returns the elected leader (if any) for this round.

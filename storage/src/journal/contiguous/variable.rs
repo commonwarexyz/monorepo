@@ -16,7 +16,7 @@ use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
     buffer::paged::{self, CacheRef},
-    Buf as _, IoBufMut,
+    Buf as _, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
 #[commonware_macros::stability(ALPHA)]
@@ -1039,6 +1039,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         if items_count == 0 {
             return Err(Error::EmptyAppend);
         }
+        let encoded = IoBuf::from(encoded);
 
         // Reject the append before writing anything (to either the data or offsets journal) if
         // it would push the size past `u64::MAX`.
@@ -1062,7 +1063,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             // into absolute offsets.
             let base_offset = self
                 .data
-                .append_raw(section, &encoded[batch_start..batch_end])
+                .append_raw(section, encoded.slice(batch_start..batch_end))
                 .await?;
 
             let absolute_offsets = item_starts[written..written + batch_count]

@@ -212,6 +212,15 @@ impl Buffer {
         true
     }
 
+    /// Replaces the buffered contents with `data` positioned at blob offset `offset`, without
+    /// copying. The capacity and pool are preserved; a later mutation recovers or reallocates
+    /// backing via [Self::writable].
+    pub(super) fn replace(&mut self, offset: u64, data: IoBuf) {
+        self.len = data.len();
+        self.data = data;
+        self.offset = offset;
+    }
+
     /// Appends the provided `data` to the buffer, and returns `true` if the buffer is over capacity
     /// after the append.
     ///
