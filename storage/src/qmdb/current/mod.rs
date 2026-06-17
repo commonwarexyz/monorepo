@@ -348,7 +348,7 @@ use commonware_codec::{CodecShared, FixedSize};
 use commonware_cryptography::Hasher;
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use commonware_utils::{bitmap::Prunable as BitMap, sync::AsyncMutex};
+use commonware_utils::bitmap::Prunable as BitMap;
 use std::sync::Arc;
 
 pub mod batch;
@@ -479,7 +479,7 @@ where
     let db = db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
         metrics,

@@ -70,9 +70,7 @@ use crate::{
 use commonware_codec::{Codec, CodecShared, Read as CodecRead};
 use commonware_cryptography::{DigestOf, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::{
-    bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, sync::AsyncMutex, Array,
-};
+use commonware_utils::{bitmap::Prunable as BitMap, channel::oneshot, range::NonEmptyRange, Array};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -231,10 +229,10 @@ where
             .await?;
 
     let metrics = db::Metrics::new(context);
-    let current_db = db::Db {
+    let mut current_db = db::Db {
         any,
         grafted_tree,
-        metadata: AsyncMutex::new(metadata),
+        metadata,
         strategy,
         root,
         metrics,
