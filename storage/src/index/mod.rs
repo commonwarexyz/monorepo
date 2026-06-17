@@ -2425,15 +2425,7 @@ mod tests {
     /// Exercises a single translated key holding a very large overflow chain, ensuring inserts and
     /// the resulting `Vec` overflow stay correct at scale.
     fn run_index_large_collision_chain<I: Unordered<Value = u64>>(index: &mut I) {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // miri uses a smaller chain to keep runtime reasonable while exercising the same
-                // insert and overflow paths.
-                const ITEMS: usize = 5_000;
-            } else {
-                const ITEMS: usize = 50_000;
-            }
-        }
+        const ITEMS: usize = 50_000;
         for i in 0..ITEMS {
             index.insert(b"", i as u64);
         }
