@@ -252,6 +252,53 @@ pub mod test {
         });
     }
 
+    /// The sync boundary recorded from a merkleized batch must match the boundary recovered by the
+    /// database after reopening. This can diverge if the batch boundary is derived from physical
+    /// bitmap pruning rather than the batch's declared inactivity floor, because the floor can
+    /// advance past a chunk even when pruning has not run.
+    #[test_traced("INFO")]
+    pub fn test_merkleized_batch_sync_boundary_survives_reopen() {
+        deterministic::Runner::default().start(|ctx| async move {
+            let partition = "batch-boundary-reopen".to_string();
+            let mut db = open_db(ctx.child("current"), partition.clone()).await;
+
+            let key = Sha256::fill(1u8);
+            let mut last_batch_boundary = mmr::Location::new(0);
+            for i in 0..300u64 {
+                let value = Sha256::hash(&i.to_be_bytes());
+                let batch = db
+                    .new_batch()
+                    .write(key, Some(value))
+                    .merkleize(&db, None)
+                    .await
+                    .unwrap();
+                last_batch_boundary = batch.sync_boundary();
+                db.apply_batch(batch).await.unwrap();
+            }
+            db.sync().await.unwrap();
+
+            let db_boundary = db.sync_boundary();
+            assert!(
+                *db_boundary > 0,
+                "inactivity floor never crossed a chunk; add more commits"
+            );
+            assert_eq!(
+                last_batch_boundary,
+                db_boundary,
+                "batch boundary diverged from db boundary"
+            );
+
+            drop(db);
+            let reopened = open_db(ctx.child("reopen"), partition).await;
+            assert_eq!(
+                reopened.sync_boundary(),
+                last_batch_boundary,
+                "reopened db boundary disagrees with the boundary recorded from the last merkleized batch"
+            );
+            reopened.destroy().await.unwrap();
+        });
+    }
+
     #[test_traced("DEBUG")]
     pub fn test_current_db_verify_proof_over_bits_in_uncommitted_chunk() {
         shared::test_verify_proof_over_bits_in_uncommitted_chunk(open_db);
