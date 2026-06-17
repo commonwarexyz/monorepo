@@ -1113,7 +1113,8 @@ impl<
                     parent: self.state.view_span(current_view),
                     "simplex.voter.timeout",
                     epoch = self.state.epoch().traced(),
-                    view = current_view.traced()
+                    view = current_view.traced(),
+                    reason = reason.as_str()
                 );
                 self.handle_timeout(
                     &mut batcher,

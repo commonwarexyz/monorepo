@@ -401,8 +401,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// Constructs a nullify vote for the current view, if eligible.
     ///
     /// `reason` labels why the view timed out (as returned by
-    /// [`Self::next_timeout`]) and is only used for metrics; retries are
-    /// always recorded as [`TimeoutReason::Retry`].
+    /// [`Self::next_timeout`]) and is only used for metrics. Retries are not
+    /// counted because the timeout metric tracks timed-out views, not rebroadcasts.
     ///
     /// Returns `Some((is_retry, nullify))` where `is_retry` is true when this is not the first
     /// nullify emission for `view`. Returns `None` if `view` is not the current view or if we
@@ -419,17 +419,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             let round = self.create_round(view);
             (round.construct_nullify()?, round.leader())
         };
-        let reason = if is_retry {
-            TimeoutReason::Retry
-        } else {
-            reason
-        };
         let nullify = Nullify::sign::<D>(&self.scheme, Rnd::new(self.epoch, view))?;
         self.nullify_views.insert(view);
-        if let Some(leader) = leader {
-            self.timeouts
-                .get_or_create(&Timeout::new(&leader.key, reason))
-                .inc();
+        if !is_retry {
+            if let Some(leader) = leader {
+                self.timeouts
+                    .get_or_create(&Timeout::new(&leader.key, reason))
+                    .inc();
+            }
         }
         Some((is_retry, nullify))
     }
@@ -2024,7 +2021,7 @@ mod tests {
             assert!(!was_retry);
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
-            // Retries are classified separately from the original timeout reason.
+            // Retries should not be counted as additional timed-out views.
             state.trigger_timeout(view, TimeoutReason::LeaderTimeout);
             let (was_retry, _) = state
                 .construct_nullify(view, TimeoutReason::Retry)
@@ -2033,7 +2030,7 @@ mod tests {
             assert_eq!(state.timeouts.get_or_create(&label).get(), 1);
 
             let retry_label = Timeout::new(leader_key, TimeoutReason::Retry);
-            assert_eq!(state.timeouts.get_or_create(&retry_label).get(), 1);
+            assert_eq!(state.timeouts.get_or_create(&retry_label).get(), 0);
         });
     }
 
