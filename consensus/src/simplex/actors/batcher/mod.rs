@@ -190,7 +190,10 @@ mod tests {
             select! {
                 message = voter_receiver.recv() => match message {
                     Some(voter::Message::Timeout { round, reason, .. }) => {
-                        panic!("unexpected voter timeout for view {}: {reason:?}", round.view());
+                        panic!(
+                            "unexpected voter timeout for view {}: {reason:?}",
+                            round.view()
+                        );
                     }
                     Some(_) => {}
                     None => panic!("voter receiver closed"),

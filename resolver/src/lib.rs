@@ -163,10 +163,7 @@ commonware_macros::stability_scope!(BETA {
         /// latest [`retain`](Self::retain) predicate.
         ///
         /// Passing a bare key is supported when `Subscriber: Default`.
-        fn fetch<F>(
-            &mut self,
-            key: F,
-        ) -> Feedback
+        fn fetch<F>(&mut self, key: F) -> Feedback
         where
             F: Into<Fetch<Self::Key, Self::Subscriber>> + Send;
 

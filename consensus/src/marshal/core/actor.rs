@@ -409,7 +409,7 @@ where
                 Ok(block) => {
                     self.ingest(&block, &mut buffer, &mut application, &mut resolver)
                         .await;
-                },
+                }
                 Err(key) => {
                     match key {
                         SubscriptionKey::Digest(digest) => {

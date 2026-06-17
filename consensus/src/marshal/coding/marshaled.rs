@@ -362,10 +362,7 @@ where
                         result = block_request => match result {
                             Ok(block) => block,
                             Err(_) => {
-                                debug!(
-                                    reason = "block unavailable",
-                                    "skipping verification"
-                                );
+                                debug!(reason = "block unavailable", "skipping verification");
                                 return;
                             }
                         },

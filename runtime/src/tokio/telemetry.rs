@@ -77,9 +77,7 @@ pub fn init(context: Context, logs: Logs, metrics: Option<SocketAddr>, traces: O
                 .with(trace_layer)
                 .with(console_layer);
         } else {
-            let registry = Registry::default()
-                .with(log_layer)
-                .with(trace_layer);
+            let registry = Registry::default().with(log_layer).with(trace_layer);
         }
     }
 

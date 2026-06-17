@@ -269,8 +269,7 @@ where
                             .retain(|key, subscriber| predicate(key, subscriber));
                         let subscribers = &self.subscribers;
                         self.fetcher.retain(|key| subscribers.contains(key));
-                        let count =
-                            self.inflight.retain(|key| subscribers.contains(key)) as u64;
+                        let count = self.inflight.retain(|key| subscribers.contains(key)) as u64;
                         self.record_cancellations(count);
                     }
                 }
