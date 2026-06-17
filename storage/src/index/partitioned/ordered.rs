@@ -49,7 +49,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Returns an iterator over the values of the lexicographically first translated key across
     /// all partitions, or None if every partition is empty.
-    fn first_translated_values(&self) -> Option<Values<'_, T::Key, V>> {
+    fn first_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
         self.partitions
             .iter()
             .find_map(|p| p.first_translated_values())
@@ -57,7 +57,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Returns an iterator over the values of the lexicographically last translated key across
     /// all partitions, or None if every partition is empty.
-    fn last_translated_values(&self) -> Option<Values<'_, T::Key, V>> {
+    fn last_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
         self.partitions
             .iter()
             .rev()

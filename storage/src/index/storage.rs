@@ -2,7 +2,10 @@
 
 use crate::index::Cursor as CursorTrait;
 use commonware_runtime::telemetry::metrics::{Counter, Gauge};
-use std::collections::BTreeMap;
+use std::{
+    collections::HashMap,
+    hash::{BuildHasher, Hash},
+};
 
 /// Maps a translated key to the values that conflict with the value stored inline in the index's
 /// map, stored oldest first.
@@ -14,7 +17,7 @@ use std::collections::BTreeMap;
 ///
 /// The logical chain of values for a key is the inline map value followed by the overflow values
 /// in reverse order (newest first).
-pub type Overflow<K, V> = BTreeMap<K, Vec<V>>;
+pub type Overflow<K, V, S> = HashMap<K, Vec<V>, S>;
 
 /// Adds a value displaced from a key's inline slot to that key's overflow chain.
 ///
@@ -22,7 +25,11 @@ pub type Overflow<K, V> = BTreeMap<K, Vec<V>>;
 /// keep the hot (vacant or collision-free) insert path small.
 #[cold]
 #[inline(never)]
-pub(super) fn push_displaced<K: Ord + Copy, V>(overflow: &mut Overflow<K, V>, key: K, old: V) {
+pub(super) fn push_displaced<K: Hash + Eq + Copy, V, S: BuildHasher>(
+    overflow: &mut Overflow<K, V, S>,
+    key: K,
+    old: V,
+) {
     overflow.entry(key).or_default().push(old);
 }
 
@@ -80,11 +87,12 @@ enum State {
 ///   may hold the index of a just-deleted slot, which is only ever stepped down from, never
 ///   read).
 /// - [`State::EntryRemoved`] implies the chain was taken and is empty.
-pub struct Cursor<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> {
+pub struct Cursor<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHasher>
+{
     // The occupied index entry holding the inline value (and its key) while the cursor exists.
     entry: Option<E>,
     // The overflow values for all keys in the index, used to take and reinstall `chain`.
-    overflow: &'a mut Overflow<K, V>,
+    overflow: &'a mut Overflow<K, V, S>,
     // The key's overflow values; `None` until first needed.
     chain: Option<Vec<V>>,
     // The current position/state of the cursor.
@@ -96,12 +104,14 @@ pub struct Cursor<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> 
     pruned: &'a Counter,
 }
 
-impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> Cursor<'a, K, V, E> {
+impl<'a, K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHasher>
+    Cursor<'a, K, V, E, S>
+{
     /// Creates a new [Cursor] from an occupied index entry.
     #[inline]
     pub(super) const fn new(
         entry: E,
-        overflow: &'a mut Overflow<K, V>,
+        overflow: &'a mut Overflow<K, V, S>,
         keys: &'a Gauge,
         items: &'a Gauge,
         pruned: &'a Counter,
@@ -136,8 +146,12 @@ impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> Cursor<'a, K,
     }
 }
 
-impl<K: Ord + Copy + Send + Sync, V: Send + Sync, E: IndexEntry<V, Key = K>> CursorTrait
-    for Cursor<'_, K, V, E>
+impl<
+        K: Hash + Eq + Copy + Send + Sync,
+        V: Send + Sync,
+        E: IndexEntry<V, Key = K>,
+        S: BuildHasher + Send + Sync,
+    > CursorTrait for Cursor<'_, K, V, E, S>
 {
     type Value = V;
 
@@ -253,7 +267,9 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync, E: IndexEntry<V, Key = K>> Cur
     }
 }
 
-impl<K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> Drop for Cursor<'_, K, V, E> {
+impl<K: Hash + Eq + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>, S: BuildHasher> Drop
+    for Cursor<'_, K, V, E, S>
+{
     #[inline]
     fn drop(&mut self) {
         if matches!(self.state, State::EntryRemoved) {
@@ -274,27 +290,27 @@ impl<K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> Drop for Cursor<'
 ///
 /// The overflow map is probed lazily, only when iteration advances past the head value. Callers
 /// that consume just the first value (e.g. existence checks) never touch the overflow map.
-pub struct Values<'a, K: Ord, V> {
+pub struct Values<'a, K: Hash + Eq, V, S: BuildHasher> {
     head: Option<&'a V>,
-    overflow: OverflowValues<'a, K, V>,
+    overflow: OverflowValues<'a, K, V, S>,
 }
 
 /// The overflow portion of a [Values] iterator.
-enum OverflowValues<'a, K: Ord, V> {
+enum OverflowValues<'a, K: Hash + Eq, V, S: BuildHasher> {
     /// The overflow map has not been probed yet.
     Pending {
-        overflow: &'a Overflow<K, V>,
+        overflow: &'a Overflow<K, V, S>,
         key: K,
     },
     /// Iterating the key's overflow values (an empty iterator when the key has none).
     Iter(std::iter::Rev<std::slice::Iter<'a, V>>),
 }
 
-impl<'a, K: Ord, V> Values<'a, K, V> {
+impl<'a, K: Hash + Eq, V, S: BuildHasher> Values<'a, K, V, S> {
     /// Creates a [Values] iterator from a key's optional inline value and the index's overflow
     /// map. If `head` is `None` (the key is absent), the iterator is empty and the overflow map
     /// is never probed.
-    pub(super) fn new(head: Option<&'a V>, overflow: &'a Overflow<K, V>, key: K) -> Self {
+    pub(super) fn new(head: Option<&'a V>, overflow: &'a Overflow<K, V, S>, key: K) -> Self {
         let overflow = match head {
             Some(_) => OverflowValues::Pending { overflow, key },
             None => OverflowValues::Iter([].iter().rev()),
@@ -303,7 +319,7 @@ impl<'a, K: Ord, V> Values<'a, K, V> {
     }
 }
 
-impl<'a, K: Ord, V> Iterator for Values<'a, K, V> {
+impl<'a, K: Hash + Eq, V, S: BuildHasher> Iterator for Values<'a, K, V, S> {
     type Item = &'a V;
 
     fn next(&mut self) -> Option<&'a V> {

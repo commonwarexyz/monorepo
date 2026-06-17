@@ -38,7 +38,7 @@ impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
 }
 
 /// A [crate::index::Cursor] over the values associated with a translated key.
-pub type Cursor<'a, K, V> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>>;
+pub type Cursor<'a, K, V, S> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>, S>;
 
 /// A memory-efficient index that uses an unordered map internally to map translated keys to
 /// arbitrary values.
@@ -49,7 +49,7 @@ pub type Cursor<'a, K, V> = CursorImpl<'a, K, V, OccupiedEntry<'a, K, V>>;
 pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: HashMap<T::Key, V, T>,
-    overflow: Overflow<T::Key, V>,
+    overflow: Overflow<T::Key, V, T>,
 
     keys: Gauge,
     items: Gauge,
@@ -68,8 +68,8 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         Self {
             translator: translator.clone(),
+            overflow: HashMap::with_hasher(translator.clone()),
             map: HashMap::with_capacity_and_hasher(INITIAL_CAPACITY, translator),
-            overflow: Overflow::new(),
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
@@ -86,7 +86,7 @@ impl<T: Translator, V: Send + Sync> super::Factory<T> for Index<T, V> {
 impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     type Value = V;
     type Cursor<'a>
-        = Cursor<'a, T::Key, V>
+        = Cursor<'a, T::Key, V, T>
     where
         Self: 'a;
 
@@ -101,7 +101,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
+            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
                 &mut self.overflow,
                 &self.keys,
@@ -115,7 +115,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
+            Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
                 &mut self.overflow,
                 &self.keys,
@@ -177,7 +177,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 }
 
                 // Slow path: the key has conflicting values; walk them with a cursor.
-                let mut cursor = Cursor::<'_, T::Key, V>::new(
+                let mut cursor = Cursor::<'_, T::Key, V, T>::new(
                     entry,
                     &mut self.overflow,
                     &self.keys,

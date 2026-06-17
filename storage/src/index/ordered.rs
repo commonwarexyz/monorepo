@@ -21,7 +21,7 @@ use std::{
             Entry as BTreeEntry, OccupiedEntry as BTreeOccupiedEntry,
             VacantEntry as BTreeVacantEntry,
         },
-        BTreeMap,
+        BTreeMap, HashMap,
     },
     ops::Bound::{Excluded, Unbounded},
 };
@@ -41,7 +41,7 @@ impl<K: Ord + Send + Sync, V: Send + Sync> IndexEntry<V> for BTreeOccupiedEntry<
 }
 
 /// A [crate::index::Cursor] over the values associated with a translated key.
-pub type Cursor<'a, K, V> = CursorImpl<'a, K, V, BTreeOccupiedEntry<'a, K, V>>;
+pub type Cursor<'a, K, V, S> = CursorImpl<'a, K, V, BTreeOccupiedEntry<'a, K, V>, S>;
 
 /// A memory-efficient index that uses an ordered map internally to map translated keys to arbitrary
 /// values.
@@ -52,7 +52,7 @@ pub type Cursor<'a, K, V> = CursorImpl<'a, K, V, BTreeOccupiedEntry<'a, K, V>>;
 pub struct Index<T: Translator, V: Send + Sync> {
     translator: T,
     map: BTreeMap<T::Key, V>,
-    overflow: Overflow<T::Key, V>,
+    overflow: Overflow<T::Key, V, T>,
 
     keys: Gauge,
     items: Gauge,
@@ -70,9 +70,9 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     /// Create a new [Index] with the given translator and metrics registry.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
         Self {
+            overflow: HashMap::with_hasher(translator.clone()),
             translator,
             map: BTreeMap::new(),
-            overflow: Overflow::new(),
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
@@ -81,7 +81,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Returns an iterator over the values associated with the translated key `k`, given that
     /// key's inline (head) value.
-    fn values<'a>(&'a self, k: &T::Key, head: &'a V) -> Values<'a, T::Key, V> {
+    fn values<'a>(&'a self, k: &T::Key, head: &'a V) -> Values<'a, T::Key, V, T> {
         Values::new(Some(head), &self.overflow, *k)
     }
 
@@ -91,7 +91,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     }
 
     /// Returns an iterator over all values associated with an already-translated key.
-    pub(super) fn get_translated(&self, key: T::Key) -> Values<'_, T::Key, V> {
+    pub(super) fn get_translated(&self, key: T::Key) -> Values<'_, T::Key, V, T> {
         Values::new(self.map.get(&key), &self.overflow, key)
     }
 
@@ -100,7 +100,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     pub(super) fn next_translated_values_no_cycle(
         &self,
         key: &[u8],
-    ) -> Option<Values<'_, T::Key, V>> {
+    ) -> Option<Values<'_, T::Key, V, T>> {
         let k = self.translator.transform(key);
         self.map
             .range((Excluded(k), Unbounded))
@@ -113,7 +113,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
     pub(super) fn prev_translated_values_no_cycle(
         &self,
         key: &[u8],
-    ) -> Option<Values<'_, T::Key, V>> {
+    ) -> Option<Values<'_, T::Key, V, T>> {
         let k = self.translator.transform(key);
         self.map
             .range(..k)
@@ -123,7 +123,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Returns an iterator over the values of the lexicographically first translated key, or
     /// None if the index is empty.
-    pub(super) fn first_translated_values(&self) -> Option<Values<'_, T::Key, V>> {
+    pub(super) fn first_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
         self.map
             .first_key_value()
             .map(|(k, head)| self.values(k, head))
@@ -131,7 +131,7 @@ impl<T: Translator, V: Send + Sync> Index<T, V> {
 
     /// Returns an iterator over the values of the lexicographically last translated key, or
     /// None if the index is empty.
-    pub(super) fn last_translated_values(&self) -> Option<Values<'_, T::Key, V>> {
+    pub(super) fn last_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
         self.map
             .last_key_value()
             .map(|(k, head)| self.values(k, head))
@@ -208,7 +208,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         }
     }
     type Cursor<'a>
-        = Cursor<'a, T::Key, V>
+        = Cursor<'a, T::Key, V, T>
     where
         Self: 'a;
 
@@ -222,7 +222,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
+            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
                 &mut self.overflow,
                 &self.keys,
@@ -236,7 +236,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
     fn get_mut_or_insert<'a>(&'a mut self, key: &[u8], value: V) -> Option<Self::Cursor<'a>> {
         let k = self.translator.transform(key);
         match self.map.entry(k) {
-            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
+            BTreeEntry::Occupied(entry) => Some(Cursor::<'_, T::Key, V, T>::new(
                 entry,
                 &mut self.overflow,
                 &self.keys,
@@ -298,7 +298,7 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 }
 
                 // Slow path: the key has conflicting values; walk them with a cursor.
-                let mut cursor = Cursor::<'_, T::Key, V>::new(
+                let mut cursor = Cursor::<'_, T::Key, V, T>::new(
                     entry,
                     &mut self.overflow,
                     &self.keys,
