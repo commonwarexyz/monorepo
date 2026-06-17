@@ -16,14 +16,14 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true, optional = true }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
-ark-ec.workspace = true
-ark-ed-on-bls12-381-bandersnatch = { workspace = true, features = ["r1cs"] }
-ark-ff.workspace = true
-ark-r1cs-std.workspace = true
-ark-relations.workspace = true
-ark-serialize.workspace = true
+ark-ec = { workspace = true, optional = true }
+ark-ed-on-bls12-381-bandersnatch = { workspace = true, features = ["r1cs"], optional = true }
+ark-ff = { workspace = true, optional = true }
+ark-r1cs-std = { workspace = true, optional = true }
+ark-relations = { workspace = true, optional = true }
+ark-serialize = { workspace = true, optional = true }
 blake3 = { workspace = true, features = ["zeroize"] }
-blst = { workspace = true, features = ["no-threads"] }
+blst = { workspace = true, features = ["no-threads"], optional = true }
 bytes.workspace = true
 cfg-if.workspace = true
 commonware-codec.workspace = true
@@ -76,7 +76,16 @@ rstest.workspace = true
 bench = false
 
 [features]
-default = [ "std" ]
+default = [ "bls12381", "std" ]
+bls12381 = [
+	"dep:ark-ec",
+	"dep:ark-ed-on-bls12-381-bandersnatch",
+	"dep:ark-ff",
+	"dep:ark-r1cs-std",
+	"dep:ark-relations",
+	"dep:ark-serialize",
+	"dep:blst",
+]
 blake3-parallel = [ "blake3/rayon", "std" ]
 sha2-asm = [ "sha2/asm" ]
 mocks = [ "std" ]
@@ -88,15 +97,15 @@ arbitrary = [
 	"dep:arbitrary",
 	"std",
 ]
-fuzz = [ "arbitrary", "std" ]
+fuzz = [ "arbitrary", "bls12381", "std" ]
 std = [
 	"anyhow?/std",
-	"ark-ec/std",
-	"ark-ed-on-bls12-381-bandersnatch/std",
-	"ark-ff/std",
-	"ark-r1cs-std/std",
-	"ark-relations/std",
-	"ark-serialize/std",
+	"ark-ec?/std",
+	"ark-ed-on-bls12-381-bandersnatch?/std",
+	"ark-ff?/std",
+	"ark-r1cs-std?/std",
+	"ark-relations?/std",
+	"ark-serialize?/std",
 	"blake3/std",
 	"bytes/std",
 	"chacha20poly1305/getrandom",
@@ -128,6 +137,7 @@ std = [
 name = "bls12381"
 harness = false
 path = "src/bls12381/benches/bench.rs"
+required-features = ["bls12381"]
 
 [[bench]]
 name = "ed25519"

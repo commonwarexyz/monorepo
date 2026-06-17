@@ -15,12 +15,15 @@ extern crate alloc;
 
 // Modules containing #[macro_export] macros must use verbose cfg.
 // See rust-lang/rust#52234: macro-expanded macro_export macros cannot be referenced by absolute paths.
-#[cfg(not(any(
-    commonware_stability_GAMMA,
-    commonware_stability_DELTA,
-    commonware_stability_EPSILON,
-    commonware_stability_RESERVED
-)))] // BETA
+#[cfg(all(
+    feature = "bls12381",
+    not(any(
+        commonware_stability_GAMMA,
+        commonware_stability_DELTA,
+        commonware_stability_EPSILON,
+        commonware_stability_RESERVED
+    ))
+))] // BETA
 pub mod bls12381;
 #[cfg(not(any(
     commonware_stability_GAMMA,
@@ -395,46 +398,55 @@ mod tests {
         assert_eq!(ed25519::Signature::SIZE, 64);
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_validate() {
         test_validate::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_validate_invalid_public_key() {
         test_validate_invalid_public_key::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_sign_and_verify() {
         test_sign_and_verify::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_sign_and_verify_wrong_message() {
         test_sign_and_verify_wrong_message::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_sign_and_verify_wrong_namespace() {
         test_sign_and_verify_wrong_namespace::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_empty_namespace() {
         test_empty_namespace::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_signature_determinism() {
         test_signature_determinism::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_invalid_signature_publickey_pair() {
         test_invalid_signature_publickey_pair::<bls12381::PrivateKey>();
     }
 
+    #[cfg(feature = "bls12381")]
     #[test]
     fn test_bls12381_len() {
         assert_eq!(bls12381::PublicKey::SIZE, 48);

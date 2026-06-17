@@ -390,7 +390,7 @@ mod conformance {
 }
 
 #[commonware_macros::stability(ALPHA)]
-#[cfg(any(test, feature = "fuzz"))]
+#[cfg(all(feature = "bls12381", any(test, feature = "fuzz")))]
 pub mod fuzz {
     use super::*;
     use crate::bls12381::primitives::group::{Scalar as F, G1 as G};
