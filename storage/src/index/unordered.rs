@@ -25,6 +25,10 @@ const INITIAL_CAPACITY: usize = 256;
 
 /// Implementation of [IndexEntry] for [OccupiedEntry].
 impl<K: Send + Sync, V: Send + Sync> IndexEntry<V> for OccupiedEntry<'_, K, V> {
+    type Key = K;
+    fn key(&self) -> &K {
+        OccupiedEntry::key(self)
+    }
     fn get_mut(&mut self) -> &mut V {
         self.get_mut()
     }
@@ -99,7 +103,6 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
-                k,
                 &mut self.overflow,
                 &self.keys,
                 &self.items,
@@ -114,7 +117,6 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
         match self.map.entry(k) {
             Entry::Occupied(entry) => Some(Cursor::<'_, T::Key, V>::new(
                 entry,
-                k,
                 &mut self.overflow,
                 &self.keys,
                 &self.items,
@@ -177,7 +179,6 @@ impl<T: Translator, V: Send + Sync> Unordered for Index<T, V> {
                 // Slow path: the key has conflicting values; walk them with a cursor.
                 let mut cursor = Cursor::<'_, T::Key, V>::new(
                     entry,
-                    k,
                     &mut self.overflow,
                     &self.keys,
                     &self.items,

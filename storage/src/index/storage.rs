@@ -37,6 +37,8 @@ enum Position {
 }
 
 pub trait IndexEntry<V: Send + Sync>: Send + Sync {
+    type Key;
+    fn key(&self) -> &Self::Key;
     fn get_mut(&mut self) -> &mut V;
     fn remove(self);
 }
@@ -78,11 +80,9 @@ enum State {
 ///   may hold the index of a just-deleted slot, which is only ever stepped down from, never
 ///   read).
 /// - [`State::EntryRemoved`] implies the chain was taken and is empty.
-pub struct Cursor<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> {
-    // The occupied index entry holding the inline value while the cursor exists.
+pub struct Cursor<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> {
+    // The occupied index entry holding the inline value (and its key) while the cursor exists.
     entry: Option<E>,
-    // The translated key whose values the cursor traverses.
-    key: K,
     // The overflow values for all keys in the index, used to take and reinstall `chain`.
     overflow: &'a mut Overflow<K, V>,
     // The key's overflow values; `None` until first needed.
@@ -96,12 +96,11 @@ pub struct Cursor<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> {
     pruned: &'a Counter,
 }
 
-impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> Cursor<'a, K, V, E> {
+impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> Cursor<'a, K, V, E> {
     /// Creates a new [Cursor] from an occupied index entry.
     #[inline]
     pub(super) const fn new(
         entry: E,
-        key: K,
         overflow: &'a mut Overflow<K, V>,
         keys: &'a Gauge,
         items: &'a Gauge,
@@ -109,7 +108,6 @@ impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> Cursor<'a, K, V, E> {
     ) -> Self {
         Self {
             entry: Some(entry),
-            key,
             overflow,
             chain: None,
             state: State::NeedNext { from: None },
@@ -126,7 +124,7 @@ impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> Cursor<'a, K, V, E> {
 
     /// Returns the key's overflow chain, taking it from the overflow map on first use.
     fn chain_mut(&mut self) -> &mut Vec<V> {
-        let key = self.key;
+        let key = *self.entry.as_ref().unwrap().key();
         let overflow = &mut self.overflow;
         self.chain.get_or_insert_with(|| {
             if overflow.is_empty() {
@@ -138,7 +136,7 @@ impl<'a, K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> Cursor<'a, K, V, E> {
     }
 }
 
-impl<K: Ord + Copy + Send + Sync, V: Send + Sync, E: IndexEntry<V>> CursorTrait
+impl<K: Ord + Copy + Send + Sync, V: Send + Sync, E: IndexEntry<V, Key = K>> CursorTrait
     for Cursor<'_, K, V, E>
 {
     type Value = V;
@@ -255,7 +253,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync, E: IndexEntry<V>> CursorTrait
     }
 }
 
-impl<K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, K, V, E> {
+impl<K: Ord + Copy, V: Send + Sync, E: IndexEntry<V, Key = K>> Drop for Cursor<'_, K, V, E> {
     #[inline]
     fn drop(&mut self) {
         if matches!(self.state, State::EntryRemoved) {
@@ -264,7 +262,8 @@ impl<K: Ord + Copy, V: Send + Sync, E: IndexEntry<V>> Drop for Cursor<'_, K, V, 
         } else if let Some(chain) = self.chain.take() {
             // Reinstall the key's remaining overflow values.
             if !chain.is_empty() {
-                self.overflow.insert(self.key, chain);
+                let key = *self.entry.as_ref().unwrap().key();
+                self.overflow.insert(key, chain);
             }
         }
     }
