@@ -10,7 +10,7 @@ use commonware_consensus::{
     Viewable,
 };
 use commonware_cryptography::Digestible;
-use commonware_runtime::{Clock, Metrics, Spawner};
+use commonware_runtime::{telemetry::traces::TracedExt as _, Clock, Metrics, Spawner};
 use commonware_utils::{acknowledgement::Exact, channel::oneshot};
 use futures::Stream;
 use rand::Rng;
@@ -211,8 +211,8 @@ where
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.propose",
-            epoch = %context.1.epoch(),
-            view = %context.1.view()
+            epoch = context.1.epoch().traced(),
+            view = context.1.view().traced()
         );
         let _ = self.sender.enqueue(Message::Propose {
             span,
@@ -233,8 +233,8 @@ where
         let (response, receiver) = oneshot::channel();
         let span = info_span!(
             "stateful.mailbox.verify",
-            epoch = %context.1.epoch(),
-            view = %context.1.view()
+            epoch = context.1.epoch().traced(),
+            view = context.1.view().traced()
         );
         let _ = self.sender.enqueue(Message::Verify {
             span,
@@ -262,8 +262,8 @@ where
                 let context = block.context();
                 let span = info_span!(
                     "stateful.mailbox.finalized",
-                    epoch = %context.epoch(),
-                    view = %context.view(),
+                    epoch = context.epoch().traced(),
+                    view = context.view().traced(),
                     digest = %block.digest()
                 );
                 Message::Finalized {

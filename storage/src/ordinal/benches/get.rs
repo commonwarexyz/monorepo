@@ -1,9 +1,11 @@
-use super::utils::{append_random, init, Ordinal};
+use super::utils::{append_random, init, Ordinal, ITEMS_PER_BLOB};
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Config,
     Runner,
 };
+use commonware_storage::utils::bits_for_indices;
+use commonware_utils::NZU64;
 use criterion::{criterion_group, Criterion};
 use futures::future::try_join_all;
 use rand::{rngs::StdRng, Rng, SeedableRng};
@@ -44,10 +46,11 @@ fn bench_get(c: &mut Criterion) {
 
     // Create a shared on-disk store once so later setup is fast.
     let builder = commonware_runtime::tokio::Runner::new(cfg.clone());
-    builder.start(|ctx| async move {
-        let mut store = init(ctx).await;
-        append_random(&mut store, ITEMS).await;
+    let bits = builder.start(|ctx| async move {
+        let mut store = init(ctx, None).await;
+        let indices = append_random(&mut store, ITEMS).await;
         store.sync().await.unwrap();
+        bits_for_indices(NZU64!(ITEMS_PER_BLOB), indices)
     });
 
     // Run the benchmarks.
@@ -56,21 +59,33 @@ fn bench_get(c: &mut Criterion) {
         for reads in [1_000, 10_000, 50_000] {
             let label = format!("{}/mode={} reads={}", module_path!(), mode, reads);
             c.bench_function(&label, |b| {
-                b.to_async(&runner).iter_custom(move |iters| async move {
-                    let ctx = context::get::<commonware_runtime::tokio::Context>();
-                    let store = init(ctx).await;
-                    let selected_indices = select_indices(reads, ITEMS);
-                    let start = Instant::now();
-                    for _ in 0..iters {
-                        match mode {
-                            "serial" => read_serial_indices(&store, &selected_indices).await,
-                            "concurrent" => {
-                                read_concurrent_indices(&store, &selected_indices).await
+                b.to_async(&runner).iter_custom({
+                    let bits = bits.clone();
+                    move |iters| {
+                        let bits = bits.clone();
+                        async move {
+                            let ctx = context::get::<commonware_runtime::tokio::Context>();
+                            let bits = bits
+                                .iter()
+                                .map(|(section, bitmap)| (*section, bitmap))
+                                .collect();
+                            let store = init(ctx, Some(bits)).await;
+                            let selected_indices = select_indices(reads, ITEMS);
+                            let start = Instant::now();
+                            for _ in 0..iters {
+                                match mode {
+                                    "serial" => {
+                                        read_serial_indices(&store, &selected_indices).await
+                                    }
+                                    "concurrent" => {
+                                        read_concurrent_indices(&store, &selected_indices).await
+                                    }
+                                    _ => unreachable!(),
+                                }
                             }
-                            _ => unreachable!(),
+                            start.elapsed()
                         }
                     }
-                    start.elapsed()
                 });
             });
         }
@@ -79,7 +94,7 @@ fn bench_get(c: &mut Criterion) {
     // Clean up shared artifacts.
     let cleaner = commonware_runtime::tokio::Runner::new(cfg);
     cleaner.start(|ctx| async move {
-        let store = init(ctx).await;
+        let store = init(ctx, None).await;
         store.destroy().await.unwrap();
     });
 }

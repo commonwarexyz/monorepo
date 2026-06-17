@@ -39,7 +39,7 @@
 //! - **Reads**: O(1) - direct offset calculation
 //! - **Has**: O(1) - in-memory lookup (via [crate::rmap::RMap])
 //! - **Next Gap**: O(log n) - in-memory range query (via [crate::rmap::RMap])
-//! - **Restart**: O(n) where n is the number of existing records (to rebuild [crate::rmap::RMap])
+//! - **Recovery**: O(n) over committed records when bits are provided (`None` resets the store)
 //!
 //! # Atomicity
 //!
@@ -53,8 +53,12 @@
 //!
 //! # Recovery
 //!
-//! On restart, [Ordinal] validates all records using their CRC32 and rebuilds the in-memory
-//! [crate::rmap::RMap]. Invalid records (corrupted or empty) are excluded from the rebuilt index.
+//! To recover existing data, pass `Some(bits)` to [Ordinal::init]. The bits identify which records
+//! were durably committed by the caller. [Ordinal] validates required records using their CRC32 and
+//! rebuilds the in-memory [crate::rmap::RMap]. Stored sections omitted from `bits` are removed, and
+//! stored records whose bits are unset are cleared before replay. Missing or invalid required records
+//! fail initialization. Passing `Some(BTreeMap::new())` or `None` removes all stored sections and
+//! starts empty.
 //!
 //! # Example
 //!
@@ -72,7 +76,7 @@
 //!         write_buffer: NZUsize!(4096),
 //!         replay_buffer: NZUsize!(1024 * 1024),
 //!     };
-//!     let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg).await.unwrap();
+//!     let mut store = Ordinal::<_, FixedBytes<32>>::init(context, cfg, None).await.unwrap();
 //!
 //!     // Put values at specific indices
 //!     let value1 = FixedBytes::new([1u8; 32]);
@@ -133,6 +137,7 @@ pub struct Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::bits_for_indices;
     use commonware_codec::{FixedSize, Read, ReadExt, Write};
     use commonware_cryptography::Crc32;
     use commonware_formatting::hex;
@@ -161,7 +166,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -219,7 +224,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -255,7 +260,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -303,7 +308,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -355,7 +360,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -405,7 +410,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -485,7 +490,7 @@ mod tests {
             // Insert data and close
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -505,12 +510,25 @@ mod tests {
                 store.sync().await.expect("Failed to sync store");
             }
 
-            // Reopen and verify data persisted
+            // Reopen with bits and verify committed data persisted
             {
-                let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
-                        .await
-                        .expect("Failed to initialize store");
+                let mut bits0 = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
+                bits0.set(0, true);
+                bits0.set(100, true);
+                let mut bits1 = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
+                bits1.set(0, true);
+                let bits0 = Some(bits0);
+                let bits1 = Some(bits1);
+                let mut bits = BTreeMap::new();
+                bits.insert(0, &bits0);
+                bits.insert(1, &bits1);
+                let store = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("second"),
+                    cfg.clone(),
+                    Some(bits),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 let values = vec![
                     (0u64, FixedBytes::new([0u8; 32])),
@@ -550,7 +568,7 @@ mod tests {
             // Create store with data
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -571,18 +589,16 @@ mod tests {
                 blob.write_at_sync(32, vec![0xFF]).await.unwrap();
             }
 
-            // Reopen and try to read corrupted data
+            // Reopen without bits, deleting the stored corrupted data before replay.
             {
                 let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
-                // Reading corrupt record will return empty
                 let result = store.get(0).await.unwrap();
                 assert!(result.is_none());
 
-                // The index should not be in the intervals after restart with corrupted data
                 assert!(!store.has(0));
             }
         });
@@ -600,9 +616,10 @@ mod tests {
                 write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
-            let store = Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
-                .await
-                .expect("Failed to initialize store");
+            let store =
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
+                    .await
+                    .expect("Failed to initialize store");
 
             // Attempt to get an index that doesn't exist
             let retrieved = store.get(999).await.expect("Failed to get data");
@@ -628,7 +645,7 @@ mod tests {
             // Create store with data
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -648,7 +665,7 @@ mod tests {
             // Try to create a new store - it should be empty
             {
                 let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -676,7 +693,7 @@ mod tests {
             // Create store with data
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -701,22 +718,15 @@ mod tests {
                 blob.write_at_sync(36, vec![0xFF; 32]).await.unwrap();
             }
 
-            // Reopen and verify it handles partial write gracefully
+            // Reopen without bits and verify uncheckpointed data is deleted.
             {
                 let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
-                // First record should be fine
-                assert_eq!(
-                    store.get(0).await.unwrap().unwrap(),
-                    FixedBytes::new([42u8; 32])
-                );
-
-                // Second record should be removed due to partial write
+                assert!(!store.has(0));
                 assert!(!store.has(1));
-                assert!(store.get(1).await.unwrap().is_none());
 
                 // Store should still be functional
                 let mut store_mut = store;
@@ -744,7 +754,7 @@ mod tests {
             // Create store with data
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -771,22 +781,15 @@ mod tests {
                     .unwrap();
             }
 
-            // Reopen and verify it detects corruption
+            // Reopen without bits and verify uncheckpointed data is deleted.
             {
                 let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
-                // First record should be detected as corrupted (CRC mismatch)
                 assert!(!store.has(0));
-
-                // Second record should still be valid
-                assert!(store.has(1));
-                assert_eq!(
-                    store.get(1).await.unwrap().unwrap(),
-                    FixedBytes::new([43u8; 32])
-                );
+                assert!(!store.has(1));
             }
         });
     }
@@ -806,7 +809,7 @@ mod tests {
             // Create store with data across multiple blobs
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -835,28 +838,17 @@ mod tests {
                 blob.write_at_sync(5, vec![0xFF; 4]).await.unwrap(); // Corrupt value of index 10
             }
 
-            // Reopen and verify handling of CRC corruptions
+            // Reopen without bits and verify uncheckpointed data is deleted.
             {
                 let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
-                // Corrupted records should not be present
-                assert!(!store.has(0)); // CRC corrupted
-                assert!(!store.has(10)); // Value corrupted (CRC mismatch)
-
-                // Valid records should still be accessible
-                assert!(store.has(5));
-                assert!(store.has(15));
-                assert_eq!(
-                    store.get(5).await.unwrap().unwrap(),
-                    FixedBytes::new([5u8; 32])
-                );
-                assert_eq!(
-                    store.get(15).await.unwrap().unwrap(),
-                    FixedBytes::new([15u8; 32])
-                );
+                assert!(!store.has(0));
+                assert!(!store.has(5));
+                assert!(!store.has(10));
+                assert!(!store.has(15));
             }
         });
     }
@@ -876,7 +868,7 @@ mod tests {
             // Create store with data
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -906,24 +898,15 @@ mod tests {
                 blob.write_at_sync(size, garbage).await.unwrap();
             }
 
-            // Reopen and verify it handles extra bytes
+            // Reopen without bits and verify uncheckpointed data is deleted.
             {
                 let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
-                // Original records should still be valid
-                assert!(store.has(0));
-                assert!(store.has(1));
-                assert_eq!(
-                    store.get(0).await.unwrap().unwrap(),
-                    FixedBytes::new([42u8; 32])
-                );
-                assert_eq!(
-                    store.get(1).await.unwrap().unwrap(),
-                    FixedBytes::new([43u8; 32])
-                );
+                assert!(!store.has(0));
+                assert!(!store.has(1));
 
                 // Store should still be functional
                 let mut store_mut = store;
@@ -966,12 +949,20 @@ mod tests {
                 blob.write_at_sync(36 * 5, valid_record).await.unwrap();
             }
 
-            // Initialize store and verify it handles zero-filled records
+            // Initialize with bits and verify it handles zero-filled records
             {
-                let store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
-                        .await
-                        .expect("Failed to initialize store");
+                let mut section = BitMap::zeroes(DEFAULT_ITEMS_PER_BLOB);
+                section.set(5, true);
+                let section = Some(section);
+                let mut bits = BTreeMap::new();
+                bits.insert(0, &section);
+                let store = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("storage"),
+                    cfg.clone(),
+                    Some(bits),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 // Zero-filled positions should not be considered valid
                 for i in 0..5 {
@@ -1001,7 +992,7 @@ mod tests {
 
             // Initialize the store
             let mut store =
-                Ordinal::<_, FixedBytes<128>>::init(context.child("first"), cfg.clone())
+                Ordinal::<_, FixedBytes<128>>::init(context.child("first"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1052,9 +1043,15 @@ mod tests {
             drop(store);
 
             // Reopen the store
-            let mut store = Ordinal::<_, FixedBytes<128>>::init(context.child("second"), cfg)
-                .await
-                .expect("Failed to initialize store");
+            let owned_bits = bits_for_indices(NZU64!(100), values.iter().map(|(index, _)| *index));
+            let bits = owned_bits
+                .iter()
+                .map(|(section, bitmap)| (*section, bitmap))
+                .collect();
+            let mut store =
+                Ordinal::<_, FixedBytes<128>>::init(context.child("second"), cfg, Some(bits))
+                    .await
+                    .expect("Failed to initialize store");
 
             // Verify all values are still there after restart
             for (index, value) in &values {
@@ -1108,7 +1105,7 @@ mod tests {
             };
 
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1188,7 +1185,7 @@ mod tests {
             };
 
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1241,7 +1238,7 @@ mod tests {
             };
 
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1283,7 +1280,7 @@ mod tests {
             };
 
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1311,7 +1308,7 @@ mod tests {
             // Create store and add data
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -1321,12 +1318,28 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            // Reopen and prune
+            // Reopen with bits and prune
             {
-                let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone())
-                        .await
-                        .expect("Failed to initialize store");
+                let mut bits0 = BitMap::zeroes(100);
+                bits0.set(0, true);
+                let mut bits1 = BitMap::zeroes(100);
+                bits1.set(0, true);
+                let mut bits2 = BitMap::zeroes(100);
+                bits2.set(0, true);
+                let bits0 = Some(bits0);
+                let bits1 = Some(bits1);
+                let bits2 = Some(bits2);
+                let mut bits = BTreeMap::new();
+                bits.insert(0, &bits0);
+                bits.insert(1, &bits1);
+                bits.insert(2, &bits2);
+                let mut store = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("second"),
+                    cfg.clone(),
+                    Some(bits),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 // Verify data is there
                 assert!(store.has(0));
@@ -1346,9 +1359,22 @@ mod tests {
 
             // Reopen again and verify pruning persisted
             {
-                let store = Ordinal::<_, FixedBytes<32>>::init(context.child("third"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut bits1 = BitMap::zeroes(100);
+                bits1.set(0, true);
+                let mut bits2 = BitMap::zeroes(100);
+                bits2.set(0, true);
+                let bits1 = Some(bits1);
+                let bits2 = Some(bits2);
+                let mut bits = BTreeMap::new();
+                bits.insert(1, &bits1);
+                bits.insert(2, &bits2);
+                let store = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("third"),
+                    cfg.clone(),
+                    Some(bits),
+                )
+                .await
+                .expect("Failed to initialize store");
 
                 assert!(!store.has(0));
                 assert!(store.has(100));
@@ -1375,7 +1401,7 @@ mod tests {
             };
 
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1433,7 +1459,7 @@ mod tests {
             };
 
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1485,7 +1511,7 @@ mod tests {
             };
 
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1547,7 +1573,7 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
             let mut store =
-                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone())
+                Ordinal::<_, FixedBytes<32>>::init(context.child("storage"), cfg.clone(), None)
                     .await
                     .expect("Failed to initialize store");
 
@@ -1589,7 +1615,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_init_with_bits_none() {
+    fn test_init_without_bits_deletes_existing_data() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1603,7 +1629,7 @@ mod tests {
             // Create store with data across multiple sections
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -1622,44 +1648,28 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            // Reinitialize with bits = None (should behave like regular init)
+            // Reinitialize with bits = None, deleting uncheckpointed data.
             {
-                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
-                    context.child("second"),
-                    cfg.clone(),
-                    None,
-                )
-                .await
-                .expect("Failed to initialize store with bits");
+                let store =
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("second"), cfg.clone(), None)
+                        .await
+                        .expect("Failed to initialize store");
 
-                // All records should be available
-                assert!(store.has(0));
-                assert!(store.has(5));
-                assert!(store.has(9));
-                assert!(store.has(10));
-                assert!(store.has(15));
-                assert!(store.has(25));
-
-                // Non-existent records should not be available
+                assert!(!store.has(0));
+                assert!(!store.has(5));
+                assert!(!store.has(9));
+                assert!(!store.has(10));
+                assert!(!store.has(15));
+                assert!(!store.has(25));
                 assert!(!store.has(1));
                 assert!(!store.has(11));
                 assert!(!store.has(20));
-
-                // Verify values
-                assert_eq!(
-                    store.get(0).await.unwrap().unwrap(),
-                    FixedBytes::new([0u8; 32])
-                );
-                assert_eq!(
-                    store.get(15).await.unwrap().unwrap(),
-                    FixedBytes::new([15u8; 32])
-                );
             }
         });
     }
 
     #[test_traced]
-    fn test_init_with_bits_empty_hashmap() {
+    fn test_init_empty_hashmap() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1673,7 +1683,7 @@ mod tests {
             // Create store with data
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -1684,10 +1694,10 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            // Reinitialize with empty HashMap - should skip all sections
+            // Reinitialize with an empty map, deleting every stored section.
             {
                 let bits: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
-                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
                     cfg.clone(),
                     Some(bits),
@@ -1700,11 +1710,27 @@ mod tests {
                 assert!(!store.has(10));
                 assert!(!store.has(20));
             }
+
+            // The explicit empty map deletes the uncheckpointed blobs.
+            {
+                let mut section = BitMap::zeroes(10);
+                section.set(0, true);
+                let section = Some(section);
+                let mut bits = BTreeMap::new();
+                bits.insert(0, &section);
+                let result = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("third"),
+                    cfg.clone(),
+                    Some(bits),
+                )
+                .await;
+                assert!(matches!(result, Err(Error::MissingRecord(0))));
+            }
         });
     }
 
     #[test_traced]
-    fn test_init_with_bits_selective_sections() {
+    fn test_init_selective_sections() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1718,7 +1744,7 @@ mod tests {
             // Create store with data in multiple sections
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -1753,7 +1779,7 @@ mod tests {
 
                 bits_map.insert(1, &bitmap_option);
 
-                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
                     cfg.clone(),
                     Some(bits_map),
@@ -1797,11 +1823,27 @@ mod tests {
                     FixedBytes::new([18u8; 32])
                 );
             }
+
+            // Unselected records in a retained section are physically cleared.
+            {
+                let mut bitmap = BitMap::zeroes(10);
+                bitmap.set(0, true); // Index 10
+                let bitmap_option = Some(bitmap);
+                let mut bits_map: BTreeMap<u64, &Option<BitMap>> = BTreeMap::new();
+                bits_map.insert(1, &bitmap_option);
+                let result = Ordinal::<_, FixedBytes<32>>::init(
+                    context.child("third"),
+                    cfg.clone(),
+                    Some(bits_map),
+                )
+                .await;
+                assert!(matches!(result, Err(Error::MissingRecord(10))));
+            }
         });
     }
 
     #[test_traced]
-    fn test_init_with_bits_none_option_all_records_exist() {
+    fn test_init_none_option_all_records_exist() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1815,7 +1857,7 @@ mod tests {
             // Create store with all records in a section
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -1833,7 +1875,7 @@ mod tests {
                 let none_option: Option<BitMap> = None;
                 bits_map.insert(1, &none_option);
 
-                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
                     cfg.clone(),
                     Some(bits_map),
@@ -1855,7 +1897,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "Failed to initialize store with bits: MissingRecord(6)")]
-    fn test_init_with_bits_none_option_missing_record_panics() {
+    fn test_init_none_option_missing_record_panics() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1869,7 +1911,7 @@ mod tests {
             // Create store with missing record in a section
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -1890,7 +1932,7 @@ mod tests {
                 let none_option: Option<BitMap> = None;
                 bits_map.insert(1, &none_option);
 
-                let _store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                let _store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
                     cfg.clone(),
                     Some(bits_map),
@@ -1902,7 +1944,7 @@ mod tests {
     }
 
     #[test_traced]
-    fn test_init_with_bits_mixed_sections() {
+    fn test_init_mixed_sections() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -1916,7 +1958,7 @@ mod tests {
             // Create store with data in multiple sections
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -1954,9 +1996,9 @@ mod tests {
                 let bitmap1_option = Some(bitmap1);
                 bits_map.insert(1, &bitmap1_option);
 
-                // Section 2: Not in map, should be skipped entirely
+                // Section 2: Not in map, so it should be removed entirely.
 
-                let store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                let store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
                     cfg.clone(),
                     Some(bits_map),
@@ -1990,7 +2032,7 @@ mod tests {
 
     #[test_traced]
     #[should_panic(expected = "Failed to initialize store with bits: MissingRecord(2)")]
-    fn test_init_with_bits_corrupted_records() {
+    fn test_init_corrupted_records() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
@@ -2004,7 +2046,7 @@ mod tests {
             // Create store with data and corrupt one record
             {
                 let mut store =
-                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone())
+                    Ordinal::<_, FixedBytes<32>>::init(context.child("first"), cfg.clone(), None)
                         .await
                         .expect("Failed to initialize store");
 
@@ -2039,7 +2081,7 @@ mod tests {
                 let bitmap_option = Some(bitmap);
                 bits_map.insert(0, &bitmap_option);
 
-                let _store = Ordinal::<_, FixedBytes<32>>::init_with_bits(
+                let _store = Ordinal::<_, FixedBytes<32>>::init(
                     context.child("second"),
                     cfg.clone(),
                     Some(bits_map),
@@ -2093,11 +2135,12 @@ mod tests {
                 replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
             };
 
-            // Create store with valid records
+            // Create store with records, including one that will fail to parse if recovered.
             {
-                let mut store = Ordinal::<_, DummyValue>::init(context.child("first"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let mut store =
+                    Ordinal::<_, DummyValue>::init(context.child("first"), cfg.clone(), None)
+                        .await
+                        .expect("Failed to initialize store");
 
                 // Add records at indices 1, 2, 4
                 store.put(1, DummyValue { value: 1 }).await.unwrap();
@@ -2107,36 +2150,16 @@ mod tests {
                 store.sync().await.unwrap();
             }
 
-            // Reinitialize - should skip the unparseable record but continue processing
+            // Reinitialize without bits and verify uncheckpointed data is deleted.
             {
-                let store = Ordinal::<_, DummyValue>::init(context.child("second"), cfg.clone())
-                    .await
-                    .expect("Failed to initialize store");
+                let store =
+                    Ordinal::<_, DummyValue>::init(context.child("second"), cfg.clone(), None)
+                        .await
+                        .expect("Failed to initialize store");
 
-                // Record 0 should be available
-                assert!(store.has(1), "Record 1 should be available");
-                assert_eq!(
-                    store.get(1).await.unwrap().unwrap(),
-                    DummyValue { value: 1 },
-                    "Record 0 should have correct value"
-                );
-
-                // Record 2 should NOT be available (unparseable)
-                assert!(
-                    !store.has(2),
-                    "Record 2 should not be available (unparseable)"
-                );
-
-                // This tests that we didn't exit early when encountering the unparseable record
-                assert!(
-                    store.has(4),
-                    "Record 4 should be available - we should not exit early on unparseable record"
-                );
-                assert_eq!(
-                    store.get(4).await.unwrap().unwrap(),
-                    DummyValue { value: 4 },
-                    "Record 4 should have correct value"
-                );
+                assert!(!store.has(1));
+                assert!(!store.has(2));
+                assert!(!store.has(4));
             }
         });
     }
