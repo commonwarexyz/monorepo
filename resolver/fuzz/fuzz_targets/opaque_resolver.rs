@@ -262,6 +262,7 @@ fn run(input: FuzzInput) -> String {
                         .fetch(Fetch {
                             key,
                             subscriber: sub,
+                            span: tracing::Span::none(),
                         })
                         .accepted());
                 }
@@ -271,6 +272,7 @@ fn run(input: FuzzInput) -> String {
                         .map(|(key, sub)| Fetch {
                             key,
                             subscriber: sub,
+                            span: tracing::Span::none(),
                         })
                         .collect();
                     assert!(resolver.fetch_all(fetches).accepted());
@@ -282,6 +284,7 @@ fn run(input: FuzzInput) -> String {
                             Fetch {
                                 key,
                                 subscriber: sub,
+                                span: tracing::Span::none(),
                             },
                             NonEmptyVec::new(target.clone()),
                         )
@@ -295,6 +298,7 @@ fn run(input: FuzzInput) -> String {
                                 Fetch {
                                     key,
                                     subscriber: sub,
+                                    span: tracing::Span::none(),
                                 },
                                 NonEmptyVec::new(target.clone()),
                             )
@@ -330,6 +334,7 @@ fn run(input: FuzzInput) -> String {
                             .fetch(Fetch {
                                 key,
                                 subscriber: sub,
+                                span: tracing::Span::none(),
                             })
                             .accepted());
                     }

@@ -18,6 +18,7 @@ commonware-runtime.workspace = true
 commonware-utils.workspace = true
 libfuzzer-sys.workspace = true
 rand.workspace = true
+tracing.workspace = true
 
 [[bin]]
 name = "p2p_resolver"
