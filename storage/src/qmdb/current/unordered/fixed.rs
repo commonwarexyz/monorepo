@@ -252,14 +252,15 @@ pub mod test {
         });
     }
 
-    /// The sync boundary recorded from a merkleized batch must match the boundary recovered by the
-    /// database after reopening. This can diverge if the batch boundary is derived from physical
-    /// bitmap pruning rather than the batch's declared inactivity floor, because the floor can
-    /// advance past a chunk even when pruning has not run.
+    /// The sync boundary recorded from a merkleized batch must match the boundary the database
+    /// reports once that batch is applied. These can diverge if the batch boundary is derived from
+    /// physical bitmap pruning rather than the batch's declared inactivity floor, because the floor
+    /// can advance past a chunk even when pruning has not run. Reopening is exercised afterward as a
+    /// persistence sanity check; it must not move the boundary.
     #[test_traced("INFO")]
-    pub fn test_merkleized_batch_sync_boundary_survives_reopen() {
+    pub fn test_merkleized_batch_sync_boundary_matches_db() {
         deterministic::Runner::default().start(|ctx| async move {
-            let partition = "batch-boundary-reopen".to_string();
+            let partition = "batch-boundary-match".to_string();
             let mut db = open_db(ctx.child("current"), partition.clone()).await;
 
             let key = Sha256::fill(1u8);
@@ -277,17 +278,22 @@ pub mod test {
             }
             db.sync().await.unwrap();
 
+            // The boundary must have advanced, otherwise the inactivity floor never crossed a chunk
+            // and the equality below would hold trivially.
             let db_boundary = db.sync_boundary();
             assert!(
                 *db_boundary > 0,
                 "inactivity floor never crossed a chunk; add more commits"
             );
+
+            // The headline invariant: the boundary the batch advertised equals the boundary the DB
+            // reports after applying that batch.
             assert_eq!(
-                last_batch_boundary,
-                db_boundary,
-                "batch boundary diverged from db boundary"
+                last_batch_boundary, db_boundary,
+                "batch boundary diverged from applied db boundary"
             );
 
+            // Reopening must not move the boundary.
             drop(db);
             let reopened = open_db(ctx.child("reopen"), partition).await;
             assert_eq!(
