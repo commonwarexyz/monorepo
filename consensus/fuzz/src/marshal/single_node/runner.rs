@@ -233,6 +233,7 @@ fn shadow_repair(
 /// `shadow_repair` extend through the already-available run. A delivery with no
 /// finalization or no fetch witness is rejected, so a marshal that dispatched
 /// through a genuinely unresolved height is still caught.
+#[allow(clippy::too_many_arguments)]
 fn observe_ready_delivery(
     height: Height,
     ready_prefix: &mut u64,
