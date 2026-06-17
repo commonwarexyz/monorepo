@@ -65,13 +65,13 @@ impl Conformance for ArchiveImmutable {
         runner.start(|mut context| async move {
             let config = immutable::Config {
                 metadata_partition: format!("archive-immutable-metadata-{seed}"),
-                freezer_table_partition: format!("archive-immutable-table-{seed}"),
+                freezer_table_partition: format!("archive-immutable-freezer-table-{seed}"),
                 freezer_table_initial_size: 64,
                 freezer_table_resize_frequency: 2,
                 freezer_table_resize_chunk_size: 32,
-                freezer_key_partition: format!("archive-immutable-key-{seed}"),
+                freezer_key_partition: format!("archive-immutable-freezer-key-{seed}"),
                 freezer_key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
-                freezer_value_partition: format!("archive-immutable-value-{seed}"),
+                freezer_value_partition: format!("archive-immutable-freezer-value-{seed}"),
                 freezer_value_target_size: 1024 * 1024,
                 freezer_value_compression: None,
                 ordinal_partition: format!("archive-immutable-ordinal-{seed}"),

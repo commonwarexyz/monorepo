@@ -179,9 +179,8 @@ impl crate::Blob for Blob {
                 let name = self.name.clone();
                 task::spawn_blocking(move || {
                     Self::write_vectored_at(&file, offset, bufs, None)?;
-                    file.sync_all().map_err(|e| {
-                        Error::BlobSyncFailed(partition, hex(&name), e)
-                    })
+                    file.sync_all()
+                        .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e))
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?

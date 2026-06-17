@@ -459,7 +459,7 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// from the raw encoded size if compression is enabled).
     pub async fn append(&mut self, section: u64, item: &V) -> Result<(u64, u32), Error> {
         let (buf, item_len) = Self::encode_item(self.compression, item)?;
-        self.append_raw(section, &buf)
+        self.append_raw(section, IoBuf::from(buf))
             .await
             .map(|offset| (offset, item_len))
     }
@@ -468,10 +468,9 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     /// where the data was written.
     ///
     /// The buffer must be in the on-disk format produced by [Self::encode_item].
-    async fn append_raw(&mut self, section: u64, buf: &[u8]) -> Result<u64, Error> {
+    async fn append_raw(&mut self, section: u64, buf: IoBuf) -> Result<u64, Error> {
         let blob = self.manager.get_or_create(section).await?;
-        let offset = blob.size().await;
-        blob.append(buf).await?;
+        let offset = blob.append_owned(buf).await?;
         trace!(blob = section, offset, "appended item");
         Ok(offset)
     }
@@ -1182,7 +1181,7 @@ mod tests {
                 .await
                 .expect("Failed to append item");
             journal
-                .append_raw(section, &[0xFF, 0xFF])
+                .append_raw(section, IoBuf::copy_from_slice(&[0xFF, 0xFF]))
                 .await
                 .expect("Failed to append trailing bytes");
             journal.sync(section).await.expect("Failed to sync journal");
@@ -2228,6 +2227,85 @@ mod tests {
                 assert_eq!(*off, offset);
                 assert_eq!(*sz as usize, LARGE_SIZE);
                 assert_eq!(*item, large_data, "Replay read mismatch");
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_journal_large_item_direct_path() {
+        // Items larger than the write buffer are written directly to the blob. The first append
+        // takes the direct path from an empty tip; the second takes it with a non-empty tip
+        // (holding the first item's sub-page remainder), covering both top-up branches. The
+        // returned offsets must remain correct since callers persist them for random access.
+        const LARGE_SIZE: usize = 2048;
+        type LargeItem = [u8; LARGE_SIZE];
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "test-partition".into(),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                write_buffer: NZUsize!(1024),
+            };
+            let mut journal = Journal::init(context.child("first"), cfg.clone())
+                .await
+                .expect("Failed to initialize journal");
+
+            let mut first: LargeItem = [0u8; LARGE_SIZE];
+            for (i, byte) in first.iter_mut().enumerate() {
+                *byte = (i % 256) as u8;
+            }
+            let mut second: LargeItem = [0u8; LARGE_SIZE];
+            for (i, byte) in second.iter_mut().enumerate() {
+                *byte = ((i + 7) % 251) as u8;
+            }
+
+            let (first_offset, _) = journal
+                .append(1, &first)
+                .await
+                .expect("Failed to append first item");
+            let (second_offset, _) = journal
+                .append(1, &second)
+                .await
+                .expect("Failed to append second item");
+
+            // Both items are readable at their returned offsets before any sync.
+            let retrieved: LargeItem = journal.get(1, first_offset).await.unwrap();
+            assert_eq!(retrieved, first);
+            let retrieved: LargeItem = journal.get(1, second_offset).await.unwrap();
+            assert_eq!(retrieved, second);
+
+            // Everything survives a sync and reopen.
+            journal.sync(1).await.expect("Failed to sync");
+            drop(journal);
+            let journal = Journal::<_, LargeItem>::init(context.child("second"), cfg.clone())
+                .await
+                .expect("Failed to re-initialize journal");
+
+            let retrieved: LargeItem = journal.get(1, first_offset).await.unwrap();
+            assert_eq!(retrieved, first);
+            let retrieved: LargeItem = journal.get(1, second_offset).await.unwrap();
+            assert_eq!(retrieved, second);
+
+            {
+                let stream = journal
+                    .replay(0, 0, NZUsize!(1024))
+                    .await
+                    .expect("Failed to setup replay");
+                pin_mut!(stream);
+
+                let mut items = Vec::new();
+                while let Some(result) = stream.next().await {
+                    let (section, off, _, item) = result.expect("Failed to replay item");
+                    items.push((section, off, item));
+                }
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0], (1, first_offset, first));
+                assert_eq!(items[1], (1, second_offset, second));
             }
 
             journal.destroy().await.unwrap();

@@ -1,23 +1,26 @@
 use super::Verifier;
 use crate::{
     simplex::{
+        actors::span::ViewSpan,
         scheme::Scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
             Notarization, Nullification, NullifyFinalize, Proposal, Vote, VoteTracker,
         },
     },
-    types::Participant,
+    types::{Participant, Round as Rnd},
     Reporter,
 };
 use commonware_cryptography::Digest;
 use commonware_p2p::Blocker;
 use commonware_parallel::Strategy;
+use commonware_runtime::telemetry::traces::TracedExt as _;
 use commonware_utils::{
     ordered::{Quorum, Set},
     N3f1,
 };
 use rand_core::CryptoRngCore;
+use tracing::{info_span, Span};
 
 /// Per-view state for vote accumulation and certificate tracking.
 pub struct Round<
@@ -26,6 +29,7 @@ pub struct Round<
     D: Digest,
     R: Reporter<Activity = Activity<S, D>>,
 > {
+    round: Rnd,
     participants: Set<S::PublicKey>,
 
     blocker: B,
@@ -49,6 +53,11 @@ pub struct Round<
     notarization: Option<Notarization<S, D>>,
     nullification: Option<Nullification<S>>,
     finalization: Option<Finalization<S, D>>,
+
+    /// Root span of the view, shared with the voter's round.
+    ///
+    /// Pending until the voter announces the view via an update.
+    span: ViewSpan,
 }
 
 impl<
@@ -58,10 +67,17 @@ impl<
         R: Reporter<Activity = Activity<S, D>>,
     > Round<S, B, D, R>
 {
-    pub fn new(participants: Set<S::PublicKey>, scheme: S, blocker: B, reporter: R) -> Self {
+    pub fn new(
+        round: Rnd,
+        participants: Set<S::PublicKey>,
+        scheme: S,
+        blocker: B,
+        reporter: R,
+    ) -> Self {
         let quorum = participants.quorum::<N3f1>();
         let len = participants.len();
         Self {
+            round,
             participants,
 
             blocker,
@@ -76,7 +92,27 @@ impl<
             notarization: None,
             nullification: None,
             finalization: None,
+
+            span: ViewSpan::new(),
         }
+    }
+
+    /// Returns the root span of the view.
+    pub fn span(&self) -> Span {
+        self.span.get()
+    }
+
+    /// Adopts the root span of the view from the voter.
+    pub fn set_span(&mut self, span: Span) {
+        self.span.adopt(span);
+    }
+
+    /// Closes the view's root span once the view is decided.
+    ///
+    /// The round is retained until it is no longer interesting, but its work no
+    /// longer anchors a trace.
+    pub fn close_span(&mut self) {
+        self.span.close();
     }
 
     /// Returns true if we already have a notarization certificate for this view.
@@ -290,6 +326,7 @@ impl<
         self.verifier.ready_notarizes()
     }
 
+    #[tracing::instrument(name = "simplex.batcher.verify_notarizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
     pub fn verify_notarizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -306,6 +343,7 @@ impl<
         self.verifier.ready_nullifies()
     }
 
+    #[tracing::instrument(name = "simplex.batcher.verify_nullifies", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
     pub fn verify_nullifies<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -322,6 +360,7 @@ impl<
         self.verifier.ready_finalizes()
     }
 
+    #[tracing::instrument(name = "simplex.batcher.verify_finalizes", level = "info", skip_all, fields(epoch = self.round.epoch().traced(), view = self.round.view().traced()))]
     pub fn verify_finalizes<E: CryptoRngCore>(
         &mut self,
         rng: &mut E,
@@ -407,6 +446,12 @@ impl<
         if self.verified_votes.len_notarizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
+        let _span = info_span!(
+            "simplex.batcher.try_construct_notarization",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        )
+        .entered();
         let notarization =
             Notarization::from_notarizes(scheme, self.verified_votes.iter_notarizes(), strategy)?;
         self.set_notarization(notarization.clone());
@@ -427,6 +472,12 @@ impl<
         if self.verified_votes.len_nullifies() < self.participants.quorum::<N3f1>() {
             return None;
         }
+        let _span = info_span!(
+            "simplex.batcher.try_construct_nullification",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        )
+        .entered();
         let nullification =
             Nullification::from_nullifies(scheme, self.verified_votes.iter_nullifies(), strategy)?;
         self.set_nullification(nullification.clone());
@@ -447,6 +498,12 @@ impl<
         if self.verified_votes.len_finalizes() < self.participants.quorum::<N3f1>() {
             return None;
         }
+        let _span = info_span!(
+            "simplex.batcher.try_construct_finalization",
+            epoch = self.round.epoch().traced(),
+            view = self.round.view().traced()
+        )
+        .entered();
         let finalization =
             Finalization::from_finalizes(scheme, self.verified_votes.iter_finalizes(), strategy)?;
         self.set_finalization(finalization.clone());

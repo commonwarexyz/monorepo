@@ -123,7 +123,7 @@ use crate::{
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
     buffer::paged::{self, CacheRef, Replay, Writer},
-    Blob, Buf,
+    Blob, Buf, IoBuf,
 };
 use futures::{
     stream::{self, Stream},
@@ -814,6 +814,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         if items_count == 0 {
             return Err(Error::EmptyAppend);
         }
+        let items_buf = IoBuf::from(items_buf);
 
         // Reject the append before writing anything if it would push the size past `u64::MAX`.
         // This keeps the in-loop size arithmetic safe.
@@ -838,7 +839,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
             self.blobs
                 .tail_writer()
-                .append(&items_buf[start..end])
+                .append_owned(items_buf.slice(start..end))
                 .await
                 .map_err(Error::Runtime)?;
             self.bounds.end = new_size;

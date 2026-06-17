@@ -107,9 +107,12 @@ use commonware_macros::select;
 use commonware_p2p::Recipients;
 use commonware_parallel::Strategy;
 use commonware_runtime::{
-    telemetry::metrics::{
-        histogram::{Buckets, Timed},
-        MetricsExt as _,
+    telemetry::{
+        metrics::{
+            histogram::{Buckets, Timed},
+            MetricsExt as _,
+        },
+        traces::TracedExt as _,
     },
     Clock, Metrics, Spawner, Storage,
 };
@@ -359,10 +362,7 @@ where
                         result = block_request => match result {
                             Ok(block) => block,
                             Err(_) => {
-                                debug!(
-                                    reason = "block unavailable",
-                                    "skipping verification"
-                                );
+                                debug!(reason = "block unavailable", "skipping verification");
                                 return;
                             }
                         },
@@ -433,7 +433,7 @@ where
                         "marshal.coding.application.verify",
                         round = %consensus_context.round,
                         commitment = %commitment,
-                        parent_view = %parent_view,
+                        parent_view = parent_view.traced(),
                         parent = %parent_commitment
                     ));
 
@@ -838,7 +838,7 @@ where
                     .instrument(info_span!(
                         "marshal.coding.application.propose",
                         round = %consensus_context.round,
-                        parent_view = %parent_view,
+                        parent_view = parent_view.traced(),
                         parent = %parent_commitment
                     ));
 
