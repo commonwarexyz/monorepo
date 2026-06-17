@@ -13,30 +13,30 @@ const BOX_CONTENT = [
 ];
 
 const SLIDE1_POSITIONS = {
-  bte: { x: 40.5, y: 12 },
-  ste: { x: 75.25, y: 12 },
+  bte: { x: 38.5, y: 12 },
+  ste: { x: 77.25, y: 12 },
   trx: { x: 43.75, y: 62.5 },
   btibe: { x: 47.25, y: 44 },
   sbtibe: { x: 65.25, y: 62.5 },
   beast: { x: 88.75, y: 62.5 },
   beat: { x: 63, y: 28 },
   pfbte: { x: 15.75, y: 31.5 },
-  simple: { x: 23.75, y: 52.75 },
+  simple: { x: 20.75, y: 56.25 },
 };
 
-const LEFT_COLUMN_X = 20;
-const MIDDLE_COLUMN_X = 50;
-const RIGHT_COLUMN_X = 75;
+const LEFT_COLUMN_X = 19;
+const MIDDLE_COLUMN_X = 52;
+const RIGHT_COLUMN_X = 80;
 
 const SLIDE2_POSITIONS = {
   bte: { x: LEFT_COLUMN_X, y: 27 },
-  btibe: { x: LEFT_COLUMN_X, y: 40 },
-  sbtibe: { x: LEFT_COLUMN_X, y: 53 },
-  trx: { x: LEFT_COLUMN_X, y: 66 },
+  btibe: { x: LEFT_COLUMN_X, y: 41 },
+  sbtibe: { x: LEFT_COLUMN_X, y: 55 },
+  trx: { x: LEFT_COLUMN_X, y: 69 },
   beat: { x: MIDDLE_COLUMN_X, y: 27 },
-  beast: { x: MIDDLE_COLUMN_X, y: 40 },
+  beast: { x: MIDDLE_COLUMN_X, y: 41 },
   pfbte: { x: RIGHT_COLUMN_X, y: 27 },
-  simple: { x: RIGHT_COLUMN_X, y: 40 },
+  simple: { x: RIGHT_COLUMN_X, y: 41 },
 };
 
 const BOXES = BOX_CONTENT.map(box => ({
@@ -64,8 +64,8 @@ const HEADERS = [
 ];
 
 const DIVIDERS = [
-  { x: 38, y1: 7, y2: 71 },
-  { x: 62, y1: 7, y2: 71 },
+  { x: 38.5, y1: 7, y2: 71 },
+  { x: 65.5, y1: 7, y2: 71 },
 ];
 
 const WINDOWS = {
@@ -352,6 +352,10 @@ function injectStyles() {
     @media (max-width: 600px) {
       .cw-magic-move {
         --cw-magic-track-height: 680vh;
+      }
+
+      .cw-magic-box {
+        font-size: 21px;
       }
     }
 
