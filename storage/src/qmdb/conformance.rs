@@ -605,7 +605,7 @@ macro_rules! db_conformance {
     ($name:ident, $db:ty, $cfg_fn:expr, |$d:ident, $s:ident| $body:expr) => {
         struct $name;
         impl Conformance for $name {
-            async fn commit($s: u64) -> Vec<u8> {
+            fn commit($s: u64) -> Vec<u8> {
                 deterministic::Runner::seeded($s).start(|ctx| async move {
                     let mut $d = <$db>::init(ctx.child("db"), ($cfg_fn)("cf", &ctx))
                         .await

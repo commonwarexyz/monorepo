@@ -29,7 +29,7 @@ fn config(seed: u64, pooler: &impl BufferPooler) -> Config<(RangeCfg<usize>, ())
 struct QueueConformance;
 
 impl Conformance for QueueConformance {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let mut queue = Queue::<_, Vec<u8>>::init(

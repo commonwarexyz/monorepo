@@ -133,12 +133,10 @@ pub fn conformance_tests(input: TokenStream) -> TokenStream {
             #[::commonware_conformance::commonware_macros::test_group("conformance")]
             #[test]
             fn #fn_name() {
-                ::commonware_conformance::futures::executor::block_on(
-                    ::commonware_conformance::run_conformance_test::<#ty>(
-                        concat!(module_path!(), "::", #type_name_str),
-                        #n_cases,
-                        ::std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/conformance.toml")),
-                    )
+                ::commonware_conformance::run_conformance_test::<#ty>(
+                    concat!(module_path!(), "::", #type_name_str),
+                    #n_cases,
+                    ::std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/conformance.toml")),
                 );
             }
         }

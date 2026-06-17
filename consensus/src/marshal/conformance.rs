@@ -24,13 +24,13 @@ struct StandardStorageConformance;
 struct CodingStorageConformance;
 
 impl Conformance for StandardStorageConformance {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         marshal_commit::<StandardHarness>(seed)
     }
 }
 
 impl Conformance for CodingStorageConformance {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         marshal_commit::<CodingHarness>(seed)
     }
 }

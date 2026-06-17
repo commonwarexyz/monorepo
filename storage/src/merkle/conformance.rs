@@ -54,7 +54,7 @@ type Standard = crate::merkle::hasher::Standard<Sha256>;
 struct MmrRootStability;
 
 impl Conformance for MmrRootStability {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let hasher = Standard::new(ForwardFold);
         let mmr = crate::mmr::mem::Mmr::new();
         build_test_mem(&hasher, mmr, seed)
@@ -71,7 +71,7 @@ impl Conformance for MmrRootStability {
 struct MmbRootStability;
 
 impl Conformance for MmbRootStability {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let hasher = Standard::new(ForwardFold);
         let mmb = crate::mmb::mem::Mmb::new();
         build_test_mem(&hasher, mmb, seed)

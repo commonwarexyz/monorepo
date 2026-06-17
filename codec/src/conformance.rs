@@ -85,7 +85,7 @@ impl<T> Conformance for CodecConformance<T>
 where
     T: Encode + for<'a> Arbitrary<'a> + Send + Sync,
 {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let value: T = generate_value(seed);
         value.encode().to_vec()
     }

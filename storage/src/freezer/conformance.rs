@@ -14,7 +14,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 struct Freezer;
 
 impl Conformance for Freezer {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = Config {

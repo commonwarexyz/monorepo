@@ -18,7 +18,7 @@ commonware_conformance::conformance_tests! {
 struct RationalOptimalBits;
 
 impl Conformance for RationalOptimalBits {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let mut log = Vec::new();
 
         // Use seed to vary expected_items (1 to 1M range)

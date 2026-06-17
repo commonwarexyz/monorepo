@@ -1154,7 +1154,7 @@ mod tests {
         }
 
         impl Conformance for ContainerTransitionsConformance {
-            async fn commit(seed: u64) -> Vec<u8> {
+            fn commit(seed: u64) -> Vec<u8> {
                 let mut out = Vec::new();
 
                 // Start from a dense contiguous range so in-memory normalization picks Run.

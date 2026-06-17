@@ -22,7 +22,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 struct ContiguousFixed;
 
 impl Conformance for ContiguousFixed {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = fixed::Config {
@@ -53,7 +53,7 @@ impl Conformance for ContiguousFixed {
 struct ContiguousVariable;
 
 impl Conformance for ContiguousVariable {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = variable::Config {
@@ -90,7 +90,7 @@ impl Conformance for ContiguousVariable {
 struct SegmentedFixed;
 
 impl Conformance for SegmentedFixed {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = segmented_fixed::Config {
@@ -128,7 +128,7 @@ impl Conformance for SegmentedFixed {
 struct SegmentedGlob;
 
 impl Conformance for SegmentedGlob {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = glob::Config {
@@ -170,7 +170,7 @@ impl Conformance for SegmentedGlob {
 struct SegmentedVariable;
 
 impl Conformance for SegmentedVariable {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = segmented_variable::Config {
@@ -261,7 +261,7 @@ impl Record for TestEntry {
 struct SegmentedOversized;
 
 impl Conformance for SegmentedOversized {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = oversized::Config {

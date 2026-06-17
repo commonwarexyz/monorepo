@@ -19,7 +19,7 @@ const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(10);
 struct ArchivePrunable;
 
 impl Conformance for ArchivePrunable {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = prunable::Config {
@@ -60,7 +60,7 @@ impl Conformance for ArchivePrunable {
 struct ArchiveImmutable;
 
 impl Conformance for ArchiveImmutable {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let runner = deterministic::Runner::seeded(seed);
         runner.start(|mut context| async move {
             let config = immutable::Config {

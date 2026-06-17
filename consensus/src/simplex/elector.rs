@@ -507,7 +507,7 @@ mod tests {
         struct RoundRobinShuffleConformance;
 
         impl Conformance for RoundRobinShuffleConformance {
-            async fn commit(seed: u64) -> Vec<u8> {
+            fn commit(seed: u64) -> Vec<u8> {
                 let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
                 // Generate deterministic participants (using ed25519 fixture)
@@ -535,7 +535,7 @@ mod tests {
         struct RandomSelectLeaderConformance;
 
         impl Conformance for RandomSelectLeaderConformance {
-            async fn commit(seed: u64) -> Vec<u8> {
+            fn commit(seed: u64) -> Vec<u8> {
                 let mut rng = ChaCha8Rng::seed_from_u64(seed);
 
                 // Generate deterministic BLS threshold fixture (4-10 participants)

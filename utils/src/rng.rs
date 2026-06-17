@@ -383,7 +383,7 @@ mod tests {
         struct FuzzRngConformance;
 
         impl Conformance for FuzzRngConformance {
-            async fn commit(seed: u64) -> Vec<u8> {
+            fn commit(seed: u64) -> Vec<u8> {
                 let mut seed_rng = test_rng_seeded(seed);
                 let len = seed_rng.gen_range(1..=64);
                 let mut input = vec![0u8; len];

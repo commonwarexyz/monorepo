@@ -2563,7 +2563,7 @@ mod tests {
         struct RootConformance;
 
         impl Conformance for RootConformance {
-            async fn commit(seed: u64) -> Vec<u8> {
+            fn commit(seed: u64) -> Vec<u8> {
                 let root = test_merkle_tree(seed as usize);
                 root.to_vec()
             }

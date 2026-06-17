@@ -17,7 +17,7 @@ const NAMESPACE: &[u8] = b"_COMMONWARE_HANDSHAKE_CONFORMANCE_TESTS";
 struct Handshake;
 
 impl Conformance for Handshake {
-    async fn commit(seed: u64) -> Vec<u8> {
+    fn commit(seed: u64) -> Vec<u8> {
         let mut log = Vec::new();
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
 

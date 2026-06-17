@@ -1446,7 +1446,6 @@ dependencies = [
  "commonware-conformance-macros",
  "commonware-formatting",
  "commonware-macros",
- "futures",
  "serde",
  "sha2 0.10.9",
  "toml",

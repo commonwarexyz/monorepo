@@ -16,7 +16,6 @@ workspace = true
 commonware-conformance-macros.workspace = true
 commonware-formatting.workspace = true
 commonware-macros.workspace = true
-futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 toml.workspace = true
