@@ -655,12 +655,8 @@ impl PooledSlot {
     /// allocation for this slot. Until the slot is created, no free bit points
     /// at it and no [`PooledBuffer`] may be built from it.
     #[inline]
-    pub const fn new(
-        slot: u32,
-        capacity: usize,
-        class_id: u32,
-        thread_cache_capacity: u32,
-    ) -> Self {
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn new(slot: u32, capacity: usize, class_id: u32, thread_cache_capacity: u32) -> Self {
         Self {
             refs: AtomicUsize::new(1),
             lease: MaybeUninit::uninit(),
