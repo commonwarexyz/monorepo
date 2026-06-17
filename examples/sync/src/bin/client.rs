@@ -591,7 +591,7 @@ fn main() {
     executor.start(|context| async move {
         tokio_runtime::telemetry::init(
             context.child("telemetry"),
-            tokio_runtime::telemetry::Logging {
+            tokio_runtime::telemetry::Logs {
                 level: tracing::Level::INFO,
                 json: false,
             },

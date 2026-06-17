@@ -138,13 +138,12 @@ impl LtHash {
 
     /// Return the [Digest] of the current state.
     pub fn checksum(&self) -> Digest {
-        let mut hasher = Blake3::new();
-
-        // Convert u16 array to bytes in little-endian order
-        for &val in &self.state {
-            hasher.update(&val.to_le_bytes());
+        let mut bytes = [0u8; LTHASH_SIZE];
+        for (chunk, val) in bytes.chunks_exact_mut(2).zip(&self.state) {
+            chunk.copy_from_slice(&val.to_le_bytes());
         }
-
+        let mut hasher = Blake3::new();
+        hasher.update(&bytes);
         hasher.finalize()
     }
 
