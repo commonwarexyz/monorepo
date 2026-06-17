@@ -167,6 +167,10 @@ impl Report {
             println!("write_shape={}", cfg.write_shape);
             if cfg.workload == Workload::WriteSync {
                 println!("sync_method={}", cfg.sync_method);
+            } else if cfg.workload == Workload::SyncPending {
+                println!("sync_kind={}", cfg.sync_kind);
+                println!("pending_size={}", cfg.pending_size.expect("validated"));
+                println!("pending_mode={}", cfg.pending_mode);
             } else {
                 println!("sync_every={}", cfg.sync_mode);
             }
@@ -195,10 +199,18 @@ impl Report {
             "root": cfg.root,
             "cache": cfg.cache.map(|mode| mode.to_string()),
             "write_shape": cfg.workload.has_writes().then(|| cfg.write_shape.to_string()),
-            "sync_every": (cfg.workload.has_writes() && cfg.workload != Workload::WriteSync)
+            "sync_every": (cfg.workload.has_writes()
+                && cfg.workload != Workload::WriteSync
+                && cfg.workload != Workload::SyncPending)
                 .then(|| cfg.sync_mode.to_string()),
             "sync_method": (cfg.workload == Workload::WriteSync)
                 .then(|| cfg.sync_method.to_string()),
+            "sync_kind": (cfg.workload == Workload::SyncPending)
+                .then(|| cfg.sync_kind.to_string()),
+            "pending_size": (cfg.workload == Workload::SyncPending)
+                .then_some(cfg.pending_size.expect("validated")),
+            "pending_mode": (cfg.workload == Workload::SyncPending)
+                .then(|| cfg.pending_mode.to_string()),
             "seed": cfg.seed,
             "elapsed_ns": self.elapsed.as_nanos() as u64,
             "read": self.read.as_ref().map(OperationReport::to_json),

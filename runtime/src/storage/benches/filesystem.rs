@@ -1,22 +1,22 @@
 //! Filesystem helpers.
 
 use crate::{
-    config::WriteShape,
+    config::{SyncKind, WriteShape},
     error::{Error, Result},
 };
 use bytes::Bytes;
-#[cfg(target_os = "linux")]
 use commonware_formatting::hex;
 use commonware_runtime::{Blob, IoBuf, IoBufs, Storage};
 use rand::Rng;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 use std::{
-    fs, io,
+    fs::{self, File, OpenOptions},
+    io,
     path::{Path, PathBuf},
     process,
     time::{SystemTime, UNIX_EPOCH},
 };
-#[cfg(target_os = "linux")]
-use std::{fs::OpenOptions, os::fd::AsRawFd};
 
 const DEFAULT_FILL_CHUNK_SIZE: usize = 1024 * 1024;
 
@@ -26,6 +26,11 @@ pub const fn backend_name() -> &'static str {
     } else {
         "tokio"
     }
+}
+
+/// Return the on-disk path for a blob in the benchmark partition.
+pub fn blob_path(root: &Path, partition: &str, name: &[u8]) -> PathBuf {
+    root.join(partition).join(hex(name))
 }
 
 /// Create a unique storage root for one benchmark run under the configured parent.
@@ -64,7 +69,7 @@ pub fn cleanup_root(root: &Path) -> Result<()> {
 /// rather than first-write allocation behavior.
 #[cfg(target_os = "linux")]
 fn preallocate_blob(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
-    let path = root.join(partition).join(hex(name));
+    let path = blob_path(root, partition, name);
     let file = OpenOptions::new().read(true).write(true).open(path)?;
     let length = file.metadata()?.len();
 
@@ -97,7 +102,7 @@ const fn preallocate_blob(_root: &Path, _partition: &str, _name: &[u8]) -> std::
 /// later does not undo it.
 #[cfg(target_os = "linux")]
 pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<()> {
-    let path = root.join(partition).join(hex(name));
+    let path = blob_path(root, partition, name);
     let file = OpenOptions::new().read(true).write(true).open(path)?;
 
     // SAFETY: The file descriptor is valid for the duration of the call.
@@ -106,6 +111,22 @@ pub fn drop_page_cache(root: &Path, partition: &str, name: &[u8]) -> io::Result<
         return Err(io::Error::from_raw_os_error(result));
     }
     Ok(())
+}
+
+/// Open the benchmark blob through the standard filesystem API.
+pub fn open_blob_file(root: &Path, partition: &str, name: &[u8]) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(blob_path(root, partition, name))
+}
+
+/// Persist pending writes using the selected filesystem sync operation.
+pub fn sync_file(file: &File, sync_kind: SyncKind) -> io::Result<()> {
+    match sync_kind {
+        SyncKind::Full => file.sync_all(),
+        SyncKind::Data => file.sync_data(),
+    }
 }
 
 #[cfg(not(target_os = "linux"))]

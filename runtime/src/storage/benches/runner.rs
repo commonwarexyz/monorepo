@@ -1,13 +1,14 @@
 //! Timed I/O loops and helpers.
 
 use crate::{
-    config::{SyncMethod, SyncMode},
+    config::{PendingMode, SyncKind, SyncMethod, SyncMode},
     error::Result,
+    filesystem::sync_file,
     report::Stats,
 };
 use commonware_runtime::{Blob, IoBufMut, IoBufs};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
-use std::time::Instant;
+use std::{fs::File, time::Instant};
 
 /// Operations between deadline checks.
 ///
@@ -22,6 +23,16 @@ const DEADLINE_CHECK_STRIDE: u64 = 8;
 /// throughput rates this yields thousands of samples per second while keeping
 /// `Instant::now()` overhead well below 1% of per-operation cost.
 const LATENCY_SAMPLE_STRIDE: u64 = 16;
+
+/// Settings for one `sync_pending` timed loop.
+pub struct PendingSyncLoop {
+    pub deadline: Instant,
+    pub io_size: usize,
+    pub pending_size: u64,
+    pub sync_kind: SyncKind,
+    pub pending_mode: PendingMode,
+    pub initial_file_size: u64,
+}
 
 /// Return a closure that yields block indices in sequential, strided order.
 ///
@@ -151,6 +162,56 @@ pub async fn run_sync_write_loop(
             }
         }
         stats.record(io_size, started.map(|s| s.elapsed()));
+    }
+    Ok(stats)
+}
+
+/// Timed loop that dirties `pending_size` bytes before each filesystem sync.
+///
+/// Latency samples cover only the sync call. Total throughput includes both
+/// the writes needed to create dirty data and the selected sync operation.
+#[inline]
+pub async fn run_pending_sync_loop(
+    blob: impl Blob,
+    file: File,
+    payload: IoBufs,
+    cfg: PendingSyncLoop,
+) -> Result<Stats> {
+    let mut stats = Stats::default();
+    let io_size = cfg.io_size as u64;
+    let writes_per_sync = cfg.pending_size / io_size;
+    let mut next_offset = match cfg.pending_mode {
+        PendingMode::Append => cfg.initial_file_size,
+        PendingMode::Overwrite | PendingMode::Preallocated => 0,
+    };
+
+    while should_continue(cfg.deadline, stats.ops) {
+        let base_offset = match cfg.pending_mode {
+            PendingMode::Overwrite => 0,
+            PendingMode::Append => {
+                let offset = next_offset;
+                next_offset += cfg.pending_size;
+                offset
+            }
+            PendingMode::Preallocated => {
+                let offset = next_offset;
+                next_offset = if next_offset + cfg.pending_size >= cfg.initial_file_size {
+                    0
+                } else {
+                    next_offset + cfg.pending_size
+                };
+                offset
+            }
+        };
+
+        for write in 0..writes_per_sync {
+            blob.write_at(base_offset + write * io_size, payload.clone())
+                .await?;
+        }
+
+        let started = should_sample_latency(stats.ops).then(Instant::now);
+        sync_file(&file, cfg.sync_kind)?;
+        stats.record(cfg.pending_size, started.map(|s| s.elapsed()));
     }
     Ok(stats)
 }

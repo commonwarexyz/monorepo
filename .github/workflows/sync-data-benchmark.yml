@@ -1,0 +1,123 @@
+name: Sync Data Benchmark
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: Duration in seconds for each full/data run
+        default: "10"
+        required: true
+      file_size:
+        description: Existing/preallocated file size for non-append runs
+        default: "64M"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  sync-data:
+    name: pending=${{ matrix.pending_size }} mode=${{ matrix.pending_mode }}
+    runs-on: ubuntu-latest-8
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        pending_size: [4K, 64K, 1M, 16M]
+        pending_mode: [overwrite, append, preallocated]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4
+
+      - name: Run setup
+        uses: ./.github/actions/setup
+
+      - name: Compile storage benchmark
+        run: cargo bench -p commonware-runtime --bench storage --no-run
+
+      - name: Run sync benchmarks
+        env:
+          DURATION: ${{ github.event_name == 'workflow_dispatch' && inputs.duration || '10' }}
+          FILE_SIZE: ${{ github.event_name == 'workflow_dispatch' && inputs.file_size || '64M' }}
+          PENDING_SIZE: ${{ matrix.pending_size }}
+          PENDING_MODE: ${{ matrix.pending_mode }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p sync-data-results
+          output="sync-data-results/pending-${PENDING_SIZE}-mode-${PENDING_MODE}.jsonl"
+          : > "$output"
+
+          for sync_kind in full data; do
+            args=(
+              --workload sync_pending
+              --duration "$DURATION"
+              --io-size 4K
+              --pending-size "$PENDING_SIZE"
+              --pending-mode "$PENDING_MODE"
+              --sync-kind "$sync_kind"
+              --output json
+            )
+            if [ "$PENDING_MODE" != "append" ]; then
+              args+=(--file-size "$FILE_SIZE")
+            fi
+
+            echo "::group::sync_kind=${sync_kind}"
+            cargo bench -p commonware-runtime --bench storage -- "${args[@]}" | tee -a "$output"
+            echo "::endgroup::"
+          done
+
+      - name: Summarize sync benchmarks
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          rows = []
+          for path in sorted(Path("sync-data-results").glob("*.jsonl")):
+              results = [json.loads(line) for line in path.read_text().splitlines() if line.startswith("{")]
+              by_kind = {result["sync_kind"]: result for result in results}
+              full = by_kind.get("full")
+              data = by_kind.get("data")
+              if not full or not data:
+                  raise SystemExit(f"missing full/data result in {path}")
+              full_ops = full["write"]["ops_per_sec"]
+              data_ops = data["write"]["ops_per_sec"]
+              full_p50 = full["write"]["p50_latency_ns"] / 1_000
+              data_p50 = data["write"]["p50_latency_ns"] / 1_000
+              ratio = data_ops / full_ops if full_ops else 0
+              rows.append((
+                  full["pending_size"],
+                  full["pending_mode"],
+                  full_ops,
+                  data_ops,
+                  ratio,
+                  full_p50,
+                  data_p50,
+              ))
+
+          lines = [
+              "| pending bytes | mode | full ops/s | data ops/s | speedup | full p50 us | data p50 us |",
+              "| ---: | --- | ---: | ---: | ---: | ---: | ---: |",
+          ]
+          for pending, mode, full_ops, data_ops, ratio, full_p50, data_p50 in rows:
+              lines.append(
+                  f"| {pending} | {mode} | {full_ops:.1f} | {data_ops:.1f} | "
+                  f"{ratio:.2f}x | {full_p50:.1f} | {data_p50:.1f} |"
+              )
+
+          summary = "\n".join(lines)
+          print(summary)
+          with open("sync-data-results/summary.md", "w", encoding="utf-8") as f:
+              f.write(summary + "\n")
+          PY
+          cat sync-data-results/summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sync benchmark results
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sync-data-${{ matrix.pending_size }}-${{ matrix.pending_mode }}
+          path: sync-data-results
+          if-no-files-found: error
