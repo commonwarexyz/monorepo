@@ -28,7 +28,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
-use commonware_utils::sync::Mutex;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
@@ -388,6 +388,15 @@ impl crate::Blob for Blob {
             .sync(self.file.clone())
             .await
             .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+    }
+
+    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        let (tx, rx) = oneshot::channel();
+        let this = self.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(this.sync().await);
+        });
+        rx
     }
 }
 

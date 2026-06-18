@@ -1393,7 +1393,7 @@ mod tests {
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16, NZU32};
+    use commonware_utils::{channel::oneshot, NZUsize, NZU16, NZU32};
     use std::{
         num::NonZeroU16,
         sync::{
@@ -2660,6 +2660,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             self.inner.sync().await
+        }
+
+        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            self.inner.start_sync()
         }
     }
 

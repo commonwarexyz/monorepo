@@ -277,6 +277,36 @@ mod tests {
         run_storage_tests(storage).await;
     }
 
+    /// Dropping the `start_sync` receiver before the background sync completes must not
+    /// break the blob: the data still persists and the handle stays usable.
+    #[tokio::test]
+    async fn test_start_sync_dropped_receiver() {
+        let mut rng = rand::rngs::StdRng::from_entropy();
+        let storage_directory =
+            env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.gen::<u64>()));
+        let config = Config::new(storage_directory, 2 * 1024 * 1024);
+        let storage = Storage::new(config, test_pool());
+
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        // Drop the receiver immediately; the spawned sync task must tolerate the
+        // closed channel without panicking.
+        drop(blob.start_sync());
+
+        // The handle is still usable, and a subsequent sync persists the data.
+        blob.start_sync()
+            .await
+            .expect("sync sender dropped")
+            .unwrap();
+        drop(blob);
+
+        let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();
+        assert_eq!(len, 11);
+        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        assert_eq!(read.as_ref(), b"hello world");
+    }
+
     #[tokio::test]
     async fn test_blob_header_handling() {
         let mut rng = rand::rngs::StdRng::from_entropy();

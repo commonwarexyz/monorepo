@@ -388,6 +388,7 @@ pub(crate) mod tests {
         test_read_beyond_bound(&storage).await;
         test_write_at_large_offset(&storage).await;
         test_write_at_sync(&storage).await;
+        test_start_sync(&storage).await;
         test_append_data(&storage).await;
         test_vectored_write_at(&storage).await;
         test_vectored_write_at_large_offset(&storage).await;
@@ -881,6 +882,29 @@ pub(crate) mod tests {
             .open("test_write_at_sync", b"test_blob")
             .await
             .unwrap();
+        assert_eq!(len, 11);
+        let read = blob.read_at(0, 11).await.unwrap().coalesce();
+        assert_eq!(read.as_ref(), b"hello world");
+    }
+
+    /// Test that `start_sync` durably persists data, matching `sync`.
+    async fn test_start_sync<S>(storage: &S)
+    where
+        S: Storage + Send + Sync,
+        S::Blob: Send + Sync,
+    {
+        let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
+        assert_eq!(len, 0);
+
+        blob.write_at(0, b"hello world").await.unwrap();
+        blob.start_sync()
+            .await
+            .expect("sync sender dropped")
+            .unwrap();
+        drop(blob);
+
+        // The bytes must survive a reopen, just as they would after `sync`.
+        let (blob, len) = storage.open("test_start_sync", b"test_blob").await.unwrap();
         assert_eq!(len, 11);
         let read = blob.read_at(0, 11).await.unwrap().coalesce();
         assert_eq!(read.as_ref(), b"hello world");

@@ -576,6 +576,12 @@ mod tests {
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
         }
+
+        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Ok(()));
+            rx
+        }
     }
 
     #[derive(Clone)]
@@ -654,6 +660,12 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
+        }
+
+        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Ok(()));
+            rx
         }
     }
 

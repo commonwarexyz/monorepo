@@ -2,6 +2,7 @@ use super::Header;
 use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
+use commonware_utils::channel::oneshot;
 use std::{
     fs::File,
     io::IoSlice,
@@ -209,5 +210,14 @@ impl crate::Blob for Blob {
             .and_then(|r| r)
             .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
         Ok(())
+    }
+
+    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        let (tx, rx) = oneshot::channel();
+        let this = self.clone();
+        task::spawn(async move {
+            let _ = tx.send(this.sync().await);
+        });
+        rx
     }
 }

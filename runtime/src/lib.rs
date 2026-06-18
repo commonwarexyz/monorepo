@@ -48,6 +48,7 @@ stability_scope!(BETA {
     pub use bytes::{Buf, BufMut};
     use commonware_macros::select;
     use commonware_parallel::{Rayon, ThreadPool};
+    use commonware_utils::channel::oneshot;
     /// Re-export of [governor::Quota] for rate limiting configuration.
     pub use governor::Quota;
     use iobuf::PoolError;
@@ -757,6 +758,10 @@ stability_scope!(BETA {
 
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Begin syncing all pending data durably, returning a [oneshot::Receiver] that
+        /// resolves once the sync completes.
+        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>>;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.

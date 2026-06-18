@@ -1,6 +1,7 @@
 use super::Header;
 use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_formatting::hex;
+use commonware_utils::channel::oneshot;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,
@@ -134,5 +135,14 @@ impl crate::Blob for Blob {
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
         self.sync_inner(&file).await
+    }
+
+    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        let (tx, rx) = oneshot::channel();
+        let this = self.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(this.sync().await);
+        });
+        rx
     }
 }

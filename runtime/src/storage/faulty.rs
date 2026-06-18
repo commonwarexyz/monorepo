@@ -2,7 +2,10 @@
 
 use crate::{deterministic::BoxDynRng, Error, IoBufs, IoBufsMut};
 use bytes::Buf;
-use commonware_utils::sync::{Mutex, RwLock};
+use commonware_utils::{
+    channel::oneshot,
+    sync::{Mutex, RwLock},
+};
 use rand::Rng;
 use std::{
     io::Error as IoError,
@@ -391,6 +394,15 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         }
         self.inner.sync().await
     }
+
+    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        if self.ctx.should_fail(Op::Sync) {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Err(Error::Io(injected_io_error())));
+            return rx;
+        }
+        self.inner.start_sync()
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +461,17 @@ mod tests {
         blob.write_at(0, b"data".to_vec()).await.unwrap();
 
         assert!(matches!(blob.sync().await, Err(Error::Io(_))));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_start_sync_always_fails() {
+        let h = Harness::new(Config::default().sync(1.0));
+
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
+
+        let result = blob.start_sync().await.expect("sync sender dropped");
+        assert!(matches!(result, Err(Error::Io(_))));
     }
 
     #[tokio::test]
