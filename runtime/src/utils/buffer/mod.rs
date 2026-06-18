@@ -165,7 +165,7 @@ mod tests {
     use crate::{
         deterministic,
         mocks::{next_pending_sync, DelayedSyncBlob},
-        Blob as _, Error, Handle, IoBufs, IoBufsMut, Runner, Storage,
+        Blob as _, Error, Handle, IoBufMut, IoBufs, IoBufsMut, Runner, Storage,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{sync::Mutex, NZUsize};
@@ -237,6 +237,11 @@ mod tests {
     }
 
     impl crate::Blob for SyncTrackingBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
+                .await
+        }
+
         async fn read_at_buf(
             &self,
             offset: u64,
@@ -250,10 +255,8 @@ mod tests {
                 return Err(Error::BlobInsufficientLength);
             }
 
-            // Overwrite from the start of the caller's storage, like real
-            // Blob impls, so reused (non-empty) buffers work per the
-            // read_at_buf contract.
             let mut out = buf.into();
+            assert!(out.capacity() >= len);
             // SAFETY: `len` bytes are filled by copy_from_slice below.
             unsafe { out.set_len(len) };
             out.copy_from_slice(&state.data[start..end]);
