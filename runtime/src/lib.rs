@@ -726,17 +726,11 @@ stability_scope!(BETA {
         /// of data read from the blob starting at `offset`.
         ///
         /// To reuse a buffer(s), use [`Blob::read_at_buf`].
-        ///
-        /// The default implementation allocates a fresh buffer of exactly
-        /// `len` bytes. Implementations with access to a pool should override
-        /// it to allocate from the pool instead.
         fn read_at(
             &self,
             offset: u64,
             len: usize,
-        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send {
-            self.read_at_buf(offset, len, IoBufMut::with_capacity(len))
-        }
+        ) -> impl Future<Output = Result<IoBufsMut, Error>> + Send;
 
         /// Write `bufs` to the blob at the given offset.
         fn write_at(

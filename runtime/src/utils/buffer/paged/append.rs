@@ -2558,7 +2558,7 @@ mod tests {
             append.append(&[1, 2, 3, 4]).await.unwrap();
 
             // Request a zero-length read with a reused, non-empty buffer.
-            let stale = IoBufMut::from([9u8, 8, 7, 6]);
+            let stale = [9u8, 8, 7, 6];
             let (buf, read) = append.read_up_to(0, 0, stale).await.unwrap();
 
             assert_eq!(read, 0);
