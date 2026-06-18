@@ -3,6 +3,7 @@
 //! - fund: move funds from a public account into a private account
 //! - transfer: move funds between private accounts
 //! - burn: reveal the balance of a private account
+//!
 //! The commitment scheme is assumed to be homomorphic, supporting addition and subtraction of commitments thereby, allowing in-place updates of the balance.
 
 use core::ops::{Add, Sub};
