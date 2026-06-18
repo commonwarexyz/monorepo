@@ -45,6 +45,9 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
+    #[cfg(not(target_arch = "wasm32"))]
+    pub mod mayo;
+
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
