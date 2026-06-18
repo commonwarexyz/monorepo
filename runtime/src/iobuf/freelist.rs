@@ -346,12 +346,11 @@ impl Freelist {
     /// the matching `Acquire` operation before rebuilding a buffer handle from
     /// the same side-table entry.
     ///
-    /// Panics if `buffer` was not created by this freelist, its slot has not
-    /// been created yet, or its slot is already globally free. If this method
-    /// panics, `buffer` may leak.
+    /// The caller must own `buffer`, its slot must not already be available in
+    /// this freelist, and the buffer must have been created by this freelist.
     #[inline]
     pub fn put(&self, buffer: PooledBuffer) {
-        let slot = self.validate_buffer(&buffer);
+        let slot = buffer.slot();
 
         // Setting the slot bit makes the slot available. `Release` pairs with
         // the taker's `Acquire` clear before it reuses the side-table entry.
@@ -373,11 +372,11 @@ impl Freelist {
     /// `BufferPool` callers use simple drain and array iterators, avoiding
     /// per-entry guards keeps this path allocation-free for ordinary batches.
     ///
-    /// Panics if any buffer was not created by this freelist, has a slot that
-    /// has not been created yet, appears more than once in the batch, or has a
-    /// slot that is already globally free. If this method panics after
-    /// accepting one or more buffers, accepted-but-unpublished buffers may
-    /// leak.
+    /// The caller must own every buffer in the batch. Slots must be unique
+    /// within the batch and must not already be available in this freelist.
+    /// Each buffer must have been created by this freelist. If this method
+    /// panics after accepting one or more buffers, accepted-but-unpublished
+    /// buffers may leak.
     #[inline]
     pub fn put_batch(&self, entries: impl IntoIterator<Item = PooledBuffer>) {
         let mut entries = entries.into_iter();
@@ -422,7 +421,7 @@ impl Freelist {
     /// `put_batch` peels the first two entries before calling this helper, so
     /// this path only handles batches large enough to benefit from coalescing.
     /// `masks` must contain exactly one zeroed entry per bitmap word. Each slot
-    /// is validated and ORed into its word's scratch mask. Once all entries are
+    /// is ORed into its word's scratch mask. Once all entries are
     /// staged, one `Release` `fetch_or` per non-empty mask makes the
     /// corresponding slots available.
     ///
@@ -437,9 +436,8 @@ impl Freelist {
         next_buffer: PooledBuffer,
         entries: impl Iterator<Item = PooledBuffer>,
     ) {
-        // Masks are staged by word after validating the returned buffers. The
-        // later Release `fetch_or` makes every staged slot in that word
-        // available.
+        // Masks are staged by word before the later Release `fetch_or` makes
+        // every staged slot in that word available.
         self.stage_put(masks, buffer);
         self.stage_put(masks, next_buffer);
         for buffer in entries {
@@ -471,31 +469,9 @@ impl Freelist {
     /// `masks` must contain the scratch word for `buffer`'s slot.
     #[inline(always)]
     fn stage_put(&self, masks: &mut [u64], buffer: PooledBuffer) {
-        let slot = self.validate_buffer(&buffer);
-        let (word_index, mask) = self.slot_word(slot);
-        assert_eq!(
-            masks[word_index] & mask,
-            0,
-            "returned slot batch must not contain duplicate slots"
-        );
-        masks[word_index] |= mask;
-    }
-
-    /// Verifies that `buffer` belongs to this freelist and returns its slot id.
-    #[inline(always)]
-    fn validate_buffer(&self, buffer: &PooledBuffer) -> u32 {
         let slot = buffer.slot();
-        let slot_index = slot as usize;
-        assert!(
-            slot_index < self.created.load(Ordering::Relaxed),
-            "returned buffer slot must have been created by this freelist"
-        );
-        assert_eq!(
-            buffer.slot_ptr(),
-            self.slot_ptr(slot),
-            "returned buffer must belong to this freelist"
-        );
-        slot
+        let (word_index, mask) = self.slot_word(slot);
+        masks[word_index] |= mask;
     }
 
     /// Takes any one available slot from the global freelist.
