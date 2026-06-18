@@ -363,12 +363,14 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
                 .next_timeout(now, timeout_retry)
                 .expect("current round must always have a timeout")
         };
+
         // Once the current view is retrying a nullify, retry cadence should be governed
         // by timeout_retry. An older expired same-term finalization deadline may still
         // exist for the first unfinalized view in the term.
         if matches!(round_timeout.1, TimeoutReason::Retry) {
             return round_timeout;
         }
+
         // The finalization anchor only overrides a round timeout that has not
         // itself expired: when both are due, the round's reason (e.g. a latched
         // LeaderNullify or InvalidProposal) is the more diagnostic label for
@@ -379,9 +381,12 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .unwrap_or(round_timeout)
     }
 
+    /// Returns the oldest entered, unfinalized view's finalization deadline in
+    /// the current term, advancing the cached anchor past skipped rounds.
     fn next_finalization_timeout(&mut self) -> Option<SystemTime> {
         let term_start = self.view.term_start(self.term_length);
         let unfinalized_view = self.last_finalized.next().max(term_start);
+
         // The oldest unfinalized view may never have been entered (e.g., we
         // jumped past it by certifying a future notarization), and a skipped
         // round never acquires a deadline (views are entered in order), so we
@@ -438,7 +443,8 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
     /// With stable leaders, if the current view follows a skipped term, prefer
     /// a nullification from that term over a notarization at the previous view.
     /// The nullification is what proves the skipped views were abandoned, which
-    /// is the evidence peers need to enter the new term safely.
+    /// is the evidence peers need to align on the same fork and enter the new
+    /// term without timing out again while searching for skipped-view evidence.
     pub fn get_best_certificate(&self) -> Option<Certificate<S, D>> {
         let prev = self
             .view
@@ -835,6 +841,9 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
             .expect("notarization must exist for certified view");
 
         if is_success {
+            // Keep the finalization deadline armed after certification so the
+            // term-level timeout can still abandon a term that certifies but
+            // never finalizes.
             self.enter_view(view.next());
         } else {
             self.trigger_timeout(view, TimeoutReason::FailedCertification);

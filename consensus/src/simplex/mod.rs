@@ -170,9 +170,9 @@
 //! The gate also recovers from a `nullify` vote that never became a nullification (e.g., a
 //! transient timeout on an otherwise healthy network): by the invariant, an observed same-term
 //! finalization at or above the vote proves the nullification can never form, so the vote is
-//! inert and the gate reopens ("heals"). In a healthy network this takes one view: peers
-//! broadcast `finalize(v)` when they certify `v`, so the finalization for `v` typically arrives
-//! shortly after entering `v+1`.
+//! inert and the gate reopens ("heals"). This prevents one transient timeout from degrading the
+//! rest of the term. In a healthy network this takes one view: peers broadcast `finalize(v)` when
+//! they certify `v`, so the finalization for `v` typically arrives shortly after entering `v+1`.
 //!
 //! Healing is not retroactive: a `finalize` vote is only constructed when a view's certification
 //! completes, so a view certified while the gate was blocked never receives this participant's

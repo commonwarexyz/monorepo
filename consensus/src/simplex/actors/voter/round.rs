@@ -49,6 +49,7 @@ pub struct Round<S: Scheme, D: Digest> {
     leader: Option<Leader<S::PublicKey>>,
 
     proposal: ProposalSlot<D>,
+    // Deadlines armed when entering a view.
     leader_deadline: Option<SystemTime>,
     certification_deadline: Option<SystemTime>,
     finalization_deadline: Option<SystemTime>,

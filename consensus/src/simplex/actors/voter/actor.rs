@@ -954,13 +954,13 @@ impl<
                 .expect("unable to replay journal");
             pin_mut!(stream);
             while let Some(artifact) = stream.next().await {
-                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
                 // Dropping our own nullify votes at or below the floor is safe
                 // for the same-term finalize gate: the floor finalization
                 // covers any such vote (it lies between the vote and any later
                 // same-term view), so the gate would treat it as healed anyway.
                 // If the gate ever stops keying off last_finalized, this skip
                 // must be revisited.
+                let (_, _, _, artifact) = artifact.expect("unable to replay journal");
                 if artifact.view() <= replay_floor {
                     continue;
                 }

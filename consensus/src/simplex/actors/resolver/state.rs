@@ -39,6 +39,9 @@ pub(crate) enum Effect {
         reason: FetchReason,
     },
     /// Retain only subscribers outside this inclusive view range.
+    ///
+    /// A nullification at `start` covers every pending request through `end`,
+    /// so those subscribers no longer need an individual certificate response.
     RetainOutside { start: View, end: View },
     /// Retain only views above this floor.
     RetainAbove(View),
@@ -157,8 +160,9 @@ impl<S: Scheme, D: Digest> State<S, D> {
                 });
             }
 
-            if let Some(satisfied_views) = self.satisfied_by.remove(&view) {
-                for &v in satisfied_views.iter().filter(|v| **v > floor) {
+            if let Some(mut satisfied_views) = self.satisfied_by.remove(&view) {
+                satisfied_views.retain(|v| *v > floor);
+                for v in satisfied_views {
                     effects.push(Effect::Fetch {
                         view: v,
                         cause: view,
@@ -503,6 +507,33 @@ mod tests {
         assert!(
             matches!(state.get(View::new(5)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
         );
+    }
+
+    #[test]
+    fn nullification_admission_matches_pruning_boundary() {
+        let (schemes, verifier) = ed25519_fixture();
+        let mut state: State<TestScheme, Sha256Digest> =
+            State::new(NZUsize!(10), TermLength::new(NZU64!(5)));
+
+        let finalization_v3 = build_finalization(&schemes, &verifier, View::new(3));
+        let effects = state.handle(Certificate::Finalization(finalization_v3), None);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(3))]);
+
+        let nullification_v2 = build_nullification(&schemes, &verifier, View::new(2));
+        let effects = state.handle(Certificate::Nullification(nullification_v2.clone()), None);
+        assert_eq!(effects, vec![retain_outside(2, 5)]);
+        assert!(
+            matches!(state.get(View::new(4)), Some(Certificate::Nullification(n)) if n == &nullification_v2)
+        );
+
+        let finalization_v5 = build_finalization(&schemes, &verifier, View::new(5));
+        let effects = state.handle(Certificate::Finalization(finalization_v5), None);
+        assert_eq!(effects, vec![Effect::RetainAbove(View::new(5))]);
+        assert!(state.nullifications.is_empty());
+
+        let effects = state.handle(Certificate::Nullification(nullification_v2), None);
+        assert!(effects.is_empty());
+        assert!(state.nullifications.is_empty());
     }
 
     #[test]
