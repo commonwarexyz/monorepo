@@ -1,0 +1,24 @@
+[package]
+name = "commonware-privacy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+description = "Build privacy-preserving applications."
+readme = "README.md"
+repository = "https://github.com/commonwarexyz/monorepo/tree/main/privacy"
+documentation = "https://docs.rs/commonware-privacy"
+
+[dependencies]
+commonware-macros.workspace = true
+rand_core.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "commonware-macros/std",
+]
+
+[lints]
+workspace = true
