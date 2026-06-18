@@ -788,12 +788,6 @@ impl PooledBuffer {
         unsafe { self.slot.as_ref().data_base }
     }
 
-    /// Returns the owning side-table slot pointer.
-    #[inline(always)]
-    pub(crate) const fn slot_ptr(&self) -> NonNull<PooledSlot> {
-        self.slot
-    }
-
     /// Returns the usable data capacity for this size-class buffer.
     #[inline(always)]
     pub(crate) const fn capacity(&self) -> usize {
