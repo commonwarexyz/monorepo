@@ -47,7 +47,6 @@ const BENCH_LAYOUT: Layout =
 
 #[derive(Debug)]
 struct Entry {
-    slot: u32,
     buffer: PooledBuffer,
 }
 
@@ -56,7 +55,6 @@ impl Entry {
         let slot_ptr = slots[slot].get();
         let slot_ptr = NonNull::new(slot_ptr).expect("slot pointers are non-null");
         Self {
-            slot: slot as u32,
             // SAFETY: each benchmark slot is initialized once before the
             // entry is published to the baseline container.
             buffer: unsafe { PooledBuffer::new_in_slot(slot_ptr, BENCH_LAYOUT, false) },
@@ -304,14 +302,14 @@ impl FreelistImplementation for Freelist {
     #[inline]
     fn take_batch(&self, out: &mut Vec<Entry>, max: usize) {
         if max == 1 {
-            if let Some((slot, buffer)) = self.take() {
-                out.push(Entry { slot, buffer });
+            if let Some(buffer) = self.take() {
+                out.push(Entry { buffer });
             }
             return;
         }
 
-        self.take_batch(max, |slot, buffer| {
-            out.push(Entry { slot, buffer });
+        self.take_batch(max, |buffer| {
+            out.push(Entry { buffer });
         });
     }
 
@@ -319,13 +317,10 @@ impl FreelistImplementation for Freelist {
     fn put_batch(&self, entries: &mut Vec<Entry>) {
         if entries.len() == 1 {
             let entry = entries.pop().unwrap();
-            // SAFETY: the entry was taken from this freelist and is returned exactly once.
-            unsafe { self.put(entry.slot, entry.buffer) };
+            self.put(entry.buffer);
             return;
         }
-
-        // SAFETY: every entry was taken from this freelist by a distinct take, so slots are
         // unique and each is returned exactly once; the drain iterator cannot panic.
-        unsafe { self.put_batch(entries.drain(..).map(|entry| (entry.slot, entry.buffer))) };
+        self.put_batch(entries.drain(..).map(|entry| entry.buffer));
     }
 }

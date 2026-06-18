@@ -642,7 +642,7 @@ impl SizeClassHandle {
     /// Creates a new tracked buffer and initializes its live lease.
     #[inline(always)]
     fn try_create(&self, zeroed: bool) -> Option<PooledBuffer> {
-        let (_slot, buffer) = self.global.try_create(zeroed)?;
+        let buffer = self.global.try_create(zeroed)?;
         Some(self.lease_into(buffer))
     }
 
@@ -650,7 +650,7 @@ impl SizeClassHandle {
     /// live lease.
     #[inline(always)]
     fn take_global(&self) -> Option<PooledBuffer> {
-        let (_slot, buffer) = self.global.take()?;
+        let buffer = self.global.take()?;
         Some(self.lease_into(buffer))
     }
 
@@ -662,8 +662,8 @@ impl SizeClassHandle {
     #[inline(always)]
     fn lease_into(&self, mut buffer: PooledBuffer) -> PooledBuffer {
         let lease = SizeClassLease::retain(self);
-        // SAFETY: buffers entering checked-out state from creation or from
-        // the global freelist do not carry a live lease.
+        // SAFETY: freshly created buffers and buffers taken from the global
+        // freelist do not carry a live lease.
         unsafe { buffer.init_lease(lease) };
         buffer
     }
@@ -765,13 +765,9 @@ impl SizeClassLease {
     /// dropping the `SizeClass` will then drain the just-parked buffer.
     #[inline(always)]
     fn return_global(self, buffer: PooledBuffer) {
-        // SAFETY: pooled buffers returned through a lease came from this size
-        // class, so their stable slot fields are initialized.
-        let slot = unsafe { buffer.slot() };
-        // SAFETY: the lease proves this buffer was checked out from this
-        // class's freelist with this slot, and checked-out slots are not
-        // available in the freelist.
-        unsafe { self.class().global.put(slot, buffer) };
+        // The lease proves this buffer was checked out from this class's
+        // freelist, and checked-out slots are not available in the freelist.
+        self.class().global.put(buffer);
         // SAFETY: this lease owns one strong reference.
         unsafe { self.token.release() };
     }
@@ -906,7 +902,7 @@ impl TlsSizeClassCache {
         // over several future local pops.
         let mut entry = None;
         let take = self.capacity / 2;
-        class.global.take_batch(take, |_slot, buffer| {
+        class.global.take_batch(take, |buffer| {
             // Each claimed global entry becomes either the returned allocation
             // or a local cache entry, so each needs one retained class
             // reference stored in its slot lease.
@@ -1027,7 +1023,8 @@ impl TlsSizeClassCache {
         // panic would strand parked-but-unpublished buffers).
         #[cfg(debug_assertions)]
         for index in start..end {
-            // SAFETY: `start..end` is initialized; the entry is only borrowed.
+            // SAFETY: `start..end` was initialized and ownership transferred
+            // to this function, the entry is only borrowed here.
             let entry = unsafe { (*entries.add(index)).assume_init_ref() };
             // SAFETY: local cache entries keep a live lease in the slot.
             let entry_token = unsafe { entry.buffer.lease() }.token;
@@ -1049,16 +1046,12 @@ impl TlsSizeClassCache {
             // released here (leases have no drop glue); the token releases
             // below settle it.
             let _ = unsafe { entry.buffer.take_lease() }.into_token();
-            // SAFETY: pooled buffers in this cache came from this class, so
-            // their stable slot fields are initialized.
-            let slot = unsafe { entry.buffer.slot() };
-            (slot, entry.buffer)
+            entry.buffer
         });
-        // SAFETY: every entry's lease proves it was checked out from this
-        // class's freelist with its slot; cache entries are distinct buffers,
-        // so slots are unique and unavailable; the iterator body cannot panic
-        // after a yield (the debug same-class check ran above).
-        unsafe { class.global.put_batch(batch) };
+        // Cache entries are distinct checked-out buffers from this class, and
+        // the iterator body cannot panic after a yield (the debug same-class
+        // check ran above).
+        class.global.put_batch(batch);
 
         // Release the strong references only now that every buffer is parked.
         for _ in 0..count {
@@ -1238,17 +1231,14 @@ impl BufferPoolThreadCache {
     /// return fast path one level shorter.
     #[inline(always)]
     pub(super) fn push(buffer: PooledBuffer) {
-        // SAFETY: pooled buffers returned from checked-out state have
-        // initialized stable slot fields.
-        let class_id = unsafe { buffer.class_id() } as usize;
+        let class_id = buffer.class_id() as usize;
         // Id 0 marks standalone (test/bench) freelist buffers, which have no
         // owning class and must never enter pool return routing.
         debug_assert_ne!(
             class_id, 0,
             "unrouted pooled buffer entered pool return path"
         );
-        // SAFETY: as above.
-        let thread_cache_capacity = unsafe { buffer.thread_cache_capacity() };
+        let thread_cache_capacity = buffer.thread_cache_capacity();
         if thread_cache_capacity == 0 {
             TlsSizeClassCacheEntry { buffer }.return_global();
             return;
@@ -1280,11 +1270,8 @@ impl BufferPoolThreadCache {
     /// only contains the initialized-cache lookup and local push.
     #[inline(never)]
     fn push_slow(buffer: PooledBuffer) {
-        // SAFETY: pooled buffers returned from checked-out state have
-        // initialized stable slot fields.
-        let class_id = unsafe { buffer.class_id() } as usize;
-        // SAFETY: as above.
-        let thread_cache_capacity = unsafe { buffer.thread_cache_capacity() } as usize;
+        let class_id = buffer.class_id() as usize;
+        let thread_cache_capacity = buffer.thread_cache_capacity() as usize;
         // Returning a pooled buffer can happen from arbitrary Drop code,
         // including during thread-local destruction. If the local cache is
         // unavailable, fall back to the global freelist instead of panicking.
@@ -1626,7 +1613,8 @@ impl BufferPool {
             .inner
             .try_alloc(class_index, false)
             .map(|allocation| {
-                // SAFETY: allocation buffer carries a live size-class lease.
+                // SAFETY: pooled allocations returned by the pool have an
+                // initialized live lease.
                 unsafe { IoBufMut::from_pooled_parts(allocation.buffer) }
             })
             .ok_or(PoolError::Exhausted)?;
@@ -1710,11 +1698,12 @@ impl BufferPool {
             .inner
             .try_alloc(class_index, true)
             .ok_or(PoolError::Exhausted)?;
-
-        // SAFETY: allocation buffer carries a live size-class lease.
+        // SAFETY: pooled allocations returned by the pool have an initialized
+        // live lease.
         let mut buf = unsafe { IoBufMut::from_pooled_parts(allocation.buffer) };
         if allocation.is_new {
-            // SAFETY: buffer was allocated with alloc_zeroed, so bytes in 0..len are initialized.
+            // SAFETY: newly allocated zeroed buffers have `capacity() >= len`
+            // and the readable bytes are initialized by zeroed allocation.
             unsafe { buf.set_len(len) };
         } else {
             // Reused buffers may contain old bytes, re-zero requested readable range.
@@ -2473,12 +2462,11 @@ mod tests {
     #[test]
     fn test_global_batch_alloc_stops_when_global_runs_empty() {
         let class = test_size_class(64, 64);
-        let (slot, buffer) = class.global.try_create(false).expect("slot reservation");
+        let buffer = class.global.try_create(false).expect("slot reservation");
 
         // A short global freelist should return the allocation and stop
         // without filling the local cache to its batch target.
-        // SAFETY: this freelist just created the buffer for this slot.
-        unsafe { class.global.put(slot, buffer) };
+        class.global.put(buffer);
         let buffer = BufferPoolThreadCache::pop(&class).expect("global allocation");
 
         assert_eq!(get_local_len(&class), 0);
@@ -2495,7 +2483,7 @@ mod tests {
         let mut cache = TlsSizeClassCache::new(MIN_TLS_BATCH_CAPACITY);
         assert_eq!(size_class_strong_count(&class), 1);
 
-        let (_slot, mut buffer) = class.global.try_create(false).expect("slot reservation");
+        let mut buffer = class.global.try_create(false).expect("slot reservation");
         let lease = SizeClassLease::retain(&class);
         // SAFETY: this buffer was just created and has no live lease.
         unsafe { buffer.init_lease(lease) };
@@ -2512,9 +2500,8 @@ mod tests {
         assert_eq!(size_class_strong_count(&class), 1);
 
         for _ in 0..2 {
-            let (slot, buffer) = class.global.try_create(false).expect("slot reservation");
-            // SAFETY: this freelist just created the buffer for this slot.
-            unsafe { class.global.put(slot, buffer) };
+            let buffer = class.global.try_create(false).expect("slot reservation");
+            class.global.put(buffer);
         }
 
         let entry = cache.pop(&class).expect("global refill");
@@ -2532,7 +2519,7 @@ mod tests {
     #[test]
     fn test_tls_size_class_cache_push_tolerates_empty_spill() {
         let class = test_size_class(64, 64);
-        let (_slot, mut buffer) = class.global.try_create(false).expect("slot reservation");
+        let mut buffer = class.global.try_create(false).expect("slot reservation");
         let lease = SizeClassLease::retain(&class);
         // SAFETY: this buffer was just created and has no live lease.
         unsafe { buffer.init_lease(lease) };
@@ -2563,16 +2550,14 @@ mod tests {
 
         // Create both slot ids and keep each allocation's pointer so we can
         // verify that the freelist returns the same buffer parked for that slot.
-        let (slot0, buffer0) = class.global.try_create(false).expect("first slot");
+        let buffer0 = class.global.try_create(false).expect("first slot");
+        let slot0 = buffer0.slot();
         let ptr0 = buffer0.as_ptr();
-        let (slot1, buffer1) = class.global.try_create(false).expect("second slot");
+        let buffer1 = class.global.try_create(false).expect("second slot");
+        let slot1 = buffer1.slot();
         let ptr1 = buffer1.as_ptr();
-
-        // SAFETY: each buffer was created by this freelist for its slot and is returned once.
-        unsafe {
-            class.global.put(slot0, buffer0);
-            class.global.put(slot1, buffer1);
-        }
+        class.global.put(buffer0);
+        class.global.put(buffer1);
 
         // The freelist does not preserve insertion order, so normalize by slot
         // before asserting identity. The important property is that each slot is
@@ -2581,21 +2566,20 @@ mod tests {
             class.global.take().expect("first pop"),
             class.global.take().expect("second pop"),
         ];
-        popped.sort_by_key(|(slot, _)| *slot);
+        popped.sort_by_key(PooledBuffer::slot);
 
-        assert_eq!(popped[0].0, slot0);
-        assert_eq!(popped[0].1.as_ptr(), ptr0);
-        assert_eq!(popped[1].0, slot1);
-        assert_eq!(popped[1].1.as_ptr(), ptr1);
+        assert_eq!(popped[0].slot(), slot0);
+        assert_eq!(popped[0].as_ptr(), ptr0);
+        assert_eq!(popped[1].slot(), slot1);
+        assert_eq!(popped[1].as_ptr(), ptr1);
 
         // Both slots were claimed above, so the global freelist is empty.
         assert!(class.global.take().is_none());
 
         // Return the buffers so the freelist owns and deallocates them when the
         // test size class is dropped.
-        for (slot, buffer) in popped {
-            // SAFETY: each entry was taken from this freelist and is returned exactly once.
-            unsafe { class.global.put(slot, buffer) };
+        for buffer in popped {
+            class.global.put(buffer);
         }
     }
 
