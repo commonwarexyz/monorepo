@@ -11,5 +11,7 @@
 #![cfg_attr(not(any(feature = "std", test)), no_std)]
 
 commonware_macros::stability_scope!(ALPHA {
+    #[cfg(feature = "mocks")]
+    pub mod mocks;
     pub mod payments;
 });
