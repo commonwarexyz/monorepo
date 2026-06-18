@@ -1,5 +1,5 @@
 use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBufs};
-use commonware_utils::sync::AsyncRwLock;
+use commonware_utils::{channel::oneshot, sync::AsyncRwLock};
 use std::{num::NonZeroUsize, sync::Arc};
 
 /// Shared writer state.
@@ -294,4 +294,37 @@ impl<B: Blob> Write<B> {
 
         state.sync().await
     }
+
+    /// Begin making buffered and pending mutations durable, returning a [oneshot::Receiver] that
+    /// resolves once the durability barrier completes.
+    ///
+    /// Unlike [`Self::sync`], this returns without waiting for the fsync: buffered bytes are
+    /// flushed with a plain write, then the underlying [`Blob::start_sync`] runs the barrier in the
+    /// background. `needs_sync` is intentionally left set, so a concurrent [`Self::sync`] never
+    /// observes a false-durable state.
+    pub async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        let mut state = self.state.write().await;
+
+        // Flush buffered bytes with a plain write, leaving any durability barrier pending.
+        if let Some((buf, offset)) = state.buffer.take() {
+            if let Err(e) = state.write_at(offset, buf).await {
+                return ready(Err(e));
+            }
+        }
+
+        // Background the durability barrier on the underlying blob.
+        if !state.needs_sync {
+            return ready(Ok(()));
+        }
+        let blob = state.blob.clone();
+        drop(state);
+        blob.start_sync()
+    }
+}
+
+/// Returns a [oneshot::Receiver] already resolved with `result`.
+fn ready(result: Result<(), Error>) -> oneshot::Receiver<Result<(), Error>> {
+    let (tx, rx) = oneshot::channel();
+    let _ = tx.send(result);
+    rx
 }

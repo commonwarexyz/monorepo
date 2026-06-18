@@ -36,7 +36,10 @@ use crate::{
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
-use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
+use commonware_utils::{
+    channel::oneshot,
+    sync::{AsyncRwLock, AsyncRwLockWriteGuard},
+};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -1214,6 +1217,13 @@ impl<B: Blob> Append<B> {
     }
 }
 
+/// Returns a [oneshot::Receiver] already resolved with `result`.
+fn ready(result: Result<(), Error>) -> oneshot::Receiver<Result<(), Error>> {
+    let (tx, rx) = oneshot::channel();
+    let _ = tx.send(result);
+    rx
+}
+
 impl<B: Blob> Append<B> {
     /// Flushes buffered data and makes all pending mutations durable.
     ///
@@ -1233,6 +1243,31 @@ impl<B: Blob> Append<B> {
         // durability barrier is still pending.
         let mut blob_state = self.blob_state.write().await;
         blob_state.sync().await
+    }
+
+    /// Begin making all pending mutations durable, returning a [oneshot::Receiver] that resolves
+    /// once the durability barrier completes.
+    ///
+    /// Unlike [`Self::sync`], this returns without waiting for the fsync: buffered data is flushed
+    /// eagerly with plain writes, then the underlying [`Blob::start_sync`] runs the barrier in the
+    /// background. `needs_sync` is intentionally left set, so a concurrent [`Self::sync`] never
+    /// observes a false-durable state; the cost is at most a redundant fsync on a later sync.
+    pub async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        // Flush buffered data (including any partial page) with plain writes, leaving any
+        // durability barrier pending.
+        let buf_guard = self.buffer.write().await;
+        if let Err(e) = self.flush_internal(buf_guard, true, false).await {
+            return ready(Err(e));
+        }
+
+        // Background the durability barrier on the underlying blob.
+        let blob_state = self.blob_state.read().await;
+        if !blob_state.needs_sync {
+            return ready(Ok(()));
+        }
+        let blob = blob_state.blob.clone();
+        drop(blob_state);
+        blob.start_sync()
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -1788,6 +1823,62 @@ mod tests {
                 .unwrap();
 
             assert_eq!(append.size().await, 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_durability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"start_sync").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let data: Vec<u8> = (1..=10).collect();
+            append.append(&data).await.unwrap();
+
+            // start_sync flushes eagerly and backgrounds the fsync; awaiting the receiver
+            // confirms durability.
+            let rx = append.start_sync().await;
+            rx.await.expect("sync sender dropped").unwrap();
+            drop(append);
+
+            // Reopen and confirm the bytes survived.
+            let (blob, blob_size) = context.open("test_partition", b"start_sync").await.unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 10);
+            let read = append.read_at(0, 10).await.unwrap().coalesce();
+            assert_eq!(read, &data[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_then_sync_consistent() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"start_then_sync")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(&[1, 2, 3, 4, 5]).await.unwrap();
+            let rx = append.start_sync().await;
+            rx.await.expect("sync sender dropped").unwrap();
+
+            // `needs_sync` is intentionally left set, so a following `sync` is still valid and
+            // must succeed (at worst a redundant fsync).
+            append.sync().await.unwrap();
+
+            let read = append.read_at(0, 5).await.unwrap().coalesce();
+            assert_eq!(read, &[1, 2, 3, 4, 5]);
         });
     }
 
