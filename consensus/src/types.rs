@@ -720,7 +720,7 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
         //! Types and utilities for working with [`Commitment`]s.
 
-        use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
+        use commonware_codec::{Encode, FixedArray, FixedSize, Read, ReadExt, Write};
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
@@ -728,7 +728,9 @@ commonware_macros::stability_scope!(ALPHA {
         use core::{marker::PhantomData, num::NonZeroU16, ops::Deref};
         use rand_core::CryptoRngCore;
 
-        const DEFAULT_COMMITMENT_SIZE: usize =
+        /// The encoded size of a [`Commitment`] over default
+        /// ([`commonware_cryptography::sha256`]) digests.
+        pub const DEFAULT_COMMITMENT_SIZE: usize =
             3 * <commonware_cryptography::sha256::Digest as FixedSize>::SIZE + CodingConfig::SIZE;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
@@ -739,12 +741,13 @@ commonware_macros::stability_scope!(ALPHA {
         /// - context digest
         /// - coding config
         ///
-        /// The block digest, coding root, and context digest types are part of this type, and
-        /// deserialization parses each field as its declared type.
+        /// Each field is parsed as its declared type on deserialization, so the accessors on a
+        /// successfully decoded [`Commitment`] never fail.
         ///
         /// `N` is the encoded length. It must be provided for non-default digest sizes because
-        /// stable Rust cannot use generic associated constants in array lengths.
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        /// stable Rust cannot use a generic associated constant as an array length.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FixedArray)]
+        #[fixed_array(bytes([u8; N]))]
         pub struct Commitment<
             B = commonware_cryptography::sha256::Digest,
             R = commonware_cryptography::sha256::Digest,
@@ -753,34 +756,35 @@ commonware_macros::stability_scope!(ALPHA {
         >([u8; N], PhantomData<fn() -> (B, R, C)>);
 
         impl<B: Digest, R: Digest, C: Digest, const N: usize> Commitment<B, R, C, N> {
-            const BLOCK_DIGEST_OFFSET: usize = 0;
-            const CODING_ROOT_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + B::SIZE;
+            const CODING_ROOT_OFFSET: usize = B::SIZE;
             const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_ROOT_OFFSET + R::SIZE;
             const CONFIG_OFFSET: usize = Self::CONTEXT_DIGEST_OFFSET + C::SIZE;
             const ENCODED_SIZE: usize = Self::CONFIG_OFFSET + CodingConfig::SIZE;
 
-            /// Extracts the [`CodingConfig`] from this [`Commitment`].
-            pub fn config(&self) -> CodingConfig {
-                let mut buf = &self.0[Self::CONFIG_OFFSET..Self::SIZE];
-                CodingConfig::read(&mut buf).expect("Commitment always contains a valid config")
-            }
-
             /// Returns the block [`Digest`] from this [`Commitment`].
             pub fn block(&self) -> B {
-                let mut buf = &self.0[..B::SIZE];
-                B::read(&mut buf).expect("Commitment always contains a valid block digest")
+                self.field(0)
             }
 
             /// Returns the coding root [`Digest`] from this [`Commitment`].
             pub fn root(&self) -> R {
-                let mut buf = &self.0[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET];
-                R::read(&mut buf).expect("Commitment always contains a valid coding root")
+                self.field(Self::CODING_ROOT_OFFSET)
             }
 
             /// Returns the context [`Digest`] from this [`Commitment`].
             pub fn context(&self) -> C {
-                let mut buf = &self.0[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET];
-                C::read(&mut buf).expect("Commitment always contains a valid context digest")
+                self.field(Self::CONTEXT_DIGEST_OFFSET)
+            }
+
+            /// Extracts the [`CodingConfig`] from this [`Commitment`].
+            pub fn config(&self) -> CodingConfig {
+                self.field(Self::CONFIG_OFFSET)
+            }
+
+            /// Reads the fixed-size field of type `T` beginning at `offset`.
+            fn field<T: ReadExt + FixedSize>(&self, offset: usize) -> T {
+                T::read(&mut &self.0[offset..offset + T::SIZE])
+                    .expect("Commitment fields are validated on construction")
             }
 
             const fn assert_size() {
@@ -829,30 +833,15 @@ commonware_macros::stability_scope!(ALPHA {
                 buf: &mut impl bytes::Buf,
                 _cfg: &Self::Cfg,
             ) -> Result<Self, commonware_codec::Error> {
-                if buf.remaining() < Self::SIZE {
-                    return Err(commonware_codec::Error::EndOfBuffer);
-                }
                 const { Self::assert_size() };
+                let arr = <[u8; N]>::read(buf)?;
 
-                let mut arr = [0u8; N];
-                buf.copy_to_slice(&mut arr);
-
-                let mut block_buf = &arr[..B::SIZE];
-                B::read(&mut block_buf).map_err(|_| {
-                    commonware_codec::Error::Invalid("Commitment", "invalid block digest")
-                })?;
-                let mut root_buf = &arr[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET];
-                R::read(&mut root_buf).map_err(|_| {
-                    commonware_codec::Error::Invalid("Commitment", "invalid coding root")
-                })?;
-                let mut context_buf = &arr[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET];
-                C::read(&mut context_buf).map_err(|_| {
-                    commonware_codec::Error::Invalid("Commitment", "invalid context digest")
-                })?;
-                let mut cfg_buf = &arr[Self::CONFIG_OFFSET..Self::SIZE];
-                CodingConfig::read(&mut cfg_buf).map_err(|_| {
-                    commonware_codec::Error::Invalid("Commitment", "invalid embedded CodingConfig")
-                })?;
+                let invalid = |reason| commonware_codec::Error::Invalid("Commitment", reason);
+                let mut cursor = &arr[..];
+                B::read(&mut cursor).map_err(|_| invalid("invalid block digest"))?;
+                R::read(&mut cursor).map_err(|_| invalid("invalid coding root"))?;
+                C::read(&mut cursor).map_err(|_| invalid("invalid context digest"))?;
+                CodingConfig::read(&mut cursor).map_err(|_| invalid("invalid embedded CodingConfig"))?;
 
                 Ok(Self(arr, PhantomData))
             }
@@ -862,7 +851,6 @@ commonware_macros::stability_scope!(ALPHA {
             for Commitment<B, R, C, N>
         {
             fn as_ref(&self) -> &[u8] {
-                const { Self::assert_size() };
                 &self.0
             }
         }
@@ -893,24 +881,21 @@ commonware_macros::stability_scope!(ALPHA {
 
         impl<B: Digest, R: Digest, C: Digest, const N: usize> Default for Commitment<B, R, C, N> {
             fn default() -> Self {
-                const { Self::assert_size() };
-                Self([0u8; N], PhantomData)
+                Self::EMPTY
             }
         }
 
         impl<B: Digest, R: Digest, C: Digest, const N: usize> From<(B, R, C, CodingConfig)>
             for Commitment<B, R, C, N>
         {
-            fn from((digest, commitment, context_digest, config): (B, R, C, CodingConfig)) -> Self {
+            fn from((block, root, context, config): (B, R, C, CodingConfig)) -> Self {
                 const { Self::assert_size() };
 
                 let mut buf = [0u8; N];
-                buf[..B::SIZE].copy_from_slice(&digest);
-                buf[Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + R::SIZE]
-                    .copy_from_slice(&commitment);
-                buf[Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + C::SIZE]
-                    .copy_from_slice(&context_digest);
-                buf[Self::CONFIG_OFFSET..Self::SIZE].copy_from_slice(&config.encode());
+                buf[..Self::CODING_ROOT_OFFSET].copy_from_slice(&block);
+                buf[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET].copy_from_slice(&root);
+                buf[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET].copy_from_slice(&context);
+                buf[Self::CONFIG_OFFSET..].copy_from_slice(&config.encode());
                 Self(buf, PhantomData)
             }
         }

@@ -1,18 +1,18 @@
 //! Types for erasure coding.
 
 use crate::{
-    types::{coding::Commitment, Height},
+    types::{
+        coding::{Commitment, DEFAULT_COMMITMENT_SIZE},
+        Height,
+    },
     Block, CertifiableBlock, Heightable,
 };
-use commonware_codec::{BufsMut, EncodeSize, FixedSize, Read, ReadExt, Write};
+use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
 use commonware_coding::{Config as CodingConfig, Scheme};
 use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
 use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, sync::Arc};
-
-const DEFAULT_COMMITMENT_SIZE: usize =
-    3 * <commonware_cryptography::sha256::Digest as FixedSize>::SIZE + CodingConfig::SIZE;
 
 /// The typed coding commitment for an application block, coding scheme, and context hasher.
 pub type CommitmentFor<B, C, H, const N: usize = DEFAULT_COMMITMENT_SIZE> =
