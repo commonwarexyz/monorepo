@@ -15,10 +15,8 @@ commonware-macros.workspace = true
 rand_core.workspace = true
 
 [features]
-default = ["std"]
-std = [
-    "commonware-macros/std",
-]
+default = [ "std" ]
+std = [ "commonware-macros/std" ]
 
 [lints]
 workspace = true
