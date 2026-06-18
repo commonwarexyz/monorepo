@@ -1,7 +1,7 @@
 use super::round::Round;
 use crate::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
+        elector::Elector,
         metrics::{Leader, Timeout, TimeoutReason},
         scheme::Scheme,
         types::{
@@ -115,7 +115,7 @@ fn interesting(
 }
 
 /// Configuration for initializing [`State`].
-pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
+pub struct Config<S: certificate::Scheme, L: Elector<S>> {
     pub scheme: S,
     pub elector: L,
     pub epoch: Epoch,
@@ -123,7 +123,6 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
     pub leader_timeout: Duration,
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
-    pub term_length: TermLength,
     pub finalization_timeout: Duration,
 }
 
@@ -131,10 +130,10 @@ pub struct Config<S: certificate::Scheme, L: ElectorConfig<S>> {
 ///
 /// Tracks proposals and certificates for each view. Vote aggregation and verification
 /// is handled by the [crate::simplex::actors::batcher].
-pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest> {
+pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> {
     context: E,
     scheme: S,
-    elector: L::Elector,
+    elector: L,
     epoch: Epoch,
     activity_timeout: ViewDelta,
     leader_timeout: Duration,
@@ -171,30 +170,25 @@ pub struct State<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorCon
     nullifications: CounterFamily<Leader<S::PublicKey>>,
 }
 
-impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: Digest>
-    State<E, S, L, D>
-{
+impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: Elector<S>, D: Digest> State<E, S, L, D> {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
         let current_view = context.gauge("current_view", "current view");
         let tracked_views = context.gauge("tracked_views", "tracked views");
         let timeouts = context.family("timeouts", "timed out views");
         let nullifications = context.family("nullifications", "nullifications");
 
-        // Build elector with participants
-        let elector = cfg
-            .elector
-            .build(cfg.scheme.participants(), cfg.term_length);
+        let term_length = cfg.elector.term_length();
 
         Self {
             context,
             scheme: cfg.scheme,
-            elector,
+            elector: cfg.elector,
             epoch: cfg.epoch,
             activity_timeout: cfg.activity_timeout,
             leader_timeout: cfg.leader_timeout,
             certification_timeout: cfg.certification_timeout,
             timeout_retry: cfg.timeout_retry,
-            term_length: cfg.term_length,
+            term_length,
             finalization_timeout: cfg.finalization_timeout,
             view: GENESIS_VIEW,
             last_finalized: GENESIS_VIEW,
@@ -1053,7 +1047,7 @@ impl<E: Clock + CryptoRngCore + Metrics, S: Scheme<D>, L: ElectorConfig<S>, D: D
 mod tests {
     use super::*;
     use crate::simplex::{
-        elector::RoundRobin,
+        elector::{Config as _, RoundRobin, RoundRobinElector},
         scheme::ed25519,
         types::{Finalization, Finalize, Notarization, Notarize, Nullification, Nullify, Proposal},
     };
@@ -1063,6 +1057,19 @@ mod tests {
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
     use commonware_utils::{futures::AbortablePool, NZU64};
     use std::time::Duration;
+
+    fn round_robin<S: certificate::Scheme>(scheme: &S) -> RoundRobinElector<S> {
+        <RoundRobin>::default().build(scheme.participants())
+    }
+
+    fn round_robin_with_term<S: certificate::Scheme>(
+        scheme: &S,
+        term_length: TermLength,
+    ) -> RoundRobinElector<S> {
+        <RoundRobin>::default()
+            .with_term_length(term_length)
+            .build(scheme.participants())
+    }
 
     fn test_genesis() -> Sha256Digest {
         Sha256Digest::from([0u8; 32])
@@ -1081,13 +1088,12 @@ mod tests {
                 context,
                 Config {
                     scheme: verifier.clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin(&verifier),
                     epoch,
                     activity_timeout: ViewDelta::new(10),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(30),
                 },
             );
@@ -1124,7 +1130,12 @@ mod tests {
         });
     }
 
-    type TestState = State<deterministic::Context, ed25519::Scheme, RoundRobin, Sha256Digest>;
+    type TestState = State<
+        deterministic::Context,
+        ed25519::Scheme,
+        RoundRobinElector<ed25519::Scheme>,
+        Sha256Digest,
+    >;
 
     fn setup_state(
         context: &mut deterministic::Context,
@@ -1143,13 +1154,15 @@ mod tests {
             context.child("state"),
             Config {
                 scheme: fixture.verifier.clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(
+                    &fixture.verifier,
+                    TermLength::new(NZU64!(term_length)),
+                ),
                 epoch: Epoch::new(epoch),
                 activity_timeout: ViewDelta::new(activity_timeout),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(term_length)),
                 finalization_timeout: Duration::from_secs(30),
             },
         );
@@ -1170,13 +1183,12 @@ mod tests {
                 context,
                 Config {
                     scheme: verifier.clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin(&verifier),
                     epoch: Epoch::new(11),
                     activity_timeout: ViewDelta::new(6),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -1251,13 +1263,12 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: local_scheme.clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&local_scheme),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1329,13 +1340,12 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(30),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1387,13 +1397,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(31),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(30),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1439,13 +1448,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(32),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1504,13 +1512,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(33),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1604,13 +1611,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(34),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(11),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: Duration::from_secs(12),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1655,13 +1661,12 @@ mod tests {
             let same_term_timeout = Duration::from_millis(30);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(35),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_millis(10),
                 certification_timeout: Duration::from_millis(20),
                 timeout_retry: retry,
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: same_term_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1719,13 +1724,12 @@ mod tests {
             let same_term_timeout = Duration::from_secs(4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(36),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: same_term_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1778,13 +1782,12 @@ mod tests {
             let finalization_timeout = Duration::from_secs(4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(5)),
                 finalization_timeout,
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1829,13 +1832,12 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(9),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(10),
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1862,13 +1864,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(12),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1917,13 +1918,12 @@ mod tests {
             let retry = Duration::from_secs(3);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(13),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout,
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: retry,
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -1992,13 +1992,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(12),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -2053,14 +2052,13 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[0].clone();
             let cfg = Config {
-                scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                scheme: local_scheme.clone(),
+                elector: round_robin(&local_scheme),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -2114,13 +2112,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -2172,14 +2169,13 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[2].clone(); // leader of view 1
             let cfg = Config {
-                scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                scheme: local_scheme.clone(),
+                elector: round_robin(&local_scheme),
                 epoch: Epoch::new(4),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -2246,14 +2242,13 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let local_scheme = schemes[1].clone(); // leader of view 2
             let cfg = Config {
-                scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                scheme: local_scheme.clone(),
+                elector: round_robin(&local_scheme),
                 epoch: Epoch::new(7),
                 activity_timeout: ViewDelta::new(3),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -2687,13 +2682,12 @@ mod tests {
                 context.child("state"),
                 Config {
                     scheme: verifier.clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin_with_term(&verifier, TermLength::new(NZU64!(5))),
                     epoch,
                     activity_timeout: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    term_length: TermLength::new(NZU64!(5)),
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2746,13 +2740,12 @@ mod tests {
                 context.child("state"),
                 Config {
                     scheme: verifier.clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin(&verifier),
                     epoch,
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2803,14 +2796,13 @@ mod tests {
             let mut state = State::new(
                 context.child("state"),
                 Config {
-                    scheme: verifier,
-                    elector: <RoundRobin>::default(),
+                    scheme: verifier.clone(),
+                    elector: round_robin(&verifier),
                     epoch,
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(10),
                     certification_timeout: Duration::from_secs(10),
                     timeout_retry: Duration::from_secs(30),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2860,13 +2852,12 @@ mod tests {
                 context,
                 Config {
                     scheme: schemes[0].clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin(&schemes[0]),
                     epoch,
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2931,13 +2922,12 @@ mod tests {
                 context,
                 Config {
                     scheme: schemes[0].clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin(&schemes[0]),
                     epoch,
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -2984,13 +2974,12 @@ mod tests {
                 context.child("state"),
                 Config {
                     scheme: local_scheme.clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin(&local_scheme),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -3022,14 +3011,13 @@ mod tests {
             let mut restarted = State::new(
                 context.child("state_restarted"),
                 Config {
-                    scheme: local_scheme,
-                    elector: <RoundRobin>::default(),
+                    scheme: local_scheme.clone(),
+                    elector: round_robin(&local_scheme),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(5),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -3053,13 +3041,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: verifier.clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&verifier),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3181,13 +3168,12 @@ mod tests {
 
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3357,14 +3343,13 @@ mod tests {
 
             let local_scheme = schemes[0].clone();
             let cfg = Config {
-                scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                scheme: local_scheme.clone(),
+                elector: round_robin(&local_scheme),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3429,14 +3414,13 @@ mod tests {
             // With RoundRobin (epoch=1), child view=3 has leader index 0, so signer index 1 is a follower.
             let local_scheme = schemes[1].clone();
             let cfg = Config {
-                scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                scheme: local_scheme.clone(),
+                elector: round_robin(&local_scheme),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3510,13 +3494,12 @@ mod tests {
                 context,
                 Config {
                     scheme: schemes[2].clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin_with_term(&schemes[2], TermLength::new(NZU64!(5))),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(10),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::new(NZU64!(5)),
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -3571,13 +3554,12 @@ mod tests {
                 context,
                 Config {
                     scheme: schemes[3].clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin_with_term(&schemes[3], TermLength::new(NZU64!(5))),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::new(NZU64!(5)),
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -3637,14 +3619,13 @@ mod tests {
             // With RoundRobin (epoch=1), view 3 leader is index 0, so signer index 1 is a follower.
             let local_scheme = schemes[1].clone();
             let cfg = Config {
-                scheme: local_scheme,
-                elector: <RoundRobin>::default(),
+                scheme: local_scheme.clone(),
+                elector: round_robin(&local_scheme),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(10),
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_secs(30),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -3720,13 +3701,12 @@ mod tests {
             let Fixture { schemes, .. } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(5),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3766,13 +3746,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(5)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3811,13 +3790,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3884,13 +3862,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin(&schemes[0]),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(10),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -3928,13 +3905,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(5)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -4110,13 +4086,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(5)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -4173,13 +4148,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(5)),
                 finalization_timeout: Duration::from_secs(4),
             };
 
@@ -4217,13 +4191,12 @@ mod tests {
                 context.child("restarted"),
                 Config {
                     scheme: schemes[0].clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(5))),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(20),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::new(NZU64!(5)),
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -4251,13 +4224,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(20))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(2),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(20)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context.child("state"), cfg);
@@ -4329,13 +4301,12 @@ mod tests {
                 context.child("restarted"),
                 Config {
                     scheme: schemes[0].clone(),
-                    elector: <RoundRobin>::default(),
+                    elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(20))),
                     epoch: Epoch::new(1),
                     activity_timeout: ViewDelta::new(2),
                     leader_timeout: Duration::from_secs(1),
                     certification_timeout: Duration::from_secs(2),
                     timeout_retry: Duration::from_secs(3),
-                    term_length: TermLength::new(NZU64!(20)),
                     finalization_timeout: Duration::from_secs(4),
                 },
             );
@@ -4363,13 +4334,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);
@@ -4434,13 +4404,12 @@ mod tests {
             } = ed25519::fixture(&mut context, &namespace, 4);
             let cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: <RoundRobin>::default(),
+                elector: round_robin_with_term(&schemes[0], TermLength::new(NZU64!(3))),
                 epoch: Epoch::new(1),
                 activity_timeout: ViewDelta::new(20),
                 leader_timeout: Duration::from_secs(1),
                 certification_timeout: Duration::from_secs(2),
                 timeout_retry: Duration::from_secs(3),
-                term_length: TermLength::new(NZU64!(3)),
                 finalization_timeout: Duration::from_secs(4),
             };
             let mut state = State::new(context, cfg);

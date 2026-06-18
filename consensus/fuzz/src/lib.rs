@@ -16,6 +16,7 @@ use commonware_codec::{Decode, DecodeExt};
 use commonware_consensus::{
     simplex::{
         config,
+        elector::Config as _,
         mocks::{application, relay, reporter, twins},
         types::{Certificate, Vote},
         Engine, Floor, ForwardingPolicy,
@@ -364,17 +365,13 @@ where
     ResolverSender: commonware_p2p::Sender<PublicKey = Ed25519PublicKey>,
     ResolverReceiver: commonware_p2p::Receiver<PublicKey = Ed25519PublicKey>,
 {
-    let elector = P::Elector::default();
+    let elector = P::Elector::default().with_term_length(term_length);
     let reporter_cfg = reporter::Config {
         participants: participants.try_into().expect("public keys are unique"),
         scheme: scheme.clone(),
         elector: elector.clone(),
     };
-    let reporter = reporter::Reporter::new_with_term_length(
-        context.child("reporter"),
-        reporter_cfg,
-        term_length,
-    );
+    let reporter = reporter::Reporter::new(context.child("reporter"), reporter_cfg);
 
     let app_cfg = application::Config {
         hasher: Sha256::default(),
@@ -407,7 +404,6 @@ where
         activity_timeout: Delta::new(10),
         skip_timeout: Duration::from_secs(11),
         fetch_concurrent: NZUsize!(1),
-        term_length,
         finalization_timeout: Duration::from_secs(12),
         replay_buffer: NZUsize!(1024 * 1024),
         write_buffer: NZUsize!(1024 * 1024),
@@ -612,7 +608,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
 
             // Primary: legitimate engine
             let primary_context = context.child("primary");
-            let primary_elector = P::Elector::default();
+            let primary_elector = P::Elector::default().with_term_length(input.term_length);
             let reporter_cfg = reporter::Config {
                 participants: participants
                     .as_ref()
@@ -621,11 +617,7 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 scheme: scheme.clone(),
                 elector: primary_elector.clone(),
             };
-            let reporter = reporter::Reporter::new_with_term_length(
-                primary_context.child("reporter"),
-                reporter_cfg,
-                input.term_length,
-            );
+            let reporter = reporter::Reporter::new(primary_context.child("reporter"), reporter_cfg);
 
             let app_cfg = application::Config {
                 hasher: Sha256::default(),
@@ -659,7 +651,6 @@ fn run_with_twin_mutator<P: simplex::Simplex>(input: FuzzInput) {
                 activity_timeout: Delta::new(10),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(1),
-                term_length: input.term_length,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),

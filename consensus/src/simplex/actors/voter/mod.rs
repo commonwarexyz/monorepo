@@ -5,8 +5,8 @@ mod slot;
 mod state;
 
 use crate::{
-    simplex::{elector::Config as Elector, types::Activity, Floor, Plan},
-    types::{Epoch, TermLength, ViewDelta},
+    simplex::{elector::Elector, types::Activity, Floor, Plan},
+    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Relay, Reporter,
 };
 pub use actor::Actor;
@@ -43,7 +43,6 @@ pub struct Config<
     pub certification_timeout: Duration,
     pub timeout_retry: Duration,
     pub activity_timeout: ViewDelta,
-    pub term_length: TermLength,
     pub finalization_timeout: Duration,
     pub replay_buffer: NonZeroUsize,
     pub write_buffer: NonZeroUsize,
@@ -59,7 +58,7 @@ mod tests {
                 batcher,
                 resolver::{self, MailboxMessage},
             },
-            elector::{Config as ElectorConfig, Elector, Random, RoundRobin, RoundRobinElector},
+            elector::{self, Config as _, Random, RoundRobin, RoundRobinElector},
             metrics::TimeoutReason,
             mocks, quorum,
             scheme::{
@@ -71,7 +70,7 @@ mod tests {
                 Nullification, Nullify, Proposal, Vote,
             },
         },
-        types::{Participant, Round, View},
+        types::{Participant, Round, TermLength, View},
         Viewable,
     };
     use commonware_actor::mailbox;
@@ -200,7 +199,7 @@ mod tests {
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         setup_voter_with_certifier(
             context,
@@ -236,7 +235,7 @@ mod tests {
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let signing = schemes[0].clone();
         let me = participants[0].clone();
@@ -247,6 +246,7 @@ mod tests {
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
         let relay = Arc::new(mocks::relay::Relay::new());
+        let elector = elector.build(signing.participants());
 
         let application_cfg = mocks::application::Config {
             hasher: Sha256::default(),
@@ -276,7 +276,6 @@ mod tests {
             certification_timeout,
             timeout_retry,
             activity_timeout: ViewDelta::new(10),
-            term_length: TermLength::ONE,
             finalization_timeout: Duration::from_secs(4),
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -337,21 +336,19 @@ mod tests {
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let signing = schemes[0].clone();
         let me = participants[0].clone();
+        let elector = elector.with_term_length(term_length);
         let reporter_cfg = mocks::reporter::Config {
             participants: participants.to_vec().try_into().unwrap(),
             scheme: signing.clone(),
             elector: elector.clone(),
         };
-        let reporter = mocks::reporter::Reporter::new_with_term_length(
-            context.child("reporter"),
-            reporter_cfg,
-            term_length,
-        );
+        let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
         let relay = Arc::new(mocks::relay::Relay::new());
+        let elector = elector.build(signing.participants());
 
         let application_cfg = mocks::application::Config {
             hasher: Sha256::default(),
@@ -381,7 +378,6 @@ mod tests {
             certification_timeout,
             timeout_retry,
             activity_timeout: ViewDelta::new(10),
-            term_length,
             finalization_timeout,
             replay_buffer: NZUsize!(10240),
             write_buffer: NZUsize!(10240),
@@ -496,7 +492,7 @@ mod tests {
     )
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let VoterFloorStart {
             partition,
@@ -512,6 +508,7 @@ mod tests {
         };
         let reporter = mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
         let relay = Arc::new(mocks::relay::Relay::new());
+        let elector = elector.build(schemes[0].participants());
         let application_cfg = mocks::application::Config {
             hasher: Sha256::default(),
             relay: relay.clone(),
@@ -540,7 +537,6 @@ mod tests {
             certification_timeout: Duration::from_secs(6),
             timeout_retry: Duration::from_mins(60),
             activity_timeout: ViewDelta::new(10),
-            term_length: TermLength::ONE,
             finalization_timeout: Duration::from_secs(7),
             replay_buffer: NZUsize!(1024 * 1024),
             write_buffer: NZUsize!(1024 * 1024),
@@ -909,7 +905,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -941,6 +937,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+            let elector = elector.build(schemes[0].participants());
             let relay = Arc::new(mocks::relay::Relay::new());
             let application_cfg = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -969,7 +966,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
                 write_buffer: NonZeroUsize::new(1024 * 1024).unwrap(),
@@ -1142,7 +1138,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1173,6 +1169,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+            let elector = elector.build(signing.participants());
             let relay = Arc::new(mocks::relay::Relay::new());
             let app_config = mocks::application::Config {
                 hasher: Sha256::default(),
@@ -1201,7 +1198,6 @@ mod tests {
                 certification_timeout: Duration::from_millis(1000),
                 timeout_retry: Duration::from_millis(1000),
                 activity_timeout,
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -1420,7 +1416,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1540,7 +1536,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1674,7 +1670,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1796,7 +1792,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -1837,7 +1833,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -1850,7 +1846,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1993,9 +1988,8 @@ mod tests {
             // Figure out who the leader will be for view 2
             let view2_round = Round::new(epoch, View::new(2));
             let elector_config = RoundRobin::<Sha256>::default();
-            let temp_elector: RoundRobinElector<S> = elector_config
-                .clone()
-                .build(schemes[0].participants(), TermLength::ONE);
+            let temp_elector: RoundRobinElector<S> =
+                elector_config.clone().build(schemes[0].participants());
             let leader_idx = temp_elector.elect(view2_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 
@@ -2028,7 +2022,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: leader_scheme.clone(),
-                elector: elector_config,
+                elector: elector_config.clone().build(leader_scheme.participants()),
                 blocker: oracle.control(leader.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2041,7 +2035,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2179,7 +2172,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -2223,7 +2216,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2236,7 +2229,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2318,7 +2310,7 @@ mod tests {
             // Initialize voter actor
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(participants[0].clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -2331,7 +2323,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2444,6 +2435,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_cfg);
+            let elector = elector.build(schemes[0].participants());
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let app_cfg = mocks::application::Config {
@@ -2477,7 +2469,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -2630,7 +2621,8 @@ mod tests {
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(schemes[0].participants(), TermLength::new(NZU64!(2)));
+                .with_term_length(TermLength::new(NZU64!(2)))
+                .build(schemes[0].participants());
             let leader_idx = built_elector.elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
             let (mut mailbox, mut batcher_receiver, relay) = setup_voter_with_term_and_latency(
@@ -2857,7 +2849,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         // This is a regression test as the resolver didn't use to send
         // finalizations to the voter
@@ -2955,7 +2947,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3058,7 +3050,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3108,7 +3100,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3122,7 +3114,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout,
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3276,7 +3267,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3322,7 +3313,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3336,7 +3327,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3523,7 +3513,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3537,7 +3527,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3644,7 +3633,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -3690,7 +3679,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -3704,7 +3693,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(10),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -3852,7 +3840,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S> + Default,
+        L: elector::Config<S> + Default,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4035,7 +4023,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: signing.clone(),
-                elector,
+                elector: elector.clone().build(signing.participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4048,7 +4036,6 @@ mod tests {
                 certification_timeout: Duration::from_millis(250),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(10240),
                 write_buffer: NZUsize!(10240),
@@ -4270,7 +4257,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -4321,7 +4308,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4334,7 +4321,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4449,7 +4435,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4462,7 +4448,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1000),
                 timeout_retry: Duration::from_secs(1000),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4590,7 +4575,7 @@ mod tests {
             // Build and start the voter wired to the observing application.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4603,7 +4588,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4752,7 +4736,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4765,7 +4749,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -4855,7 +4838,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -4868,7 +4851,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5027,7 +5009,7 @@ mod tests {
             // guaranteeing the journal contains no `Nullify` either.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5040,7 +5022,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5141,7 +5122,7 @@ mod tests {
             // (dropped) propose request.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5154,7 +5135,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5310,7 +5290,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5323,7 +5303,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5426,7 +5405,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5439,7 +5418,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_secs(1),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5595,7 +5573,7 @@ mod tests {
             // Build and start the voter wired to the observing application.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5608,7 +5586,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5770,7 +5747,7 @@ mod tests {
             // Build and start the pre-restart voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5783,7 +5760,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -5872,7 +5848,7 @@ mod tests {
             // Build and start the post-restart voter against the same journal partition.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -5885,7 +5861,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6052,7 +6027,7 @@ mod tests {
             // conflicting notarization reaches the voter.
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -6065,7 +6040,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(600),
                 timeout_retry: Duration::from_secs(600),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6193,7 +6167,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -6220,6 +6194,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+            let elector = elector.build(schemes[0].participants());
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -6250,7 +6225,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6382,7 +6356,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -6409,6 +6383,7 @@ mod tests {
             };
             let reporter =
                 mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
+            let elector = elector.build(schemes[0].participants());
             let relay = Arc::new(mocks::relay::Relay::new());
 
             let application_cfg = mocks::application::Config {
@@ -6439,7 +6414,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -6671,7 +6645,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap(), TermLength::ONE);
+                .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6787,7 +6761,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap(), TermLength::ONE);
+                .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, relay, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -6936,7 +6910,7 @@ mod tests {
             let elector = RoundRobin::<Sha256>::default();
             let built_elector: RoundRobinElector<S> = elector
                 .clone()
-                .build(&participants.clone().try_into().unwrap(), TermLength::ONE);
+                .build(&participants.clone().try_into().unwrap());
             let (mut mailbox, mut batcher_receiver, _, _, _) = setup_voter(
                 &mut context,
                 &oracle,
@@ -7368,7 +7342,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -7381,7 +7355,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -7483,7 +7456,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -7496,7 +7469,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8495,7 +8467,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: ElectorConfig<S>,
+        L: elector::Config<S>,
     {
         let n = 5;
         let quorum = quorum(n);
@@ -8517,7 +8489,7 @@ mod tests {
             let first_round = Round::new(Epoch::new(333), View::new(1));
             let leader_idx = elector
                 .clone()
-                .build(schemes[0].participants(), TermLength::ONE)
+                .build(schemes[0].participants())
                 .elect(first_round, None);
             let leader = participants[usize::from(leader_idx)].clone();
 
@@ -8712,7 +8684,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8725,7 +8697,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8839,7 +8810,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -8852,7 +8823,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -8987,7 +8957,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9000,7 +8970,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9100,7 +9069,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9113,7 +9082,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(5),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9243,7 +9211,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector: elector.clone(),
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9256,7 +9224,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9362,7 +9329,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9375,7 +9342,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(1),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -9501,7 +9467,7 @@ mod tests {
 
             let voter_cfg = Config {
                 scheme: schemes[0].clone(),
-                elector,
+                elector: elector.clone().build(schemes[0].participants()),
                 blocker: oracle.control(me.clone()),
                 automaton: application.clone(),
                 relay: application.clone(),
@@ -9514,7 +9480,6 @@ mod tests {
                 certification_timeout: Duration::from_secs(100),
                 timeout_retry: Duration::from_mins(60),
                 activity_timeout: ViewDelta::new(10),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(4),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),

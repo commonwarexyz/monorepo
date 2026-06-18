@@ -118,13 +118,16 @@ where
 {
     type Elector = Elector<L::Elector, S>;
 
+    fn with_term_length(self, term_length: TermLength) -> Self {
+        Self(self.0.with_term_length(term_length))
+    }
+
     fn build(
         self,
         participants: &commonware_utils::ordered::Set<<Scheme<S> as Verifier>::PublicKey>,
-        term_length: TermLength,
     ) -> Self::Elector {
         Elector {
-            inner: self.0.build(participants, term_length),
+            inner: self.0.build(participants),
             _phantom: std::marker::PhantomData,
         }
     }
@@ -135,6 +138,10 @@ where
     S: CertificateScheme,
     E: elector::Elector<S>,
 {
+    fn term_length(&self) -> TermLength {
+        self.inner.term_length()
+    }
+
     fn elect(
         &self,
         round: Round,

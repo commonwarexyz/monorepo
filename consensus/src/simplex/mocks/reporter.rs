@@ -2,7 +2,7 @@
 //! records votes/faults, and exposes a simple subscription.
 use crate::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector},
+        elector::{self, Elector as _},
         scheme,
         types::{
             Activity, Attributable, ConflictingFinalize, ConflictingNotarize, Finalization,
@@ -41,13 +41,13 @@ type Faults<S, D> = HashMap<<S as Verifier>::PublicKey, HashMap<View, HashSet<Ac
 
 /// Reporter configuration used in tests.
 #[derive(Clone, Debug)]
-pub struct Config<S: Scheme, L: ElectorConfig<S>> {
+pub struct Config<S: Scheme, L: elector::Config<S>> {
     pub participants: Set<S::PublicKey>,
     pub scheme: S,
     pub elector: L,
 }
 
-pub struct Reporter<E: CryptoRngCore, S: Scheme, L: ElectorConfig<S>, D: Digest> {
+pub struct Reporter<E: CryptoRngCore, S: Scheme, L: elector::Config<S>, D: Digest> {
     context: Arc<Mutex<E>>,
     pub participants: Set<S::PublicKey>,
     scheme: S,
@@ -74,7 +74,7 @@ impl<E, S, L, D> Clone for Reporter<E, S, L, D>
 where
     E: CryptoRngCore,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     L::Elector: Clone,
     D: Digest,
 {
@@ -106,16 +106,12 @@ impl<E, S, L, D> Reporter<E, S, L, D>
 where
     E: CryptoRngCore,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     D: Digest + Eq + Hash + Clone,
 {
     pub fn new(context: E, cfg: Config<S, L>) -> Self {
-        Self::new_with_term_length(context, cfg, TermLength::ONE)
-    }
-
-    pub fn new_with_term_length(context: E, cfg: Config<S, L>, term_length: TermLength) -> Self {
-        // Build elector with participants
-        let elector = cfg.elector.build(&cfg.participants, term_length);
+        let elector = cfg.elector.build(&cfg.participants);
+        let term_length = elector.term_length();
 
         Self {
             context: Arc::new(Mutex::new(context)),
@@ -169,7 +165,7 @@ impl<E, S, L, D> crate::Reporter for Reporter<E, S, L, D>
 where
     E: CryptoRngCore + Send + Sync + 'static,
     S: scheme::Scheme<D>,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Activity = Activity<S, D>;
@@ -366,7 +362,7 @@ impl<E, S, L, D> Monitor for Reporter<E, S, L, D>
 where
     E: CryptoRngCore + Send + Sync + 'static,
     S: Scheme,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
     D: Digest + Eq + Hash + Clone,
 {
     type Index = View;

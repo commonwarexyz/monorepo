@@ -1,6 +1,6 @@
 use commonware_codec::Read;
 use commonware_consensus::simplex::{
-    elector::{Config as ElectorConfig, RoundRobin},
+    elector::{self, RoundRobin},
     scheme::{
         bls12381_multisig, bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519, secp256r1,
         Scheme,
@@ -19,7 +19,7 @@ where
     <<Self::Scheme as certificate::Verifier>::Certificate as Read>::Cfg: Default,
 {
     type Scheme: Scheme<Sha256Digest, PublicKey = Ed25519PublicKey>;
-    type Elector: ElectorConfig<Self::Scheme> + Default;
+    type Elector: elector::Config<Self::Scheme> + Default;
     fn fixture(
         context: &mut deterministic::Context,
         namespace: &[u8],

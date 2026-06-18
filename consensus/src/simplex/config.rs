@@ -1,9 +1,9 @@
 use super::{
-    elector::Config as Elector,
+    elector,
     types::{Activity, Context, Finalization},
 };
 use crate::{
-    types::{Epoch, TermLength, ViewDelta},
+    types::{Epoch, ViewDelta},
     CertifiableAutomaton, Epochable, Relay, Reporter, Viewable,
 };
 use commonware_cryptography::{certificate::Scheme, Digest};
@@ -79,7 +79,7 @@ impl<S: Scheme, D: Digest> Floor<S, D> {
 pub struct Config<S, L, B, D, A, R, F, T>
 where
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     B: Blocker<PublicKey = S::PublicKey>,
     D: Digest,
     A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,
@@ -179,14 +179,6 @@ where
     /// Number of concurrent requests to make at once.
     pub fetch_concurrent: NonZeroUsize,
 
-    /// Number of consecutive views in which a leader remains stable (a "term").
-    ///
-    /// When `term_length` is 1, every view has an independent leader (the default behavior).
-    /// When `term_length` is greater than 1, views are grouped into terms and the same
-    /// leader serves for each view in the term. If a nullification is formed in any view
-    /// of a term, participants skip the rest of the term.
-    pub term_length: TermLength,
-
     /// Maximum time an entered view may remain unfinalized before we allow a
     /// local nullify vote for the current view.
     ///
@@ -211,7 +203,7 @@ where
 
 impl<
         S: Scheme,
-        L: Elector<S>,
+        L: elector::Config<S>,
         B: Blocker<PublicKey = S::PublicKey>,
         D: Digest,
         A: CertifiableAutomaton<Context = Context<D, S::PublicKey>>,

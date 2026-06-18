@@ -5,7 +5,7 @@ use crate::{
 };
 use commonware_codec::{Encode, Read};
 use commonware_consensus::{
-    simplex::{elector::Config as Elector, mocks::reporter::Reporter, scheme, scheme::Scheme},
+    simplex::{elector, mocks::reporter::Reporter, scheme, scheme::Scheme},
     types::{TermLength, View},
 };
 use commonware_cryptography::{
@@ -224,7 +224,7 @@ pub fn extract<E, S, L>(
 where
     E: CryptoRngCore,
     S: Scheme<Sha256Digest>,
-    L: Elector<S>,
+    L: elector::Config<S>,
 {
     reporters
         .iter()

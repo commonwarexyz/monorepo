@@ -71,7 +71,7 @@
 //! messages with that participant identity in that view.
 
 use crate::{
-    simplex::elector::{Config as ElectorConfig, Elector as Elected},
+    simplex::elector,
     types::{Participant, Round, TermLength, View},
 };
 use commonware_cryptography::certificate::Scheme;
@@ -302,27 +302,38 @@ pub struct ElectorState<E> {
     term_length: TermLength,
 }
 
-impl<S, C> ElectorConfig<S> for Elector<C>
+impl<S, C> elector::Config<S> for Elector<C>
 where
     S: Scheme,
-    C: ElectorConfig<S>,
+    C: elector::Config<S>,
 {
     type Elector = ElectorState<C::Elector>;
 
-    fn build(self, participants: &Set<S::PublicKey>, term_length: TermLength) -> Self::Elector {
+    fn with_term_length(mut self, term_length: TermLength) -> Self {
+        self.fallback = self.fallback.with_term_length(term_length);
+        self
+    }
+
+    fn build(self, participants: &Set<S::PublicKey>) -> Self::Elector {
+        let fallback = self.fallback.build(participants);
+        let term_length = elector::Elector::term_length(&fallback);
         ElectorState {
-            fallback: self.fallback.build(participants, term_length),
+            fallback,
             round_leaders: self.round_leaders,
             term_length,
         }
     }
 }
 
-impl<S, E> Elected<S> for ElectorState<E>
+impl<S, E> elector::Elector<S> for ElectorState<E>
 where
     S: Scheme,
-    E: Elected<S>,
+    E: elector::Elector<S>,
 {
+    fn term_length(&self) -> TermLength {
+        self.term_length
+    }
+
     fn elect(&self, round: Round, certificate: Option<&S::Certificate>) -> Participant {
         let idx = term_index(round.view(), self.term_length);
         if let Some(&leader) = self.round_leaders.get(idx) {
@@ -1257,7 +1268,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as ElectorConfig, RoundRobin},
+            elector::{self, Elector as _, RoundRobin},
             scheme::ed25519,
         },
         types::Epoch,
@@ -2222,19 +2233,17 @@ mod tests {
             .map(|seed| PrivateKey::from_seed(seed).public_key())
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
-        let twins = <Elector<RoundRobin<Sha256>> as ElectorConfig<ed25519::Scheme>>::build(
+        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
             Elector::new(
                 RoundRobin::<Sha256>::default(),
                 &case.scenario,
                 framework.participants,
             ),
             &participants,
-            TermLength::ONE,
         );
-        let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
+        let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
             RoundRobin::<Sha256>::default(),
             &participants,
-            TermLength::ONE,
         );
 
         for (round_idx, round_scenario) in case.scenario.rounds().iter().enumerate() {
@@ -2273,15 +2282,17 @@ mod tests {
             .collect();
         let participants = Set::try_from(participants).expect("participants should be unique");
         let term_length = TermLength::new(NZU64!(3));
-        let twins = <Elector<RoundRobin<Sha256>> as ElectorConfig<ed25519::Scheme>>::build(
-            Elector::new(RoundRobin::<Sha256>::default(), &scenario, 3),
+        let twins = <Elector<RoundRobin<Sha256>> as elector::Config<ed25519::Scheme>>::build(
+            Elector::new(
+                RoundRobin::<Sha256>::default().with_term_length(term_length),
+                &scenario,
+                3,
+            ),
             &participants,
-            term_length,
         );
-        let fallback = <RoundRobin<Sha256> as ElectorConfig<ed25519::Scheme>>::build(
-            RoundRobin::<Sha256>::default(),
+        let fallback = <RoundRobin<Sha256> as elector::Config<ed25519::Scheme>>::build(
+            RoundRobin::<Sha256>::default().with_term_length(term_length),
             &participants,
-            term_length,
         );
 
         for view in 1..=3 {

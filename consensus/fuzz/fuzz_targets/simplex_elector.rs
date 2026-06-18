@@ -3,7 +3,7 @@
 use arbitrary::Arbitrary;
 use commonware_consensus::{
     simplex::{
-        elector::{Config as ElectorConfig, Elector, Random, RoundRobin},
+        elector::{self, Elector, Random, RoundRobin},
         scheme::{bls12381_threshold::vrf as bls12381_threshold_vrf, ed25519},
     },
     types::{Round, TermLength, View},
@@ -45,7 +45,7 @@ fn fuzz<S, L>(
     certificate: Option<&S::Certificate>,
 ) where
     S: Scheme<PublicKey = PublicKey>,
-    L: ElectorConfig<S>,
+    L: elector::Config<S>,
 {
     let Ok(participants) = (1..=input.participants_count)
         .map(|i| {
@@ -62,7 +62,9 @@ fn fuzz<S, L>(
         return;
     }
 
-    let elector = elector_config.build(&participants, term_length);
+    let elector = elector_config
+        .with_term_length(term_length)
+        .build(&participants);
 
     // For view 1 certificate should be None, for other views use provided certificate
     if input.round.view() == View::new(1) {

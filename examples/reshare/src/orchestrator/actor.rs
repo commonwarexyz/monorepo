@@ -8,7 +8,7 @@ use crate::{
 use commonware_actor::mailbox;
 use commonware_consensus::{
     marshal::{core::Mailbox as MarshalMailbox, standard::Standard},
-    simplex::{self, elector::Config as Elector, scheme, types::Context, Floor, Plan},
+    simplex::{self, elector, scheme, types::Context, Floor, Plan},
     types::{Epoch, Epocher, FixedEpocher, Height, TermLength, ViewDelta},
     CertifiableAutomaton, Relay,
 };
@@ -42,7 +42,7 @@ where
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
 {
     pub oracle: B,
@@ -70,7 +70,7 @@ where
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: Scheme,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
@@ -102,7 +102,7 @@ where
     A: CertifiableAutomaton<Context = Context<H::Digest, C::PublicKey>, Digest = H::Digest>
         + Relay<Digest = H::Digest, PublicKey = C::PublicKey, Plan = Plan<C::PublicKey>>,
     S: scheme::Scheme<H::Digest, PublicKey = C::PublicKey>,
-    L: Elector<S>,
+    L: elector::Config<S>,
     T: Strategy,
     Provider<S, C>: EpochProvider<Variant = V, PublicKey = C::PublicKey, Scheme = S>,
 {
@@ -330,7 +330,7 @@ where
         >,
     ) -> Handle<()> {
         // Start the new engine
-        let elector = L::default();
+        let elector = L::default().with_term_length(TermLength::ONE);
         let context = self
             .context
             .child("consensus_engine")
@@ -359,7 +359,6 @@ where
                 fetch_concurrent: NZUsize!(32),
                 page_cache: self.page_cache_ref.clone(),
                 strategy: self.strategy.clone(),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(12),
                 forwarding: simplex::ForwardingPolicy::Disabled,
             },

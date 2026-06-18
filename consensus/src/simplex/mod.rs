@@ -430,7 +430,7 @@ mod tests {
     use super::*;
     use crate::{
         simplex::{
-            elector::{Config as Elector, Elector as ElectorTrait, Random, RoundRobin},
+            elector::{self, Config as _, Elector as _, Random, RoundRobin},
             mocks::{
                 scheme as scheme_mocks,
                 twins::{self, Elector as TwinsElector},
@@ -504,11 +504,11 @@ mod tests {
 
     // Generate one `#[test_group("slow")] #[test_traced]` test per canonical
     // (elector, scheme) fixture, named `test_<callee>_<suffix>`. The helper takes
-    // the elector as its third generic parameter.
+    // the elector config type as its third generic parameter.
     //
     // Supported forms:
-    //   test_for_all_fixtures!(callee);                  // callee::<_, _, Elector>(fixture)
-    //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, Elector>(seed, fixture)
+    //   test_for_all_fixtures!(callee);                  // callee::<_, _, RoundRobin>(fixture)
+    //   test_for_all_fixtures!(callee, seeds = N);       // loops callee::<_, _, RoundRobin>(seed, fixture)
     //   test_for_all_fixtures!(callee, level = "INFO");  // overrides the trace level
     macro_rules! test_for_all_fixtures {
         ($callee:ident) => {
@@ -724,7 +724,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
@@ -810,7 +810,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -960,7 +959,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // First let a quorum finalize beyond genesis so the joiner has a real
         // floor certificate and existing tip to catch.
@@ -1050,7 +1049,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1159,7 +1157,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1210,7 +1207,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        RoundRobin: Elector<S>,
+        RoundRobin: elector::Config<S>,
     {
         let n = 5;
         let required_containers = View::new(50);
@@ -1238,8 +1235,7 @@ mod tests {
 
             let elector = RoundRobin::default();
             let participants_set: Set<S::PublicKey> = participants.clone().try_into().unwrap();
-            let term_length = TermLength::ONE;
-            let built_elector = elector.clone().build(&participants_set, term_length);
+            let built_elector = elector.clone().build(&participants_set);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = Vec::new();
             let mut engine_handlers = Vec::new();
@@ -1297,7 +1293,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1356,7 +1351,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n_active = 5;
@@ -1463,7 +1458,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1511,7 +1505,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut StdRng, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
@@ -1620,7 +1614,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -1702,7 +1695,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
@@ -1798,7 +1791,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -1922,7 +1914,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -1955,7 +1946,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
@@ -2053,7 +2044,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2185,7 +2175,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
@@ -2282,7 +2272,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2359,7 +2348,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
@@ -2444,7 +2433,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2554,7 +2542,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 10;
@@ -2639,7 +2627,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2735,7 +2722,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
@@ -2829,7 +2816,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -2878,7 +2864,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         slow_and_lossy_links_seeded::<_, _, L>(6, fixture)
     }
@@ -2889,7 +2875,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // We use slow and lossy links as the deterministic test
         // because it is the most complex test.
@@ -2928,7 +2914,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
@@ -3027,7 +3013,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3096,7 +3081,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
@@ -3198,7 +3183,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -3264,7 +3248,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 4;
         let required_containers = View::new(10);
@@ -3365,7 +3349,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -3433,7 +3416,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 4;
         let epoch = Epoch::new(333);
@@ -3554,7 +3537,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(10),
                 skip_timeout: Duration::from_secs(11),
                 fetch_concurrent: NZUsize!(4),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3576,7 +3558,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
@@ -3678,7 +3660,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3728,7 +3709,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 7;
@@ -3787,7 +3768,6 @@ mod tests {
                     let cfg = mocks::equivocator::Config {
                         scheme: schemes[idx_scheme].clone(),
                         epoch: Epoch::new(333),
-                        term_length: TermLength::ONE,
                         relay: relay.clone(),
                         hasher: Sha256::default(),
                         elector: elector.clone(),
@@ -3835,7 +3815,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -3931,7 +3910,6 @@ mod tests {
                 activity_timeout,
                 skip_timeout,
                 fetch_concurrent: NZUsize!(4),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 1024),
                 write_buffer: NZUsize!(1024 * 1024),
@@ -3970,7 +3948,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let detected = (0..5).any(|seed| equivocator_seeded::<_, _, L>(seed, fixture));
         assert!(
@@ -3985,7 +3963,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
@@ -4086,7 +4064,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4136,7 +4113,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
@@ -4234,7 +4211,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4300,7 +4276,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 4;
@@ -4399,7 +4375,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -4444,7 +4419,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 10;
@@ -4530,7 +4505,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -4583,7 +4557,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 1;
         let namespace = b"consensus".to_vec();
@@ -4655,7 +4629,6 @@ mod tests {
                 activity_timeout: ViewDelta::new(4),
                 skip_timeout: Duration::from_secs(2),
                 fetch_concurrent: NZUsize!(4),
-                term_length: TermLength::ONE,
                 finalization_timeout: Duration::from_secs(12),
                 replay_buffer: NZUsize!(1024 * 16),
                 write_buffer: NZUsize!(1024 * 16),
@@ -4717,7 +4690,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, false);
     }
@@ -4728,7 +4701,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         engine_shutdown::<S, F, L>(seed, fixture, true);
     }
@@ -4739,7 +4712,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = 3;
         let required_containers = View::new(10);
@@ -4833,7 +4806,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -4925,7 +4897,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Scenario:
         // - View F: Finalization of B_1 seen by all participants.
@@ -5172,7 +5144,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length: TermLength::ONE,
                         finalization_timeout: Duration::from_secs(13),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -5290,7 +5261,7 @@ mod tests {
     fn tle<V, L>()
     where
         V: Variant,
-        L: Elector<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
+        L: elector::Config<bls12381_threshold_vrf::Scheme<PublicKey, V>>,
     {
         // Create context
         let n = 4;
@@ -5380,7 +5351,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length: TermLength::ONE,
                     finalization_timeout: Duration::from_secs(51),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -5444,7 +5414,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         // Create context
         let n = 5;
@@ -5474,7 +5444,7 @@ mod tests {
             link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
             // Create engines
-            let elector = L::default();
+            let elector = L::default().with_term_length(term_length);
             let relay = Arc::new(mocks::relay::Relay::new());
             let mut reporters = BTreeMap::new();
             let mut engine_handlers = BTreeMap::new();
@@ -5490,11 +5460,8 @@ mod tests {
                     scheme: schemes[idx].clone(),
                     elector: elector.clone(),
                 };
-                let reporter = mocks::reporter::Reporter::new_with_term_length(
-                    context.child("reporter"),
-                    reporter_config,
-                    term_length,
-                );
+                let reporter =
+                    mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                 reporters.insert(idx, reporter.clone());
                 let application_cfg = mocks::application::Config {
                     hasher: Sha256::default(),
@@ -5532,7 +5499,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -5636,7 +5602,6 @@ mod tests {
                     activity_timeout,
                     skip_timeout,
                     fetch_concurrent: NZUsize!(4),
-                    term_length,
                     finalization_timeout: Duration::from_secs(12),
                     replay_buffer: NZUsize!(1024 * 1024),
                     write_buffer: NZUsize!(1024 * 1024),
@@ -5761,7 +5726,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S> + Copy,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         assert_eq!(
             run_hailstorm::<_, _, L>(0, 10, ViewDelta::new(15), TermLength::ONE, fixture),
@@ -5845,7 +5810,7 @@ mod tests {
     ) where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         let n = campaign.n;
         let faults = N3f1::max_faults(n) as usize;
@@ -5899,7 +5864,11 @@ mod tests {
                 let mut registrations = register_validators(&mut oracle, &participants).await;
                 link_validators(&mut oracle, &participants, Action::Link(link), None).await;
 
-                let elector = TwinsElector::new(L::default(), &scenario, n as usize);
+                let elector = TwinsElector::new(
+                    L::default().with_term_length(term_length),
+                    &scenario,
+                    n as usize,
+                );
                 let relay = Arc::new(mocks::relay::Relay::new());
                 let mut reporters = Vec::new();
                 let mut engine_handlers = Vec::new();
@@ -6002,10 +5971,9 @@ mod tests {
                             scheme: schemes[idx].clone(),
                             elector: elector.clone(),
                         };
-                        let reporter = mocks::reporter::Reporter::new_with_term_length(
+                        let reporter = mocks::reporter::Reporter::new(
                             context.child("reporter"),
                             reporter_config,
-                            term_length,
                         );
                         reporters.push(reporter.clone());
 
@@ -6046,7 +6014,6 @@ mod tests {
                             activity_timeout,
                             skip_timeout,
                             fetch_concurrent: NZUsize!(4),
-                            term_length,
                             finalization_timeout: Duration::from_secs(12),
                             replay_buffer: NZUsize!(1024 * 1024),
                             write_buffer: NZUsize!(1024 * 1024),
@@ -6077,11 +6044,8 @@ mod tests {
                         scheme: schemes[idx].clone(),
                         elector: elector.clone(),
                     };
-                    let reporter = mocks::reporter::Reporter::new_with_term_length(
-                        context.child("reporter"),
-                        reporter_config,
-                        term_length,
-                    );
+                    let reporter =
+                        mocks::reporter::Reporter::new(context.child("reporter"), reporter_config);
                     reporters.push(reporter.clone());
 
                     let application_cfg = mocks::application::Config {
@@ -6121,7 +6085,6 @@ mod tests {
                         activity_timeout,
                         skip_timeout,
                         fetch_concurrent: NZUsize!(4),
-                        term_length,
                         finalization_timeout: Duration::from_secs(12),
                         replay_buffer: NZUsize!(1024 * 1024),
                         write_buffer: NZUsize!(1024 * 1024),
@@ -6358,7 +6321,7 @@ mod tests {
     where
         S: Scheme<Sha256Digest, PublicKey = PublicKey>,
         F: FnMut(&mut deterministic::Context, &[u8], u32) -> Fixture<S>,
-        L: Elector<S>,
+        L: elector::Config<S>,
     {
         twins_campaign::<_, _, L>(&mut test_rng(), TWINS_CAMPAIGN, TWINS_LINK, fixture);
     }

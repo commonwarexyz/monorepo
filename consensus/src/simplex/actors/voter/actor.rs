@@ -6,7 +6,7 @@ use super::{
 use crate::{
     simplex::{
         actors::{batcher, resolver},
-        elector::Config as Elector,
+        elector::Elector,
         metrics::{self, Outbound, TimeoutReason},
         scheme::Scheme,
         types::{
@@ -163,7 +163,6 @@ impl<
                 leader_timeout: cfg.leader_timeout,
                 certification_timeout: cfg.certification_timeout,
                 timeout_retry: cfg.timeout_retry,
-                term_length: cfg.term_length,
                 finalization_timeout: cfg.finalization_timeout,
             },
         );
