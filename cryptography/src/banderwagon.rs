@@ -32,11 +32,38 @@ const D: Scalar = Scalar(blst_fr {
     ],
 });
 
+// Banderwagon group structure:
+//
+// `G` holds a point on the Bandersnatch twisted Edwards curve
+// (`a*x^2 + y^2 = 1 + d*x^2*y^2`, with `a = -5`). The full curve group is not
+// prime order; it is isomorphic to `Z/2 x Z/2 x Z/r` (cofactor 4, `r` the large
+// prime). The cofactor part is the "2-torsion" subgroup `{O, (0,-1), S, S'}`,
+// where `(0,-1)` has order 2 and `S`, `S'` are the two other order-2 points.
+//
+// Banderwagon turns this into a clean prime-order group of size `r` in two steps:
+//
+//   1. Restrict to the subgroup of order `2r`, i.e. the prime-order subgroup
+//      together with its coset by `(0,-1)`. The order-2 points `S`, `S'` (and
+//      anything built from them) are *not* in this subgroup. Membership is
+//      enforced by a "subgroup check": `1 - a*x^2` must be a square in the base
+//      field (equivalently, in projective form, `z^2 - a*x^2`, avoiding an
+//      inversion). This is only needed when decoding an untrusted point; values
+//      produced internally (the generator plus the group law) never leave this
+//      subgroup, so we don't perform it here yet.
+//   2. Quotient that `2r` subgroup by the order-2 subgroup `{O, (0,-1)}`, which
+//      collapses it to size `r`. Concretely this identifies each point `P` with
+//      `P + (0,-1)`; since adding `(0,-1)` maps `(x, y)` to `(-x, -y)`, the two
+//      representatives of every group element are `(x, y)` and `(-x, -y)`.
+//
+// So a single group element has many in-memory representations (any projective
+// scaling of either of its two affine representatives), and equality (below)
+// must see through all of them.
+
 /// Represents a point in the Banderwagon group.
 ///
 /// This group is defined over the BLS12-381 [`Scalar`] field.
 /// Because of that, we can efficiently use it in ZK proofs using BLS.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct G {
     // We use a projective representation where xy = tz.
     x: Scalar,
@@ -44,6 +71,26 @@ pub struct G {
     t: Scalar,
     z: Scalar,
 }
+
+impl PartialEq for G {
+    fn eq(&self, other: &Self) -> bool {
+        // See the group-structure notes above `struct G`. Two representations are
+        // the same group element iff their affine `x:y` ratios match, i.e.
+        // `x1/z1 * y2/z2 == x2/z2 * y1/z1`. Clearing the `z` factors (they cancel)
+        // gives `x1 * y2 == x2 * y1`. This single check absorbs both sources of
+        // redundancy:
+        //
+        //   - projective scaling `(x,y,t,z)` vs `(λx,λy,λt,λz)`: the `λ`s cancel;
+        //   - the `(0,-1)` quotient `(x,y)` vs `(-x,-y)`: the signs cancel
+        //     (`x * -y == -x * y`).
+        //
+        // (Soundness relies on both points being valid subgroup elements; for
+        // points off the curve or outside the `2r` subgroup this is meaningless.)
+        self.x.clone() * &other.y == other.x.clone() * &self.y
+    }
+}
+
+impl Eq for G {}
 
 impl G {
     /// Returns the prime-order Bandersnatch generator in extended coordinates.
@@ -237,5 +284,81 @@ impl<'a> Mul<&'a F> for G {
 impl Space<F> for G {
     fn msm(points: &[Self], scalars: &[F], _strategy: &impl Strategy) -> Self {
         msm_naive(points, scalars)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbitrary::Unstructured;
+    use commonware_invariants::minifuzz;
+
+    fn arbitrary_point(u: &mut Unstructured<'_>) -> arbitrary::Result<G> {
+        Ok(G::generator()
+            * &F {
+                limbs: [u.arbitrary()?, 0, 0, 0],
+            })
+    }
+
+    #[test]
+    fn test_eq_identity() {
+        assert_eq!(G::zero(), G::zero());
+    }
+
+    #[test]
+    fn test_eq_reflexive() {
+        minifuzz::test(|u| {
+            let p = arbitrary_point(u)?;
+            assert_eq!(p, p.clone());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_eq_invariant_under_projective_scaling() {
+        // Scaling every coordinate by a common nonzero factor yields the same point.
+        minifuzz::test(|u| {
+            let p = arbitrary_point(u)?;
+            let mut lambda: Scalar = u.arbitrary()?;
+            if lambda == Scalar::zero() {
+                lambda = Scalar::one();
+            }
+            let scaled = G {
+                x: p.x.clone() * &lambda,
+                y: p.y.clone() * &lambda,
+                t: p.t.clone() * &lambda,
+                z: p.z.clone() * &lambda,
+            };
+            assert_eq!(p, scaled);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_eq_invariant_under_two_torsion() {
+        // Adding the order-2 point (0, -1) maps (x, y) to (-x, -y); `t = xy` is
+        // unchanged. Banderwagon must treat this as the same group element.
+        minifuzz::test(|u| {
+            let p = arbitrary_point(u)?;
+            let twin = G {
+                x: -p.x.clone(),
+                y: -p.y.clone(),
+                t: p.t.clone(),
+                z: p.z.clone(),
+            };
+            assert_eq!(p, twin);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_neq_distinct_points() {
+        // `P` and `P + generator` differ by a prime-order element, so they are
+        // always distinct group elements.
+        minifuzz::test(|u| {
+            let p = arbitrary_point(u)?;
+            assert_ne!(p, p.clone() + &G::generator());
+            Ok(())
+        });
     }
 }
