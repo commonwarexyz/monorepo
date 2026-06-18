@@ -1,6 +1,11 @@
 use crate::bls12381::primitives::group::Scalar;
 use blst::blst_fr;
-use commonware_math::algebra::{msm_naive, Additive, Multiplicative, Object, Ring, Space};
+use bytes::{Buf, BufMut};
+use commonware_codec::{
+    Error::{self, Invalid},
+    FixedSize, Read, ReadExt, Write,
+};
+use commonware_math::algebra::{msm_naive, Additive, Field, Multiplicative, Object, Ring, Space};
 use commonware_parallel::Strategy;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
@@ -287,10 +292,79 @@ impl Space<F> for G {
     }
 }
 
+// Banderwagon (de)serialization. See the spec for full details:
+// <https://hackmd.io/@6iQDuIePQjyYBqDChYw_jg/BJBNcv9fq> and the implementation
+// notes <https://hackmd.io/wliPP_RMT4emsucVuCqfHA>.
+//
+// A group element is encoded as the single base-field element
+// `u = (X/Z) * Sign(Y/Z)`, written big-endian. Multiplying by `Sign(Y/Z)` makes
+// `P` and its quotient twin `P + (0,-1) = (-X,-Y)` (see notes above `struct G`)
+// serialize to the same bytes, since negating the point negates both `X` and
+// `Y`, leaving `u` unchanged. The sign, subgroup, and square-root helpers used
+// here live on [`Scalar`].
+
+impl Write for G {
+    fn write(&self, buf: &mut impl BufMut) {
+        // Convert to affine `(x, y) = (X/Z, Y/Z)`; `Z != 0` for all elements of
+        // the subgroup we represent.
+        let z_inv = self.z.inv();
+        let x = self.x.clone() * &z_inv;
+        let y = self.y.clone() * &z_inv;
+        // `u = x * Sign(y)`: keep `x` when `y` is the positive (largest)
+        // representative, otherwise negate it.
+        let u = if y.is_positive() { x } else { -x };
+        u.write(buf);
+    }
+}
+
+impl FixedSize for G {
+    const SIZE: usize = Scalar::SIZE;
+}
+
+impl Read for G {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+        let bytes = <[u8; 32]>::read(buf)?;
+        let x = Scalar::from_canonical_bytes(&bytes)
+            .ok_or(Invalid("Banderwagon", "x not a canonical field element"))?;
+
+        let one = Scalar::one();
+        let x_sq = {
+            let mut out = x.clone();
+            out.square();
+            out
+        };
+
+        // `num = 1 - a*x^2`, `den = 1 - d*x^2`, and `y^2 = num / den`.
+        let num = one.clone() - &(x_sq.clone() * &A);
+        let den = one.clone() - &(x_sq * &D);
+
+        // Subgroup check: `1 - a*x^2` must be a square (see notes above `struct G`).
+        if !num.is_square() {
+            return Err(Invalid("Banderwagon", "point not in subgroup"));
+        }
+
+        // Recover `y` and pick the positive (largest) representative. `sqrt`
+        // returning `None` means `x` is not a valid abscissa (point off-curve).
+        let ratio = num * &den.inv();
+        let mut y = ratio
+            .sqrt()
+            .ok_or(Invalid("Banderwagon", "point not on curve"))?;
+        if !y.is_positive() {
+            y = -y;
+        }
+
+        let t = x.clone() * &y;
+        Ok(Self { x, y, t, z: one })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use arbitrary::Unstructured;
+    use commonware_codec::{DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
 
     fn arbitrary_point(u: &mut Unstructured<'_>) -> arbitrary::Result<G> {
@@ -358,6 +432,149 @@ mod tests {
         minifuzz::test(|u| {
             let p = arbitrary_point(u)?;
             assert_ne!(p, p.clone() + &G::generator());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_codec_fixed_size() {
+        assert_eq!(G::SIZE, 32);
+    }
+
+    #[test]
+    fn test_codec_round_trip_identity() {
+        // The identity serializes to all-zero bytes and decodes back to itself.
+        let encoded = G::zero().encode();
+        assert_eq!(encoded.as_ref(), &[0u8; 32]);
+        let decoded = G::decode(encoded).unwrap();
+        assert_eq!(decoded, G::zero());
+    }
+
+    #[test]
+    fn test_codec_round_trip_generator() {
+        let g = G::generator();
+        let decoded = G::decode(g.encode()).unwrap();
+        assert_eq!(decoded, g);
+    }
+
+    #[test]
+    fn test_codec_fixed_vectors() {
+        // Official Banderwagon test vectors: the serialization of `G, 2G, 4G,
+        // 8G, ...` (successive doublings of the generator). Matching these
+        // confirms interoperability with go-ipa / Ethereum Verkle.
+        //
+        // Source: crate-crypto/rust-verkle `banderwagon::element::fixed_test_vectors`.
+        let expected = [
+            "4a2c7486fd924882bf02c6908de395122843e3e05264d7991e18e7985dad51e9",
+            "43aa74ef706605705989e8fd38df46873b7eae5921fbed115ac9d937399ce4d5",
+            "5e5f550494159f38aa54d2ed7f11a7e93e4968617990445cc93ac8e59808c126",
+            "0e7e3748db7c5c999a7bcd93d71d671f1f40090423792266f94cb27ca43fce5c",
+            "14ddaa48820cb6523b9ae5fe9fe257cbbd1f3d598a28e670a40da5d1159d864a",
+            "6989d1c82b2d05c74b62fb0fbdf8843adae62ff720d370e209a7b84e14548a7d",
+            "26b8df6fa414bf348a3dc780ea53b70303ce49f3369212dec6fbe4b349b832bf",
+            "37e46072db18f038f2cc7d3d5b5d1374c0eb86ca46f869d6a95fc2fb092c0d35",
+            "2c1ce64f26e1c772282a6633fac7ca73067ae820637ce348bb2c8477d228dc7d",
+            "297ab0f5a8336a7a4e2657ad7a33a66e360fb6e50812d4be3326fab73d6cee07",
+            "5b285811efa7a965bd6ef5632151ebf399115fcc8f5b9b8083415ce533cc39ce",
+            "1f939fa2fd457b3effb82b25d3fe8ab965f54015f108f8c09d67e696294ab626",
+            "3088dcb4d3f4bacd706487648b239e0be3072ed2059d981fe04ce6525af6f1b8",
+            "35fbc386a16d0227ff8673bc3760ad6b11009f749bb82d4facaea67f58fc60ed",
+            "00f29b4f3255e318438f0a31e058e4c081085426adb0479f14c64985d0b956e0",
+            "3fa4384b2fa0ecc3c0582223602921daaa893a97b64bdf94dcaa504e8b7b9e5f",
+        ];
+
+        let mut point = G::generator();
+        for (i, want) in expected.into_iter().enumerate() {
+            let encoded = point.encode();
+            assert_eq!(
+                commonware_formatting::hex(encoded.as_ref()),
+                want,
+                "encoding mismatch at index {i}"
+            );
+            // The vectors must also decode back to the same point.
+            let decoded = G::decode(encoded).unwrap();
+            assert_eq!(decoded, point, "decode mismatch at index {i}");
+            point.double();
+        }
+    }
+
+    #[test]
+    fn test_codec_round_trip() {
+        minifuzz::test(|u| {
+            let p = arbitrary_point(u)?;
+            let decoded = G::decode(p.encode()).unwrap();
+            assert_eq!(decoded, p);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_codec_canonical_for_twin() {
+        // `P` and its quotient twin `(-x, -y)` are the same group element, so
+        // they must serialize to identical bytes.
+        minifuzz::test(|u| {
+            let p = arbitrary_point(u)?;
+            let twin = G {
+                x: -p.x.clone(),
+                y: -p.y.clone(),
+                t: p.t.clone(),
+                z: p.z.clone(),
+            };
+            assert_eq!(p.encode(), twin.encode());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_codec_canonical_under_projective_scaling() {
+        // Projective scaling does not change the group element, so the encoding
+        // must be invariant under it.
+        minifuzz::test(|u| {
+            let p = arbitrary_point(u)?;
+            let mut lambda: Scalar = u.arbitrary()?;
+            if lambda == Scalar::zero() {
+                lambda = Scalar::one();
+            }
+            let scaled = G {
+                x: p.x.clone() * &lambda,
+                y: p.y.clone() * &lambda,
+                t: p.t.clone() * &lambda,
+                z: p.z.clone() * &lambda,
+            };
+            assert_eq!(p.encode(), scaled.encode());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_decode_rejects_non_canonical_field_element() {
+        // `r - 1` is the largest valid field element; `r` (and above) must be
+        // rejected as non-canonical. These are the big-endian bytes of `r`.
+        let r_bytes: [u8; 32] = [
+            0x73, 0xed, 0xa7, 0x53, 0x29, 0x9d, 0x7d, 0x48, 0x33, 0x39, 0xd8, 0x08, 0x09, 0xa1,
+            0xd8, 0x05, 0x53, 0xbd, 0xa4, 0x02, 0xff, 0xfe, 0x5b, 0xfe, 0xff, 0xff, 0xff, 0xff,
+            0x00, 0x00, 0x00, 0x01,
+        ];
+        assert!(G::decode(&r_bytes[..]).is_err());
+        assert!(G::decode(&[0xffu8; 32][..]).is_err());
+    }
+
+    #[test]
+    fn test_decode_rejects_off_subgroup() {
+        // Search for an `x` whose `1 - a*x^2` is a non-square: decoding must fail
+        // the subgroup check. We expect to find one quickly (~half of all `x`).
+        minifuzz::test(|u| {
+            let x: Scalar = u.arbitrary()?;
+            let x_sq = {
+                let mut out = x.clone();
+                out.square();
+                out
+            };
+            let num = Scalar::one() - &(x_sq * &A);
+            if num != Scalar::zero() && !num.is_square() {
+                let bytes = x.encode_fixed::<32>();
+                assert!(G::decode(&bytes[..]).is_err());
+            }
             Ok(())
         });
     }

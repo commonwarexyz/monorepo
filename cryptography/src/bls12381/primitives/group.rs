@@ -25,8 +25,8 @@ use blst::{
     blst_p2_cneg, blst_p2_compress, blst_p2_double, blst_p2_from_affine, blst_p2_in_g2,
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
-    blst_scalar, blst_scalar_from_be_bytes, blst_scalar_from_bendian, blst_scalar_from_fr,
-    blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
+    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -375,6 +375,31 @@ const COSET_SHIFT_INV: Scalar = Scalar(blst_fr {
     ],
 });
 
+/// Big-endian bytes of `(r - 1) / 2`. A scalar is "positive" (in the sense of
+/// [`Scalar::is_positive`]) iff its canonical representative exceeds this value.
+const HALF_MODULUS_BE: [u8; SCALAR_LENGTH] = [
+    0x39, 0xf6, 0xd3, 0xa9, 0x94, 0xce, 0xbe, 0xa4, 0x19, 0x9c, 0xec, 0x04, 0x04, 0xd0, 0xec, 0x02,
+    0xa9, 0xde, 0xd2, 0x01, 0x7f, 0xff, 0x2d, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x80, 0x00, 0x00, 0x00,
+];
+
+/// Little-endian limbs of `(r - 1) / 2`, the exponent of the Legendre symbol
+/// `s^((r-1)/2)` used by [`Scalar::is_square`].
+const LEGENDRE_EXP: [u64; 4] = [
+    0x7fff_ffff_8000_0000,
+    0xa9de_d201_7fff_2dff,
+    0x199c_ec04_04d0_ec02,
+    0x39f6_d3a9_94ce_bea4,
+];
+
+/// Little-endian limbs of `(Q + 1) / 2`, where `r - 1 = Q * 2^32` with `Q` odd.
+/// `s^((Q+1)/2)` is the initial Tonelli-Shanks candidate root in [`Scalar::sqrt`].
+const SQRT_EXP: [u64; 4] = [
+    0x7fff_2dff_8000_0000,
+    0x04d0_ec02_a9de_d201,
+    0x94ce_bea4_199c_ec04,
+    0x0000_0000_39f6_d3a9,
+];
+
 /// A point on the BLS12-381 G1 curve.
 #[derive(Clone, Copy, Eq, PartialEq, FixedArray)]
 #[repr(transparent)]
@@ -614,6 +639,109 @@ impl Scalar {
         // SAFETY: Both pointers are valid and properly aligned.
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
+    }
+
+    /// Parses a scalar from its canonical 32-byte big-endian encoding.
+    ///
+    /// Returns `None` if `bytes` is not a canonical representative (i.e. encodes
+    /// an integer `>= r`). Unlike the [`Read`] implementation, this accepts zero.
+    pub fn from_canonical_bytes(bytes: &[u8; SCALAR_LENGTH]) -> Option<Self> {
+        let mut scalar = blst_scalar::default();
+        let mut fr = blst_fr::default();
+        // SAFETY: `bytes` is a valid 32-byte buffer. `blst_scalar_fr_check`
+        // validates that the value is in `[0, r)`; we only convert once it passes.
+        unsafe {
+            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
+            if !blst_scalar_fr_check(&scalar) {
+                return None;
+            }
+            blst_fr_from_scalar(&mut fr, &scalar);
+        }
+        Some(Self(fr))
+    }
+
+    /// Returns the canonical sign of the scalar.
+    ///
+    /// The "positive" representative is the lexicographically largest one: this
+    /// returns `true` iff the canonical representative is strictly greater than
+    /// `(r-1)/2` (equivalently, `self > -self`).
+    pub fn is_positive(&self) -> bool {
+        // `as_slice` yields the canonical big-endian representation, so a
+        // lexicographic byte comparison matches the numeric comparison.
+        *self.as_slice() > HALF_MODULUS_BE
+    }
+
+    /// Returns `true` if the scalar is a non-zero quadratic residue.
+    pub fn is_square(&self) -> bool {
+        // Legendre symbol: `s^((r-1)/2)` is `1` for a non-zero square, `-1` for
+        // a non-square, and `0` for `s = 0`.
+        self.exp(&LEGENDRE_EXP) == Self::one()
+    }
+
+    /// Returns a square root of the scalar, or `None` if it is not a quadratic
+    /// residue.
+    ///
+    /// Uses the Tonelli-Shanks algorithm, seeded by the field's primitive
+    /// `2^MAX_LG_ROOT_ORDER`-th root of unity (the generator of the 2-Sylow
+    /// subgroup).
+    pub fn sqrt(&self) -> Option<Self> {
+        let one = Self::one();
+
+        // Zero is its own (only) square root; the loop below assumes a non-zero
+        // element living in the multiplicative group.
+        if *self == Self::zero() {
+            return Some(Self::zero());
+        }
+
+        // `c` is a generator of the 2-Sylow subgroup (order `2^MAX_LG_ROOT_ORDER`).
+        let mut c =
+            Self::root_of_unity(Self::MAX_LG_ROOT_ORDER).expect("2-adic root of unity must exist");
+        let mut m = u32::from(Self::MAX_LG_ROOT_ORDER);
+        // `r = self^((Q+1)/2)` is the candidate root; `t = self^Q = r^2 / self`
+        // lives in the 2-Sylow subgroup and is driven to `1` by the loop.
+        let mut r = self.exp(&SQRT_EXP);
+        let mut t = {
+            let mut t = r.clone();
+            t.square();
+            t * &self.inv()
+        };
+
+        loop {
+            if t == one {
+                // `self` is a quadratic residue and `r` is its square root. The
+                // check guards against a non-residue that still drives `t` to `1`
+                // (it cannot, but verifying keeps callers honest).
+                let mut check = r.clone();
+                check.square();
+                return (check == *self).then_some(r);
+            }
+
+            // Find the least `i` in `(0, m)` with `t^(2^i) == 1`.
+            let mut i = 0u32;
+            let mut t2i = t.clone();
+            while t2i != one {
+                t2i.square();
+                i += 1;
+                if i == m {
+                    // `t` has order `2^m`, so `self` is not a quadratic residue.
+                    return None;
+                }
+            }
+
+            // `b = c^(2^(m - i - 1))`; halve the order of `t` each iteration.
+            let mut b = c.clone();
+            for _ in 0..(m - i - 1) {
+                b.square();
+            }
+            m = i;
+            c = {
+                let mut c = b.clone();
+                c.square();
+                c
+            };
+            t *= &c;
+            r *= &b;
+        }
     }
 }
 
@@ -1773,7 +1901,7 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{DecodeExt, Encode};
+    use commonware_codec::{DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{test_suites, Random};
@@ -1837,6 +1965,74 @@ mod tests {
         assert_eq!(encoded.len(), Scalar::SIZE);
         let decoded = Scalar::decode(&mut encoded).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_scalar_sqrt() {
+        // The square of any element is a quadratic residue whose root squares
+        // back to it (up to sign).
+        minifuzz::test(|u| {
+            let mut sq: Scalar = u.arbitrary()?;
+            sq.square();
+            assert!(sq.is_square() || sq == Scalar::zero());
+            let mut root = sq.sqrt().expect("a square must have a root");
+            root.square();
+            assert_eq!(root, sq);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_scalar_sqrt_non_residue() {
+        // Roughly half of all elements are non-residues; find one and confirm
+        // both `is_square` and `sqrt` agree it has no root.
+        let mut found = false;
+        for i in 2u64..100 {
+            let s = Scalar::from_u64(i);
+            if !s.is_square() {
+                assert!(s.sqrt().is_none());
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expected to find a non-residue");
+    }
+
+    #[test]
+    fn test_scalar_is_square_and_zero() {
+        assert!(Scalar::one().is_square());
+        assert_eq!(Scalar::zero().sqrt(), Some(Scalar::zero()));
+        // Zero is not reported as a (non-zero) quadratic residue.
+        assert!(!Scalar::zero().is_square());
+    }
+
+    #[test]
+    fn test_scalar_is_positive() {
+        // `1` is in the lower half, its negation in the upper half.
+        assert!(!Scalar::one().is_positive());
+        assert!((-Scalar::one()).is_positive());
+        // Exactly one of `s` and `-s` is positive (for non-zero `s`).
+        minifuzz::test(|u| {
+            let s: Scalar = u.arbitrary()?;
+            if s != Scalar::zero() {
+                assert_ne!(s.is_positive(), (-s).is_positive());
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_scalar_from_canonical_bytes() {
+        // Round-trips canonical encodings, including zero.
+        let s = Scalar::random(&mut test_rng());
+        let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
+        assert_eq!(Scalar::from_canonical_bytes(&bytes), Some(s));
+        assert_eq!(
+            Scalar::from_canonical_bytes(&[0u8; Scalar::SIZE]),
+            Some(Scalar::zero())
+        );
+        // Non-canonical encodings (>= r) are rejected.
+        assert_eq!(Scalar::from_canonical_bytes(&[0xffu8; Scalar::SIZE]), None);
     }
 
     #[test]
