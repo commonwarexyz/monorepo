@@ -701,9 +701,7 @@ impl IoBufMut {
     /// `buffer` must have an initialized live lease in its pooled slot.
     #[inline]
     pub(crate) unsafe fn from_pooled_parts(buffer: PooledBuffer) -> Self {
-        // SAFETY: pooled buffers returned by the pool have initialized stable
-        // slot fields.
-        let cap = unsafe { buffer.capacity() };
+        let cap = buffer.capacity();
         let ptr = buffer.data_ptr();
         // SAFETY: guaranteed by the caller.
         let owner = unsafe { buffer.owner_ref() };

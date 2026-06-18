@@ -788,15 +788,17 @@ impl PooledBuffer {
         unsafe { self.slot.as_ref().data_base }
     }
 
-    /// Returns the usable data capacity for this size-class buffer.
-    ///
-    /// # Safety
-    ///
-    /// `self` must reference a created slot (its stable side-table fields are
-    /// initialized).
+    /// Returns the owning side-table slot pointer.
     #[inline(always)]
-    pub(crate) const unsafe fn capacity(&self) -> usize {
-        // SAFETY: guaranteed by the caller.
+    pub(crate) const fn slot_ptr(&self) -> NonNull<PooledSlot> {
+        self.slot
+    }
+
+    /// Returns the usable data capacity for this size-class buffer.
+    #[inline(always)]
+    pub(crate) const fn capacity(&self) -> usize {
+        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
+        // stable side-table fields are initialized.
         unsafe { self.slot.as_ref().capacity }
     }
 
@@ -806,13 +808,10 @@ impl PooledBuffer {
     /// buffer and is needed only when the buffer returns to the global
     /// freelist.
     ///
-    /// # Safety
-    ///
-    /// `self` must reference a created slot (its stable side-table fields are
-    /// initialized).
     #[inline(always)]
-    pub(crate) const unsafe fn slot(&self) -> u32 {
-        // SAFETY: guaranteed by the caller.
+    pub(crate) const fn slot(&self) -> u32 {
+        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
+        // stable side-table fields are initialized.
         unsafe { self.slot.as_ref().slot }
     }
 
@@ -821,13 +820,10 @@ impl PooledBuffer {
     /// Cached in the slot so the buffer-return fast path can route into the
     /// right thread-local cache without dereferencing the class object.
     ///
-    /// # Safety
-    ///
-    /// `self` must reference a created slot (its stable side-table fields are
-    /// initialized).
     #[inline(always)]
-    pub(crate) const unsafe fn class_id(&self) -> u32 {
-        // SAFETY: guaranteed by the caller.
+    pub(crate) const fn class_id(&self) -> u32 {
+        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
+        // stable side-table fields are initialized.
         unsafe { self.slot.as_ref().class_id }
     }
 
@@ -835,13 +831,10 @@ impl PooledBuffer {
     ///
     /// Cached in the slot for the same reason as [`Self::class_id`].
     ///
-    /// # Safety
-    ///
-    /// `self` must reference a created slot (its stable side-table fields are
-    /// initialized).
     #[inline(always)]
-    pub(crate) const unsafe fn thread_cache_capacity(&self) -> u32 {
-        // SAFETY: guaranteed by the caller.
+    pub(crate) const fn thread_cache_capacity(&self) -> u32 {
+        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
+        // stable side-table fields are initialized.
         unsafe { self.slot.as_ref().thread_cache_capacity }
     }
 
