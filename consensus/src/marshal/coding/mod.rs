@@ -456,7 +456,9 @@ mod tests {
         make_coding_block(genesis_ctx, Sha256::hash(b""), Height::zero(), 0)
     }
 
-    fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(block: &B) -> Commitment {
+    fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(
+        block: &B,
+    ) -> Commitment<B::Digest, B::Digest, H::Digest> {
         Commitment::from((
             block.digest(),
             block.digest(),
@@ -2260,8 +2262,8 @@ mod tests {
         // Construct a Commitment with all-zero bytes (invalid CodingConfig:
         // minimum_shards=0, extra_shards=0). Serialize it and attempt to
         // deserialize -- this must fail.
-        let malformed_bytes = [0u8; Commitment::SIZE];
-        let result = Commitment::read(&mut &malformed_bytes[..]);
+        let malformed_bytes = [0u8; <Commitment as FixedSize>::SIZE];
+        let result = Commitment::<D, D, D>::read(&mut &malformed_bytes[..]);
         assert!(
             result.is_err(),
             "deserialization of Commitment with zeroed CodingConfig must fail"
@@ -2522,7 +2524,7 @@ mod tests {
             let coded_floor = CodedBlock::new(floor_block, coding_config, &Sequential);
             assert_ne!(
                 coded_floor.parent(),
-                coded_floor.context().parent.1.block::<D>()
+                coded_floor.context().parent.1.block()
             );
 
             let finalization = CodingHarness::make_finalization(

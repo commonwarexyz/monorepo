@@ -720,118 +720,116 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod coding {
         //! Types and utilities for working with [`Commitment`]s.
 
-        use commonware_codec::{Encode, FixedArray, FixedSize, Read, ReadExt, Write};
+        use commonware_codec::{Encode, FixedSize, Read, ReadExt, Write};
         use commonware_coding::Config as CodingConfig;
         use commonware_cryptography::Digest;
         use commonware_math::algebra::Random;
         use commonware_utils::{Array, Span, NZU16};
-        use core::{
-            num::NonZeroU16,
-            ops::{Deref, Range},
-        };
+        use core::{marker::PhantomData, num::NonZeroU16, ops::Deref};
         use rand_core::CryptoRngCore;
+
+        // Ideally, the backing array would be `[u8; Self::SIZE]`, but `Self::SIZE`
+        // depends on generic digest associated constants. Stable Rust does not allow
+        // those generic const expressions in array lengths, so keep a max-sized backing
+        // array and expose only the initialized `[..Self::SIZE]` prefix.
+        const MAX_COMMITMENT_SIZE: usize = 100;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
         ///
-        /// Commitment wire layout (byte ranges are start..end):
-        /// - block digest:   0..32
-        /// - coding root:    32..64
-        /// - context digest: 64..96
-        /// - coding config:  96..100
-        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FixedArray)]
-        pub struct Commitment([u8; Self::SIZE]);
+        /// Commitment wire layout:
+        /// - block digest
+        /// - coding root
+        /// - context digest
+        /// - coding config
+        ///
+        /// The block digest, coding root, and context digest types are part of this type, and
+        /// deserialization parses each field as its declared type.
+        #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub struct Commitment<
+            B = commonware_cryptography::sha256::Digest,
+            R = commonware_cryptography::sha256::Digest,
+            C = commonware_cryptography::sha256::Digest,
+        >([u8; MAX_COMMITMENT_SIZE], PhantomData<fn() -> (B, R, C)>);
 
-        impl Commitment {
-            const DIGEST_SIZE: usize = 32;
+        impl<B: Digest, R: Digest, C: Digest> Commitment<B, R, C> {
             const BLOCK_DIGEST_OFFSET: usize = 0;
-            const CODING_ROOT_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + Self::DIGEST_SIZE;
-            const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_ROOT_OFFSET + Self::DIGEST_SIZE;
-            const CONFIG_OFFSET: usize = Self::CONTEXT_DIGEST_OFFSET + Self::DIGEST_SIZE;
+            const CODING_ROOT_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + B::SIZE;
+            const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_ROOT_OFFSET + R::SIZE;
+            const CONFIG_OFFSET: usize = Self::CONTEXT_DIGEST_OFFSET + C::SIZE;
 
             /// Extracts the [`CodingConfig`] from this [`Commitment`].
             pub fn config(&self) -> CodingConfig {
-                let mut buf = &self.0[Self::CONFIG_OFFSET..];
+                let mut buf = &self.0[Self::CONFIG_OFFSET..Self::SIZE];
                 CodingConfig::read(&mut buf).expect("Commitment always contains a valid config")
             }
 
             /// Returns the block [`Digest`] from this [`Commitment`].
-            ///
-            /// ## Panics
-            ///
-            /// Panics if the [`Digest`]'s [`FixedSize::SIZE`] is > 32 bytes.
-            pub fn block<D: Digest>(&self) -> D {
-                self.take(Self::BLOCK_DIGEST_OFFSET..Self::BLOCK_DIGEST_OFFSET + D::SIZE)
+            pub fn block(&self) -> B {
+                Self::read_digest(&self.0[..B::SIZE], "block digest")
+                    .expect("Commitment always contains a valid block digest")
             }
 
             /// Returns the coding root [`Digest`] from this [`Commitment`].
-            ///
-            /// ## Panics
-            ///
-            /// Panics if the [`Digest`]'s [`FixedSize::SIZE`] is > 32 bytes.
-            pub fn root<D: Digest>(&self) -> D {
-                self.take(Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + D::SIZE)
+            pub fn root(&self) -> R {
+                Self::read_digest(
+                    &self.0[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET],
+                    "coding root",
+                )
+                    .expect("Commitment always contains a valid coding root")
             }
 
             /// Returns the context [`Digest`] from this [`Commitment`].
-            ///
-            /// ## Panics
-            ///
-            /// Panics if the [`Digest`]'s [`FixedSize::SIZE`] is > 32 bytes.
-            pub fn context<D: Digest>(&self) -> D {
-                self.take(Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + D::SIZE)
+            pub fn context(&self) -> C {
+                Self::read_digest(
+                    &self.0[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET],
+                    "context digest",
+                )
+                    .expect("Commitment always contains a valid context digest")
             }
 
-            /// Extracts the [`Digest`] from this [`Commitment`].
-            ///
-            /// ## Panics
-            ///
-            /// Panics if the [`Digest`]'s [`FixedSize::SIZE`] is > 32 bytes.
-            fn take<D: Digest>(&self, range: Range<usize>) -> D {
-                const {
-                    assert!(
-                        D::SIZE <= 32,
-                        "Cannot extract Digest with size > 32 from Commitment"
-                    );
-                }
+            fn read_digest<D: Digest>(
+                bytes: &[u8],
+                name: &'static str,
+            ) -> Result<D, commonware_codec::Error> {
+                D::read(&mut bytes.as_ref())
+                    .map_err(|_| commonware_codec::Error::Invalid("Commitment", name))
+            }
 
-                D::read(&mut self.0[range].as_ref())
-                    .expect("Commitment always contains a valid digest")
+            const fn assert_fits() {
+                assert!(
+                    Self::SIZE <= MAX_COMMITMENT_SIZE,
+                    "Cannot create Commitment with size > MAX_COMMITMENT_SIZE"
+                );
             }
         }
 
-        impl Random for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> Random for Commitment<B, R, C> {
             fn random(mut rng: impl CryptoRngCore) -> Self {
-                let mut buf = [0u8; Self::SIZE];
-                rng.fill_bytes(&mut buf[..Self::CONFIG_OFFSET]);
-
                 let one = NZU16!(1);
                 let shards = rng.next_u32();
                 let config = CodingConfig {
                     minimum_shards: NonZeroU16::new(shards as u16).unwrap_or(one),
                     extra_shards: NonZeroU16::new((shards >> 16) as u16).unwrap_or(one),
                 };
-                let mut cfg_buf = &mut buf[Self::CONFIG_OFFSET..];
-                config.write(&mut cfg_buf);
-
-                Self(buf)
+                Self::from((B::random(&mut rng), R::random(&mut rng), C::random(&mut rng), config))
             }
         }
 
-        impl Digest for Commitment {
-            const EMPTY: Self = Self([0u8; Self::SIZE]);
+        impl<B: Digest, R: Digest, C: Digest> Digest for Commitment<B, R, C> {
+            const EMPTY: Self = Self([0u8; MAX_COMMITMENT_SIZE], PhantomData);
         }
 
-        impl Write for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> Write for Commitment<B, R, C> {
             fn write(&self, buf: &mut impl bytes::BufMut) {
-                buf.put_slice(&self.0);
+                buf.put_slice(self.as_ref());
             }
         }
 
-        impl FixedSize for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> FixedSize for Commitment<B, R, C> {
             const SIZE: usize = Self::CONFIG_OFFSET + CodingConfig::SIZE;
         }
 
-        impl Read for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> Read for Commitment<B, R, C> {
             type Cfg = ();
 
             fn read_cfg(
@@ -841,94 +839,96 @@ commonware_macros::stability_scope!(ALPHA {
                 if buf.remaining() < Self::SIZE {
                     return Err(commonware_codec::Error::EndOfBuffer);
                 }
-                let mut arr = [0u8; Self::SIZE];
-                buf.copy_to_slice(&mut arr);
+                const { Self::assert_fits() };
 
-                // Validate the embedded CodingConfig so that `config()` can
-                // never panic on a successfully-deserialized Commitment.
-                let mut cfg_buf = &arr[Self::CONFIG_OFFSET..];
+                let mut arr = [0u8; MAX_COMMITMENT_SIZE];
+                buf.copy_to_slice(&mut arr[..Self::SIZE]);
+
+                Self::read_digest::<B>(&arr[..B::SIZE], "invalid block digest")?;
+                Self::read_digest::<R>(
+                    &arr[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET],
+                    "invalid coding root",
+                )?;
+                Self::read_digest::<C>(
+                    &arr[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET],
+                    "invalid context digest",
+                )?;
+                let mut cfg_buf = &arr[Self::CONFIG_OFFSET..Self::SIZE];
                 CodingConfig::read(&mut cfg_buf).map_err(|_| {
                     commonware_codec::Error::Invalid("Commitment", "invalid embedded CodingConfig")
                 })?;
 
-                Ok(Self(arr))
+                Ok(Self(arr, PhantomData))
             }
         }
 
-        impl AsRef<[u8]> for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> AsRef<[u8]> for Commitment<B, R, C> {
             fn as_ref(&self) -> &[u8] {
-                &self.0
+                &self.0[..Self::SIZE]
             }
         }
 
-        impl Deref for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> Deref for Commitment<B, R, C> {
             type Target = [u8];
 
             fn deref(&self) -> &Self::Target {
-                &self.0
+                self.as_ref()
             }
         }
 
-        impl core::fmt::Display for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> core::fmt::Display for Commitment<B, R, C> {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
             }
         }
 
-        impl core::fmt::Debug for Commitment {
+        impl<B: Digest, R: Digest, C: Digest> core::fmt::Debug for Commitment<B, R, C> {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
             }
         }
 
-        impl Default for Commitment {
+        impl<B, R, C> Default for Commitment<B, R, C> {
             fn default() -> Self {
-                Self([0u8; Self::SIZE])
+                Self([0u8; MAX_COMMITMENT_SIZE], PhantomData)
             }
         }
 
-        impl<D1: Digest, D2: Digest, D3: Digest> From<(D1, D2, D3, CodingConfig)> for Commitment {
-            fn from(
-                (digest, commitment, context_digest, config): (D1, D2, D3, CodingConfig),
-            ) -> Self {
-                const {
-                    assert!(
-                        D1::SIZE <= Self::DIGEST_SIZE,
-                        "Cannot create Commitment from Digest with size > Self::DIGEST_SIZE"
-                    );
-                    assert!(
-                        D2::SIZE <= Self::DIGEST_SIZE,
-                        "Cannot create Commitment from Digest with size > Self::DIGEST_SIZE"
-                    );
-                    assert!(
-                        D3::SIZE <= Self::DIGEST_SIZE,
-                        "Cannot create Commitment from Digest with size > Self::DIGEST_SIZE"
-                    );
-                }
+        impl<B: Digest, R: Digest, C: Digest> From<(B, R, C, CodingConfig)>
+            for Commitment<B, R, C>
+        {
+            fn from((digest, commitment, context_digest, config): (B, R, C, CodingConfig)) -> Self {
+                const { Self::assert_fits() };
 
-                let mut buf = [0u8; Self::SIZE];
-                buf[..D1::SIZE].copy_from_slice(&digest);
-                buf[Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + D2::SIZE]
+                let mut buf = [0u8; MAX_COMMITMENT_SIZE];
+                buf[..B::SIZE].copy_from_slice(&digest);
+                buf[Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + R::SIZE]
                     .copy_from_slice(&commitment);
-                buf[Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + D3::SIZE]
+                buf[Self::CONTEXT_DIGEST_OFFSET..Self::CONTEXT_DIGEST_OFFSET + C::SIZE]
                     .copy_from_slice(&context_digest);
-                buf[Self::CONFIG_OFFSET..].copy_from_slice(&config.encode());
-                Self(buf)
+                buf[Self::CONFIG_OFFSET..Self::SIZE].copy_from_slice(&config.encode());
+                Self(buf, PhantomData)
             }
         }
 
-        impl Span for Commitment {}
+        impl<B: Digest, R: Digest, C: Digest> Span for Commitment<B, R, C> {}
 
-        impl Array for Commitment {}
+        impl<B: Digest, R: Digest, C: Digest> Array for Commitment<B, R, C> {}
 
         #[cfg(feature = "arbitrary")]
-        impl arbitrary::Arbitrary<'_> for Commitment {
+        impl<B, R, C> arbitrary::Arbitrary<'_> for Commitment<B, R, C>
+        where
+            B: Digest + for<'a> arbitrary::Arbitrary<'a>,
+            R: Digest + for<'a> arbitrary::Arbitrary<'a>,
+            C: Digest + for<'a> arbitrary::Arbitrary<'a>,
+        {
             fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-                let config = CodingConfig::arbitrary(u)?;
-                let mut buf = [0u8; Self::SIZE];
-                buf[..96].copy_from_slice(u.bytes(96)?);
-                buf[96..].copy_from_slice(&config.encode());
-                Ok(Self(buf))
+                Ok(Self::from((
+                    B::arbitrary(u)?,
+                    R::arbitrary(u)?,
+                    C::arbitrary(u)?,
+                    CodingConfig::arbitrary(u)?,
+                )))
             }
         }
     }
@@ -1785,19 +1785,34 @@ mod tests {
             },
         ));
 
-        // Decoding the commitment should succeed.
         let encoded = commitment.encode();
-        let decoded = Commitment::decode(encoded).unwrap();
+        assert!(Commitment::<Digest, Digest, Digest>::decode(encoded).is_err());
+    }
 
-        // Pulling out the digest should panic.
-        let result = std::panic::catch_unwind(|| decoded.block::<Digest>());
-        assert!(result.is_err());
-        let result = std::panic::catch_unwind(|| decoded.root::<Digest>());
-        assert!(result.is_err());
-        let result = std::panic::catch_unwind(|| decoded.context::<Digest>());
-        assert!(result.is_err());
-        let result = std::panic::catch_unwind(|| decoded.config());
-        assert!(result.is_ok());
+    #[test]
+    fn test_coding_commitment_size_tracks_digest_types() {
+        type CrcCommitment =
+            Commitment<commonware_cryptography::crc32::Digest, commonware_cryptography::crc32::Digest, commonware_cryptography::crc32::Digest>;
+
+        let block = commonware_cryptography::crc32::Digest::from(1);
+        let root = commonware_cryptography::crc32::Digest::from(2);
+        let context = commonware_cryptography::crc32::Digest::from(3);
+        let config = CodingConfig {
+            minimum_shards: NZU16!(1),
+            extra_shards: NZU16!(1),
+        };
+        let commitment = CrcCommitment::from((block, root, context, config));
+        let expected_size =
+            3 * commonware_cryptography::crc32::Digest::SIZE + CodingConfig::SIZE;
+
+        assert_eq!(CrcCommitment::SIZE, expected_size);
+        assert_eq!(commitment.encode().len(), expected_size);
+
+        let decoded = CrcCommitment::decode(commitment.encode()).unwrap();
+        assert_eq!(decoded.block(), block);
+        assert_eq!(decoded.root(), root);
+        assert_eq!(decoded.context(), context);
+        assert_eq!(decoded.config(), config);
     }
 
     #[cfg(feature = "arbitrary")]
