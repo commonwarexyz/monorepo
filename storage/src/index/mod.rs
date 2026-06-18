@@ -25,7 +25,7 @@ pub mod unordered;
 /// A mutable iterator over the values associated with a translated key, allowing in-place
 /// modifications.
 ///
-/// The [Cursor] provides a way to traverse and modify the linked list of values associated with a
+/// The [Cursor] provides a way to traverse and modify the chain of values associated with a
 /// translated key by an index while maintaining its structure. It supports:
 ///
 /// - Iteration via `next()` to access values.
@@ -33,11 +33,11 @@ pub mod unordered;
 /// - Insertion via `insert()` to add new values.
 /// - Deletion via `delete()` to remove values.
 ///
-/// # Safety
+/// # Usage
 ///
 /// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
 /// - Once `next()` returns `None`, only `insert()` can be called.
-/// - The cursor mutates the linked list in place. If the sole element is deleted, dropping the
+/// - The cursor mutates the chain of values in place. If the sole element is deleted, dropping the
 ///   cursor removes the map entry.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_retain()`, or
@@ -53,7 +53,7 @@ pub trait Cursor: Send + Sync {
     /// If after `insert()`, the next active item is the item after the inserted item. If after
     /// `delete()`, the next active item is the item after the deleted item.
     ///
-    /// Advances through cursor states and adjusts for deletions. Returns `None` when the list is
+    /// Advances through cursor states and adjusts for deletions. Returns `None` when the chain is
     /// exhausted. It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> Option<&Self::Value>;
@@ -61,7 +61,7 @@ pub trait Cursor: Send + Sync {
     /// Inserts a new value at the current position.
     fn insert(&mut self, value: Self::Value);
 
-    /// Deletes the current value, adjusting the list structure.
+    /// Deletes the current value, adjusting the chain structure.
     fn delete(&mut self);
 
     /// Updates the value at the current position in the iteration.
@@ -1359,6 +1359,62 @@ mod tests {
         });
     }
 
+    /// Exercises `insert_and_retain` on single-value (collision-free) keys, covering each
+    /// combination of retaining the existing and new values.
+    fn run_index_insert_and_retain_single_value<I: Unordered<Value = u64>>(index: &mut I) {
+        // Retain both: the new value joins the chain after the existing one.
+        index.insert(b"both", 1u64);
+        index.insert_and_retain(b"both", 2u64, |_| true);
+        assert_eq!(index.get(b"both").copied().collect::<Vec<_>>(), vec![1, 2]);
+
+        // Retain the existing value, drop the new one: a no-op.
+        index.insert(b"keep", 1u64);
+        index.insert_and_retain(b"keep", 2u64, |v| *v == 1);
+        assert_eq!(index.get(b"keep").copied().collect::<Vec<_>>(), vec![1]);
+
+        // Drop both: the key is removed.
+        index.insert(b"drop", 1u64);
+        index.insert_and_retain(b"drop", 2u64, |_| false);
+        assert!(index.get(b"drop").next().is_none());
+
+        assert_eq!(index.keys(), 2); // "both" and "keep" remain
+        assert_eq!(index.items(), 3); // both -> [1, 2], keep -> [1]
+        assert_eq!(index.pruned(), 1); // the dropped "drop" value
+    }
+
+    #[test_traced]
+    fn test_hash_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_retain_single_value(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_insert_and_retain_single_value(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_partitioned_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.child("unordered"));
+                run_index_insert_and_retain_single_value(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context.child("ordered"));
+                run_index_insert_and_retain_single_value(&mut index);
+            }
+        });
+    }
+
     fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
     where
         I: Unordered<Value = u64> + Send + 'static,
@@ -2366,50 +2422,44 @@ mod tests {
         });
     }
 
-    fn run_index_large_collision_chain_stack_overflow<I: Unordered<Value = u64>>(index: &mut I) {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // The full native test stresses stack depth, while miri is mainly checking the
-                // same iterative drop path for memory safety.
-                const ITEMS: usize = 5_000;
-            } else {
-                const ITEMS: usize = 50_000;
-            }
-        }
+    /// Exercises a single translated key holding a very large overflow chain, ensuring inserts and
+    /// the resulting `Vec` overflow stay correct at scale.
+    fn run_index_large_collision_chain<I: Unordered<Value = u64>>(index: &mut I) {
+        const ITEMS: usize = 50_000;
         for i in 0..ITEMS {
             index.insert(b"", i as u64);
         }
     }
 
     #[test_traced]
-    fn test_hash_index_large_collision_chain_stack_overflow() {
+    fn test_hash_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            run_index_large_collision_chain_stack_overflow(&mut index);
+            run_index_large_collision_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_ordered_index_large_collision_chain_stack_overflow() {
+    fn test_ordered_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_ordered(context);
-            run_index_large_collision_chain_stack_overflow(&mut index);
+            run_index_large_collision_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_partitioned_index_large_collision_chain_stack_overflow() {
+    fn test_partitioned_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
                 let mut index = new_partitioned_unordered(context.child("unordered"));
-                run_index_large_collision_chain_stack_overflow(&mut index);
+                run_index_large_collision_chain(&mut index);
             }
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
-                run_index_large_collision_chain_stack_overflow(&mut index);
+                run_index_large_collision_chain(&mut index);
             }
         });
     }
