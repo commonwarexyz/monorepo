@@ -14,9 +14,6 @@ pub trait Commitment:
     Clone + Eq + for<'a> Add<&'a Self, Output = Self> + for<'a> Sub<&'a Self, Output = Self>
 {
     fn zero() -> Self;
-
-    // deterministically commit to a public value
-    fn commit_public(value: u64) -> Self;
 }
 
 /// The opening of a commitment
@@ -58,6 +55,10 @@ pub trait Backend: Sized {
 
     /// Deterministically derive the public parameters from `input`.
     fn setup(input: &Self::SetupInput) -> Result<Self::Params, Self::SetupError>;
+
+    /// Deterministically commit to a public value with zero blinding, returning
+    /// both the commitment and matching opening.
+    fn commit_public(params: &Self::Params, value: u64) -> (Self::Commitment, Self::Opening);
 
     /// mechanism to movefunds from a public account into a private account.
     /// returns (amount_commitment, amount_opening, fund_proof)
