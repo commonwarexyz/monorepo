@@ -767,34 +767,20 @@ commonware_macros::stability_scope!(ALPHA {
 
             /// Returns the block [`Digest`] from this [`Commitment`].
             pub fn block(&self) -> B {
-                Self::read_digest(&self.0[..B::SIZE], "block digest")
-                    .expect("Commitment always contains a valid block digest")
+                let mut buf = &self.0[..B::SIZE];
+                B::read(&mut buf).expect("Commitment always contains a valid block digest")
             }
 
             /// Returns the coding root [`Digest`] from this [`Commitment`].
             pub fn root(&self) -> R {
-                Self::read_digest(
-                    &self.0[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET],
-                    "coding root",
-                )
-                    .expect("Commitment always contains a valid coding root")
+                let mut buf = &self.0[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET];
+                R::read(&mut buf).expect("Commitment always contains a valid coding root")
             }
 
             /// Returns the context [`Digest`] from this [`Commitment`].
             pub fn context(&self) -> C {
-                Self::read_digest(
-                    &self.0[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET],
-                    "context digest",
-                )
-                    .expect("Commitment always contains a valid context digest")
-            }
-
-            fn read_digest<D: Digest>(
-                bytes: &[u8],
-                name: &'static str,
-            ) -> Result<D, commonware_codec::Error> {
-                D::read(&mut bytes.as_ref())
-                    .map_err(|_| commonware_codec::Error::Invalid("Commitment", name))
+                let mut buf = &self.0[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET];
+                C::read(&mut buf).expect("Commitment always contains a valid context digest")
             }
 
             const fn assert_size() {
@@ -851,15 +837,18 @@ commonware_macros::stability_scope!(ALPHA {
                 let mut arr = [0u8; N];
                 buf.copy_to_slice(&mut arr);
 
-                Self::read_digest::<B>(&arr[..B::SIZE], "invalid block digest")?;
-                Self::read_digest::<R>(
-                    &arr[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET],
-                    "invalid coding root",
-                )?;
-                Self::read_digest::<C>(
-                    &arr[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET],
-                    "invalid context digest",
-                )?;
+                let mut block_buf = &arr[..B::SIZE];
+                B::read(&mut block_buf).map_err(|_| {
+                    commonware_codec::Error::Invalid("Commitment", "invalid block digest")
+                })?;
+                let mut root_buf = &arr[Self::CODING_ROOT_OFFSET..Self::CONTEXT_DIGEST_OFFSET];
+                R::read(&mut root_buf).map_err(|_| {
+                    commonware_codec::Error::Invalid("Commitment", "invalid coding root")
+                })?;
+                let mut context_buf = &arr[Self::CONTEXT_DIGEST_OFFSET..Self::CONFIG_OFFSET];
+                C::read(&mut context_buf).map_err(|_| {
+                    commonware_codec::Error::Invalid("Commitment", "invalid context digest")
+                })?;
                 let mut cfg_buf = &arr[Self::CONFIG_OFFSET..Self::SIZE];
                 CodingConfig::read(&mut cfg_buf).map_err(|_| {
                     commonware_codec::Error::Invalid("Commitment", "invalid embedded CodingConfig")
