@@ -2271,14 +2271,14 @@ mod tests {
 
         // A validly-constructed Commitment must still round-trip.
         let coding_config = coding_config_for_participants(NUM_VALIDATORS as u16);
-        let valid = Commitment::from((
+        let valid: Commitment = Commitment::from((
             Sha256::hash(b"block"),
             Sha256::hash(b"root"),
             Sha256::hash(b"context"),
             coding_config,
         ));
         let encoded = valid.encode();
-        let decoded =
+        let decoded: Commitment =
             Commitment::read(&mut &encoded[..]).expect("valid Commitment must deserialize");
         assert_eq!(valid, decoded);
     }

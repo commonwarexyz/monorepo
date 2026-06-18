@@ -728,11 +728,8 @@ commonware_macros::stability_scope!(ALPHA {
         use core::{marker::PhantomData, num::NonZeroU16, ops::Deref};
         use rand_core::CryptoRngCore;
 
-        // Ideally, the backing array would be `[u8; Self::SIZE]`, but `Self::SIZE`
-        // depends on generic digest associated constants. Stable Rust does not allow
-        // those generic const expressions in array lengths, so keep a max-sized backing
-        // array and expose only the initialized `[..Self::SIZE]` prefix.
-        const MAX_COMMITMENT_SIZE: usize = 100;
+        const DEFAULT_COMMITMENT_SIZE: usize =
+            3 * <commonware_cryptography::sha256::Digest as FixedSize>::SIZE + CodingConfig::SIZE;
 
         /// A [`Digest`] containing a coding commitment, encoded [`CodingConfig`], and context hash.
         ///
@@ -744,18 +741,23 @@ commonware_macros::stability_scope!(ALPHA {
         ///
         /// The block digest, coding root, and context digest types are part of this type, and
         /// deserialization parses each field as its declared type.
+        ///
+        /// `N` is the encoded length. It must be provided for non-default digest sizes because
+        /// stable Rust cannot use generic associated constants in array lengths.
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct Commitment<
             B = commonware_cryptography::sha256::Digest,
             R = commonware_cryptography::sha256::Digest,
             C = commonware_cryptography::sha256::Digest,
-        >([u8; MAX_COMMITMENT_SIZE], PhantomData<fn() -> (B, R, C)>);
+            const N: usize = DEFAULT_COMMITMENT_SIZE,
+        >([u8; N], PhantomData<fn() -> (B, R, C)>);
 
-        impl<B: Digest, R: Digest, C: Digest> Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Commitment<B, R, C, N> {
             const BLOCK_DIGEST_OFFSET: usize = 0;
             const CODING_ROOT_OFFSET: usize = Self::BLOCK_DIGEST_OFFSET + B::SIZE;
             const CONTEXT_DIGEST_OFFSET: usize = Self::CODING_ROOT_OFFSET + R::SIZE;
             const CONFIG_OFFSET: usize = Self::CONTEXT_DIGEST_OFFSET + C::SIZE;
+            const ENCODED_SIZE: usize = Self::CONFIG_OFFSET + CodingConfig::SIZE;
 
             /// Extracts the [`CodingConfig`] from this [`Commitment`].
             pub fn config(&self) -> CodingConfig {
@@ -795,15 +797,15 @@ commonware_macros::stability_scope!(ALPHA {
                     .map_err(|_| commonware_codec::Error::Invalid("Commitment", name))
             }
 
-            const fn assert_fits() {
+            const fn assert_size() {
                 assert!(
-                    Self::SIZE <= MAX_COMMITMENT_SIZE,
-                    "Cannot create Commitment with size > MAX_COMMITMENT_SIZE"
+                    N == Self::ENCODED_SIZE,
+                    "Commitment backing length must match encoded size"
                 );
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> Random for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Random for Commitment<B, R, C, N> {
             fn random(mut rng: impl CryptoRngCore) -> Self {
                 let one = NZU16!(1);
                 let shards = rng.next_u32();
@@ -815,21 +817,26 @@ commonware_macros::stability_scope!(ALPHA {
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> Digest for Commitment<B, R, C> {
-            const EMPTY: Self = Self([0u8; MAX_COMMITMENT_SIZE], PhantomData);
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Digest for Commitment<B, R, C, N> {
+            const EMPTY: Self = {
+                Self::assert_size();
+                Self([0u8; N], PhantomData)
+            };
         }
 
-        impl<B: Digest, R: Digest, C: Digest> Write for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Write for Commitment<B, R, C, N> {
             fn write(&self, buf: &mut impl bytes::BufMut) {
                 buf.put_slice(self.as_ref());
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> FixedSize for Commitment<B, R, C> {
-            const SIZE: usize = Self::CONFIG_OFFSET + CodingConfig::SIZE;
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> FixedSize
+            for Commitment<B, R, C, N>
+        {
+            const SIZE: usize = N;
         }
 
-        impl<B: Digest, R: Digest, C: Digest> Read for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Read for Commitment<B, R, C, N> {
             type Cfg = ();
 
             fn read_cfg(
@@ -839,10 +846,10 @@ commonware_macros::stability_scope!(ALPHA {
                 if buf.remaining() < Self::SIZE {
                     return Err(commonware_codec::Error::EndOfBuffer);
                 }
-                const { Self::assert_fits() };
+                const { Self::assert_size() };
 
-                let mut arr = [0u8; MAX_COMMITMENT_SIZE];
-                buf.copy_to_slice(&mut arr[..Self::SIZE]);
+                let mut arr = [0u8; N];
+                buf.copy_to_slice(&mut arr);
 
                 Self::read_digest::<B>(&arr[..B::SIZE], "invalid block digest")?;
                 Self::read_digest::<R>(
@@ -862,13 +869,16 @@ commonware_macros::stability_scope!(ALPHA {
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> AsRef<[u8]> for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> AsRef<[u8]>
+            for Commitment<B, R, C, N>
+        {
             fn as_ref(&self) -> &[u8] {
-                &self.0[..Self::SIZE]
+                const { Self::assert_size() };
+                &self.0
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> Deref for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Deref for Commitment<B, R, C, N> {
             type Target = [u8];
 
             fn deref(&self) -> &Self::Target {
@@ -876,31 +886,36 @@ commonware_macros::stability_scope!(ALPHA {
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> core::fmt::Display for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> core::fmt::Display
+            for Commitment<B, R, C, N>
+        {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> core::fmt::Debug for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> core::fmt::Debug
+            for Commitment<B, R, C, N>
+        {
             fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
                 write!(f, "{}", commonware_formatting::Hex(self.as_ref()))
             }
         }
 
-        impl<B, R, C> Default for Commitment<B, R, C> {
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Default for Commitment<B, R, C, N> {
             fn default() -> Self {
-                Self([0u8; MAX_COMMITMENT_SIZE], PhantomData)
+                const { Self::assert_size() };
+                Self([0u8; N], PhantomData)
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> From<(B, R, C, CodingConfig)>
-            for Commitment<B, R, C>
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> From<(B, R, C, CodingConfig)>
+            for Commitment<B, R, C, N>
         {
             fn from((digest, commitment, context_digest, config): (B, R, C, CodingConfig)) -> Self {
-                const { Self::assert_fits() };
+                const { Self::assert_size() };
 
-                let mut buf = [0u8; MAX_COMMITMENT_SIZE];
+                let mut buf = [0u8; N];
                 buf[..B::SIZE].copy_from_slice(&digest);
                 buf[Self::CODING_ROOT_OFFSET..Self::CODING_ROOT_OFFSET + R::SIZE]
                     .copy_from_slice(&commitment);
@@ -911,12 +926,12 @@ commonware_macros::stability_scope!(ALPHA {
             }
         }
 
-        impl<B: Digest, R: Digest, C: Digest> Span for Commitment<B, R, C> {}
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Span for Commitment<B, R, C, N> {}
 
-        impl<B: Digest, R: Digest, C: Digest> Array for Commitment<B, R, C> {}
+        impl<B: Digest, R: Digest, C: Digest, const N: usize> Array for Commitment<B, R, C, N> {}
 
         #[cfg(feature = "arbitrary")]
-        impl<B, R, C> arbitrary::Arbitrary<'_> for Commitment<B, R, C>
+        impl<B, R, C, const N: usize> arbitrary::Arbitrary<'_> for Commitment<B, R, C, N>
         where
             B: Digest + for<'a> arbitrary::Arbitrary<'a>,
             R: Digest + for<'a> arbitrary::Arbitrary<'a>,
@@ -1775,7 +1790,7 @@ mod tests {
         impl Array for Digest {}
 
         let digest = Digest::random(test_rng());
-        let commitment = Commitment::from((
+        let commitment: Commitment<Digest, Digest, Digest> = Commitment::from((
             digest,
             digest,
             digest,
@@ -1791,8 +1806,12 @@ mod tests {
 
     #[test]
     fn test_coding_commitment_size_tracks_digest_types() {
-        type CrcCommitment =
-            Commitment<commonware_cryptography::crc32::Digest, commonware_cryptography::crc32::Digest, commonware_cryptography::crc32::Digest>;
+        type CrcCommitment = Commitment<
+            commonware_cryptography::crc32::Digest,
+            commonware_cryptography::crc32::Digest,
+            commonware_cryptography::crc32::Digest,
+            { 3 * commonware_cryptography::crc32::Digest::SIZE + CodingConfig::SIZE },
+        >;
 
         let block = commonware_cryptography::crc32::Digest::from(1);
         let root = commonware_cryptography::crc32::Digest::from(2);
