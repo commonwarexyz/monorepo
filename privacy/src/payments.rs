@@ -2,12 +2,11 @@
 //! Must also define a (compatible) commitment scheme for balances and three types of transactions:
 //! - fund: move funds from a public account into a private account
 //! - transfer: move funds between private accounts
-//! - burn: reveal the balance of a private account
+//! - burn: move funds from a private account into a public account
 //!
 //! The commitment scheme is assumed to be homomorphic, supporting addition and subtraction of commitments thereby, allowing in-place updates of the balance.
 
 use core::ops::{Add, Sub};
-
 use rand_core::CryptoRngCore;
 
 /// A homomorphic commitment to a balance value.
@@ -21,7 +20,7 @@ pub trait Commitment:
 }
 
 /// The opening of a commitment
-/// 
+///
 /// Account balances and hence committed values are assumed to fit in u64
 pub trait Opening:
     Clone + for<'a> Add<&'a Self, Output = Self> + for<'a> Sub<&'a Self, Output = Self>
@@ -76,7 +75,7 @@ pub trait Backend: Sized {
     /// takes as input the sender's commitment, it's opening and the amount to transfer
     /// returns (amount_commitment, amount_opening, transfer_proof)
     /// note: can be computed before the receipient is even known
-    /// to apply: 
+    /// to apply:
     /// 1. verify(sender_commitment, amount_commitment, transfer_proof) == 1
     /// 2. sender_commitment <- sender_commitment - amount_commitment
     /// 3. recipient_commitment <- recipient_commitment + amount_commitment
@@ -92,7 +91,7 @@ pub trait Backend: Sized {
     /// takes as input the sender's commitment, it's opening and the amount to burn
     /// returns burn_proof
     /// to apply:
-    /// 1. verify(commitment, amount, burn_proof) == 1
+    /// 1. verify(sender_commitment, amount, burn_proof) == 1
     /// 2. sender_public_balance <- sender_public_balance + amount
     /// 3. sender_commitment <- sender_commitment - commit_public(amount)
     fn burn(
@@ -108,11 +107,7 @@ pub trait Backend: Sized {
     fn batch_verify(
         params: &Self::Params,
         funds: &[(u64, Self::Commitment, Self::FundProof)],
-        transfers: &[(
-            Self::Commitment,
-            Self::Commitment,
-            Self::TransferProof,
-        )],
+        transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
         burns: &[(Self::Commitment, u64, Self::BurnProof)],
         rng: &mut impl CryptoRngCore,
     ) -> bool;
