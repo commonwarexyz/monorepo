@@ -1838,6 +1838,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "commonware-privacy"
+version = "2026.5.0"
+dependencies = [
+ "commonware-macros",
+ "rand_core 0.6.4",
+]
+
+[[package]]
 name = "commonware-reshare"
 version = "2026.5.0"
 dependencies = [
