@@ -320,7 +320,7 @@ where
         prefetched_block: Option<CodedBlock<B, C, H>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
-        let mut marshal = self.marshal.clone();
+        let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let verify_duration = self.verify_duration.clone();
@@ -416,6 +416,16 @@ where
                     return;
                 }
 
+                // Run application verification and the durable store concurrently.
+                // Durability is independent of validity, so the put_sync is enqueued as
+                // soon as the join starts and overlaps app verification instead of
+                // following it. This task gates the finalize vote: `certify` awaits its
+                // verdict, sent only after both complete.
+                let store_block = block.clone();
+                let mut store_marshal = marshal.clone();
+                let store =
+                    async move { stage.store(&mut store_marshal, round, store_block).await };
+
                 let ancestry_stream = marshal.ancestor_stream(
                     Arc::new(runtime_context.child("ancestor_stream")),
                     [block.clone(), parent],
@@ -436,25 +446,36 @@ where
                         parent_view = parent_view.traced(),
                         parent = %parent_commitment
                     ));
-
                 // If consensus drops the receiver, we can stop work early.
-                let timer = verify_duration.timer(&runtime_context);
-                let application_valid = select! {
-                    _ = tx.closed() => {
-                        debug!(
-                            reason = "consensus dropped receiver",
-                            "skipping verification"
-                        );
-                        return;
-                    },
-                    is_valid = validity_request => is_valid,
+                let verify = async {
+                    let timer = verify_duration.timer(&runtime_context);
+                    let result = select! {
+                        _ = tx.closed() => {
+                            debug!(
+                                reason = "consensus dropped receiver",
+                                "skipping verification"
+                            );
+                            None
+                        },
+                        is_valid = validity_request => Some(is_valid),
+                    };
+                    timer.observe(&runtime_context);
+                    result
                 };
-                timer.observe(&runtime_context);
-                if application_valid && !stage.store(&mut marshal, round, block).await {
+                let (verdict, durable) = futures::join!(verify, store);
+
+                let Some(application_valid) = verdict else {
+                    return;
+                };
+                if !application_valid {
+                    tx.send_lossy(false);
+                    return;
+                }
+                if !durable {
                     debug!(?round, "marshal unable to accept block");
                     return;
                 }
-                tx.send_lossy(application_valid);
+                tx.send_lossy(true);
             }
             .instrument(span)
         });
@@ -675,9 +696,11 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's commitment when ready. The built block is persisted via
-    /// [`core::Mailbox::verified`] before the commitment is delivered, so consensus can rely
-    /// on the block surviving restart.
+    /// contain the proposed block's commitment when ready. The block's persistence is started
+    /// before the commitment is delivered but awaited only at certification, so its put_sync
+    /// overlaps the notarization round. The commitment does not imply durability on its own;
+    /// [`CertifiableAutomaton::certify`] awaits the registered durability task before the
+    /// finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
@@ -688,6 +711,7 @@ where
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
         let strategy = self.strategy.clone();
+        let verification_tasks = self.verification_tasks.clone();
 
         // If there's no scheme for the current epoch, we cannot verify the proposal.
         // Send back a receiver with a dropped sender.
@@ -804,19 +828,22 @@ where
                 if parent.height() == last_in_epoch {
                     let commitment = parent.commitment();
                     let round = consensus_context.round;
-                    if !marshal.verified(round, parent).await {
-                        debug!(
-                            ?round,
-                            ?commitment,
-                            "marshal rejected re-proposed boundary block"
-                        );
-                        return;
-                    }
+                    // Enqueue the persist before broadcasting the commitment (so a later
+                    // `forward` is ordered after it), but await the put_sync only at
+                    // certify so it overlaps the notarization round. `certify` awaits
+                    // this task (the leader certifies its own proposal once `is_local`
+                    // is gone) before the finalize vote, establishing durability.
+                    let (durable_tx, durable_rx) = oneshot::channel();
+                    verification_tasks.insert(round, commitment, durable_rx);
+                    let verified_rx = marshal.verified_deferred(round, parent);
                     let success = tx.send_lossy(commitment);
+                    let durable = verified_rx.await.is_ok();
+                    durable_tx.send_lossy(durable);
                     debug!(
                         ?round,
                         ?commitment,
                         success,
+                        durable,
                         "re-proposed parent block at epoch boundary"
                     );
                     return;
@@ -868,12 +895,18 @@ where
 
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
-                if !marshal.proposed(round, coded_block).await {
-                    debug!(?round, ?commitment, "marshal rejected proposed block");
-                    return;
-                }
+                // Enqueue the persist before broadcasting the commitment (so a later
+                // `forward` is ordered after it), but await the put_sync only at certify
+                // so it overlaps the notarization round. `certify` awaits this task (the
+                // leader certifies its own proposal once `is_local` is gone) before the
+                // finalize vote, establishing durability.
+                let (durable_tx, durable_rx) = oneshot::channel();
+                verification_tasks.insert(round, commitment, durable_rx);
+                let proposed_rx = marshal.proposed_deferred(round, coded_block);
                 let success = tx.send_lossy(commitment);
-                debug!(?round, ?commitment, success, "proposed new block");
+                let durable = proposed_rx.await.is_ok();
+                durable_tx.send_lossy(durable);
+                debug!(?round, ?commitment, success, durable, "proposed new block");
             }
             .instrument(span)
         });

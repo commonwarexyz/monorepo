@@ -2734,11 +2734,12 @@ mod tests {
         });
     }
 
-    /// Regression: a proposer must be able to recover its own block after a
-    /// crash that occurs immediately after `Marshaled::propose()` returns a
-    /// commitment. `propose` is responsible for persisting the block via
-    /// `marshal.verified`, so the block must survive restart even if
-    /// `Relay::broadcast` never runs or marshal aborts in between.
+    /// Regression: a leader must be able to recover its own block across an unclean restart.
+    /// `propose` defers the block's put_sync (it is started but awaited at certification), so
+    /// the leader establishes durability by certifying its own proposal -- the path the voter
+    /// takes now that the `is_local` shortcut is gone. After certify, the block must survive
+    /// restart even if `Relay::broadcast` never runs. This is the >= f+1 guarantee for the
+    /// leader's own block.
     #[test_traced("WARN")]
     fn test_marshaled_proposed_block_persists_across_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));
@@ -2821,8 +2822,19 @@ mod tests {
                 .expect("propose should produce a commitment");
             assert_eq!(commitment, expected_commitment);
 
-            // Abort marshal immediately after propose returns; the propose
-            // path must already have persisted the block.
+            // The leader certifies its own proposal (the path the voter takes now that the
+            // `is_local` shortcut is gone), which awaits the deferred propose put_sync and
+            // establishes durability before the finalize vote.
+            assert!(
+                marshaled
+                    .certify(propose_round, commitment)
+                    .await
+                    .await
+                    .expect("certify result missing"),
+                "certify must succeed for the leader's own proposal"
+            );
+
+            // Abort marshal after certify; the leader's own block must be durable.
             marshal_actor_handle.abort();
             drop(marshaled);
             drop(marshal);

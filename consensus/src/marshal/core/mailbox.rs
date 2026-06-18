@@ -843,11 +843,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Notifies the actor that a block has been locally proposed.
+    /// Enqueues a proposed-block notification and returns its durability ack receiver
+    /// without awaiting it.
     ///
-    /// Returns after the block is durably persisted.
-    #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
+    /// The message is enqueued synchronously (before this returns), so a subsequent
+    /// [Self::forward] for the same block is ordered after it. This lets a leader broadcast
+    /// the proposal digest immediately and await durability later (at certification),
+    /// overlapping the put_sync with the notarization round.
+    pub(crate) fn proposed_deferred(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Proposed {
             span: info_span!("marshal.mailbox.proposed", round = %round),
@@ -855,14 +858,22 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             block,
             ack: Some(ack),
         });
-        receiver.await.is_ok()
+        receiver
     }
 
-    /// Notifies the actor that a block has been verified.
+    /// Notifies the actor that a block has been locally proposed.
     ///
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
+    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
+        self.proposed_deferred(round, block).await.is_ok()
+    }
+
+    /// Enqueues a verified-block notification and returns its durability ack receiver
+    /// without awaiting it.
+    ///
+    /// Enqueued synchronously, as with [Self::proposed_deferred].
+    pub(crate) fn verified_deferred(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Verified {
             span: info_span!("marshal.mailbox.verified", round = %round),
@@ -870,7 +881,15 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             block,
             ack: Some(ack),
         });
-        receiver.await.is_ok()
+        receiver
+    }
+
+    /// Notifies the actor that a block has been verified.
+    ///
+    /// Returns after the block is durably persisted.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
+        self.verified_deferred(round, block).await.is_ok()
     }
 
     /// Notifies the actor that a block has been certified.
