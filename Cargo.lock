@@ -1841,6 +1841,8 @@ dependencies = [
 name = "commonware-privacy"
 version = "2026.5.0"
 dependencies = [
+ "bytes",
+ "commonware-codec",
  "commonware-macros",
  "rand_core 0.6.4",
 ]

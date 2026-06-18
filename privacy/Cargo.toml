@@ -11,12 +11,21 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/privacy"
 documentation = "https://docs.rs/commonware-privacy"
 
 [dependencies]
+bytes = { workspace = true, optional = true }
+commonware-codec = { workspace = true, optional = true }
 commonware-macros.workspace = true
 rand_core.workspace = true
 
 [features]
 default = [ "std" ]
-std = [ "commonware-macros/std", "rand_core/std" ]
+codec = [ "dep:bytes", "dep:commonware-codec" ]
+mocks = []
+std = [
+    "bytes?/std",
+    "commonware-codec?/std",
+    "commonware-macros/std",
+    "rand_core/std",
+]
 
 [lints]
 workspace = true
