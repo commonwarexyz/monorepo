@@ -39,6 +39,7 @@ pub mod ed25519;
 pub mod secp256r1;
 
 commonware_macros::stability_scope!(ALPHA {
+    pub mod banderwagon;
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 

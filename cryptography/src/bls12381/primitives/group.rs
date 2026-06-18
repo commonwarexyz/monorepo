@@ -225,7 +225,7 @@ pub type DST = &'static [u8];
 /// the order of the BLS12‑381 G1/G2 groups.
 #[derive(Clone, Eq, PartialEq)]
 #[repr(transparent)]
-pub struct Scalar(blst_fr);
+pub struct Scalar(pub(crate) blst_fr);
 
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for Scalar {
