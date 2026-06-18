@@ -15,6 +15,7 @@
 //! values larger than 3 will fail to compile.
 
 pub mod ordered;
+mod partition;
 pub mod unordered;
 
 // Because the prefix length has a max of 3, we can safely use a 4-byte int for the index type

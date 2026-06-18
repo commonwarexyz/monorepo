@@ -1,122 +1,229 @@
-//! The ordered variant of a partitioned index.
+//! A partitioned index that stores each partition as sorted struct-of-arrays (see [`super::partition`]).
+//!
+//! The first `P` bytes of the (untranslated) key select a partition; the translator maps the
+//! remaining bytes to the partition-local key. Because the partitions are ordered by prefix and each
+//! partition's entries are sorted by translated key, this index is inherently ordered. It trades
+//! lookup/insert speed for memory density at scale; the unordered variant ([`super::unordered`])
+//! uses hash sub-indices instead and is faster when ordering is not required.
 
 use crate::{
     index::{
-        ordered::Index as OrderedIndex, partitioned::partition_index_and_sub_key, storage::Values,
-        Ordered as OrderedTrait, Unordered as UnorderedTrait,
+        partitioned::{partition::Partition, partition_index_and_sub_key},
+        Cursor as CursorTrait, Factory, Ordered, Unordered,
     },
     translator::Translator,
 };
-use commonware_runtime::Metrics;
+use commonware_runtime::{
+    telemetry::metrics::{Counter, Gauge, MetricsExt as _},
+    Metrics,
+};
 
-/// A partitioned index that maps translated keys to values. The first `P` bytes of the
-/// (untranslated) key are used to determine the partition, and the translator is used by the
-/// partition-specific indices on the key after stripping this prefix. The value of `P` should be
-/// small, typically 1 or 2. Anything larger than 3 will fail to compile.
+const MUST_CALL_NEXT: &str = "must call Cursor::next()";
+const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
+
+/// Position of a [Cursor] within its key's value run (offsets are newest-first, 0 = newest).
+enum State {
+    /// Before the first `next()` or after an `insert()`/`delete()`: the next `next()` returns the
+    /// value at run offset `from`.
+    NeedNext { from: usize },
+    /// `next()` returned the value at run offset `offset`; `update`/`delete`/`insert` are valid.
+    Active { offset: usize },
+    /// `next()` returned `None`; only `insert()` (which appends) is valid.
+    Done,
+}
+
+/// A [crate::index::Cursor] over the values of a single translated key within a partition.
+///
+/// The key's values occupy a contiguous run in the partition's sorted arrays. The run's start is
+/// re-derived from the key on each operation (a cheap binary search over a small partition), so
+/// the cursor stays correct across the in-array shifts that insert/delete cause.
+pub struct Cursor<'a, K: Ord + Copy, V> {
+    partition: &'a mut Partition<K, V>,
+    key: K,
+    state: State,
+    keys: &'a Gauge,
+    items: &'a Gauge,
+    pruned: &'a Counter,
+}
+
+impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
+    const fn new(
+        partition: &'a mut Partition<K, V>,
+        key: K,
+        keys: &'a Gauge,
+        items: &'a Gauge,
+        pruned: &'a Counter,
+    ) -> Self {
+        Self {
+            partition,
+            key,
+            state: State::NeedNext { from: 0 },
+            keys,
+            items,
+            pruned,
+        }
+    }
+}
+
+impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, V> {
+    type Value = V;
+
+    fn next(&mut self) -> Option<&V> {
+        let run = self.partition.run_range(&self.key);
+        let off = match self.state {
+            State::Done => return None,
+            State::NeedNext { from } => from,
+            State::Active { offset } => offset + 1,
+        };
+        if off >= run.len() {
+            self.state = State::Done;
+            return None;
+        }
+        self.state = State::Active { offset: off };
+        Some(self.partition.value_at(run.start + off))
+    }
+
+    fn update(&mut self, value: V) {
+        let run = self.partition.run_range(&self.key);
+        match self.state {
+            State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
+            State::Done => panic!("{NO_ACTIVE_ITEM}"),
+            State::Active { offset } => self.partition.set(run.start + offset, value),
+        }
+    }
+
+    fn insert(&mut self, value: V) {
+        let run = self.partition.run_range(&self.key);
+        match self.state {
+            State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
+            State::Active { offset } => {
+                // Place immediately after the current value; `next()` then returns the value after
+                // the inserted one (skipping both the current and the inserted).
+                self.partition
+                    .insert_at(run.start + offset + 1, self.key, value);
+                self.items.inc();
+                self.state = State::NeedNext { from: offset + 2 };
+            }
+            State::Done => {
+                // Append at the oldest position (run end), re-creating the key if it was emptied.
+                if run.is_empty() {
+                    self.keys.inc();
+                }
+                self.partition.insert_at(run.end, self.key, value);
+                self.items.inc();
+            }
+        }
+    }
+
+    fn delete(&mut self) {
+        let run = self.partition.run_range(&self.key);
+        match self.state {
+            State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
+            State::Done => panic!("{NO_ACTIVE_ITEM}"),
+            State::Active { offset } => {
+                self.partition.remove(run.start + offset);
+                self.items.dec();
+                self.pruned.inc();
+                if run.len() == 1 {
+                    // Removed the key's last value; the key is gone.
+                    self.keys.dec();
+                }
+                // The value after the deleted one shifted into `offset`.
+                self.state = State::NeedNext { from: offset };
+            }
+        }
+    }
+}
+
+/// A partitioned index storing each partition as sorted struct-of-arrays.
 pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
-    partitions: Vec<OrderedIndex<T, V>>,
+    translator: T,
+    partitions: Box<[Partition<T::Key, V>]>,
+    keys: Gauge,
+    items: Gauge,
+    pruned: Counter,
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
-    /// Create a new [Index] with the given translator and metrics registry.
+    /// Create a new [Index] with the given metrics context and translator.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
-        let partition_count = 1 << (P * 8);
-        let mut partitions = Vec::with_capacity(partition_count);
-        for i in 0..partition_count {
-            partitions.push(OrderedIndex::new(
-                ctx.child("partition").with_attribute("index", i),
-                translator.clone(),
-            ));
+        const {
+            assert!(P > 0 && P <= 3, "P must be in 1..=3");
         }
-
-        Self { partitions }
-    }
-
-    /// Get the partition for the given key, along with the prefix-stripped key for probing it.
-    fn get_partition<'a>(&self, key: &'a [u8]) -> (&OrderedIndex<T, V>, &'a [u8]) {
-        let (i, sub_key) = partition_index_and_sub_key::<P>(key);
-
-        (&self.partitions[i], sub_key)
-    }
-
-    /// Get the mutable partition for the given key, along with the prefix-stripped key for probing
-    /// it.
-    fn get_partition_mut<'a>(&mut self, key: &'a [u8]) -> (&mut OrderedIndex<T, V>, &'a [u8]) {
-        let (i, sub_key) = partition_index_and_sub_key::<P>(key);
-
-        (&mut self.partitions[i], sub_key)
-    }
-
-    /// Returns an iterator over the values of the lexicographically first translated key across
-    /// all partitions, or None if every partition is empty.
-    fn first_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
-        self.partitions
-            .iter()
-            .find_map(|p| p.first_translated_values())
-    }
-
-    /// Returns an iterator over the values of the lexicographically last translated key across
-    /// all partitions, or None if every partition is empty.
-    fn last_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
-        self.partitions
-            .iter()
-            .rev()
-            .find_map(|p| p.last_translated_values())
+        let count = 1usize << (P * 8);
+        let partitions = (0..count)
+            .map(|_| Partition::default())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+        Self {
+            translator,
+            partitions,
+            keys: ctx.gauge("keys", "Number of translated keys in the index"),
+            items: ctx.gauge("items", "Number of items in the index"),
+            pruned: ctx.counter("pruned", "Number of items pruned"),
+        }
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> super::super::Factory<T> for Index<T, V, P> {
-    fn new(ctx: impl commonware_runtime::Metrics, translator: T) -> Self {
+impl<T: Translator, V: Send + Sync, const P: usize> Factory<T> for Index<T, V, P> {
+    fn new(ctx: impl Metrics, translator: T) -> Self {
         Self::new(ctx, translator)
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P> {
     type Value = V;
+    type Cursor<'a>
+        = Cursor<'a, T::Key, V>
+    where
+        Self: 'a;
+
+    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a V> + Send + 'a
+    where
+        V: 'a,
+    {
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        self.partitions[i].values(&k).iter()
+    }
 
     fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
     where
         V: 'a,
     {
-        // Probe in (partition, translated-key) order so consecutive probes hit the same
-        // partition and descend through shared upper tree nodes within it.
+        // Probe in (partition, translated-key) order so consecutive probes hit the same partition
+        // (one region of the 2^(8*P)-entry partition array) and the same value run within it,
+        // instead of scattering across partitions in input order.
         let mut order: Vec<(usize, T::Key, usize)> = keys
             .iter()
             .enumerate()
             .map(|(key_idx, key)| {
-                let (partition, sub_key) = partition_index_and_sub_key::<P>(key.as_ref());
-                (
-                    partition,
-                    self.partitions[partition].translate(sub_key),
-                    key_idx,
-                )
+                let (partition, sub) = partition_index_and_sub_key::<P>(key.as_ref());
+                (partition, self.translator.transform(sub), key_idx)
             })
             .collect();
         order.sort_unstable();
         for (partition, translated, key_idx) in order {
-            for value in self.partitions[partition].get_translated(translated) {
+            for value in self.partitions[partition].values(&translated) {
                 visit(key_idx, value);
             }
         }
     }
-    type Cursor<'a>
-        = <OrderedIndex<T, V> as UnorderedTrait>::Cursor<'a>
-    where
-        Self: 'a;
-
-    fn get<'a>(&'a self, key: &[u8]) -> impl Iterator<Item = &'a Self::Value> + 'a
-    where
-        Self::Value: 'a,
-    {
-        let (partition, sub_key) = self.get_partition(key);
-
-        partition.get(sub_key)
-    }
 
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
-        let (partition, sub_key) = self.get_partition_mut(key);
-
-        partition.get_mut(sub_key)
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        let partition = &mut self.partitions[i];
+        if partition.run_range(&k).is_empty() {
+            return None;
+        }
+        Some(Cursor::new(
+            partition,
+            k,
+            &self.keys,
+            &self.items,
+            &self.pruned,
+        ))
     }
 
     fn get_mut_or_insert<'a>(
@@ -124,15 +231,34 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
         key: &[u8],
         value: Self::Value,
     ) -> Option<Self::Cursor<'a>> {
-        let (partition, sub_key) = self.get_partition_mut(key);
-
-        partition.get_mut_or_insert(sub_key, value)
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        let partition = &mut self.partitions[i];
+        if partition.run_range(&k).is_empty() {
+            partition.insert(k, value);
+            self.keys.inc();
+            self.items.inc();
+            return None;
+        }
+        Some(Cursor::new(
+            partition,
+            k,
+            &self.keys,
+            &self.items,
+            &self.pruned,
+        ))
     }
 
     fn insert(&mut self, key: &[u8], value: Self::Value) {
-        let (partition, sub_key) = self.get_partition_mut(key);
-
-        partition.insert(sub_key, value);
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        let partition = &mut self.partitions[i];
+        let new_key = partition.run_range(&k).is_empty();
+        partition.insert(k, value);
+        self.items.inc();
+        if new_key {
+            self.keys.inc();
+        }
     }
 
     fn insert_and_retain(
@@ -141,52 +267,48 @@ impl<T: Translator, V: Send + Sync, const P: usize> UnorderedTrait for Index<T, 
         value: Self::Value,
         should_retain: impl Fn(&Self::Value) -> bool,
     ) {
-        let (partition, sub_key) = self.get_partition_mut(key);
-
-        partition.insert_and_retain(sub_key, value, should_retain);
+        if let Some(mut cursor) = self.get_mut(key) {
+            cursor.retain(&should_retain);
+            if should_retain(&value) {
+                cursor.insert(value);
+            }
+        } else if should_retain(&value) {
+            self.insert(key, value);
+        }
     }
 
     fn remove(&mut self, key: &[u8]) {
-        let (partition, sub_key) = self.get_partition_mut(key);
-
-        partition.remove(sub_key);
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        let partition = &mut self.partitions[i];
+        let run = partition.run_range(&k);
+        if run.is_empty() {
+            return;
+        }
+        let n = run.len();
+        partition.remove_run(run);
+        self.keys.dec();
+        self.items.dec_by(n as i64);
+        self.pruned.inc_by(n as u64);
     }
 
     #[cfg(test)]
     fn keys(&self) -> usize {
-        // Note: this is really inefficient, but it's only used for testing.
-        let mut keys = 0;
-        for partition in &self.partitions {
-            keys += partition.keys();
-        }
-
-        keys
+        self.keys.get() as usize
     }
 
     #[cfg(test)]
     fn items(&self) -> usize {
-        // Note: this is really inefficient, but it's only used for testing.
-        let mut items = 0;
-        for partition in &self.partitions {
-            items += partition.items();
-        }
-
-        items
+        self.items.get() as usize
     }
 
     #[cfg(test)]
     fn pruned(&self) -> usize {
-        // Note: this is really inefficient, but it's only used for testing.
-        let mut pruned = 0;
-        for partition in &self.partitions {
-            pruned += partition.pruned();
-        }
-
-        pruned
+        self.pruned.get() as usize
     }
 }
 
-impl<T: Translator, V: Send + Sync, const P: usize> OrderedTrait for Index<T, V, P> {
+impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
     fn prev_translated_key<'a>(
         &'a self,
         key: &[u8],
@@ -194,19 +316,23 @@ impl<T: Translator, V: Send + Sync, const P: usize> OrderedTrait for Index<T, V,
     where
         V: 'a,
     {
-        let (partition_index, sub_key) = partition_index_and_sub_key::<P>(key);
-
-        if let Some(values) =
-            self.partitions[partition_index].prev_translated_values_no_cycle(sub_key)
-        {
-            return Some((values, false));
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        // The largest translated key strictly less than `k`: within the partition first, then the
+        // last key of the nearest lower partition, else cycle to the global last key.
+        if let Some(vals) = self.partitions[i].prev_values_before(&k) {
+            return Some((vals.iter(), false));
         }
-        for partition in self.partitions[..partition_index].iter().rev() {
-            if let Some(values) = partition.last_translated_values() {
-                return Some((values, false));
+        for p in self.partitions[..i].iter().rev() {
+            if let Some(vals) = p.last_values() {
+                return Some((vals.iter(), false));
             }
         }
-        self.last_translated_values().map(|values| (values, true))
+        self.partitions
+            .iter()
+            .rev()
+            .find_map(|p| p.last_values())
+            .map(|vals| (vals.iter(), true))
     }
 
     fn next_translated_key<'a>(
@@ -216,33 +342,43 @@ impl<T: Translator, V: Send + Sync, const P: usize> OrderedTrait for Index<T, V,
     where
         V: 'a,
     {
-        let (partition_index, sub_key) = partition_index_and_sub_key::<P>(key);
-
-        if let Some(values) =
-            self.partitions[partition_index].next_translated_values_no_cycle(sub_key)
-        {
-            return Some((values, false));
+        let (i, sub) = partition_index_and_sub_key::<P>(key);
+        let k = self.translator.transform(sub);
+        // The smallest translated key strictly greater than `k`: within the partition first, then
+        // the first key of the nearest higher partition, else cycle to the global first key.
+        if let Some(vals) = self.partitions[i].next_values_after(&k) {
+            return Some((vals.iter(), false));
         }
-        for partition in self.partitions[partition_index + 1..].iter() {
-            if let Some(values) = partition.first_translated_values() {
-                return Some((values, false));
+        for p in &self.partitions[i + 1..] {
+            if let Some(vals) = p.first_values() {
+                return Some((vals.iter(), false));
             }
         }
-        self.first_translated_values().map(|values| (values, true))
+        self.partitions
+            .iter()
+            .find_map(|p| p.first_values())
+            .map(|vals| (vals.iter(), true))
     }
 
     fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.first_translated_values()
+        self.partitions
+            .iter()
+            .find_map(|p| p.first_values())
+            .map(|vals| vals.iter())
     }
 
     fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.last_translated_values()
+        self.partitions
+            .iter()
+            .rev()
+            .find_map(|p| p.last_values())
+            .map(|vals| vals.iter())
     }
 }
 
@@ -254,202 +390,203 @@ mod tests {
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner};
 
-    #[test_traced]
-    fn test_ordered_trait_empty_index() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let index = Index::<_, u64, 1>::new(context, OneCap);
-
-            assert!(index.first_translated_key().is_none());
-            assert!(index.last_translated_key().is_none());
-            assert!(index.prev_translated_key(b"key").is_none());
-            assert!(index.next_translated_key(b"key").is_none());
-        });
+    fn new_index(context: deterministic::Context) -> Index<OneCap, u64, 1> {
+        Index::new(context, OneCap)
     }
 
     #[test_traced]
-    fn test_ordered_trait_single_key() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::<_, u64, 1>::new(context, OneCap);
-            let key = b"\x0a\xff";
-
-            index.insert(key, 42u64);
-
-            let mut first = index.first_translated_key().unwrap();
-            assert_eq!(first.next(), Some(&42));
-            assert!(first.next().is_none());
-
-            let mut last = index.last_translated_key().unwrap();
-            assert_eq!(last.next(), Some(&42));
-            assert!(last.next().is_none());
-
-            let (mut iter, wrapped) = index.prev_translated_key(key).unwrap();
-            assert!(wrapped);
-            assert_eq!(iter.next(), Some(&42));
-            assert!(iter.next().is_none());
-            let (mut iter, wrapped) = index.next_translated_key(key).unwrap();
-            assert!(wrapped);
-            assert_eq!(iter.next(), Some(&42));
-            assert!(iter.next().is_none());
-
-            let (mut next, wrapped) = index.next_translated_key(b"\x00").unwrap();
-            assert!(!wrapped);
-            assert_eq!(next.next(), Some(&42));
-            assert!(next.next().is_none());
-
-            let (mut prev, wrapped) = index.prev_translated_key(b"\xff\x00").unwrap();
-            assert!(!wrapped);
-            assert_eq!(prev.next(), Some(&42));
-            assert!(prev.next().is_none());
-        });
-    }
-
-    #[test_traced]
-    fn test_ordered_trait_all_keys() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::<_, u64, 1>::new(context, OneCap);
-            // Insert a key for every possible prefix + 1-cap
-            for b1 in 0..=255u8 {
-                for b2 in 0..=255u8 {
-                    let key = [b1, b2];
-                    index.insert(&key, (b1 as u64) << 8 | b2 as u64);
-                }
-            }
-
-            // Insert some longer keys to test conflicts.
-            for b1 in (0..=255u8).rev() {
-                for b2 in 0..=255u8 {
-                    let key = [b1, b2, 0xff];
-                    index.insert(&key, u64::MAX);
-                }
-            }
-
-            let first_translated_key = index.first_translated_key().unwrap().next().unwrap();
-            assert_eq!(*first_translated_key, u64::MAX);
-
-            let last_translated_key = index.last_translated_key().unwrap().next().unwrap();
-            assert_eq!(*last_translated_key, u64::MAX);
-
-            let last = [255u8, 255u8];
-            let (mut iter, wrapped) = index.next_translated_key(&last).unwrap();
-            assert!(wrapped);
-            assert_eq!(iter.next(), Some(first_translated_key));
-
-            for b1 in 0..=255u8 {
-                for b2 in 0..=255u8 {
-                    let key = [b1, b2];
-                    if !(b1 == 255 && b2 == 255) {
-                        let (mut iter, _) = index.next_translated_key(&key).unwrap();
-                        let next = *iter.next().unwrap();
-                        assert_eq!(next, u64::MAX);
-                        let next = *iter.next().unwrap();
-                        assert_eq!(next, ((b1 as u64) << 8 | b2 as u64) + 1);
-                        assert!(iter.next().is_none());
-                    }
-                    if !(b1 == 0 && b2 == 0) {
-                        let (mut iter, _) = index.prev_translated_key(&key).unwrap();
-                        let prev = *iter.next().unwrap();
-                        assert_eq!(prev, u64::MAX);
-                        let prev = *iter.next().unwrap();
-                        assert_eq!(prev, ((b1 as u64) << 8 | b2 as u64) - 1);
-                        assert!(iter.next().is_none());
-                    }
-                }
-            }
-        });
-    }
-
-    #[test_traced]
-    fn test_ordered_trait_multiple_keys() {
-        let runner = deterministic::Runner::default();
-        runner.start(|context| async move {
-            let mut index = Index::<_, u64, 1>::new(context, OneCap);
+    fn test_soa_basic() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
             assert_eq!(index.keys(), 0);
 
-            let k1 = &hex!("0x0b02AA"); // translated key 0b02
-            let k2 = &hex!("0x1c04CC"); // translated key 1c04
-            let k2_collides = &hex!("0x1c0411");
-            let k3 = &hex!("0x2d06EE"); // translated key 2d06
+            let key = b"duplicate".as_slice();
+            index.insert(key, 1);
+            index.insert(key, 2);
+            index.insert(key, 3);
+            assert_eq!(index.keys(), 1);
+            assert_eq!(index.items(), 3);
+            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![3, 2, 1]);
+
+            {
+                let mut cursor = index.get_mut(key).unwrap();
+                assert_eq!(*cursor.next().unwrap(), 3);
+                assert_eq!(*cursor.next().unwrap(), 2);
+                assert_eq!(*cursor.next().unwrap(), 1);
+                assert!(cursor.next().is_none());
+            }
+
+            index.insert(key, 3);
+            index.insert(key, 4);
+            index.retain(key, |i| *i != 3);
+            assert_eq!(index.get(key).copied().collect::<Vec<_>>(), vec![4, 2, 1]);
+
+            index.retain(key, |_| false);
+            assert_eq!(
+                index.get(key).copied().collect::<Vec<_>>(),
+                Vec::<u64>::new()
+            );
+            assert_eq!(index.keys(), 0);
+            assert!(index.get_mut(key).is_none());
+
+            // No-op on a missing key.
+            index.retain(key, |_| false);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_cursor_find() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
+            let key = b"test_key";
+            for v in [10u64, 20, 30, 40] {
+                index.insert(key, v);
+            }
+
+            {
+                let mut cursor = index.get_mut(key).unwrap();
+                assert!(cursor.find(|&v| v == 30));
+                cursor.update(35);
+            }
+            let values: Vec<u64> = index.get(key).copied().collect();
+            assert!(values.contains(&35) && !values.contains(&30));
+
+            {
+                let mut cursor = index.get_mut(key).unwrap();
+                assert!(!cursor.find(|&v| v == 100));
+                assert!(cursor.next().is_none());
+            }
+
+            {
+                let mut cursor = index.get_mut(key).unwrap();
+                assert!(cursor.find(|&v| v == 20));
+                cursor.delete();
+            }
+            let values: Vec<u64> = index.get(key).copied().collect();
+            assert!(!values.contains(&20));
+            assert_eq!(values.len(), 3);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_get_many_and_partitions() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
+            // "ab"/"abX" share a partition+translated key; "zz" is a different partition.
+            index.insert(b"ab", 1);
+            index.insert(b"ab", 2);
+            index.insert(b"abX", 3);
+            index.insert(b"zz", 4);
+
+            let keys: Vec<&[u8]> = vec![b"zz", b"missing", b"ab", b"zz"];
+            let mut visits: Vec<Vec<u64>> = vec![Vec::new(); keys.len()];
+            index.get_many(&keys, |key_idx, value| visits[key_idx].push(*value));
+            assert_eq!(visits[0], vec![4]);
+            assert!(visits[1].is_empty());
+            assert_eq!(visits[2], vec![3, 2, 1]);
+            assert_eq!(visits[3], vec![4]);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_insert_and_retain() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
+            // Keep both: new value joins as oldest.
+            index.insert(b"k", 1u64);
+            index.insert_and_retain(b"k", 2, |_| true);
+            assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![1, 2]);
+
+            // Drop the new value: no-op.
+            index.insert_and_retain(b"k", 9, |v| *v != 9);
+            assert_eq!(index.get(b"k").copied().collect::<Vec<_>>(), vec![1, 2]);
+
+            // Drop everything.
+            index.insert_and_retain(b"k", 9, |_| false);
+            assert!(index.get_mut(b"k").is_none());
+            assert_eq!(index.keys(), 0);
+
+            // Vacant key: insert only if retained.
+            index.insert_and_retain(b"new", 7, |_| true);
+            assert_eq!(index.get(b"new").copied().collect::<Vec<_>>(), vec![7]);
+            assert_eq!(index.keys(), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_remove() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
+            index.insert(b"k", 1u64);
+            index.insert(b"k", 2);
+            index.insert(b"other", 3);
+            assert_eq!(index.items(), 3);
+            assert_eq!(index.keys(), 2);
+
+            index.remove(b"k");
+            assert!(index.get_mut(b"k").is_none());
+            assert_eq!(index.keys(), 1);
+            assert_eq!(index.items(), 1);
+            assert_eq!(index.pruned(), 2);
+            assert_eq!(index.get(b"other").copied().collect::<Vec<_>>(), vec![3]);
+
+            index.remove(b"missing"); // no-op
+            assert_eq!(index.keys(), 1);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_ordered() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
+            assert!(index.first_translated_key().is_none());
+            assert!(index.last_translated_key().is_none());
+            assert!(index.next_translated_key(b"key").is_none());
+            assert!(index.prev_translated_key(b"key").is_none());
+
+            // With OneCap + P=1, the full key orders as (prefix byte, first sub-key byte).
+            let k1 = &hex!("0x0b02AA"); // -> partition 0b, sub-key 02
+            let k2 = &hex!("0x1c04CC"); // -> partition 1c, sub-key 04
+            let k2_collides = &hex!("0x1c0411"); // same (1c, 04) as k2
+            let k3 = &hex!("0x2d06EE"); // -> partition 2d, sub-key 06
             index.insert(k1, 1);
             index.insert(k2, 21);
             index.insert(k2_collides, 22);
             index.insert(k3, 3);
             assert_eq!(index.keys(), 3);
 
-            // First translated key is 0b.
-            let mut iter = index.first_translated_key().unwrap();
-            assert_eq!(iter.next(), Some(&1));
-            assert_eq!(iter.next(), None);
+            assert_eq!(index.first_translated_key().unwrap().next(), Some(&1));
+            assert_eq!(index.last_translated_key().unwrap().next(), Some(&3));
 
-            // Next translated key to 0x00 is 0b02.
-            let (mut iter, wrapped) = index.next_translated_key(&[0x00]).unwrap();
+            // From before the first key: the first key, not wrapped.
+            let (mut it, wrapped) = index.next_translated_key(&[0x00]).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&1));
-            assert_eq!(iter.next(), None);
+            assert_eq!(it.next(), Some(&1));
+            assert_eq!(it.next(), None);
 
-            // Next translated key to 0x0b02 is 1c.
-            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
+            // From k1's bucket: jumps partitions to k2's collision run (newest first).
+            let (mut it, wrapped) = index.next_translated_key(&hex!("0x0b02F2")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&22));
-            assert_eq!(iter.next(), Some(&21));
-            assert_eq!(iter.next(), None);
+            assert_eq!(it.next(), Some(&22));
+            assert_eq!(it.next(), Some(&21));
+            assert_eq!(it.next(), None);
 
-            // Next translated key to 0x1b is 1c.
-            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x1b010203")).unwrap();
-            assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&22));
-            assert_eq!(iter.next(), Some(&21));
-            assert_eq!(iter.next(), None);
-
-            // Next translated key to 0x2a is 2d.
-            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x2a01020304")).unwrap();
-            assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&3));
-            assert_eq!(iter.next(), None);
-
-            // Next translated key to 0x2d is 0b.
-            let (mut iter, wrapped) = index.next_translated_key(k3).unwrap();
+            // From the last key: cycles to the first.
+            let (mut it, wrapped) = index.next_translated_key(k3).unwrap();
             assert!(wrapped);
-            assert_eq!(iter.next(), Some(&1));
-            assert_eq!(iter.next(), None);
+            assert_eq!(it.next(), Some(&1));
 
-            // Another cycle around case.
-            let (mut iter, wrapped) = index.next_translated_key(&hex!("0x2eFF")).unwrap();
+            // From the first key going backwards: cycles to the last.
+            let (mut it, wrapped) = index.prev_translated_key(k1).unwrap();
             assert!(wrapped);
-            assert_eq!(iter.next(), Some(&1));
-            assert_eq!(iter.next(), None);
+            assert_eq!(it.next(), Some(&3));
 
-            // Previous translated key is the last key due to cycling.
-            let (mut iter, wrapped) = index.prev_translated_key(k1).unwrap();
-            assert!(wrapped);
-            assert_eq!(iter.next(), Some(&3));
-            assert_eq!(iter.next(), None);
-
-            // Previous translated key is 0b.
-            let (mut iter, wrapped) = index.prev_translated_key(&hex!("0x0c0102")).unwrap();
+            // Previous bucket below 1d is 1c's collision run.
+            let (mut it, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
             assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&1));
-            assert_eq!(iter.next(), None);
-
-            // Previous translated key is 1c.
-            let (mut iter, wrapped) = index.prev_translated_key(&hex!("0x1d0102")).unwrap();
-            assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&22));
-            assert_eq!(iter.next(), Some(&21));
-            assert_eq!(iter.next(), None);
-
-            // Previous translated key is 2d.
-            let (mut iter, wrapped) = index.prev_translated_key(&hex!("0xCC0102")).unwrap();
-            assert!(!wrapped);
-            assert_eq!(iter.next(), Some(&3));
-            assert_eq!(iter.next(), None);
-
-            // Last translated key is 2d.
-            let mut iter = index.last_translated_key().unwrap();
-            assert_eq!(iter.next(), Some(&3));
-            assert_eq!(iter.next(), None);
+            assert_eq!(it.next(), Some(&22));
+            assert_eq!(it.next(), Some(&21));
+            assert_eq!(it.next(), None);
         });
     }
 }

@@ -1,8 +1,12 @@
 use super::{Digest, DummyMetrics};
 use commonware_cryptography::{Hasher, Sha256};
+#[cfg(huge_bench)]
+use commonware_storage::index::ordered;
+#[cfg(not(huge_bench))]
+use commonware_storage::translator::{FourCap, OneCap, TwoCap};
 use commonware_storage::{
-    index::{unordered, Unordered},
-    translator::{EightCap, FourCap, OneCap, Translator, TwoCap},
+    index::{partitioned, unordered, Unordered},
+    translator::{Cap, EightCap, Translator},
 };
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, seq::SliceRandom, SeedableRng};
@@ -11,10 +15,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(not(full_bench))]
+#[cfg(not(any(full_bench, huge_bench)))]
 const N_ITEMS: [usize; 2] = [10_000, 50_000];
-#[cfg(full_bench)]
+#[cfg(all(full_bench, not(huge_bench)))]
 const N_ITEMS: [usize; 5] = [10_000, 50_000, 100_000, 500_000, 1_000_000];
+// The huge tier exercises the P=3 lookup path (16.8M partitions) at ~1.2 and ~6 entries per
+// partition; it needs ~12 GB of RAM and sits behind its own cfg.
+#[cfg(huge_bench)]
+const N_ITEMS: [usize; 2] = [20_000_000, 100_000_000];
 
 fn run_lookup<T: Translator>(
     c: &mut Criterion,
@@ -50,6 +58,38 @@ fn run_lookup<T: Translator>(
     });
 }
 
+/// Benchmark `get` on an index the caller constructs, after populating it with `items` keys.
+fn run_lookup_prebuilt<I: Unordered<Value = u64>>(
+    c: &mut Criterion,
+    mut index: I,
+    name: &str,
+    items: usize,
+    keys: &[Digest],
+) {
+    for (i, key) in keys.iter().enumerate().take(items) {
+        index.insert(key, i as u64);
+    }
+
+    let mut rng = StdRng::seed_from_u64(1);
+    let mut lookup_keys: Vec<_> = keys.iter().take(items).cloned().collect();
+    lookup_keys.shuffle(&mut rng);
+
+    let label = format!("{}/variant={name} items={items}", module_path!());
+    c.bench_function(&label, |b| {
+        b.iter_custom(|iters| {
+            let mut total = Duration::ZERO;
+            for _ in 0..iters {
+                let start = Instant::now();
+                for key in &lookup_keys {
+                    black_box(index.get(key).next().is_some());
+                }
+                total += start.elapsed();
+            }
+            total
+        });
+    });
+}
+
 fn bench_lookup(c: &mut Criterion) {
     let max_items = *N_ITEMS.last().unwrap();
     let keys: Vec<_> = (0..max_items)
@@ -57,10 +97,56 @@ fn bench_lookup(c: &mut Criterion) {
         .collect();
 
     for items in N_ITEMS {
-        run_lookup(c, OneCap, "one_cap", items, &keys);
-        run_lookup(c, TwoCap, "two_cap", items, &keys);
-        run_lookup(c, FourCap, "four_cap", items, &keys);
-        run_lookup(c, EightCap, "eight_cap", items, &keys);
+        // The small/full tiers sweep translators and benchmark both partitioned variants at P=2.
+        // The huge tier compares the flat baselines against ordered P=3 (the SoA sweet spot; a P=2
+        // sorted-array build at 100M would be pathologically slow) and unordered P=2 (hashmap
+        // shards, whose build stays cheap). Unordered P=3 is skipped: 16.8M hashmaps is impractical.
+        #[cfg(not(huge_bench))]
+        {
+            run_lookup(c, OneCap, "one_cap", items, &keys);
+            run_lookup(c, TwoCap, "two_cap", items, &keys);
+            run_lookup(c, FourCap, "four_cap", items, &keys);
+            run_lookup(c, EightCap, "eight_cap", items, &keys);
+            run_lookup_prebuilt(
+                c,
+                partitioned::ordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<6>::new()),
+                "partitioned_ordered_2",
+                items,
+                &keys,
+            );
+            run_lookup_prebuilt(
+                c,
+                partitioned::unordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<6>::new()),
+                "partitioned_unordered_2",
+                items,
+                &keys,
+            );
+        }
+        #[cfg(huge_bench)]
+        {
+            run_lookup(c, EightCap, "eight_cap", items, &keys);
+            run_lookup_prebuilt(
+                c,
+                ordered::Index::new(DummyMetrics, EightCap),
+                "ordered",
+                items,
+                &keys,
+            );
+            run_lookup_prebuilt(
+                c,
+                partitioned::ordered::Index::<_, _, 3>::new(DummyMetrics, Cap::<5>::new()),
+                "partitioned_ordered_3",
+                items,
+                &keys,
+            );
+            run_lookup_prebuilt(
+                c,
+                partitioned::unordered::Index::<_, _, 2>::new(DummyMetrics, Cap::<6>::new()),
+                "partitioned_unordered_2",
+                items,
+                &keys,
+            );
+        }
     }
 }
 
