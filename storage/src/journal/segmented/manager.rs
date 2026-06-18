@@ -13,6 +13,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufferPool, Error as RError, Metrics, Storage,
 };
+use commonware_utils::channel::oneshot;
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
@@ -24,6 +25,10 @@ pub trait SectionBuffer: Clone + Send + Sync {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Begin persisting all pending data durably, returning a [oneshot::Receiver] that resolves
+    /// once the sync completes.
+    fn start_sync(&self) -> impl Future<Output = oneshot::Receiver<Result<(), RError>>> + Send;
 
     /// Resize the logical size of the buffer.
     fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
@@ -38,6 +43,10 @@ impl<B: Blob> SectionBuffer for Append<B> {
         Self::sync(self).await
     }
 
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), RError>> {
+        Self::start_sync(self).await
+    }
+
     async fn resize(&self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
     }
@@ -50,6 +59,10 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn sync(&self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), RError>> {
+        Self::start_sync(self).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), RError> {
@@ -223,6 +236,37 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             blob.sync().await.map_err(Error::Runtime)?;
         }
         Ok(())
+    }
+
+    /// Begin syncing the given section, returning a future that resolves once the durability
+    /// barrier completes.
+    ///
+    /// Unlike [`Self::sync`], the buffer is flushed eagerly while the fsync runs in the background;
+    /// awaiting the returned future confirms durability.
+    pub async fn start_sync(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<E, F> {
+        let prep: Result<Option<oneshot::Receiver<Result<(), RError>>>, Error> =
+            match self.prune_guard(section) {
+                Err(e) => Err(e),
+                Ok(()) => match self.blobs.get(&section) {
+                    Some(blob) => {
+                        self.synced.inc();
+                        Ok(Some(blob.start_sync().await))
+                    }
+                    None => Ok(None),
+                },
+            };
+        async move {
+            match prep? {
+                Some(rx) => rx
+                    .await
+                    .map_err(|_| Error::Runtime(RError::Closed))?
+                    .map_err(Error::Runtime),
+                None => Ok(()),
+            }
+        }
     }
 
     /// Sync all sections to storage.

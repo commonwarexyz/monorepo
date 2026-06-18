@@ -47,8 +47,11 @@ use super::{
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{BufferPooler, Metrics, Storage};
-use futures::{future::try_join, stream::Stream};
-use std::{collections::HashSet, num::NonZeroUsize};
+use futures::{
+    future::{join, try_join},
+    stream::Stream,
+};
+use std::{collections::HashSet, future::Future, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -343,6 +346,23 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         try_join(self.index.sync(section), self.values.sync(section))
             .await
             .map(|_| ())
+    }
+
+    /// Begin syncing both journals for the given section, returning a future that resolves once
+    /// both durability barriers complete.
+    ///
+    /// Mirrors [`Self::sync`]: the index and value buffers are flushed eagerly (concurrently),
+    /// while their fsyncs run in the background.
+    pub async fn start_sync(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<E, I, V> {
+        let (index, values) = join(
+            self.index.start_sync(section),
+            self.values.start_sync(section),
+        )
+        .await;
+        async move { try_join(index, values).await.map(|_| ()) }
     }
 
     /// Sync all sections.
@@ -661,6 +681,50 @@ mod tests {
             drop(oversized);
 
             // Reopen and verify
+            let oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("second"), cfg)
+                    .await
+                    .expect("Failed to reinit");
+
+            let retrieved_entry = oversized.get(1, position).await.expect("Failed to get");
+            assert_eq!(retrieved_entry.id, 123);
+
+            let retrieved_value = oversized
+                .get_value(1, offset, size)
+                .await
+                .expect("Failed to get value");
+            assert_eq!(retrieved_value, value);
+
+            oversized.destroy().await.expect("Failed to destroy");
+        });
+    }
+
+    #[test_traced]
+    fn test_oversized_start_sync_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context);
+
+            // Create and populate
+            let mut oversized: Oversized<_, TestEntry, TestValue> =
+                Oversized::init(context.child("first"), cfg.clone())
+                    .await
+                    .expect("Failed to init");
+
+            let value: TestValue = [42; 16];
+            let entry = TestEntry::new(123, 0, 0);
+            let (position, offset, size) = oversized
+                .append(1, entry, &value)
+                .await
+                .expect("Failed to append");
+
+            // start_sync flushes eagerly and backgrounds the fsync; awaiting the returned future
+            // confirms durability.
+            let handle = oversized.start_sync(1).await;
+            handle.await.expect("Failed to start_sync");
+            drop(oversized);
+
+            // Reopen and verify the index entry and value survived.
             let oversized: Oversized<_, TestEntry, TestValue> =
                 Oversized::init(context.child("second"), cfg)
                     .await

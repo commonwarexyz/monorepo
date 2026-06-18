@@ -31,7 +31,7 @@ use futures::{
     stream::{self, Stream},
     StreamExt,
 };
-use std::{marker::PhantomData, num::NonZeroUsize};
+use std::{future::Future, marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
 
 /// State for replaying a single section's blob.
@@ -376,6 +376,16 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Sync the given section to storage.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.manager.sync(section).await
+    }
+
+    /// Begin syncing the given section, returning a future that resolves once the durability
+    /// barrier completes. Unlike [`Self::sync`], the buffer is flushed eagerly while the fsync
+    /// runs in the background.
+    pub async fn start_sync(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<E, A> {
+        self.manager.start_sync(section).await
     }
 
     /// Sync all sections to storage.

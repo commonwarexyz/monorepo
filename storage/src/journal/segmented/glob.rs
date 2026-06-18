@@ -31,7 +31,7 @@ use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{BufMut, BufferPooler, Error as RError, Metrics, Storage};
-use std::{io::Cursor, num::NonZeroUsize};
+use std::{future::Future, io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
 /// Configuration for blob storage.
@@ -165,6 +165,16 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Sync section to disk (flushes write buffer).
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.manager.sync(section).await
+    }
+
+    /// Begin syncing the given section, returning a future that resolves once the durability
+    /// barrier completes. Unlike [`Self::sync`], the buffer is flushed eagerly while the fsync
+    /// runs in the background.
+    pub async fn start_sync(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<E, V> {
+        self.manager.start_sync(section).await
     }
 
     /// Sync all sections to disk.
