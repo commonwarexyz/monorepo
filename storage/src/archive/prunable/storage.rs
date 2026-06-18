@@ -15,7 +15,10 @@ use commonware_runtime::{
 };
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
-use std::collections::{btree_map, BTreeMap, BTreeSet};
+use std::{
+    collections::{btree_map, BTreeMap, BTreeSet},
+    future::Future,
+};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -401,6 +404,24 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
+
+    /// Returns a detached future that durably syncs all currently-pending sections without
+    /// borrowing the archive. Pending sections are taken immediately (so later writes form a
+    /// new batch); the returned future fsyncs the captured section buffers and can be awaited
+    /// off the archive's borrow. On success, every write made before this call is durable.
+    pub fn request_sync(&mut self) -> impl Future<Output = Result<(), Error>> + Send + 'static {
+        let pending: Vec<u64> = self.pending.iter().copied().collect();
+        self.syncs.inc_by(pending.len() as u64);
+        self.pending.clear();
+        let handles: Vec<_> = pending
+            .into_iter()
+            .map(|section| self.oversized.sync_handle(section))
+            .collect();
+        async move {
+            try_join_all(handles).await?;
+            Ok(())
+        }
+    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -429,16 +450,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // Collect pending sections and update metrics
-        let pending: Vec<u64> = self.pending.iter().copied().collect();
-        self.syncs.inc_by(pending.len() as u64);
-
-        // Sync oversized journal (handles both index and values)
-        let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
-        try_join_all(syncs).await?;
-
-        self.pending.clear();
-        Ok(())
+        self.request_sync().await
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {

@@ -48,7 +48,7 @@ use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
 use commonware_runtime::{BufferPooler, Metrics, Storage};
 use futures::{future::try_join, stream::Stream};
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{collections::HashSet, future::Future, num::NonZeroUsize};
 use tracing::{debug, warn};
 
 /// Trait for index entries that reference oversized values in glob storage.
@@ -343,6 +343,17 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         try_join(self.index.sync(section), self.values.sync(section))
             .await
             .map(|_| ())
+    }
+
+    /// Returns a detached future that syncs both journals for the section without borrowing
+    /// the journal, so it can be driven to completion later.
+    pub fn sync_handle(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'static {
+        let index = self.index.sync_handle(section);
+        let values = self.values.sync_handle(section);
+        async move { try_join(index, values).await.map(|_| ()) }
     }
 
     /// Sync all sections.

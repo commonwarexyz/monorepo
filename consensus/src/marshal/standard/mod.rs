@@ -1245,6 +1245,7 @@ mod tests {
                 )
                 .await;
                 mgr.put_block(round, digest, block.clone()).await;
+                mgr.request_sync().await.expect("sync cache");
             }
 
             // Re-init the cache (simulating restart). find_block should fail

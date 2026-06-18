@@ -522,6 +522,113 @@ mod tests {
         });
     }
 
+    #[test]
+    fn test_archive_request_sync_detached_durability() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: TwoCap,
+                key_partition: "rs-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "rs-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(256),
+            };
+            let mut archive = Archive::<_, _, _, FixedBytes<8>>::init(
+                context.child("init").with_attribute("index", 1),
+                cfg.clone(),
+            )
+            .await
+            .expect("Failed to initialize archive");
+
+            let val = |b: u8| FixedBytes::<8>::decode([b; 8].as_ref()).unwrap();
+
+            // First batch of writes, not yet synced.
+            archive.put(0, test_key("k0"), val(0)).await.unwrap();
+            archive.put(1, test_key("k1"), val(1)).await.unwrap();
+
+            // Detach a sync of the pending batch; the archive stays usable while it runs.
+            let handle = archive.request_sync();
+
+            // A new write is accepted and visible while the prior sync is outstanding.
+            archive.put(2, test_key("k2"), val(2)).await.unwrap();
+            assert_eq!(
+                archive.get(Identifier::Index(2)).await.unwrap(),
+                Some(val(2))
+            );
+
+            // Drive the detached sync to completion. The section buffer is shared, so the handle
+            // persists every write to that section made before it ran (k0, k1, and k2). With no
+            // further sync, all three must still survive a restart, proving the detached future
+            // alone made them durable (this would fail if `request_sync` were a no-op).
+            handle.await.expect("detached sync failed");
+            drop(archive);
+
+            let archive = Archive::<TwoCap, _, FixedBytes<64>, FixedBytes<8>>::init(
+                context.child("init").with_attribute("index", 2),
+                cfg,
+            )
+            .await
+            .expect("Failed to reinitialize archive");
+
+            for i in 0..3u64 {
+                assert_eq!(
+                    archive.get(Identifier::Index(i)).await.unwrap(),
+                    Some(val(i as u8)),
+                    "index {i} should survive restart"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn test_archive_request_sync_tolerates_prune_race() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: TwoCap,
+                key_partition: "race-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "race-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(1),
+            };
+            let mut archive = Archive::<TwoCap, _, FixedBytes<64>, FixedBytes<8>>::init(
+                context.child("init"),
+                cfg,
+            )
+            .await
+            .expect("Failed to initialize archive");
+
+            archive
+                .put(
+                    0,
+                    test_key("k0"),
+                    FixedBytes::<8>::decode([0u8; 8].as_ref()).unwrap(),
+                )
+                .await
+                .unwrap();
+
+            // Detach a sync covering section 0, then prune it out from under the in-flight sync.
+            let handle = archive.request_sync();
+            archive.prune(1).await.expect("prune");
+
+            // The detached sync of the now-removed section must be a no-op success, not a fatal
+            // error (a fatal error here would panic the marshal actor's cache_sync arm).
+            handle
+                .await
+                .expect("detached sync of a pruned section must not error");
+        });
+    }
+
     fn test_archive_keys_and_restart(num_keys: usize) -> String {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();

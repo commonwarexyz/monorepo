@@ -31,7 +31,7 @@ use futures::{
     stream::{self, Stream},
     StreamExt,
 };
-use std::{marker::PhantomData, num::NonZeroUsize};
+use std::{future::Future, marker::PhantomData, num::NonZeroUsize};
 use tracing::{trace, warn};
 
 /// State for replaying a single section's blob.
@@ -376,6 +376,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Sync the given section to storage.
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.manager.sync(section).await
+    }
+
+    /// Returns a detached future that syncs the section without borrowing the journal.
+    pub fn sync_handle(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'static {
+        self.manager.sync_handle(section)
     }
 
     /// Sync all sections to storage.

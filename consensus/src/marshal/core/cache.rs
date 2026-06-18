@@ -12,17 +12,23 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
+use futures::future::try_join_all;
 use rand::Rng;
 use std::{
     cmp::max,
     collections::BTreeMap,
+    future::Future,
     num::{NonZero, NonZeroUsize},
+    pin::Pin,
     time::Duration,
 };
 use tracing::{debug, info};
 
 // The key used to store the current epoch in the metadata store.
 const CACHED_EPOCHS_KEY: u8 = 0;
+
+/// A detached, owned future that durably syncs part of the cache off the archive's borrow.
+type SyncHandle = Pin<Box<dyn Future<Output = Result<(), archive::Error>> + Send>>;
 
 /// Configuration parameters for prunable archives.
 pub(crate) struct Config {
@@ -302,7 +308,7 @@ where
         };
         let result = cache
             .verified_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "verified");
     }
@@ -327,7 +333,7 @@ where
 
         match cache
             .certified_blocks
-            .put_multi_sync(height.get(), digest, block)
+            .put_multi(height.get(), digest, block)
             .await
         {
             Ok(()) => debug!(%height, "cached certified block"),
@@ -350,7 +356,7 @@ where
         };
         let result = cache
             .notarized_blocks
-            .put_sync(round.view().get(), digest, block)
+            .put(round.view().get(), digest, block)
             .await;
         Self::handle_result(result, round, "notarized");
     }
@@ -367,7 +373,7 @@ where
         };
         let result = cache
             .notarizations
-            .put_sync(round.view().get(), digest, notarization)
+            .put(round.view().get(), digest, notarization)
             .await;
         Self::handle_result(result, round, "notarization");
     }
@@ -384,9 +390,30 @@ where
         };
         let result = cache
             .finalizations
-            .put_sync(round.view().get(), digest, finalization)
+            .put(round.view().get(), digest, finalization)
             .await;
         Self::handle_result(result, round, "finalization");
+    }
+
+    /// Returns a detached future that durably syncs all pending cache writes across every live
+    /// epoch without borrowing the cache. Pending sections are taken immediately, so the cache
+    /// stays usable while the returned future runs; awaiting it makes every prior put durable.
+    /// Used to coalesce cache fsyncs off the marshal actor loop.
+    pub(crate) fn request_sync(
+        &mut self,
+    ) -> impl Future<Output = Result<(), archive::Error>> + Send + 'static {
+        let mut handles: Vec<SyncHandle> = Vec::new();
+        for cache in self.caches.values_mut() {
+            handles.push(Box::pin(cache.verified_blocks.request_sync()));
+            handles.push(Box::pin(cache.notarized_blocks.request_sync()));
+            handles.push(Box::pin(cache.certified_blocks.request_sync()));
+            handles.push(Box::pin(cache.notarizations.request_sync()));
+            handles.push(Box::pin(cache.finalizations.request_sync()));
+        }
+        async move {
+            try_join_all(handles).await?;
+            Ok(())
+        }
     }
 
     /// Helper to debug cache results.

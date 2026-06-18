@@ -31,7 +31,7 @@ use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
 use commonware_runtime::{BufMut, BufferPooler, Error as RError, Metrics, Storage};
-use std::{io::Cursor, num::NonZeroUsize};
+use std::{future::Future, io::Cursor, num::NonZeroUsize};
 use zstd::{bulk::compress, decode_all};
 
 /// Configuration for blob storage.
@@ -165,6 +165,14 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Sync section to disk (flushes write buffer).
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.manager.sync(section).await
+    }
+
+    /// Returns a detached future that syncs the section without borrowing the journal.
+    pub fn sync_handle(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'static {
+        self.manager.sync_handle(section)
     }
 
     /// Sync all sections to disk.

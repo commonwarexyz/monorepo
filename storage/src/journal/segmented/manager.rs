@@ -18,7 +18,7 @@ use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
 use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
-pub trait SectionBuffer: Clone + Send + Sync {
+pub trait SectionBuffer: Clone + Send + Sync + 'static {
     /// Returns the current logical size of the buffer including any buffered data.
     fn size(&self) -> impl Future<Output = u64> + Send;
 
@@ -223,6 +223,38 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             blob.sync().await.map_err(Error::Runtime)?;
         }
         Ok(())
+    }
+
+    /// Returns a detached future that syncs the section's blob without borrowing the
+    /// manager. The section buffer is cloned (cheap, shared internals), so the manager can
+    /// keep being used while the returned future is driven to completion later.
+    pub fn sync_handle(
+        &self,
+        section: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send + 'static {
+        let prune = self.prune_guard(section);
+        let blob = prune
+            .as_ref()
+            .ok()
+            .and_then(|()| self.blobs.get(&section).cloned());
+        if blob.is_some() {
+            self.synced.inc();
+        }
+        async move {
+            prune?;
+            if let Some(blob) = blob {
+                // A detached sync can race pruning. The section may be removed (Manager::prune
+                // via context.remove, or a destroyed partition) after we cloned its buffer but
+                // before this runs, and a pruned section's data is being discarded so syncing it
+                // is moot. A removed blob or partition is therefore treated as success rather
+                // than a fatal error.
+                match blob.sync().await {
+                    Ok(()) | Err(RError::BlobMissing(..)) | Err(RError::PartitionMissing(..)) => {}
+                    Err(e) => return Err(Error::Runtime(e)),
+                }
+            }
+            Ok(())
+        }
     }
 
     /// Sync all sections to storage.

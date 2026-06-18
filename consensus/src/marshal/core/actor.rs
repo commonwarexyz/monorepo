@@ -41,11 +41,11 @@ use commonware_runtime::{
     },
     BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner, Storage,
 };
-use commonware_storage::archive::Identifier as ArchiveID;
+use commonware_storage::archive::{Error as ArchiveError, Identifier as ArchiveID};
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
-    futures::AbortablePool,
+    futures::{AbortablePool, Pool},
     Acknowledgement, BoxedError,
 };
 use futures::{future::join_all, try_join};
@@ -116,6 +116,10 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
+    // Durable-ack senders for cache writes awaiting the next coalesced sync.
+    pending_durable: Vec<oneshot::Sender<()>>,
+    // Whether the cache has writes not yet covered by a started sync.
+    cache_dirty: bool,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
     // Application delivery cursor
@@ -231,6 +235,8 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
+                pending_durable: Vec::new(),
+                cache_dirty: false,
                 floor,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
@@ -351,6 +357,11 @@ where
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
+        // Coalesced cache syncs in flight, each carrying the durable acks it releases on
+        // completion. At most one runs at a time (see the `on_start` flush below).
+        let mut cache_sync =
+            Pool::<(Result<(), ArchiveError>, Vec<oneshot::Sender<()>>)>::default();
+
         // Anchor all startup work under a single root span. Tip recovery, floor
         // installation, gap repair, and the initial dispatch all run before any
         // mailbox message arrives, so without this root their work would emit as
@@ -400,6 +411,15 @@ where
             on_start => {
                 // Remove any dropped subscribers. If all subscribers dropped, abort the waiter.
                 self.block_subscriptions.retain_open();
+
+                // Submit a coalesced cache sync for any unsynced writes. `request_sync` only
+                // submits work, so this never blocks the loop; at most one sync runs at a time.
+                if self.cache_dirty && cache_sync.is_empty() {
+                    let sync = self.cache.request_sync();
+                    let acks = std::mem::take(&mut self.pending_durable);
+                    cache_sync.push(async move { (sync.await, acks) });
+                    self.cache_dirty = false;
+                }
             },
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
@@ -432,6 +452,15 @@ where
             result = self.pending_acks.current() => {
                 self.handle_ack(result, &mut application, &mut buffer, &mut resolver)
                     .await;
+            },
+            // Release durable acks once their coalesced cache sync completes
+            (result, acks) = cache_sync.next_completed() => {
+                if let Err(e) = result {
+                    panic!("failed to sync cache: {e}");
+                }
+                for ack in acks {
+                    ack.send_lossy(());
+                }
             },
             // Handle consensus inputs before backfill or resolver traffic
             Some(message) = self.mailbox.recv() else {
@@ -603,13 +632,18 @@ where
                 self.cache
                     .put_verified(round, block.digest(), block.clone().into())
                     .await;
+                self.cache_dirty = true;
 
                 // Retain the block in memory so the subsequent `Forward` can
                 // broadcast it without reloading from storage. An older retained
                 // proposal (if any) is overwritten.
                 let commitment = V::commitment(&block);
                 self.last_proposed_block = Some((round, commitment, block));
-                ack.expect("durable ack present").send_lossy(());
+
+                // Defer the durable ack: it is released only once the coalesced cache sync
+                // covering this write completes, so `certify` still implies durability while
+                // the put_sync overlaps consensus voting instead of blocking the loop.
+                self.pending_durable.push(ack.expect("durable ack present"));
             }
             Message::Verified {
                 round, block, ack, ..
@@ -623,7 +657,8 @@ where
                 self.cache
                     .put_verified(round, block.digest(), block.into())
                     .await;
-                ack.expect("durable ack present").send_lossy(());
+                self.cache_dirty = true;
+                self.pending_durable.push(ack.expect("durable ack present"));
             }
             Message::Certified {
                 round, block, ack, ..
@@ -637,7 +672,8 @@ where
                 self.cache
                     .put_block(round, block.digest(), block.into())
                     .await;
-                ack.expect("durable ack present").send_lossy(());
+                self.cache_dirty = true;
+                self.pending_durable.push(ack.expect("durable ack present"));
             }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();
@@ -648,6 +684,7 @@ where
                 self.cache
                     .put_notarization(round, digest, notarization)
                     .await;
+                self.cache_dirty = true;
 
                 // A notarization alone is not enough to fetch missing proposal
                 // data. If the block is not locally available, remember the
@@ -668,6 +705,7 @@ where
                 self.cache
                     .put_finalization(round, digest, finalization.clone())
                     .await;
+                self.cache_dirty = true;
 
                 // Search for the finalized block locally, otherwise fetch it remotely.
                 if let Some(block) = self.find_block_by_commitment(buffer, commitment).await {
@@ -1075,6 +1113,7 @@ where
         self.cache
             .put_finalization(round, digest, finalization.clone())
             .await;
+        self.cache_dirty = true;
 
         // A pending anchor at the same or a newer floor already blocks
         // progress. Keep waiting for it instead of replacing it.
@@ -1298,6 +1337,7 @@ where
                             self.cache
                                 .put_certified(bounds.epoch(), height, digest, block.into())
                                 .await;
+                            self.cache_dirty = true;
                         }
                     }
                     false
@@ -1533,6 +1573,7 @@ where
                     self.cache
                         .put_notarization(round, digest, notarization)
                         .await;
+                    self.cache_dirty = true;
 
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.
