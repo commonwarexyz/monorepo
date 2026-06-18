@@ -1,10 +1,9 @@
-use crate::bls12381::primitives::group::Scalar;
+use crate::bls12381::primitives::group::{Scalar, DST};
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 use blst::blst_fr;
 use bytes::{Buf, BufMut};
-use commonware_codec::{
-    Error::{self, Invalid},
-    FixedSize, Read, ReadExt, Write,
-};
+use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{msm_naive, Additive, Field, Multiplicative, Object, Ring, Space};
 use commonware_parallel::Strategy;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
@@ -321,14 +320,13 @@ impl FixedSize for G {
     const SIZE: usize = Scalar::SIZE;
 }
 
-impl Read for G {
-    type Cfg = ();
-
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let bytes = <[u8; 32]>::read(buf)?;
-        let x = Scalar::from_canonical_bytes(&bytes)
-            .ok_or(Invalid("Banderwagon", "x not a canonical field element"))?;
-
+impl G {
+    /// Recovers the group element whose serialization has abscissa `x`.
+    ///
+    /// Returns `None` if `x` is not the serialization of an element of the
+    /// subgroup we represent (i.e. it fails the subgroup check or lies off the
+    /// curve). This is the shared core of both [`Read`] and [`G::hash_to_curve`].
+    fn from_x(x: Scalar) -> Option<Self> {
         let one = Scalar::one();
         let x_sq = {
             let mut out = x.clone();
@@ -342,21 +340,76 @@ impl Read for G {
 
         // Subgroup check: `1 - a*x^2` must be a square (see notes above `struct G`).
         if !num.is_square() {
-            return Err(Invalid("Banderwagon", "point not in subgroup"));
+            return None;
         }
 
         // Recover `y` and pick the positive (largest) representative. `sqrt`
         // returning `None` means `x` is not a valid abscissa (point off-curve).
         let ratio = num * &den.inv();
-        let mut y = ratio
-            .sqrt()
-            .ok_or(Invalid("Banderwagon", "point not on curve"))?;
+        let mut y = ratio.sqrt()?;
         if !y.is_positive() {
             y = -y;
         }
 
         let t = x.clone() * &y;
-        Ok(Self { x, y, t, z: one })
+        Some(Self { x, y, t, z: one })
+    }
+
+    /// Hashes `(domain_separator, message)` to a Banderwagon point.
+    ///
+    /// Uses try-and-increment: for `counter = 0, 1, 2, ...` we derive a candidate
+    /// abscissa `x = H(domain_separator, message || counter)` and return the
+    /// first one that is a valid subgroup serialization. Because the
+    /// serialization is a bijection between group elements and valid abscissae,
+    /// and each candidate is an independent uniform field element, the result is
+    /// a uniformly random group element whose discrete log w.r.t. the generator
+    /// is unknown.
+    ///
+    /// We deliberately choose this over a constant-time map (e.g. Elligator-2 on
+    /// the Montgomery model of bandersnatch). Try-and-increment is *simpler* — it
+    /// reuses `from_x` and adds no new trusted constants or rational maps — at
+    /// the cost of *not being constant-time*: the number of attempts (~4 on
+    /// average, since roughly 1/4 of field elements are valid abscissae) depends
+    /// on the input.
+    ///
+    /// That tradeoff fits our use case. The intended caller is the Golden DKG
+    /// eVRF, where the hash inputs (public keys and messages) and outputs are
+    /// public and the secret scalar is only applied *afterwards* — so the
+    /// data-dependent timing reveals nothing secret. A future caller that hashes
+    /// secret material would instead need a constant-time map.
+    pub fn hash_to_curve(domain_separator: DST, message: &[u8]) -> Self {
+        // `message || counter`, with an 8-byte big-endian counter we overwrite
+        // in place each attempt.
+        let mut data = Vec::with_capacity(message.len() + 8);
+        data.extend_from_slice(message);
+        data.extend_from_slice(&[0u8; 8]);
+        let counter_at = message.len();
+
+        // The loop is unbounded for totality, but is expected to terminate
+        // quickly: each attempt succeeds with probability ~1/4, so the number of
+        // iterations is geometric with mean ~4 and an exponentially small tail.
+        let mut counter: u64 = 0;
+        loop {
+            data[counter_at..].copy_from_slice(&counter.to_be_bytes());
+            // `Scalar::map` is RFC 9380 hash-to-field, giving a uniform abscissa.
+            if let Some(p) = Self::from_x(Scalar::map(domain_separator, &data)) {
+                return p;
+            }
+            counter += 1;
+        }
+    }
+}
+
+impl Read for G {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let bytes = <[u8; 32]>::read(buf)?;
+        let x = Scalar::from_canonical_bytes(&bytes).ok_or(CodecError::Invalid(
+            "Banderwagon",
+            "x not a canonical field element",
+        ))?;
+        Self::from_x(x).ok_or(CodecError::Invalid("Banderwagon", "point not in subgroup"))
     }
 }
 
@@ -455,6 +508,37 @@ mod tests {
         let g = G::generator();
         let decoded = G::decode(g.encode()).unwrap();
         assert_eq!(decoded, g);
+    }
+
+    const TEST_DST: DST = b"COMMONWARE_BANDERWAGON_HASH_TO_CURVE_TEST";
+
+    #[test]
+    fn test_hash_to_curve_deterministic() {
+        // Same inputs always produce the same point; it round-trips through the
+        // codec (so it really is a valid subgroup element).
+        let p = G::hash_to_curve(TEST_DST, b"hello");
+        let q = G::hash_to_curve(TEST_DST, b"hello");
+        assert_eq!(p, q);
+        assert_eq!(G::decode(p.encode()).unwrap(), p);
+    }
+
+    #[test]
+    fn test_hash_to_curve_distinct_messages() {
+        // Different messages map to different points.
+        let p = G::hash_to_curve(TEST_DST, b"message-a");
+        let q = G::hash_to_curve(TEST_DST, b"message-b");
+        assert_ne!(p, q);
+    }
+
+    #[test]
+    fn test_hash_to_curve_in_subgroup() {
+        // Every output must pass the subgroup check, i.e. re-encode/decode.
+        minifuzz::test(|u| {
+            let msg: Vec<u8> = u.arbitrary()?;
+            let p = G::hash_to_curve(TEST_DST, &msg);
+            assert_eq!(G::decode(p.encode()).unwrap(), p);
+            Ok(())
+        });
     }
 
     #[test]
