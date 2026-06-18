@@ -15,7 +15,10 @@ use commonware_runtime::{
 };
 use commonware_utils::Array;
 use futures::{future::try_join_all, pin_mut, StreamExt};
-use std::collections::{btree_map, BTreeMap, BTreeSet};
+use std::{
+    collections::{btree_map, BTreeMap, BTreeSet},
+    future::Future,
+};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -151,6 +154,37 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
                 .into_iter()
                 .flat_map(|v| v.iter().copied()),
         )
+    }
+
+    /// Begin syncing all pending sections, returning a future that resolves once durability
+    /// completes.
+    ///
+    /// Unlike [`crate::archive::Archive::sync`], this returns without waiting for the fsyncs: each
+    /// section's buffers are flushed eagerly, then the durability barriers run in the background.
+    /// The caller can continue issuing `put`s while the returned future is pending.
+    ///
+    /// `pending` is cleared eagerly (snapshot ownership of this batch), so subsequent `put`s
+    /// accumulate into a fresh set. If a backgrounded sync fails, those sections are not re-synced
+    /// by a later `sync`; per this crate's contract, a sync failure is fatal and the caller must
+    /// stop using the archive (the error surfaces through the returned future).
+    pub async fn start_sync(
+        &mut self,
+    ) -> impl Future<Output = Result<(), Error>> + Send + use<T, E, K, V> {
+        // Collect pending sections and update metrics.
+        let pending: Vec<u64> = self.pending.iter().copied().collect();
+        self.syncs.inc_by(pending.len() as u64);
+
+        // Eagerly flush each section's buffers; the fsyncs run in the background.
+        let mut syncs = Vec::with_capacity(pending.len());
+        for section in &pending {
+            syncs.push(self.oversized.start_sync(*section).await);
+        }
+        self.pending.clear();
+
+        async move {
+            try_join_all(syncs).await?;
+            Ok(())
+        }
     }
 
     /// Initialize a new `Archive` instance.

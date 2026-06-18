@@ -311,6 +311,52 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_archive_start_sync_persistence() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.child("first"), cfg.clone())
+                .await
+                .expect("Failed to initialize archive");
+
+            // Put a key-data pair.
+            let index = 1u64;
+            let key = test_key("testkey");
+            let data = 42;
+            archive
+                .put(index, key.clone(), data)
+                .await
+                .expect("Failed to put data");
+
+            // Non-blocking sync: flush eagerly, then await the backgrounded durability barrier.
+            let handle = archive.start_sync().await;
+            handle.await.expect("start_sync failed");
+            drop(archive);
+
+            // Reopen and confirm the value survived.
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("second"), cfg)
+                .await
+                .expect("Failed to reinitialize archive");
+            let result = archive
+                .get(Identifier::Index(index))
+                .await
+                .expect("Failed to get");
+            assert_eq!(result, Some(data));
+        });
+    }
+
+    #[test_traced]
     fn test_archive_overlapping_key_basic() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
