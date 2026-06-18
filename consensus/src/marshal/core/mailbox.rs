@@ -849,7 +849,7 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// The message is enqueued synchronously (before this returns), so a subsequent
     /// [Self::forward] for the same block is ordered after it. This lets a leader broadcast
     /// the proposal digest immediately and await durability later (at certification),
-    /// overlapping the put_sync with the notarization round.
+    /// overlapping the put_sync with consensus voting.
     pub(crate) fn proposed_deferred(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Proposed {

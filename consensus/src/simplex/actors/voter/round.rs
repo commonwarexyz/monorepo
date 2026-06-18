@@ -141,10 +141,8 @@ impl<S: Scheme, D: Digest> Round<S, D> {
 
     /// Attempt to certify this round's proposal.
     ///
-    /// Returns the proposal along with whether the local participant previously
-    /// proposed it, in which case certification can be inferred once a
-    /// notarization exists.
-    pub fn try_certify(&mut self) -> Option<(Proposal<D>, bool)> {
+    /// Returns the proposal once a notarization exists for it.
+    pub fn try_certify(&mut self) -> Option<Proposal<D>> {
         let notarization = self.notarization.as_ref()?;
         match self.certify {
             CertifyState::Ready => {}
@@ -165,7 +163,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
             &proposal, &notarization.proposal,
             "slot proposal must match notarization proposal"
         );
-        Some((proposal, self.proposal.is_local()))
+        Some(proposal)
     }
 
     /// Sets the handle for the certification request.
@@ -524,7 +522,7 @@ impl<S: Scheme, D: Digest> Round<S, D> {
         // This check prevents us from voting for a proposal if we have observed equivocation (where
         // the proposal would be set to ProposalStatus::Equivocated) or if verification hasn't
         // completed yet.
-        if !matches!(self.proposal.status(), ProposalStatus::Verified(_)) {
+        if !matches!(self.proposal.status(), ProposalStatus::Verified) {
             return None;
         }
 
@@ -957,7 +955,7 @@ mod tests {
 
         // Proposal should be restored as verified (we are the leader).
         assert_eq!(round.proposal.proposal(), Some(&proposal));
-        assert_eq!(round.proposal.status(), ProposalStatus::Verified(true));
+        assert_eq!(round.proposal.status(), ProposalStatus::Verified);
         assert!(round.broadcast_notarize);
 
         // No verification request should be emitted.
@@ -977,12 +975,8 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(
-            is_local,
-            "local notarize replay should restore local certification"
-        );
     }
 
     #[test]
@@ -1059,10 +1053,9 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed, but not via the local shortcut.
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        // First try_certify should succeed.
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(!is_local);
 
         // Set a certify handle then mark as certified
         let mut pool = AbortablePool::<()>::default();
@@ -1102,12 +1095,8 @@ mod tests {
         assert!(added);
         assert!(equivocator.is_none());
 
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(
-            is_local,
-            "locally proposed payload should carry local certify permission"
-        );
     }
 
     #[test]
@@ -1139,10 +1128,9 @@ mod tests {
         let (added, _) = round.add_notarization(notarization);
         assert!(added);
 
-        // First try_certify should succeed, but not via the local shortcut.
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        // First try_certify should succeed.
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(!is_local);
 
         // Set a certify handle (simulating in-flight certification)
         let mut pool = AbortablePool::<()>::default();
@@ -1226,11 +1214,8 @@ mod tests {
         assert!(added);
 
         // Has notarization and proposal came from certificate.
-        // Certification should go through the automaton because the proposal was
-        // not built locally.
-        let (candidate, is_local) = round.try_certify().expect("certify candidate");
+        let candidate = round.try_certify().expect("certify candidate");
         assert_eq!(candidate, proposal);
-        assert!(!is_local);
     }
 
     #[test]

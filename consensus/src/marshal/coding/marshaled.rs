@@ -446,6 +446,7 @@ where
                         parent_view = parent_view.traced(),
                         parent = %parent_commitment
                     ));
+
                 // If consensus drops the receiver, we can stop work early.
                 let verify = async {
                     let timer = verify_duration.timer(&runtime_context);
@@ -464,6 +465,8 @@ where
                 };
                 let (verdict, durable) = futures::join!(verify, store);
 
+                // Accept the block only when it is both valid and durable; otherwise
+                // vote `false` (rejected) or drop the task (early exit / store failure).
                 let Some(application_valid) = verdict else {
                     return;
                 };
@@ -698,7 +701,7 @@ where
     /// The proposal operation is spawned in a background task and returns a receiver that will
     /// contain the proposed block's commitment when ready. The block's persistence is started
     /// before the commitment is delivered but awaited only at certification, so its put_sync
-    /// overlaps the notarization round. The commitment does not imply durability on its own;
+    /// overlaps consensus voting. The commitment does not imply durability on its own;
     /// [`CertifiableAutomaton::certify`] awaits the registered durability task before the
     /// finalize vote.
     #[allow(clippy::async_yields_async)]
@@ -828,11 +831,12 @@ where
                 if parent.height() == last_in_epoch {
                     let commitment = parent.commitment();
                     let round = consensus_context.round;
+
                     // Enqueue the persist before broadcasting the commitment (so a later
                     // `forward` is ordered after it), but await the put_sync only at
-                    // certify so it overlaps the notarization round. `certify` awaits
-                    // this task (the leader certifies its own proposal once `is_local`
-                    // is gone) before the finalize vote, establishing durability.
+                    // certify so it overlaps consensus voting. The leader certifies its
+                    // own proposal, so `certify` awaits this task before the finalize
+                    // vote, establishing durability.
                     let (durable_tx, durable_rx) = oneshot::channel();
                     verification_tasks.insert(round, commitment, durable_rx);
                     let verified_rx = marshal.verified_deferred(round, parent);
@@ -895,11 +899,12 @@ where
 
                 let commitment = coded_block.commitment();
                 let round = consensus_context.round;
+
                 // Enqueue the persist before broadcasting the commitment (so a later
                 // `forward` is ordered after it), but await the put_sync only at certify
-                // so it overlaps the notarization round. `certify` awaits this task (the
-                // leader certifies its own proposal once `is_local` is gone) before the
-                // finalize vote, establishing durability.
+                // so it overlaps consensus voting. The leader certifies its own proposal,
+                // so `certify` awaits this task before the finalize vote, establishing
+                // durability.
                 let (durable_tx, durable_rx) = oneshot::channel();
                 verification_tasks.insert(round, commitment, durable_rx);
                 let proposed_rx = marshal.proposed_deferred(round, coded_block);

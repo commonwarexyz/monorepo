@@ -113,12 +113,11 @@ where
 
 /// Outcome of fetching the parent and validating structural ancestry invariants.
 pub(super) enum ParentCheck<B> {
-    /// Structurally valid; proceed to application verification. Carries the block and its
-    /// fetched parent.
-    Valid { block: B, parent: B },
+    /// Structurally valid; carries the fetched parent for application verification.
+    Valid(B),
     /// Structurally invalid (bad parent linkage or non-contiguous height); the verdict is
     /// `false` and the block must not be stored.
-    Invalid(B),
+    Invalid,
 }
 
 /// Fetches the expected parent and validates standard ancestry invariants (parent linkage
@@ -128,7 +127,7 @@ pub(super) enum ParentCheck<B> {
 #[inline]
 pub(super) async fn fetch_and_validate_parent<S, B>(
     context: &Context<B::Digest, S::PublicKey>,
-    block: B,
+    block: &B,
     marshal: &Mailbox<S, Standard<B>>,
     tx: &mut oneshot::Sender<bool>,
 ) -> Option<ParentCheck<B>>
@@ -166,7 +165,7 @@ where
     };
 
     // Validate parent linkage and contiguous child height before application logic.
-    if let Err(err) = validate_block(&block, &parent, parent_commitment) {
+    if let Err(err) = validate_block(block, &parent, parent_commitment) {
         debug!(
             ?err,
             expected_parent = %parent.digest(),
@@ -175,10 +174,10 @@ where
             block_height = %block.height(),
             "block failed standard invariant validation"
         );
-        return Some(ParentCheck::Invalid(block));
+        return Some(ParentCheck::Invalid);
     }
 
-    Some(ParentCheck::Valid { block, parent })
+    Some(ParentCheck::Valid(parent))
 }
 
 /// Runs application verification over the two-block ancestry prefix.

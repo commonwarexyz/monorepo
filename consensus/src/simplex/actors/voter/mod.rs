@@ -5746,10 +5746,8 @@ mod tests {
                 }
             }
 
-            // Assert the `is_local=false` invariant: the certify callback
-            // fired for the leader-owned view. Without the fix under test,
-            // a `leader == me`-only shortcut would skip the call and this
-            // assertion would fail.
+            // The certify callback must fire for the leader-owned view: the voter
+            // certifies its own proposals through the automaton.
             let certified = certify_calls.lock();
             assert!(
                 certified.contains(&target_view),

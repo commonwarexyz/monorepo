@@ -1054,7 +1054,7 @@ impl<
                 // Even our own proposals are certified through the automaton: that
                 // is the durability barrier that makes a block recoverable before
                 // we cast a finalize vote for it.
-                for (proposal, _is_local) in self.state.certify_candidates() {
+                for proposal in self.state.certify_candidates() {
                     let round = proposal.round;
                     let view = round.view();
                     debug!(%view, "attempting certification");
