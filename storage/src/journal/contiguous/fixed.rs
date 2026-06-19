@@ -109,7 +109,7 @@
 //! The `replay` method supports fast reading of all unpruned items into memory.
 
 use super::{
-    blobs::{Blobs, Handle, Partition, Snapshot},
+    blobs::{Blobs, Handle, Partition, Publisher, Snapshot},
     checkpoint::Checkpoint,
     replay::{self, Source as _},
 };
@@ -122,7 +122,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{self, CacheRef, Replay, Writer},
+    buffer::paged::{self, CacheRef, Replay, Writer as PagedWriter},
     Blob, Buf, IoBuf,
 };
 use futures::{
@@ -228,6 +228,27 @@ pub struct Journal<E: Context, A> {
     /// Shared with [Reader]s.
     metrics: Arc<Metrics<E>>,
 
+    _phantom: PhantomData<A>,
+}
+
+/// Append/prune side of a split fixed-size journal.
+///
+/// Destructive repair operations such as rewind, clear, and destroy remain available only on the
+/// unsplit [Journal].
+pub struct Writer<E: Context, A> {
+    journal: Journal<E, A>,
+    published: Publisher<Snapshot<E::Blob>>,
+}
+
+/// Reader factory for a split fixed-size journal.
+///
+/// Cloning the latest published snapshot does not borrow the writer, so readers can be created
+/// while the writer is appending. They observe either the previous complete snapshot or a later
+/// published one, never a partial append.
+pub struct Readers<E: Context, A> {
+    published: Publisher<Snapshot<E::Blob>>,
+    items_per_blob: NonZeroU64,
+    metrics: Arc<Metrics<E>>,
     _phantom: PhantomData<A>,
 }
 
@@ -432,7 +453,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// blob state or a watermark beyond the recovered size is corruption. The caller persists the
     /// checkpoint before applying the returned repair (see comment at the call site).
     async fn recover_bounds(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, PagedWriter<E::Blob>>,
         items_per_blob: u64,
         boundary_hint: Option<u64>,
         watermark_hint: Option<u64>,
@@ -532,7 +553,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// Classify a blob's untrusted on-disk length against its capacity. A missing blob counts
     /// as zero length, surfacing as a gap.
     async fn classify_fill(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, PagedWriter<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
         blob: u64,
@@ -562,7 +583,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// lengths are untrusted disk state. The returned size is chunk-exact and the retained
     /// prefix is contiguous.
     async fn recover_by_walking_lengths(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, PagedWriter<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
     ) -> Result<(u64, Option<u64>), Error> {
@@ -725,11 +746,31 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// init-time repairs and rewinds may truncate blobs in place under them.
     pub fn reader(&self) -> Reader<E, A> {
         Reader {
-            snapshot: self.blobs.to_snapshot(self.bounds.clone()),
+            snapshot: Arc::new(self.blobs.to_snapshot(self.bounds.clone())),
             items_per_blob: self.items_per_blob,
             metrics: self.metrics.clone(),
             _phantom: PhantomData,
         }
+    }
+
+    /// Split the journal into an append/prune writer and an independent reader factory.
+    ///
+    /// After splitting, the writer no longer exposes rewind or reset operations. Readers clone the
+    /// latest complete snapshot published by the writer and can be created while a write future
+    /// holds `&mut Writer`.
+    pub fn split(self) -> (Writer<E, A>, Readers<E, A>) {
+        let published = Publisher::new(self.blobs.to_snapshot(self.bounds.clone()));
+        let readers = Readers {
+            published: published.clone(),
+            items_per_blob: self.items_per_blob,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        };
+        let writer = Writer {
+            journal: self,
+            published,
+        };
+        (writer, readers)
     }
 
     /// Return the recovery watermark.
@@ -1027,14 +1068,111 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     }
 }
 
+impl<E: Context, A: CodecFixedShared> Writer<E, A> {
+    /// Publish the journal's latest complete snapshot.
+    fn publish(&self) {
+        self.published
+            .publish(self.journal.blobs.to_snapshot(self.journal.bounds.clone()));
+    }
+
+    /// Return the total number of items in the journal, irrespective of pruning.
+    pub const fn size(&self) -> u64 {
+        self.journal.size()
+    }
+
+    /// Return the location before which all items have been pruned.
+    pub const fn pruning_boundary(&self) -> u64 {
+        self.journal.pruning_boundary()
+    }
+
+    /// Append a new item to the journal.
+    pub async fn append(&mut self, item: &A) -> Result<u64, Error> {
+        let position = self.journal.append(item).await?;
+        self.publish();
+        Ok(position)
+    }
+
+    /// Append items to the journal, returning the position of the last item appended.
+    pub async fn append_many<'a>(&'a mut self, items: Many<'a, A>) -> Result<u64, Error> {
+        let position = self.journal.append_many(items).await?;
+        self.publish();
+        Ok(position)
+    }
+
+    /// Encode `items` into a buffer that can be appended later with [Self::append_prepared].
+    pub fn prepare_append(&self, items: Many<'_, A>) -> PreparedAppend<A> {
+        self.journal.prepare_append(items)
+    }
+
+    /// Append items encoded by [Self::prepare_append].
+    pub async fn append_prepared(&mut self, prepared: PreparedAppend<A>) -> Result<u64, Error> {
+        let position = self.journal.append_prepared(prepared).await?;
+        self.publish();
+        Ok(position)
+    }
+
+    /// Prune items older than `min_item_pos`.
+    pub async fn prune(&mut self, min_item_pos: u64) -> Result<bool, Error> {
+        let pruned = self.journal.prune(min_item_pos).await?;
+        if pruned {
+            self.publish();
+        }
+        Ok(pruned)
+    }
+
+    /// Durably persists the current state of the structure.
+    pub async fn commit(&mut self) -> Result<(), Error> {
+        self.journal.commit().await
+    }
+
+    /// Durably persist the current state of the structure.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.journal.sync().await
+    }
+}
+
+impl<E: Context, A: CodecFixedShared> Readers<E, A> {
+    /// Return an owned snapshot of the latest published journal state.
+    pub fn reader(&self) -> Reader<E, A> {
+        Reader {
+            snapshot: self.published.get(),
+            items_per_blob: self.items_per_blob,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<E: Context, A> Clone for Readers<E, A> {
+    fn clone(&self) -> Self {
+        Self {
+            published: self.published.clone(),
+            items_per_blob: self.items_per_blob,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// An owned snapshot of the journal. Bounds are frozen at creation and every position within
 /// `bounds()` remains readable, including across a concurrent prune. A rewind into the snapshot's
 /// range is refused ([Error::BlobInUse]) while it is alive, so its bytes never change underneath it.
 pub struct Reader<E: Context, A> {
-    snapshot: Snapshot<E::Blob>,
+    snapshot: Arc<Snapshot<E::Blob>>,
     items_per_blob: NonZeroU64,
     metrics: Arc<Metrics<E>>,
     _phantom: PhantomData<A>,
+}
+
+impl<E: Context, A> Clone for Reader<E, A> {
+    fn clone(&self) -> Self {
+        Self {
+            snapshot: self.snapshot.clone(),
+            items_per_blob: self.items_per_blob,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<E: Context, A: CodecFixedShared> Reader<E, A> {
@@ -1422,7 +1560,7 @@ mod tests {
     use commonware_cryptography::{sha256::Digest, Hasher as _, Sha256};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::Writer,
+        buffer::paged::Writer as PagedWriter,
         deterministic::{self, Context},
         Blob, BufferPooler, Error as RuntimeError, Metrics as _, Runner, Spawner as _, Storage,
         Supervisor as _,
@@ -1450,6 +1588,33 @@ mod tests {
 
     fn blob_partition(cfg: &Config) -> String {
         format!("{}-blobs", cfg.partition)
+    }
+
+    #[test_traced]
+    fn test_fixed_split_reader_while_append_future_exists() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = test_cfg(&context, NZU64!(2));
+            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
+                .await
+                .unwrap();
+            let (mut writer, readers) = journal.split();
+
+            let append = writer.append(&7);
+            let old_reader = readers.reader();
+            assert_eq!(old_reader.bounds(), 0..0);
+
+            assert_eq!(append.await.unwrap(), 0);
+            assert_eq!(writer.size(), 1);
+
+            assert!(matches!(
+                old_reader.read(0).await,
+                Err(Error::ItemOutOfRange(0))
+            ));
+            let new_reader = readers.reader();
+            assert_eq!(new_reader.bounds(), 0..1);
+            assert_eq!(new_reader.read(0).await.unwrap(), 7);
+        });
     }
 
     impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
@@ -2080,7 +2245,7 @@ mod tests {
                     .open(&blob_partition(&cfg), &1u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 1");
-                let append = Writer::new(blob, blob_size, 2048, cache_ref)
+                let append = PagedWriter::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 1");
                 append
@@ -2196,7 +2361,7 @@ mod tests {
                 .open(&blob_partition, &u64::MAX.to_be_bytes())
                 .await
                 .unwrap();
-            let append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
+            let append = PagedWriter::new(blob, blob_size, 2048, cache_ref).await.unwrap();
             let extra = test_digest(999);
             append.append(extra.as_ref()).await.unwrap();
             append.sync().await.unwrap();
@@ -2309,7 +2474,7 @@ mod tests {
                     .open(&blob_partition(&cfg), &2u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 2");
-                let append = Writer::new(blob, blob_size, 2048, cache_ref)
+                let append = PagedWriter::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 2");
                 append
@@ -2650,7 +2815,7 @@ mod tests {
                     .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 0");
-                let append = Writer::new(blob, blob_size, 2048, cache_ref)
+                let append = PagedWriter::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 0");
                 append

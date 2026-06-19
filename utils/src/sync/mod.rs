@@ -6,6 +6,9 @@
 //! - [Mutex]
 //! - [RwLock]
 //!
+//! Use [ArcSwap] for read-mostly published `Arc` state, where readers need a stable owned
+//! snapshot and writers replace whole versions.
+//!
 //! Use async locks only when you must hold a lock guard across an `.await` point:
 //! - [AsyncMutex]
 //! - [AsyncRwLock]
@@ -24,6 +27,7 @@
 //! possible because long-held guards increase contention and deadlock risk.
 
 use core::ops::{Deref, DerefMut};
+pub use arc_swap::{ArcSwap, ArcSwapAny, ArcSwapOption, Guard};
 pub use parking_lot::{
     Condvar, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };

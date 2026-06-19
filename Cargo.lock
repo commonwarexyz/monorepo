@@ -2071,6 +2071,7 @@ version = "2026.5.0"
 dependencies = [
  "ahash",
  "arbitrary",
+ "arc-swap",
  "bytes",
  "cfg-if",
  "commonware-codec",
