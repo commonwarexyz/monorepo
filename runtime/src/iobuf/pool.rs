@@ -51,7 +51,7 @@
 
 use super::{freelist::Freelist, page_size, IoBufMut};
 use crate::{
-    iobuf::buffer::{pooled_layout, PooledBuffer},
+    iobuf::owner::{pooled_layout, PooledBuffer},
     telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::{NZUsize, NZU32};

@@ -114,7 +114,7 @@
 //! ownership discipline: a slot is either owned by a pooled backing, parked in a
 //! thread-local cache, or available in this freelist. Only the thread that owns
 //! a slot outside the freelist may mutate that slot's side-table entry.
-use super::buffer::{PooledBuffer, PooledSlot};
+use super::owner::{PooledBuffer, PooledSlot};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
