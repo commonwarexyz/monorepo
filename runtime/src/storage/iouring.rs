@@ -387,7 +387,16 @@ impl crate::Blob for Blob {
         self.io_handle
             .sync(self.file.clone())
             .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+            .map_err(|err| match err {
+                Error::SyncFailed(e) => {
+                    Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e)
+                }
+                err => err,
+            })
+    }
+
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        self.io_handle.start_sync(self.file.clone()).await
     }
 
     fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {

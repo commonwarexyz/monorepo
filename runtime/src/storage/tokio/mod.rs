@@ -8,6 +8,7 @@ use std::{ops::RangeInclusive, path::PathBuf, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncWriteExt},
+    runtime::Handle,
     sync::Mutex,
 };
 
@@ -57,14 +58,16 @@ pub struct Storage {
     lock: Arc<Mutex<()>>,
     cfg: Config,
     pool: BufferPool,
+    handle: Handle,
 }
 
 impl Storage {
-    pub fn new(cfg: Config, pool: BufferPool) -> Self {
+    pub fn new(cfg: Config, pool: BufferPool, handle: Handle) -> Self {
         Self {
             lock: Arc::new(Mutex::new(())),
             cfg,
             pool,
+            handle,
         }
     }
 }
@@ -171,7 +174,13 @@ impl crate::Storage for Storage {
 
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
+                Self::Blob::new(
+                    partition.into(),
+                    name,
+                    file,
+                    self.pool.clone(),
+                    self.handle.clone(),
+                ),
                 logical_size,
                 blob_version,
             ))
@@ -180,7 +189,13 @@ impl crate::Storage for Storage {
         {
             // Construct the blob
             Ok((
-                Self::Blob::new(partition.into(), name, file, self.pool.clone()),
+                Self::Blob::new(
+                    partition.into(),
+                    name,
+                    file,
+                    self.pool.clone(),
+                    self.handle.clone(),
+                ),
                 logical_size,
                 blob_version,
             ))
@@ -273,7 +288,7 @@ mod tests {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory = env::temp_dir().join(format!("storage_tokio_{}", rng.gen::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
-        let storage = Storage::new(config, test_pool());
+        let storage = Storage::new(config, test_pool(), Handle::current());
         run_storage_tests(storage).await;
     }
 
@@ -285,17 +300,18 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.gen::<u64>()));
         let config = Config::new(storage_directory, 2 * 1024 * 1024);
-        let storage = Storage::new(config, test_pool());
+        let storage = Storage::new(config, test_pool(), Handle::current());
 
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
         blob.write_at(0, b"hello world").await.unwrap();
 
         // Drop the receiver immediately; the spawned sync task must tolerate the
         // closed channel without panicking.
-        drop(blob.start_sync());
+        drop(blob.start_sync().await);
 
         // The handle is still usable, and a subsequent sync persists the data.
         blob.start_sync()
+            .await
             .await
             .expect("sync sender dropped")
             .unwrap();
@@ -313,7 +329,7 @@ mod tests {
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_header_{}", rng.gen::<u64>()));
         let config = Config::new(storage_directory.clone(), 2 * 1024 * 1024);
-        let storage = Storage::new(config, test_pool());
+        let storage = Storage::new(config, test_pool(), Handle::current());
 
         // Test 1: New blob returns logical size 0 and correct app version
         let (blob, size) = storage.open("partition", b"test").await.unwrap();
@@ -415,6 +431,7 @@ mod tests {
                 maximum_buffer_size: 1024 * 1024,
             },
             test_pool(),
+            Handle::current(),
         );
 
         // Create the partition directory and a file with invalid magic bytes
@@ -451,6 +468,7 @@ mod tests {
                     maximum_buffer_size: 1024 * 1024,
                 },
                 test_pool(),
+                Handle::current(),
             );
 
             let partition_path = storage_directory.join("partition");

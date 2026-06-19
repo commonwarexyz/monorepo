@@ -9,7 +9,7 @@ use std::{
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::Arc,
 };
-use tokio::task;
+use tokio::{runtime::Handle, task};
 
 // Cap iovec batch size: larger iovecs reduce syscall count but increase
 // per-write kernel setup overhead.
@@ -21,15 +21,23 @@ pub struct Blob {
     name: Vec<u8>,
     file: Arc<File>,
     pool: BufferPool,
+    handle: Handle,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: File, pool: BufferPool) -> Self {
+    pub fn new(
+        partition: String,
+        name: &[u8],
+        file: File,
+        pool: BufferPool,
+        handle: Handle,
+    ) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(file),
             pool,
+            handle,
         }
     }
 
@@ -212,10 +220,10 @@ impl crate::Blob for Blob {
         Ok(())
     }
 
-    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         let this = self.clone();
-        task::spawn(async move {
+        self.handle.spawn(async move {
             let _ = tx.send(this.sync().await);
         });
         rx

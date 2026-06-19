@@ -899,6 +899,7 @@ pub(crate) mod tests {
         blob.write_at(0, b"hello world").await.unwrap();
         blob.start_sync()
             .await
+            .await
             .expect("sync sender dropped")
             .unwrap();
         drop(blob);

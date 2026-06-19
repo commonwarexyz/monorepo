@@ -318,7 +318,7 @@ impl<B: Blob> Write<B> {
         }
         let blob = state.blob.clone();
         drop(state);
-        blob.start_sync()
+        blob.start_sync().await
     }
 }
 

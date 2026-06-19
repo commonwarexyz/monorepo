@@ -1267,7 +1267,7 @@ impl<B: Blob> Append<B> {
         }
         let blob = blob_state.blob.clone();
         drop(blob_state);
-        blob.start_sync()
+        blob.start_sync().await
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -2753,8 +2753,8 @@ mod tests {
             self.inner.sync().await
         }
 
-        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
-            self.inner.start_sync()
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            self.inner.start_sync().await
         }
     }
 

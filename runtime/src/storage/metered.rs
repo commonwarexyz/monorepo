@@ -225,9 +225,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
-    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
         self.metrics.storage_syncs.inc();
-        self.inner.start_sync()
+        self.inner.start_sync().await
     }
 }
 
@@ -373,6 +373,7 @@ mod tests {
         blob.write_at(0, b"hello world").await.unwrap();
 
         blob.start_sync()
+            .await
             .await
             .expect("sync sender dropped")
             .unwrap();
