@@ -1852,6 +1852,11 @@ mod tests {
         }
     }
 
+    /// Crash-recovery shape: after an unclean shutdown, Simplex may recover a
+    /// notarized payload while marshal has no local verification task and no
+    /// durable block. If another participant has the block, certification should
+    /// fetch it by notarized round and persist it instead of treating the missing
+    /// local copy as a hard failure.
     #[test_traced("WARN")]
     fn test_standard_certify_missing_candidate_fetches_by_round() {
         for kind in wrapper_kinds() {

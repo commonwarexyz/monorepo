@@ -11,7 +11,7 @@ use commonware_runtime::{
         Write,
     },
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Blob, BufferPool, Error as RError, Metrics, Storage,
+    Blob, BufferPool, Error as RError, Handle, Metrics, Storage,
 };
 use futures::future::try_join_all;
 use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
@@ -24,6 +24,9 @@ pub trait SectionBuffer: Clone + Send + Sync {
 
     /// Ensure all pending data is durably persisted.
     fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Start syncing all pending data.
+    fn start_sync(&self) -> impl Future<Output = Result<Handle<()>, RError>> + Send;
 
     /// Resize the logical size of the buffer.
     fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
@@ -38,6 +41,10 @@ impl<B: Blob> SectionBuffer for Append<B> {
         Self::sync(self).await
     }
 
+    async fn start_sync(&self) -> Result<Handle<()>, RError> {
+        Self::start_sync(self).await
+    }
+
     async fn resize(&self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
     }
@@ -50,6 +57,10 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn sync(&self) -> Result<(), RError> {
         Self::sync(self).await
+    }
+
+    async fn start_sync(&self) -> Result<Handle<()>, RError> {
+        Self::start_sync(self).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), RError> {
@@ -223,6 +234,16 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             blob.sync().await.map_err(Error::Runtime)?;
         }
         Ok(())
+    }
+
+    /// Start syncing the given section to storage.
+    pub async fn start_sync(&self, section: u64) -> Result<Handle<()>, Error> {
+        self.prune_guard(section)?;
+        if let Some(blob) = self.blobs.get(&section) {
+            self.synced.inc();
+            return blob.start_sync().await.map_err(Error::Runtime);
+        }
+        Ok(Handle::ready(Ok(())))
     }
 
     /// Sync all sections to storage.

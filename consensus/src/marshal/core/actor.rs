@@ -600,7 +600,8 @@ where
                 // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache
+                let handle = self
+                    .cache
                     .put_verified(round, block.digest(), block.clone().into())
                     .await;
 
@@ -609,7 +610,7 @@ where
                 // proposal (if any) is overwritten.
                 let commitment = V::commitment(&block);
                 self.last_proposed_block = Some((round, commitment, block));
-                ack.expect("durable ack present").send_lossy(());
+                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Verified {
                 round, block, ack, ..
@@ -620,10 +621,11 @@ where
                 // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache
+                let handle = self
+                    .cache
                     .put_verified(round, block.digest(), block.into())
                     .await;
-                ack.expect("durable ack present").send_lossy(());
+                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Certified {
                 round, block, ack, ..
@@ -634,10 +636,11 @@ where
                 // `put_block` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                self.cache
-                    .put_block(round, block.digest(), block.into())
+                let handle = self
+                    .cache
+                    .put_block_start_sync(round, block.digest(), block.into())
                     .await;
-                ack.expect("durable ack present").send_lossy(());
+                ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Notarization { notarization, .. } => {
                 let round = notarization.round();

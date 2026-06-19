@@ -11,10 +11,13 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{
+    future::{join_all, try_join_all},
+    pin_mut, StreamExt,
+};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -401,6 +404,48 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
+
+    /// Store an item and start syncing pending writes.
+    pub async fn put_start_sync(
+        &mut self,
+        index: u64,
+        key: K,
+        data: V,
+    ) -> Result<Handle<()>, Error> {
+        self.put_internal(index, key, data, true).await?;
+        self.start_sync().await
+    }
+
+    /// Store an item with multi-index semantics and start syncing pending writes.
+    pub async fn put_multi_start_sync(
+        &mut self,
+        index: u64,
+        key: K,
+        data: V,
+    ) -> Result<Handle<()>, Error> {
+        self.put_internal(index, key, data, false).await?;
+        self.start_sync().await
+    }
+
+    /// Start syncing all pending writes.
+    pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        let pending: Vec<u64> = self.pending.iter().copied().collect();
+        self.syncs.inc_by(pending.len() as u64);
+
+        let syncs = pending.iter().map(|s| self.oversized.start_sync(*s));
+        let handles = try_join_all(syncs).await?;
+        self.pending.clear();
+
+        if handles.is_empty() {
+            return Ok(Handle::ready(Ok(())));
+        }
+        Ok(Handle::from_future(async move {
+            for result in join_all(handles).await {
+                result?;
+            }
+            Ok(())
+        }))
+    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -429,15 +474,8 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // Collect pending sections and update metrics
-        let pending: Vec<u64> = self.pending.iter().copied().collect();
-        self.syncs.inc_by(pending.len() as u64);
-
-        // Sync oversized journal (handles both index and values)
-        let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
-        try_join_all(syncs).await?;
-
-        self.pending.clear();
+        let handle = self.start_sync().await?;
+        handle.await.map_err(crate::journal::Error::from)?;
         Ok(())
     }
 

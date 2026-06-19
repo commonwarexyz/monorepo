@@ -229,8 +229,8 @@ where
     /// Proposes a new block or re-proposes an epoch boundary block.
     ///
     /// Proposal runs in a spawned task and returns a receiver for the resulting digest. The
-    /// block's persistence is started before the digest is delivered but awaited only at
-    /// certification, so its put_sync overlaps consensus voting. The digest does not
+    /// block's durable sync is started before the digest is delivered but awaited only at
+    /// certification, so it overlaps consensus voting. The digest does not
     /// imply durability on its own; [`CertifiableAutomaton::certify`] awaits the registered
     /// durability task before the finalize vote.
     #[allow(clippy::async_yields_async)]
@@ -326,7 +326,7 @@ where
                     let digest = parent.digest();
 
                     // Enqueue the persist before broadcasting the digest (so a later
-                    // `forward` is ordered after it), but await the put_sync only at
+                    // `forward` is ordered after it), but await the sync handle only at
                     // certify so it overlaps consensus voting. The leader certifies its
                     // own proposal, so `certify` awaits this task before the finalize
                     // vote, establishing durability.
@@ -334,7 +334,10 @@ where
                     verification_tasks.insert(consensus_context.round, digest, durable_rx);
                     let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
                     let success = tx.send_lossy(digest);
-                    let durable = verified_rx.await.is_ok();
+                    let durable = match verified_rx.await {
+                        Ok(handle) => handle.await.is_ok(),
+                        Err(_) => false,
+                    };
                     durable_tx.send_lossy(durable);
                     debug!(
                         round = ?consensus_context.round,
@@ -389,7 +392,7 @@ where
                 let digest = built_block.digest();
 
                 // Enqueue the persist before broadcasting the digest (so a later
-                // `forward` is ordered after it), but await the put_sync only at certify
+                // `forward` is ordered after it), but await the sync handle only at certify
                 // so it overlaps consensus voting. The leader certifies its own proposal,
                 // so `certify` awaits this task before the finalize vote, establishing
                 // durability.
@@ -397,7 +400,10 @@ where
                 verification_tasks.insert(consensus_context.round, digest, durable_rx);
                 let proposed_rx = marshal.proposed_deferred(consensus_context.round, built_block);
                 let success = tx.send_lossy(digest);
-                let durable = proposed_rx.await.is_ok();
+                let durable = match proposed_rx.await {
+                    Ok(handle) => handle.await.is_ok(),
+                    Err(_) => false,
+                };
                 durable_tx.send_lossy(durable);
                 debug!(
                     round = ?consensus_context.round,
@@ -421,7 +427,7 @@ where
     /// 4. Runs application verification over ancestry
     ///
     /// The notarize vote is cast as soon as application verification completes. The block's
-    /// put_sync is deferred (it runs concurrently with consensus voting) and its
+    /// durable sync is deferred (it runs concurrently with consensus voting) and its
     /// completion is registered in `verification_tasks` for [`Self::certify`] to await before
     /// the finalize vote.
     #[allow(clippy::async_yields_async)]
@@ -432,7 +438,7 @@ where
         digest: Self::Digest,
     ) -> oneshot::Receiver<bool> {
         // Register the durability task synchronously so `certify` always finds it, even
-        // while the block subscription / put_sync is still in flight. A `true` result means
+        // while the block subscription / durable sync is still in flight. A `true` result means
         // the block is durably persisted; a dropped sender (early exit) or `false` sends
         // certify to its fetch-and-persist path.
         let round = context.round;
@@ -504,7 +510,7 @@ where
                 // Run application verification and the durable store concurrently. The
                 // notarize vote is cast as soon as app verification completes (it does
                 // not wait on the store); certify awaits the store via the registered
-                // durability task. The put_sync is enqueued as soon as the join starts,
+                // durability task. The sync handle is requested as soon as the join starts,
                 // so it overlaps app verification and consensus voting.
                 let store_block = block.clone();
                 let store_marshal = marshal.clone();
@@ -550,8 +556,8 @@ where
     #[tracing::instrument(name = "marshal.inline.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         // `propose`/`verify` register an in-flight durability task whose result resolves
-        // once the block's put_sync completes. Awaiting it here is the durability barrier
-        // for the finalize vote, and it lets the put_sync overlap consensus voting
+        // once the block's sync handle completes. Awaiting it here is the durability barrier
+        // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
         let task = self.verification_tasks.take(round, digest);
         let marshal = self.marshal.clone();
@@ -1034,7 +1040,7 @@ mod tests {
         });
     }
 
-    /// Regression: in inline mode `propose` defers the built block's put_sync (it
+    /// Regression: in inline mode `propose` defers the built block's sync handle (it
     /// runs concurrently with consensus voting) and registers a durability task that
     /// `certify` awaits. After the leader certifies its own proposal, the block must be
     /// durably recoverable. This is the >=f+1 guarantee: the leader certifies its own
@@ -1107,7 +1113,7 @@ mod tests {
                 "propose must return the built block's digest"
             );
 
-            // The leader certifies its own proposal, which awaits the deferred put_sync.
+            // The leader certifies its own proposal, which awaits the deferred sync handle.
             assert!(
                 inline
                     .certify(round, child_digest)
@@ -1144,7 +1150,7 @@ mod tests {
     /// vote: while the gated application verification is still blocked, the block is
     /// already persisted (so it is queryable / recoverable). Releasing verification then
     /// lets the notarize vote resolve and certification succeed. This is the parallel-store
-    /// optimization that keeps the put_sync off the verify and certify critical paths.
+    /// optimization that keeps the durable sync off the verify and certify critical paths.
     #[test_traced("WARN")]
     fn test_inline_store_overlaps_app_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));

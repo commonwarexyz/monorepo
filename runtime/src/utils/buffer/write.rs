@@ -1,4 +1,4 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, IoBufs};
+use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs};
 use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -68,6 +68,16 @@ impl<B: Blob> State<B> {
         self.blob.sync().await?;
         self.needs_sync = false;
         Ok(())
+    }
+
+    /// Start syncing the underlying blob if there are unsynced mutations.
+    async fn start_sync(&mut self) -> Handle<()> {
+        if !self.needs_sync {
+            return Handle::ready(Ok(()));
+        }
+        let handle = self.blob.start_sync().await;
+        self.needs_sync = false;
+        handle
     }
 }
 
@@ -293,5 +303,15 @@ impl<B: Blob> Write<B> {
         }
 
         state.sync().await
+    }
+
+    /// Flush buffered bytes and start durably syncing mutations tracked by this writer.
+    pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
+        let mut state = self.state.write().await;
+        if let Some((buf, offset)) = state.buffer.take() {
+            state.write_at(offset, buf).await?;
+        }
+
+        Ok(state.start_sync().await)
     }
 }

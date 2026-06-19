@@ -7506,8 +7506,9 @@ mod tests {
     /// Verify that a voter recovers via timeout when certification hangs indefinitely.
     ///
     /// This simulates the scenario where a notarization forms but the block is
-    /// unrecoverable (e.g., proposer is dead and shard gossip didn't deliver enough
-    /// shards for reconstruction). In this case, `certify()` subscribes to the block
+    /// unrecoverable. This includes the restart case where the local block was not
+    /// durable and no peer can provide enough data for reconstruction. In this
+    /// case, `certify()` subscribes to the block
     /// but the subscription never resolves. The voter must rely on the view timeout
     /// to emit a nullify vote and advance the chain.
     ///

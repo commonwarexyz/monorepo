@@ -16,7 +16,7 @@ use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_p2p::Recipients;
 use commonware_runtime::{
     telemetry::{metrics::histogram::Timed, traces::TracedExt as _},
-    Clock,
+    Clock, Handle,
 };
 use commonware_utils::{channel::oneshot, vec::NonEmptyVec};
 use std::{
@@ -153,8 +153,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         round: Round,
         /// The proposed block.
         block: V::Block,
-        /// A channel signaled once the block is durably stored.
-        ack: Option<oneshot::Sender<()>>,
+        /// A channel sent once the block sync has started.
+        ack: Option<oneshot::Sender<Handle<()>>>,
     },
     /// A notification that a block has been verified by the application.
     Verified {
@@ -164,8 +164,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         round: Round,
         /// The verified block.
         block: V::Block,
-        /// A channel signaled once the block is durably stored.
-        ack: Option<oneshot::Sender<()>>,
+        /// A channel sent once the block sync has started.
+        ack: Option<oneshot::Sender<Handle<()>>>,
     },
     /// A notification that a block has been certified by the application.
     Certified {
@@ -175,8 +175,8 @@ pub(crate) enum Message<S: Scheme, V: Variant> {
         round: Round,
         /// The certified block.
         block: V::Block,
-        /// A channel signaled once the block is durably stored.
-        ack: Option<oneshot::Sender<()>>,
+        /// A channel sent once the block sync has started.
+        ack: Option<oneshot::Sender<Handle<()>>>,
     },
     /// Attempts to set the sync starting point from a finalized commitment.
     ///
@@ -843,14 +843,18 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Enqueues a proposed-block notification and returns its durability ack receiver
+    /// Enqueues a proposed-block notification and returns its sync handle receiver
     /// without awaiting it.
     ///
     /// The message is enqueued synchronously (before this returns), so a subsequent
     /// [Self::forward] for the same block is ordered after it. This lets a leader broadcast
     /// the proposal digest immediately and await durability later (at certification),
-    /// overlapping the put_sync with consensus voting.
-    pub(crate) fn proposed_deferred(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
+    /// overlapping the durable sync with consensus voting.
+    pub(crate) fn proposed_deferred(
+        &self,
+        round: Round,
+        block: V::Block,
+    ) -> oneshot::Receiver<Handle<()>> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Proposed {
             span: info_span!("marshal.mailbox.proposed", round = %round),
@@ -866,14 +870,21 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
-        self.proposed_deferred(round, block).await.is_ok()
+        match self.proposed_deferred(round, block).await {
+            Ok(handle) => handle.await.is_ok(),
+            Err(_) => false,
+        }
     }
 
-    /// Enqueues a verified-block notification and returns its durability ack receiver
+    /// Enqueues a verified-block notification and returns its sync handle receiver
     /// without awaiting it.
     ///
     /// Enqueued synchronously, as with [Self::proposed_deferred].
-    pub(crate) fn verified_deferred(&self, round: Round, block: V::Block) -> oneshot::Receiver<()> {
+    pub(crate) fn verified_deferred(
+        &self,
+        round: Round,
+        block: V::Block,
+    ) -> oneshot::Receiver<Handle<()>> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Verified {
             span: info_span!("marshal.mailbox.verified", round = %round),
@@ -889,7 +900,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Returns after the block is durably persisted.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
-        self.verified_deferred(round, block).await.is_ok()
+        match self.verified_deferred(round, block).await {
+            Ok(handle) => handle.await.is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Notifies the actor that a block has been certified.
@@ -904,7 +918,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             block,
             ack: Some(ack),
         });
-        receiver.await.is_ok()
+        match receiver.await {
+            Ok(handle) => handle.await.is_ok(),
+            Err(_) => false,
+        }
     }
 
     /// Attempts to set the sync starting point from a finalized commitment.
@@ -1029,7 +1046,7 @@ mod tests {
         )
     }
 
-    fn proposed(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+    fn proposed(height: u64) -> (TestMessage, oneshot::Receiver<Handle<()>>) {
         let (ack, receiver) = oneshot::channel();
         (
             TestMessage::Proposed {
@@ -1042,7 +1059,7 @@ mod tests {
         )
     }
 
-    fn verified(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+    fn verified(height: u64) -> (TestMessage, oneshot::Receiver<Handle<()>>) {
         let (ack, receiver) = oneshot::channel();
         (
             TestMessage::Verified {
@@ -1055,7 +1072,7 @@ mod tests {
         )
     }
 
-    fn certified(height: u64) -> (TestMessage, oneshot::Receiver<()>) {
+    fn certified(height: u64) -> (TestMessage, oneshot::Receiver<Handle<()>>) {
         let (ack, receiver) = oneshot::channel();
         (
             TestMessage::Certified {

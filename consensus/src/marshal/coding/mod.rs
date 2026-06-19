@@ -653,6 +653,11 @@ mod tests {
         });
     }
 
+    /// Crash-recovery shape: after an unclean shutdown, Simplex may recover a
+    /// notarized commitment while marshal has no local verification task and no
+    /// durable block. If enough shards or a peer response can provide the block,
+    /// certification should fetch it by notarized round and persist it instead
+    /// of treating the missing local copy as a hard failure.
     #[test_traced("WARN")]
     fn test_coding_certify_missing_candidate_fetches_by_round() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -2156,7 +2161,7 @@ mod tests {
     #[test_traced("WARN")]
     fn test_certify_without_prior_verify_crash_recovery() {
         // After a crash, consensus may call certify() without a prior verify().
-        // The certify path (marshaled.rs:842-936) should:
+        // The certify path should:
         //   1. Find no in-progress verification task
         //   2. Subscribe to the block from the shard engine
         //   3. Use the block's embedded context for deferred_verify
@@ -2735,7 +2740,7 @@ mod tests {
     }
 
     /// Regression: a leader must be able to recover its own block across an unclean restart.
-    /// `propose` defers the block's put_sync (it is started but awaited at certification), so
+    /// `propose` defers the block's sync handle (it is started but awaited at certification), so
     /// the leader establishes durability by certifying its own proposal. After certify, the
     /// block must survive restart even if `Relay::broadcast` never runs. This is the >= f+1
     /// guarantee for the leader's own block.
@@ -2822,7 +2827,7 @@ mod tests {
             assert_eq!(commitment, expected_commitment);
 
             // The leader certifies its own proposal, which awaits the deferred propose
-            // put_sync and establishes durability before the finalize vote.
+            // sync handle and establishes durability before the finalize vote.
             assert!(
                 marshaled
                     .certify(propose_round, commitment)

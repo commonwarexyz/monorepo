@@ -271,7 +271,7 @@ where
                     };
 
                 // Run application verification and the durable store concurrently.
-                // Durability is independent of validity, so the put_sync is enqueued as
+                // Durability is independent of validity, so the sync handle is requested as
                 // soon as the join starts and overlaps app verification instead of
                 // following it. This task gates the finalize vote: `certify` awaits its
                 // verdict, sent only after both complete.
@@ -444,6 +444,10 @@ where
                 },
                 result = task => result,
             };
+
+            // A completed `false` is a live local verdict. After an unclean
+            // restart the in-memory task is gone, so `certify` enters the
+            // embedded-context fetch path instead.
             match result {
                 Ok(result) => {
                     tx.send_lossy(result);
@@ -500,7 +504,7 @@ where
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
     /// contain the proposed block's digest when ready. The block's persistence is started
-    /// before the digest is delivered but awaited only at certification, so its put_sync
+    /// before the digest is delivered but awaited only at certification, so its durable sync
     /// overlaps consensus voting. The digest does not imply durability on its own;
     /// [`CertifiableAutomaton::certify`] awaits the registered durability task before the
     /// finalize vote.
@@ -614,7 +618,7 @@ where
                     let digest = parent.digest();
 
                     // Enqueue the persist before broadcasting the digest (so a later
-                    // `forward` is ordered after it), but await the put_sync only at
+                    // `forward` is ordered after it), but await the sync handle only at
                     // certify so it overlaps consensus voting. The leader certifies its
                     // own proposal, so `certify` awaits this task before the finalize
                     // vote, establishing durability.
@@ -622,7 +626,10 @@ where
                     verification_tasks.insert(consensus_context.round, digest, durable_rx);
                     let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
                     let success = tx.send_lossy(digest);
-                    let durable = verified_rx.await.is_ok();
+                    let durable = match verified_rx.await {
+                        Ok(handle) => handle.await.is_ok(),
+                        Err(_) => false,
+                    };
                     durable_tx.send_lossy(durable);
                     debug!(
                         round = ?consensus_context.round,
@@ -677,7 +684,7 @@ where
                 let digest = built_block.digest();
 
                 // Enqueue the persist before broadcasting the digest (so a later
-                // `forward` is ordered after it), but await the put_sync only at certify
+                // `forward` is ordered after it), but await the sync handle only at certify
                 // so it overlaps consensus voting. The leader certifies its own proposal,
                 // so `certify` awaits this task before the finalize vote, establishing
                 // durability.
@@ -685,7 +692,10 @@ where
                 verification_tasks.insert(consensus_context.round, digest, durable_rx);
                 let proposed_rx = marshal.proposed_deferred(consensus_context.round, built_block);
                 let success = tx.send_lossy(digest);
-                let durable = proposed_rx.await.is_ok();
+                let durable = match proposed_rx.await {
+                    Ok(handle) => handle.await.is_ok(),
+                    Err(_) => false,
+                };
                 durable_tx.send_lossy(durable);
                 debug!(
                     round = ?consensus_context.round,
@@ -1301,7 +1311,7 @@ mod tests {
     /// The durable store runs concurrently with `app.verify`, not after it: while the
     /// gated application verification is still blocked, the block is already persisted
     /// (so it is queryable / recoverable). Releasing verification then lets certification
-    /// succeed. This is the parallel-store optimization that keeps the put_sync off the
+    /// succeed. This is the parallel-store optimization that keeps the durable sync off the
     /// certify critical path.
     #[test_traced("WARN")]
     fn test_deferred_store_overlaps_app_verify() {
@@ -1541,7 +1551,7 @@ mod tests {
         });
     }
 
-    /// Regression: in deferred mode `propose` defers the block's put_sync and registers a
+    /// Regression: in deferred mode `propose` defers the block's sync handle and registers a
     /// durability task that `certify` awaits. After the leader certifies its own proposal,
     /// the block must be durably recoverable across an unclean restart. This is the >= f+1
     /// guarantee for the leader's own block.
@@ -1613,7 +1623,7 @@ mod tests {
                 "propose must return the built block's digest"
             );
 
-            // The leader certifies its own proposal; this awaits the deferred propose put_sync.
+            // The leader certifies its own proposal; this awaits the deferred propose sync handle.
             assert!(
                 marshaled
                     .certify(round, child_digest)

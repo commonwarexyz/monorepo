@@ -32,7 +32,7 @@ use crate::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
         tip::Buffer,
     },
-    Blob, Error, IoBuf, IoBufMut, IoBufs,
+    Blob, Error, Handle, IoBuf, IoBufMut, IoBufs,
 };
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
@@ -126,6 +126,16 @@ impl<B: Blob> BlobState<B> {
         self.blob.sync().await?;
         self.needs_sync = false;
         Ok(())
+    }
+
+    /// Start syncing the underlying blob if there are unsynced mutations.
+    async fn start_sync(&mut self) -> Handle<()> {
+        if !self.needs_sync {
+            return Handle::ready(Ok(()));
+        }
+        let handle = self.blob.start_sync().await;
+        self.needs_sync = false;
+        handle
     }
 }
 
@@ -1233,6 +1243,15 @@ impl<B: Blob> Append<B> {
         // durability barrier is still pending.
         let mut blob_state = self.blob_state.write().await;
         blob_state.sync().await
+    }
+
+    /// Flush buffered data and start making all pending mutations durable.
+    pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, true, false).await?;
+
+        let mut blob_state = self.blob_state.write().await;
+        Ok(blob_state.start_sync().await)
     }
 
     /// Resize the blob to the provided logical `size`.

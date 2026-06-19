@@ -417,7 +417,7 @@ where
                 }
 
                 // Run application verification and the durable store concurrently.
-                // Durability is independent of validity, so the put_sync is enqueued as
+                // Durability is independent of validity, so the sync handle is requested as
                 // soon as the join starts and overlaps app verification instead of
                 // following it. This task gates the finalize vote: `certify` awaits its
                 // verdict, sent only after both complete.
@@ -636,6 +636,10 @@ where
                 },
                 result = task => result,
             };
+
+            // A completed `false` is a live local verdict. After an unclean
+            // restart the in-memory task is gone, so `certify` enters the
+            // embedded-context fetch path instead.
             match result {
                 Ok(result) => {
                     tx.send_lossy(result);
@@ -700,7 +704,7 @@ where
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
     /// contain the proposed block's commitment when ready. The block's persistence is started
-    /// before the commitment is delivered but awaited only at certification, so its put_sync
+    /// before the commitment is delivered but awaited only at certification, so its durable sync
     /// overlaps consensus voting. The commitment does not imply durability on its own;
     /// [`CertifiableAutomaton::certify`] awaits the registered durability task before the
     /// finalize vote.
@@ -833,7 +837,7 @@ where
                     let round = consensus_context.round;
 
                     // Enqueue the persist before broadcasting the commitment (so a later
-                    // `forward` is ordered after it), but await the put_sync only at
+                    // `forward` is ordered after it), but await the sync handle only at
                     // certify so it overlaps consensus voting. The leader certifies its
                     // own proposal, so `certify` awaits this task before the finalize
                     // vote, establishing durability.
@@ -841,7 +845,10 @@ where
                     verification_tasks.insert(round, commitment, durable_rx);
                     let verified_rx = marshal.verified_deferred(round, parent);
                     let success = tx.send_lossy(commitment);
-                    let durable = verified_rx.await.is_ok();
+                    let durable = match verified_rx.await {
+                        Ok(handle) => handle.await.is_ok(),
+                        Err(_) => false,
+                    };
                     durable_tx.send_lossy(durable);
                     debug!(
                         ?round,
@@ -901,7 +908,7 @@ where
                 let round = consensus_context.round;
 
                 // Enqueue the persist before broadcasting the commitment (so a later
-                // `forward` is ordered after it), but await the put_sync only at certify
+                // `forward` is ordered after it), but await the sync handle only at certify
                 // so it overlaps consensus voting. The leader certifies its own proposal,
                 // so `certify` awaits this task before the finalize vote, establishing
                 // durability.
@@ -909,7 +916,10 @@ where
                 verification_tasks.insert(round, commitment, durable_rx);
                 let proposed_rx = marshal.proposed_deferred(round, coded_block);
                 let success = tx.send_lossy(commitment);
-                let durable = proposed_rx.await.is_ok();
+                let durable = match proposed_rx.await {
+                    Ok(handle) => handle.await.is_ok(),
+                    Err(_) => false,
+                };
                 durable_tx.send_lossy(durable);
                 debug!(?round, ?commitment, success, durable, "proposed new block");
             }
