@@ -7,7 +7,7 @@
 //! into that native form when their spare capacity allows, and caller-supplied
 //! [`Bytes`] values are held zero-copy by a small external owner. This keeps
 //! `bytes::Buf` and `bytes::BufMut` hot paths as simple pointer/length
-//! arithmetic; `buffer.rs` documents the owner model.
+//! arithmetic; `owner.rs` documents the owner model.
 //!
 //! Public types:
 //! - [`IoBuf`]: Immutable byte buffer
@@ -23,9 +23,7 @@ mod pool;
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 use crossbeam_utils::CachePadded;
-use owner::{
-    allocate_aligned_mut, owner_from_bytes, owner_from_vec, try_adopt_vec, OwnerRef, PooledBuffer,
-};
+use owner::{HeapOwner, OwnerRef, PooledBuffer};
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{
     collections::VecDeque,
@@ -68,7 +66,7 @@ pub const fn cache_line_size() -> usize {
 pub mod bench {
     pub use super::{
         freelist::Freelist,
-        owner::{PooledBuffer, PooledSlot},
+        owner::{PooledBuffer, PooledOwner},
     };
 }
 
@@ -456,7 +454,7 @@ impl Buf for IoBuf {
 /// [`Bytes`] (also zero-copy) behind a small external owner.
 impl From<Vec<u8>> for IoBuf {
     fn from(vec: Vec<u8>) -> Self {
-        let (ptr, len, owner) = owner_from_vec(vec);
+        let (ptr, len, owner) = OwnerRef::from_vec(vec);
         Self { ptr, len, owner }
     }
 }
@@ -468,7 +466,7 @@ impl From<Vec<u8>> for IoBuf {
 /// the final `IoBuf` reference drops.
 impl From<Bytes> for IoBuf {
     fn from(bytes: Bytes) -> Self {
-        let (ptr, len, owner) = owner_from_bytes(bytes);
+        let (ptr, len, owner) = OwnerRef::from_bytes(bytes);
         Self { ptr, len, owner }
     }
 }
@@ -659,7 +657,7 @@ impl IoBufMut {
         if capacity == 0 {
             return Self::default();
         }
-        let (ptr, owner) = allocate_aligned_mut(capacity, alignment.get(), false);
+        let (ptr, owner) = HeapOwner::allocate_aligned_mut(capacity, alignment.get(), false);
         Self {
             ptr,
             len: 0,
@@ -675,7 +673,7 @@ impl IoBufMut {
         if len == 0 {
             return Self::default();
         }
-        let (ptr, owner) = allocate_aligned_mut(len, alignment.get(), true);
+        let (ptr, owner) = HeapOwner::allocate_aligned_mut(len, alignment.get(), true);
         Self {
             ptr,
             len,
@@ -1068,7 +1066,7 @@ impl From<IoBuf> for IoBufMut {
 /// capacity. Unlike `From<Vec<u8>> for IoBuf`, an empty vec keeps its
 /// reserved capacity instead of detaching.
 fn iobuf_mut_from_vec(vec: Vec<u8>) -> IoBufMut {
-    match try_adopt_vec(vec) {
+    match HeapOwner::try_adopt_vec(vec) {
         Ok((ptr, len, cap, owner)) => IoBufMut {
             ptr,
             len,

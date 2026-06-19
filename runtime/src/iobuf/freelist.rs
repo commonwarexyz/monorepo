@@ -114,7 +114,7 @@
 //! ownership discipline: a slot is either owned by a pooled backing, parked in a
 //! thread-local cache, or available in this freelist. Only the thread that owns
 //! a slot outside the freelist may mutate that slot's side-table entry.
-use super::owner::{PooledBuffer, PooledSlot};
+use super::owner::{PooledBuffer, PooledOwner};
 use crossbeam_utils::CachePadded;
 use std::{
     alloc::Layout,
@@ -180,7 +180,7 @@ pub struct Freelist {
     /// by exactly one buffer/cache path. Publishing a slot to the global
     /// freelist is the bitmap bit's Release transition; taking it is the
     /// matching Acquire transition.
-    slots: Box<[CachePadded<UnsafeCell<PooledSlot>>]>,
+    slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
     /// Mask used to map a slot id to its striped bitmap word.
     word_mask: usize,
     /// Number of low slot-id bits consumed by the word index.
@@ -242,7 +242,7 @@ impl Freelist {
             .collect::<Vec<_>>()
             .into_boxed_slice();
         let slots = (0..capacity as u32)
-            .map(|slot| CachePadded::new(UnsafeCell::new(PooledSlot::new(slot, layout.size()))))
+            .map(|slot| CachePadded::new(UnsafeCell::new(PooledOwner::new(slot, layout.size()))))
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
@@ -285,7 +285,7 @@ impl Freelist {
 
         // SAFETY: this fetch_update reserved `slot` exactly once, so no other
         // thread can initialize or publish this side-table entry.
-        let buffer = unsafe { PooledBuffer::new_in_slot(self.slot_ptr(slot), self.layout, zeroed) };
+        let buffer = unsafe { PooledBuffer::new(self.slot_ptr(slot), self.layout, zeroed) };
 
         Some(buffer)
     }
@@ -599,7 +599,7 @@ impl Freelist {
 
     /// Returns the side-table pointer for a slot id.
     #[inline(always)]
-    fn slot_ptr(&self, slot: u32) -> ptr::NonNull<PooledSlot> {
+    fn slot_ptr(&self, slot: u32) -> ptr::NonNull<PooledOwner> {
         let cell = self
             .slots
             .get(slot as usize)
@@ -621,7 +621,7 @@ impl Freelist {
     #[inline(always)]
     fn buffer(&self, slot: u32) -> PooledBuffer {
         // SAFETY: the caller owns the slot and its data allocation is live.
-        unsafe { PooledBuffer::from_slot(self.slot_ptr(slot)) }
+        unsafe { PooledBuffer::from_owner(self.slot_ptr(slot)) }
     }
 }
 

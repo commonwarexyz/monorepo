@@ -51,7 +51,7 @@
 
 use super::{freelist::Freelist, page_size, IoBufMut};
 use crate::{
-    iobuf::owner::{pooled_layout, PooledBuffer},
+    iobuf::owner::{PooledBuffer, PooledOwner},
     telemetry::metrics::{raw, Counter, CounterFamily, EncodeLabelSet, GaugeFamily, Register},
 };
 use commonware_utils::{NZUsize, NZU32};
@@ -612,7 +612,7 @@ impl SizeClassHandle {
         thread_cache_capacity: usize,
         prefill: bool,
     ) -> Self {
-        let layout = pooled_layout(size, alignment);
+        let layout = PooledOwner::layout(size, alignment);
         let freelist = Freelist::new(max, parallelism, layout, prefill);
         let class = SizeClass {
             class_id,

@@ -23,9 +23,9 @@
 //!
 //! ```text
 //! 0 (entire value)        EMPTY     no owner; empty views and 'static slices
-//! header ptr | 0b01       HEAP      HeapHeader; native aligned allocations,
+//! header ptr | 0b01       HEAP      HeapOwner; native aligned allocations,
 //!                                   adopted vecs, and front-block mutables
-//! slot ptr   | 0b10       POOLED    PooledSlot side-table entry
+//! slot ptr   | 0b10       POOLED    PooledOwner side-table entry
 //! owner ptr  | 0b11       EXTERNAL  boxed ExternalOwner holding a Bytes
 //! ```
 //!
@@ -50,11 +50,11 @@
 //! ```
 //!
 //! Pooled allocations keep their owner metadata out of the data allocation.
-//! Each size class owns a cache-line-padded side table with one [`PooledSlot`]
+//! Each size class owns a cache-line-padded side table with one [`PooledOwner`]
 //! per possible tracked buffer:
 //!
 //! ```text
-//! SizeClass slots: [ refs | lease | data | capacity | slot | routing ... ]
+//! SizeClass slots: [ refs | lease | data | capacity | slot ]
 //!                    ^
 //!                    OwnerRef target
 //!
@@ -71,7 +71,7 @@
 //! instead:
 //!
 //! ```text
-//! [ reserved HeapHeader ][ usable data bytes ............ ]
+//! [ reserved HeapOwner ][ usable data bytes ............ ]
 //! ^                       ^
 //! OwnerRef target         data base
 //! ```
@@ -96,13 +96,13 @@
 //! ```text
 //! [ len readable ][ writable ......... ][ header ][ waste 0..ALIGN-1 ]
 //! ^ base                                ^ header_addr =
-//!                                         round_down(base + cap - HDR, ALIGN)
+//!                                         HeapOwner::round_down(base + cap - HDR, ALIGN)
 //! ```
 //!
 //! Adoption succeeds iff `header_addr >= base + len`. The result is a fully
 //! native heap buffer: zero copies, zero extra allocations, and mutable
 //! recovery through `try_into_mut`. Because a `Vec<u8>` allocation has layout
-//! `(cap, align = 1)` rather than the canonical aligned layout, [`HeapHeader`]
+//! `(cap, align = 1)` rather than the canonical aligned layout, [`HeapOwner`]
 //! stores the exact allocation layout instead of deriving it on release.
 //!
 //! `Bytes` values (and vecs whose spare capacity cannot host the header) are
@@ -170,15 +170,15 @@ const MAX_REFCOUNT: usize = isize::MAX as usize;
 // The low two pointer bits are usable as the kind tag only if every owner
 // type is at least 4-byte aligned, including on 32-bit targets where
 // `AtomicUsize` is 4 bytes.
-const _: () = assert!(align_of::<HeapHeader>() >= 4);
-const _: () = assert!(align_of::<PooledSlot>() >= 4);
+const _: () = assert!(align_of::<HeapOwner>() >= 4);
+const _: () = assert!(align_of::<PooledOwner>() >= 4);
 const _: () = assert!(align_of::<ExternalOwner>() >= 4);
-const _: () = assert!(size_of::<HeapHeader>().is_multiple_of(align_of::<HeapHeader>()));
+const _: () = assert!(size_of::<HeapOwner>().is_multiple_of(align_of::<HeapOwner>()));
 
 // `OwnerRef::refs` reads the refcount directly through the untagged pointer,
 // which is only sound if every owner type stores it at offset 0.
-const _: () = assert!(offset_of!(HeapHeader, refs) == 0);
-const _: () = assert!(offset_of!(PooledSlot, refs) == 0);
+const _: () = assert!(offset_of!(HeapOwner, refs) == 0);
+const _: () = assert!(offset_of!(PooledOwner, refs) == 0);
 const _: () = assert!(offset_of!(ExternalOwner, refs) == 0);
 
 /// Tagged reference to an allocation owner.
@@ -257,16 +257,16 @@ impl OwnerRef {
         (addr & OWNER_TAG_MASK, self.0.with_addr(addr & !OWNER_TAG_MASK))
     }
 
-    /// Creates a heap owner ref from a [`HeapHeader`] pointer.
+    /// Creates a heap owner ref from a [`HeapOwner`] pointer.
     ///
     /// # Safety
     ///
-    /// `header` must point to the [`HeapHeader`] of an allocation owned by this
+    /// `header` must point to the [`HeapOwner`] of an allocation owned by this
     /// owner ref, with its low tag bits zero. The contents may be uninitialized
     /// (for example a reserved front block before `freeze`); they must be
     /// initialized before any clone, drop, or freeze that reads them.
     #[inline(always)]
-    unsafe fn from_heap(header: NonNull<HeapHeader>) -> Self {
+    unsafe fn from_heap(header: NonNull<HeapOwner>) -> Self {
         Self::from_tagged(header, OWNER_HEAP)
     }
 
@@ -274,10 +274,10 @@ impl OwnerRef {
     ///
     /// # Safety
     ///
-    /// `slot` must point to a live [`PooledSlot`] whose low tag bits are zero
+    /// `slot` must point to a live [`PooledOwner`] whose low tag bits are zero
     /// and whose lease is initialized.
     #[inline(always)]
-    pub(crate) unsafe fn from_pooled(slot: NonNull<PooledSlot>) -> Self {
+    pub(crate) unsafe fn from_pooled(slot: NonNull<PooledOwner>) -> Self {
         Self::from_tagged(slot, OWNER_POOLED)
     }
 
@@ -298,9 +298,9 @@ impl OwnerRef {
     ///
     /// `self` must be a live heap owner.
     #[inline(always)]
-    unsafe fn heap(self) -> NonNull<HeapHeader> {
+    unsafe fn heap(self) -> NonNull<HeapOwner> {
         debug_assert_eq!(self.tag(), OWNER_HEAP);
-        // SAFETY: a live heap owner's address targets a `HeapHeader`.
+        // SAFETY: a live heap owner's address targets a `HeapOwner`.
         unsafe { self.untag() }
     }
 
@@ -310,9 +310,9 @@ impl OwnerRef {
     ///
     /// `self` must be a live pooled owner.
     #[inline(always)]
-    unsafe fn pooled(self) -> NonNull<PooledSlot> {
+    unsafe fn pooled(self) -> NonNull<PooledOwner> {
         debug_assert!(self.is_pooled());
-        // SAFETY: a live pooled owner's address targets a `PooledSlot`.
+        // SAFETY: a live pooled owner's address targets a `PooledOwner`.
         unsafe { self.untag() }
     }
 
@@ -454,7 +454,7 @@ impl OwnerRef {
     /// Only the pooled arm is inlined: pooled alloc -> fill -> freeze -> drop
     /// is the lifecycle hot loop, and it feeds directly into the thread-cache
     /// push fast path. The aligned and external arms are outlined in
-    /// [`release_unique_cold`] so every `IoBuf` drop site does not instantiate
+    /// [`Self::release_unique_cold`] so every `IoBuf` drop site does not instantiate
     /// dealloc and box-drop code twice (fast path and race branch).
     ///
     /// # Safety
@@ -466,11 +466,11 @@ impl OwnerRef {
         let (tag, owner) = self.split();
         if tag == OWNER_POOLED {
             // SAFETY: unique pooled owner with initialized lease.
-            unsafe { release_pooled(NonNull::new_unchecked(owner.cast())) };
+            unsafe { PooledOwner::release_to_thread_cache(NonNull::new_unchecked(owner.cast())) };
             return;
         }
         // SAFETY: same contract as this method.
-        unsafe { release_unique_cold(self) };
+        unsafe { self.release_unique_cold() };
     }
 
     /// Releases a uniquely-owned mutable allocation.
@@ -490,7 +490,7 @@ impl OwnerRef {
         let (tag, owner) = self.split();
         if tag == OWNER_POOLED {
             // SAFETY: unique pooled owner with initialized lease.
-            unsafe { release_pooled(NonNull::new_unchecked(owner.cast())) };
+            unsafe { PooledOwner::release_to_thread_cache(NonNull::new_unchecked(owner.cast())) };
             return;
         }
         if tag == OWNER_EMPTY {
@@ -498,13 +498,35 @@ impl OwnerRef {
         }
         debug_assert_eq!(tag, OWNER_HEAP, "IoBufMut owner is never external");
         if self.is_front_heap_for_mut(ptr) {
-            // SAFETY: front heap owners are allocated with `front_heap_layout`
+            // SAFETY: front heap owners are allocated with `HeapOwner::front_layout`
             // and `ptr + cap` is the allocation end.
-            unsafe { release_front_heap(NonNull::new_unchecked(owner.cast()), ptr, cap) };
+            unsafe { HeapOwner::release_front(NonNull::new_unchecked(owner.cast()), ptr, cap) };
             return;
         }
         // SAFETY: unique tail-header heap owner.
-        unsafe { release_heap(NonNull::new_unchecked(owner.cast())) };
+        unsafe { HeapOwner::release(NonNull::new_unchecked(owner.cast())) };
+    }
+
+    /// Releases unique non-pooled owners (heap dealloc, external box drop).
+    ///
+    /// One outlined function serves every drop site so the cold dealloc and
+    /// box-drop code is not instantiated inline at each `IoBuf`/`IoBufMut` drop.
+    ///
+    /// # Safety
+    ///
+    /// No other handle may reference this allocation.
+    #[cold]
+    #[inline(never)]
+    unsafe fn release_unique_cold(self) {
+        let tag = self.tag();
+        if tag == OWNER_HEAP {
+            // SAFETY: unique initialized heap owner.
+            unsafe { HeapOwner::release(self.heap()) };
+        } else if tag == OWNER_EXTERNAL {
+            // SAFETY: unique external owner.
+            unsafe { ExternalOwner::release(self.external()) };
+        }
+        // Empty owners need no release work.
     }
 
     /// Initializes a reserved front heap header before sharing the owner.
@@ -527,16 +549,16 @@ impl OwnerRef {
         // SAFETY: a front-heap mutable owner carries the reserved header base
         // in its tagged pointer; its contents are written below before sharing.
         let base = unsafe { self.heap() };
-        let data_base = front_heap_data_base(base);
-        let alloc_size = front_heap_alloc_size(base, ptr, cap);
+        let data_base = HeapOwner::front_data_base(base);
+        let alloc_size = HeapOwner::front_alloc_size(base, ptr, cap);
         // SAFETY: `base` points at the reserved header region of a uniquely
         // owned front-block allocation.
         unsafe {
-            base.as_ptr().write(HeapHeader {
+            base.as_ptr().write(HeapOwner {
                 refs: AtomicUsize::new(1),
                 data_base,
                 alloc_size,
-                alloc_align: align_of::<HeapHeader>(),
+                alloc_align: align_of::<HeapOwner>(),
             });
         }
     }
@@ -611,7 +633,7 @@ impl OwnerRef {
             let header = unsafe { self.heap() };
             // SAFETY: guaranteed by the caller.
             let header_ref = unsafe { header.as_ref() };
-            heap_usable_capacity(header, header_ref)
+            HeapOwner::usable_capacity(header, header_ref)
         }
     }
 
@@ -635,7 +657,7 @@ impl OwnerRef {
 /// front-header allocations may be advanced before freeze. `dealloc` therefore
 /// uses the stored layout exactly.
 #[repr(C)]
-struct HeapHeader {
+pub(crate) struct HeapOwner {
     /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
     refs: AtomicUsize,
     /// Base address of the usable data region.
@@ -646,7 +668,7 @@ struct HeapHeader {
     alloc_align: usize,
 }
 
-/// Side-table entry for one pooled slot.
+/// Owner record for one pooled slot.
 ///
 /// The owning freelist stores one cache-line-padded slot entry per possible
 /// pooled buffer. Stable fields (`refs` sentinel, `data_base`, `capacity`,
@@ -654,7 +676,7 @@ struct HeapHeader {
 /// that slot until the size class drops. The lease is live only while the slot
 /// is outside the global freelist.
 #[repr(C)]
-pub struct PooledSlot {
+pub struct PooledOwner {
     /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
     refs: AtomicUsize,
     /// Strong size-class reference; initialized at checkout, consumed at
@@ -668,7 +690,7 @@ pub struct PooledSlot {
     slot: u32,
 }
 
-impl PooledSlot {
+impl PooledOwner {
     /// Creates an empty side-table entry for a stable slot id.
     ///
     /// The data pointer is filled when the freelist first creates the pooled
@@ -684,6 +706,31 @@ impl PooledSlot {
             capacity,
             slot,
         }
+    }
+
+    /// Returns the data layout for a pooled size class.
+    ///
+    /// Pooled owner metadata lives in the size class side table, so the
+    /// allocation itself contains only caller-usable bytes with the requested
+    /// alignment.
+    #[inline]
+    pub(crate) fn layout(size: usize, alignment: usize) -> Layout {
+        Layout::from_size_align(size, alignment).expect("alignment is a power of two")
+    }
+
+    /// Releases a unique pooled owner into the thread-cache push fast path.
+    ///
+    /// # Safety
+    ///
+    /// No other handle may reference this allocation and the pooled lease must
+    /// be initialized.
+    #[inline(always)]
+    unsafe fn release_to_thread_cache(owner: NonNull<Self>) {
+        // SAFETY: guaranteed by the caller.
+        debug_assert_eq!(unsafe { owner.as_ref() }.refs.load(Ordering::Relaxed), 1);
+        // SAFETY: this unique owner proves the slot's data allocation is live.
+        let buffer = unsafe { PooledBuffer::from_owner(owner) };
+        BufferPoolThreadCache::push(buffer);
     }
 }
 
@@ -711,7 +758,7 @@ struct ExternalOwner {
 /// `PooledBuffer` has no `Drop`: callers must return it to the originating
 /// freelist or deallocate it with the exact layout used for allocation.
 pub struct PooledBuffer {
-    slot: NonNull<PooledSlot>,
+    owner: NonNull<PooledOwner>,
 }
 
 // SAFETY: `PooledBuffer` is a uniquely-owned raw allocation handle while it is
@@ -724,26 +771,27 @@ unsafe impl Sync for PooledBuffer {}
 impl std::fmt::Debug for PooledBuffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PooledBuffer")
-            .field("slot", &self.slot)
+            .field("owner", &self.owner)
+            .field("slot", &self.slot())
             .field("ptr", &self.data_ptr())
             .finish()
     }
 }
 
 impl PooledBuffer {
-    /// Creates a new pooled data allocation for `slot`.
+    /// Creates a new pooled data allocation for `owner`.
     ///
-    /// `layout` must be the size-class data layout. The slot must be the
+    /// `layout` must be the size-class data layout. The owner must be the
     /// side-table entry reserved for this allocation and must not be visible in
     /// the freelist.
     ///
     /// # Safety
     ///
-    /// The caller must own `slot` initialization for this size class. No other
-    /// thread may read the slot until the returned buffer is published through
-    /// the freelist bitmap or handed to a checked-out owner.
+    /// The caller must own `owner` initialization for this size class. No other
+    /// thread may read it until the returned buffer is published through the
+    /// freelist bitmap or handed to a checked-out owner.
     #[inline]
-    pub unsafe fn new_in_slot(slot: NonNull<PooledSlot>, layout: Layout, zeroed: bool) -> Self {
+    pub unsafe fn new(owner: NonNull<PooledOwner>, layout: Layout, zeroed: bool) -> Self {
         assert!(layout.size() > 0, "pooled data layout must be non-zero");
         let ptr = if zeroed {
             // SAFETY: layout is valid and non-zero sized (asserted above).
@@ -756,21 +804,21 @@ impl PooledBuffer {
         // SAFETY: guaranteed by the caller. The slot is unique and not
         // concurrently visible while its data pointer is initialized.
         unsafe {
-            debug_assert_eq!((*slot.as_ptr()).refs.load(Ordering::Relaxed), 1);
-            addr_of_mut!((*slot.as_ptr()).data_base).write(ptr);
+            debug_assert_eq!((*owner.as_ptr()).refs.load(Ordering::Relaxed), 1);
+            addr_of_mut!((*owner.as_ptr()).data_base).write(ptr);
         }
-        Self { slot }
+        Self { owner }
     }
 
-    /// Recreates a pooled buffer handle from an already-created side-table slot.
+    /// Recreates a pooled buffer handle from an already-created pooled owner.
     ///
     /// # Safety
     ///
-    /// The caller must own the slot and the slot's data allocation must still
+    /// The caller must own the owner and its data allocation must still
     /// be live.
     #[inline(always)]
-    pub(crate) const unsafe fn from_slot(slot: NonNull<PooledSlot>) -> Self {
-        Self { slot }
+    pub(crate) const unsafe fn from_owner(owner: NonNull<PooledOwner>) -> Self {
+        Self { owner }
     }
 
     /// Returns the usable data base pointer.
@@ -784,7 +832,7 @@ impl PooledBuffer {
     #[inline(always)]
     pub(crate) const fn data_ptr(&self) -> NonNull<u8> {
         // SAFETY: pooled buffers are built only for created slots.
-        unsafe { self.slot.as_ref().data_base }
+        unsafe { self.owner.as_ref().data_base }
     }
 
     /// Returns the usable data capacity for this size-class buffer.
@@ -792,7 +840,7 @@ impl PooledBuffer {
     pub(crate) const fn capacity(&self) -> usize {
         // SAFETY: `PooledBuffer` is constructed only for created slots, whose
         // stable side-table fields are initialized.
-        unsafe { self.slot.as_ref().capacity }
+        unsafe { self.owner.as_ref().capacity }
     }
 
     /// Returns the stable slot id for this size-class buffer.
@@ -805,7 +853,7 @@ impl PooledBuffer {
     pub(crate) const fn slot(&self) -> u32 {
         // SAFETY: `PooledBuffer` is constructed only for created slots, whose
         // stable side-table fields are initialized.
-        unsafe { self.slot.as_ref().slot }
+        unsafe { self.owner.as_ref().slot }
     }
 
     /// Initializes the pooled lease for a buffer leaving global state.
@@ -816,10 +864,10 @@ impl PooledBuffer {
     /// `lease`, and the slot must not currently contain a live lease.
     #[inline(always)]
     pub(crate) unsafe fn init_lease(&mut self, lease: SizeClassLease) {
-        // SAFETY: slot is a live side-table entry.
+        // SAFETY: owner is a live side-table entry.
         unsafe {
-            debug_assert_eq!((*self.slot.as_ptr()).refs.load(Ordering::Relaxed), 1);
-            addr_of_mut!((*self.slot.as_ptr()).lease).write(MaybeUninit::new(lease));
+            debug_assert_eq!((*self.owner.as_ptr()).refs.load(Ordering::Relaxed), 1);
+            addr_of_mut!((*self.owner.as_ptr()).lease).write(MaybeUninit::new(lease));
         }
     }
 
@@ -832,7 +880,7 @@ impl PooledBuffer {
     #[inline(always)]
     pub(crate) const unsafe fn lease(&self) -> &SizeClassLease {
         // SAFETY: guaranteed by the caller.
-        unsafe { &*self.slot.as_ref().lease.as_ptr() }
+        unsafe { &*self.owner.as_ref().lease.as_ptr() }
     }
 
     /// Consumes the live lease from this slot.
@@ -845,7 +893,7 @@ impl PooledBuffer {
     #[inline(always)]
     pub(crate) const unsafe fn take_lease(&mut self) -> SizeClassLease {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.slot.as_mut().lease.assume_init_read() }
+        unsafe { self.owner.as_mut().lease.assume_init_read() }
     }
 
     /// Returns the owner ref for a buffer whose lease is already initialized.
@@ -856,7 +904,7 @@ impl PooledBuffer {
     #[inline(always)]
     pub(crate) unsafe fn owner_ref(&self) -> OwnerRef {
         // SAFETY: guaranteed by the caller.
-        unsafe { OwnerRef::from_pooled(self.slot) }
+        unsafe { OwnerRef::from_pooled(self.owner) }
     }
 
     /// Deallocates this pooled buffer.
@@ -871,365 +919,333 @@ impl PooledBuffer {
     }
 }
 
-/// Allocates an untracked aligned buffer with a tail [`HeapHeader`].
-///
-/// The header is placed at `capacity` rounded up to `align_of::<HeapHeader>()`
-/// past the base, and the layout alignment is raised to at least the header
-/// alignment so both the data base and the header are aligned. Returns the
-/// data pointer, the usable capacity (the rounded prefix below the header,
-/// at most `align_of::<HeapHeader>() - 1` bytes more than requested), and
-/// the owner.
-///
-/// # Panics
-///
-/// Panics if `capacity == 0` or `alignment` is not a power of two.
-#[inline]
-pub(crate) fn allocate_aligned(
-    capacity: usize,
-    alignment: usize,
-    zeroed: bool,
-) -> (NonNull<u8>, usize, OwnerRef) {
-    assert!(capacity > 0, "capacity must be greater than zero");
-    let (layout, header_offset) = heap_layout(capacity, alignment);
-    let ptr = if zeroed {
-        // SAFETY: layout is valid and non-zero sized.
-        unsafe { alloc_zeroed(layout) }
-    } else {
-        // SAFETY: layout is valid and non-zero sized.
-        unsafe { alloc(layout) }
-    };
-    let data = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-    // SAFETY: the computed layout includes the header at `header_offset`, and
-    // `header_offset` is a multiple of the header alignment.
-    let owner = unsafe {
-        let header = data.as_ptr().add(header_offset).cast::<HeapHeader>();
-        header.write(HeapHeader {
+impl HeapOwner {
+    /// Allocates an untracked aligned buffer with a tail [`HeapOwner`].
+    ///
+    /// The header is placed at `capacity` rounded up to `align_of::<HeapOwner>()`
+    /// past the base, and the layout alignment is raised to at least the header
+    /// alignment so both the data base and the header are aligned. Returns the
+    /// data pointer, the usable capacity (the rounded prefix below the header,
+    /// at most `align_of::<HeapOwner>() - 1` bytes more than requested), and
+    /// the owner.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity == 0` or `alignment` is not a power of two.
+    #[inline]
+    pub(crate) fn allocate_aligned(
+        capacity: usize,
+        alignment: usize,
+        zeroed: bool,
+    ) -> (NonNull<u8>, usize, OwnerRef) {
+        assert!(capacity > 0, "capacity must be greater than zero");
+        let (layout, header_offset) = Self::layout(capacity, alignment);
+        let ptr = if zeroed {
+            // SAFETY: layout is valid and non-zero sized.
+            unsafe { alloc_zeroed(layout) }
+        } else {
+            // SAFETY: layout is valid and non-zero sized.
+            unsafe { alloc(layout) }
+        };
+        let data = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        // SAFETY: the computed layout includes the header at `header_offset`,
+        // and `header_offset` is a multiple of the header alignment.
+        let owner = unsafe {
+            let header = data.as_ptr().add(header_offset).cast::<Self>();
+            header.write(Self {
+                refs: AtomicUsize::new(1),
+                data_base: data,
+                alloc_size: layout.size(),
+                alloc_align: layout.align(),
+            });
+            OwnerRef::from_heap(NonNull::new_unchecked(header))
+        };
+        (data, header_offset, owner)
+    }
+
+    /// Allocates an untracked mutable buffer.
+    ///
+    /// Low-alignment allocations reserve a front [`HeapOwner`] and leave it
+    /// uninitialized until `freeze`; high-alignment allocations use the eager
+    /// tail owner layout from [`Self::allocate_aligned`] so the returned data
+    /// pointer keeps the requested alignment.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity == 0` or `alignment` is not a power of two.
+    #[inline(always)]
+    pub(crate) fn allocate_aligned_mut(
+        capacity: usize,
+        alignment: usize,
+        zeroed: bool,
+    ) -> (NonNull<u8>, OwnerRef) {
+        assert!(capacity > 0, "capacity must be greater than zero");
+        assert!(
+            alignment.is_power_of_two(),
+            "alignment must be a power of two"
+        );
+        if alignment > align_of::<Self>() {
+            let (ptr, _, owner) = Self::allocate_aligned(capacity, alignment, zeroed);
+            return (ptr, owner);
+        }
+
+        let layout = Self::front_layout(capacity);
+        let ptr = if zeroed {
+            // SAFETY: layout is valid and non-zero sized.
+            unsafe { alloc_zeroed(layout) }
+        } else {
+            // SAFETY: layout is valid and non-zero sized.
+            unsafe { alloc(layout) }
+        };
+        let base = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
+        let header = base.cast::<Self>();
+        let data = Self::front_data_base(header);
+        // SAFETY: `header` points at the reserved front owner region of an
+        // allocation owned by this owner ref. The contents are left uninitialized
+        // and written before the owner is shared (`from_heap` reads nothing).
+        let owner = unsafe { OwnerRef::from_heap(header) };
+        (data, owner)
+    }
+
+    /// Tries to adopt `vec`'s allocation as a native heap buffer.
+    ///
+    /// Adoption places a tail [`HeapOwner`] at the highest header-aligned
+    /// address inside the vec's own spare capacity and succeeds iff that
+    /// address is at or above `base + len` (see the module docs for the layout
+    /// diagram): zero copies and zero extra allocations. The vec's allocation
+    /// layout `(cap, align = 1)` is recorded exactly so release deallocates
+    /// with the same layout. On success, returns the data pointer, readable
+    /// length, usable capacity (the prefix below the header), and the owner.
+    ///
+    /// Exactly-sized vecs (`len == cap`, the common case for `vec![0; n]` and
+    /// `collect()`) have no spare room; reallocating could copy, so they are
+    /// returned unchanged for the caller to convert another way.
+    pub(crate) fn try_adopt_vec(
+        vec: Vec<u8>,
+    ) -> Result<(NonNull<u8>, usize, usize, OwnerRef), Vec<u8>> {
+        let len = vec.len();
+        let cap = vec.capacity();
+        let base_addr = vec.as_ptr() as usize;
+        let Some(header_offset) = Self::vec_adoption_header_offset(base_addr, len, cap) else {
+            return Err(vec);
+        };
+
+        // Adopt: dismantle the vec and place the owner record in its spare
+        // capacity.
+        let mut vec = ManuallyDrop::new(vec);
+        let base = vec.as_mut_ptr();
+        // SAFETY: `base..base+cap` is one live allocation (`cap > 0`) owned by
+        // the dismantled vec; `base + header_offset` is owner-aligned and
+        // `header_offset + size_of::<HeapOwner>() <= cap`, so the write is in
+        // bounds.
+        unsafe {
+            let header = base.add(header_offset).cast::<Self>();
+            header.write(Self {
+                refs: AtomicUsize::new(1),
+                data_base: NonNull::new_unchecked(base),
+                alloc_size: cap,
+                alloc_align: 1,
+            });
+            Ok((
+                NonNull::new_unchecked(base),
+                len,
+                header_offset,
+                OwnerRef::from_heap(NonNull::new_unchecked(header)),
+            ))
+        }
+    }
+}
+
+impl OwnerRef {
+    /// Converts `vec` into immutable handle fields, adopting its allocation if
+    /// it can host a tail [`HeapOwner`] in spare capacity.
+    ///
+    /// Empty vecs detach entirely (empty immutable buffers never pin an
+    /// allocation). Non-adoptable vecs move into `Bytes` (zero-copy for any
+    /// `Vec<u8>`; for `len == cap` also `bytes`' allocation-free promotable
+    /// path) behind an external owner.
+    pub(crate) fn from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, Self) {
+        if vec.is_empty() {
+            return (NonNull::dangling(), 0, Self::empty());
+        }
+        match HeapOwner::try_adopt_vec(vec) {
+            Ok((ptr, len, _, owner)) => (ptr, len, owner),
+            Err(vec) => Self::from_bytes(Bytes::from(vec)),
+        }
+    }
+
+    /// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
+    ///
+    /// Zero-copy: the handle points directly into the payload kept alive by the
+    /// inner `Bytes`. Costs one box; the inner refcount is not touched again
+    /// until final release.
+    pub(crate) fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, Self) {
+        if bytes.is_empty() {
+            return (NonNull::dangling(), 0, Self::empty());
+        }
+        ExternalOwner::from_bytes(bytes)
+    }
+}
+
+impl ExternalOwner {
+    fn from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, OwnerRef) {
+        // Box the owner first, then derive the handle pointer from the `Bytes`
+        // in its final location inside the box. This keeps the provenance
+        // chain trivially clean: the pointer the handle uses is derived from
+        // the exact value that owns the payload for the buffer's whole life.
+        let owner = Box::new(Self {
             refs: AtomicUsize::new(1),
-            data_base: data,
-            alloc_size: layout.size(),
-            alloc_align: layout.align(),
+            bytes,
         });
-        OwnerRef::from_heap(NonNull::new_unchecked(header))
-    };
-    (data, header_offset, owner)
-}
-
-/// Allocates an untracked mutable buffer.
-///
-/// Low-alignment allocations reserve a front [`HeapHeader`] and leave it
-/// uninitialized until `freeze`; high-alignment allocations use the eager tail
-/// header layout from [`allocate_aligned`] so the returned data pointer keeps
-/// the requested alignment.
-///
-/// # Panics
-///
-/// Panics if `capacity == 0` or `alignment` is not a power of two.
-#[inline(always)]
-pub(crate) fn allocate_aligned_mut(
-    capacity: usize,
-    alignment: usize,
-    zeroed: bool,
-) -> (NonNull<u8>, OwnerRef) {
-    assert!(capacity > 0, "capacity must be greater than zero");
-    assert!(
-        alignment.is_power_of_two(),
-        "alignment must be a power of two"
-    );
-    if alignment > align_of::<HeapHeader>() {
-        let (ptr, _, owner) = allocate_aligned(capacity, alignment, zeroed);
-        return (ptr, owner);
+        let ptr = NonNull::new(owner.bytes.as_ptr().cast_mut())
+            .expect("non-empty Bytes has non-null data");
+        let len = owner.bytes.len();
+        let owner = NonNull::from(Box::leak(owner));
+        // SAFETY: the pointer came from `Box::leak` and is uniquely owned here.
+        let owner = unsafe { OwnerRef::from_external(owner) };
+        (ptr, len, owner)
     }
 
-    let layout = front_heap_layout(capacity);
-    let ptr = if zeroed {
-        // SAFETY: layout is valid and non-zero sized.
-        unsafe { alloc_zeroed(layout) }
-    } else {
-        // SAFETY: layout is valid and non-zero sized.
-        unsafe { alloc(layout) }
-    };
-    let base = NonNull::new(ptr).unwrap_or_else(|| handle_alloc_error(layout));
-    let header = base.cast::<HeapHeader>();
-    let data = front_heap_data_base(header);
-    // SAFETY: `header` points at the reserved front header region of an
-    // allocation owned by this owner ref. The contents are left uninitialized
-    // and written before the owner is shared (`from_heap` reads nothing).
-    let owner = unsafe { OwnerRef::from_heap(header) };
-    (data, owner)
-}
-
-/// Tries to adopt `vec`'s allocation as a native heap buffer.
-///
-/// Adoption places a tail [`HeapHeader`] at the highest header-aligned
-/// address inside the vec's own spare capacity and succeeds iff that address
-/// is at or above `base + len` (see the module docs for the layout diagram):
-/// zero copies and zero extra allocations. The vec's allocation layout
-/// `(cap, align = 1)` is recorded exactly so release deallocates with the
-/// same layout. On success, returns the data pointer, readable length,
-/// usable capacity (the prefix below the header), and the owner.
-///
-/// Exactly-sized vecs (`len == cap`, the common case for `vec![0; n]` and
-/// `collect()`) have no spare room; reallocating could copy, so they are
-/// returned unchanged for the caller to convert another way.
-pub(crate) fn try_adopt_vec(
-    vec: Vec<u8>,
-) -> Result<(NonNull<u8>, usize, usize, OwnerRef), Vec<u8>> {
-    let len = vec.len();
-    let cap = vec.capacity();
-    let base_addr = vec.as_ptr() as usize;
-    let Some(header_offset) = vec_adoption_header_offset(base_addr, len, cap) else {
-        return Err(vec);
-    };
-
-    // Adopt: dismantle the vec and place the header in its spare capacity.
-    let mut vec = ManuallyDrop::new(vec);
-    let base = vec.as_mut_ptr();
-    // SAFETY: `base..base+cap` is one live allocation (`cap > 0`) owned by
-    // the dismantled vec; `base + header_offset` is header-aligned and
-    // `header_offset + size_of::<HeapHeader>() <= cap`, so the header write
-    // is in bounds.
-    unsafe {
-        let header = base.add(header_offset).cast::<HeapHeader>();
-        header.write(HeapHeader {
-            refs: AtomicUsize::new(1),
-            data_base: NonNull::new_unchecked(base),
-            alloc_size: cap,
-            alloc_align: 1,
-        });
-        Ok((
-            NonNull::new_unchecked(base),
-            len,
-            header_offset,
-            OwnerRef::from_heap(NonNull::new_unchecked(header)),
-        ))
+    /// Releases a unique external owner.
+    ///
+    /// # Safety
+    ///
+    /// `owner` must come from `Box::leak` and no other handle may reference it.
+    #[inline]
+    unsafe fn release(owner: NonNull<Self>) {
+        // SAFETY: guaranteed by the caller.
+        let owner_ref = unsafe { owner.as_ref() };
+        debug_assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
+        // SAFETY: the owner box was leaked at construction; dropping it here
+        // drops the inner `Bytes` exactly once.
+        drop(unsafe { Box::from_raw(owner.as_ptr()) });
     }
 }
 
-/// Converts `vec` into immutable handle fields, adopting its allocation if it
-/// can host a tail [`HeapHeader`] in spare capacity.
-///
-/// Empty vecs detach entirely (empty immutable buffers never pin an
-/// allocation). Non-adoptable vecs move into `Bytes` (zero-copy for any
-/// `Vec<u8>`; for `len == cap` also `bytes`' allocation-free promotable
-/// path) behind an external owner.
-pub(crate) fn owner_from_vec(vec: Vec<u8>) -> (NonNull<u8>, usize, OwnerRef) {
-    if vec.is_empty() {
-        return (NonNull::dangling(), 0, OwnerRef::empty());
-    }
-    match try_adopt_vec(vec) {
-        Ok((ptr, len, _, owner)) => (ptr, len, owner),
-        Err(vec) => owner_from_bytes(Bytes::from(vec)),
-    }
-}
-
-/// Moves `bytes` into a boxed [`ExternalOwner`] and returns handle fields.
-///
-/// Zero-copy: the handle points directly into the payload kept alive by the
-/// inner `Bytes`. Costs one box; the inner refcount is not touched again until
-/// final release.
-pub(crate) fn owner_from_bytes(bytes: Bytes) -> (NonNull<u8>, usize, OwnerRef) {
-    if bytes.is_empty() {
-        return (NonNull::dangling(), 0, OwnerRef::empty());
+impl HeapOwner {
+    /// Returns the full layout and header offset for a native aligned allocation.
+    #[inline]
+    fn layout(capacity: usize, alignment: usize) -> (Layout, usize) {
+        let header_offset = capacity
+            .checked_next_multiple_of(align_of::<Self>())
+            .expect("layout size overflow");
+        let total = header_offset
+            .checked_add(size_of::<Self>())
+            .expect("heap layout size overflow");
+        let layout_alignment = alignment.max(align_of::<Self>());
+        let layout =
+            Layout::from_size_align(total, layout_alignment).expect("alignment is a power of two");
+        (layout, header_offset)
     }
 
-    // Box the owner first, then derive the handle pointer from the `Bytes` in
-    // its final location inside the box. This keeps the provenance chain
-    // trivially clean: the pointer the handle uses is derived from the exact
-    // value that owns the payload for the buffer's whole life.
-    let owner = Box::new(ExternalOwner {
-        refs: AtomicUsize::new(1),
-        bytes,
-    });
-    let ptr =
-        NonNull::new(owner.bytes.as_ptr().cast_mut()).expect("non-empty Bytes has non-null data");
-    let len = owner.bytes.len();
-    let owner = NonNull::from(Box::leak(owner));
-    // SAFETY: the pointer came from `Box::leak` and is uniquely owned here.
-    let owner = unsafe { OwnerRef::from_external(owner) };
-    (ptr, len, owner)
-}
-
-/// Returns the data layout for a pooled size class.
-///
-/// Pooled owner metadata lives in the size class side table, so the allocation
-/// itself contains only caller-usable bytes with the requested alignment.
-#[inline]
-pub(crate) fn pooled_layout(size: usize, alignment: usize) -> Layout {
-    Layout::from_size_align(size, alignment).expect("alignment is a power of two")
-}
-
-/// Returns the full layout and header offset for a native aligned allocation.
-#[inline]
-fn heap_layout(capacity: usize, alignment: usize) -> (Layout, usize) {
-    let header_offset = capacity
-        .checked_next_multiple_of(align_of::<HeapHeader>())
-        .expect("layout size overflow");
-    let total = header_offset
-        .checked_add(size_of::<HeapHeader>())
-        .expect("heap layout size overflow");
-    let layout_alignment = alignment.max(align_of::<HeapHeader>());
-    let layout =
-        Layout::from_size_align(total, layout_alignment).expect("alignment is a power of two");
-    (layout, header_offset)
-}
-
-/// Returns the full layout for a low-alignment front-header allocation.
-#[inline(always)]
-const fn front_heap_layout(capacity: usize) -> Layout {
-    let total = size_of::<HeapHeader>()
-        .checked_add(capacity)
-        .expect("front heap layout size overflow");
-    // SAFETY: `HeapHeader` has a non-zero power-of-two alignment, and
-    // `capacity > 0` at allocation sites makes `total` non-zero.
-    unsafe { Layout::from_size_align_unchecked(total, align_of::<HeapHeader>()) }
-}
-
-#[inline(always)]
-const fn front_heap_data_base(base: NonNull<HeapHeader>) -> NonNull<u8> {
-    // SAFETY: the front layout reserves the header at the allocation base and
-    // the usable data starts immediately after it.
-    unsafe { NonNull::new_unchecked(base.as_ptr().cast::<u8>().add(size_of::<HeapHeader>())) }
-}
-
-#[inline(always)]
-fn front_heap_alloc_size(base: NonNull<HeapHeader>, ptr: NonNull<u8>, cap: usize) -> usize {
-    let base_addr = base.as_ptr() as usize;
-    let end_addr = ptr.as_ptr() as usize + cap;
-    debug_assert!(end_addr >= base_addr);
-    end_addr - base_addr
-}
-
-#[inline(always)]
-fn heap_usable_capacity(header: NonNull<HeapHeader>, header_ref: &HeapHeader) -> usize {
-    let header_addr = header.as_ptr() as usize;
-    let data_addr = header_ref.data_base.as_ptr() as usize;
-    if header_addr < data_addr {
-        header_ref
-            .alloc_size
-            .checked_sub(data_addr - header_addr)
-            .expect("front heap data base must lie within allocation")
-    } else {
-        header_addr - data_addr
+    /// Returns the full layout for a low-alignment front-owner allocation.
+    #[inline(always)]
+    const fn front_layout(capacity: usize) -> Layout {
+        let total = size_of::<Self>()
+            .checked_add(capacity)
+            .expect("front heap layout size overflow");
+        // SAFETY: `HeapOwner` has a non-zero power-of-two alignment, and
+        // `capacity > 0` at allocation sites makes `total` non-zero.
+        unsafe { Layout::from_size_align_unchecked(total, align_of::<Self>()) }
     }
-}
 
-#[inline(always)]
-fn round_down(value: usize, align: usize) -> usize {
-    debug_assert!(align.is_power_of_two());
-    value & !(align - 1)
-}
-
-#[inline(always)]
-fn vec_adoption_header_offset(base_addr: usize, len: usize, cap: usize) -> Option<usize> {
-    if cap < size_of::<HeapHeader>() {
-        return None;
+    #[inline(always)]
+    const fn front_data_base(base: NonNull<Self>) -> NonNull<u8> {
+        // SAFETY: the front layout reserves the owner at the allocation base
+        // and the usable data starts immediately after it.
+        unsafe { NonNull::new_unchecked(base.as_ptr().cast::<u8>().add(size_of::<Self>())) }
     }
-    let header_addr = round_down(
-        base_addr.checked_add(cap - size_of::<HeapHeader>())?,
-        align_of::<HeapHeader>(),
-    );
-    if header_addr < base_addr || header_addr < base_addr.checked_add(len)? {
-        return None;
+
+    #[inline(always)]
+    fn front_alloc_size(base: NonNull<Self>, ptr: NonNull<u8>, cap: usize) -> usize {
+        let base_addr = base.as_ptr() as usize;
+        let end_addr = ptr.as_ptr() as usize + cap;
+        debug_assert!(end_addr >= base_addr);
+        end_addr - base_addr
     }
-    Some(header_addr - base_addr)
-}
 
-/// Releases a unique pooled owner into the thread-cache push fast path.
-///
-/// # Safety
-///
-/// No other handle may reference this allocation and the pooled lease must be
-/// initialized.
-#[inline(always)]
-unsafe fn release_pooled(slot: NonNull<PooledSlot>) {
-    // SAFETY: guaranteed by the caller.
-    debug_assert_eq!(unsafe { slot.as_ref() }.refs.load(Ordering::Relaxed), 1);
-    // SAFETY: this unique owner proves the slot's data allocation is live.
-    let buffer = unsafe { PooledBuffer::from_slot(slot) };
-    BufferPoolThreadCache::push(buffer);
-}
-
-/// Releases unique non-pooled owners (heap dealloc, external box drop).
-///
-/// One outlined function serves every drop site so the cold dealloc and
-/// box-drop code is not instantiated inline at each `IoBuf`/`IoBufMut` drop.
-///
-/// # Safety
-///
-/// No other handle may reference this allocation.
-#[cold]
-#[inline(never)]
-unsafe fn release_unique_cold(owner: OwnerRef) {
-    let tag = owner.tag();
-    if tag == OWNER_HEAP {
-        // SAFETY: unique initialized heap owner.
-        unsafe { release_heap(owner.heap()) };
-    } else if tag == OWNER_EXTERNAL {
-        // SAFETY: unique external owner.
-        unsafe { release_external(owner.external()) };
+    #[inline(always)]
+    fn usable_capacity(header: NonNull<Self>, header_ref: &Self) -> usize {
+        let header_addr = header.as_ptr() as usize;
+        let data_addr = header_ref.data_base.as_ptr() as usize;
+        if header_addr < data_addr {
+            header_ref
+                .alloc_size
+                .checked_sub(data_addr - header_addr)
+                .expect("front heap data base must lie within allocation")
+        } else {
+            header_addr - data_addr
+        }
     }
-    // Empty owners need no release work.
-}
 
-/// Releases a unique initialized heap owner.
-///
-/// Two loads recover the stored base and layout; no placement math is redone
-/// on release. The header fields are copied out before `dealloc` because the
-/// header lives inside the allocation being freed.
-///
-/// # Safety
-///
-/// No other handle may reference this allocation.
-#[inline]
-unsafe fn release_heap(header: NonNull<HeapHeader>) {
-    // SAFETY: guaranteed by the caller.
-    let header_ref = unsafe { header.as_ref() };
-    debug_assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
-    let header_addr = header.as_ptr() as usize;
-    let data_addr = header_ref.data_base.as_ptr() as usize;
-    let base = if header_addr < data_addr {
-        header.cast::<u8>()
-    } else {
-        header_ref.data_base
-    };
-    // SAFETY: `(alloc_size, alloc_align)` is exactly the layout the allocation
-    // was created with (a heap-owner invariant).
-    let layout =
-        unsafe { Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align) };
-    // SAFETY: base/layout came from the global allocator; the header borrow
-    // ended above (its fields were copied to locals).
-    unsafe { dealloc(base.as_ptr(), layout) };
-}
+    #[inline(always)]
+    fn round_down(value: usize, align: usize) -> usize {
+        debug_assert!(align.is_power_of_two());
+        value & !(align - 1)
+    }
 
-/// Releases a front-header heap allocation without touching its reserved
-/// header.
-///
-/// # Safety
-///
-/// `base`, `ptr`, and `cap` must describe a live front-header allocation whose
-/// mutable handle is unique.
-#[inline(always)]
-unsafe fn release_front_heap(base: NonNull<HeapHeader>, ptr: NonNull<u8>, cap: usize) {
-    let alloc_size = front_heap_alloc_size(base, ptr, cap);
-    // SAFETY: front heap allocations are created with this exact layout.
-    let layout = unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<HeapHeader>()) };
-    // SAFETY: base/layout came from the global allocator on the front branch.
-    unsafe { dealloc(base.as_ptr().cast::<u8>(), layout) };
-}
+    #[inline(always)]
+    fn vec_adoption_header_offset(base_addr: usize, len: usize, cap: usize) -> Option<usize> {
+        if cap < size_of::<Self>() {
+            return None;
+        }
+        let header_addr = Self::round_down(
+            base_addr.checked_add(cap - size_of::<Self>())?,
+            align_of::<Self>(),
+        );
+        if header_addr < base_addr || header_addr < base_addr.checked_add(len)? {
+            return None;
+        }
+        Some(header_addr - base_addr)
+    }
 
-/// Releases a unique external owner.
-///
-/// # Safety
-///
-/// `owner` must come from `Box::leak` and no other handle may reference it.
-#[inline]
-unsafe fn release_external(owner: NonNull<ExternalOwner>) {
-    // SAFETY: guaranteed by the caller.
-    let owner_ref = unsafe { owner.as_ref() };
-    debug_assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
-    // SAFETY: the owner box was leaked at construction; dropping it here drops
-    // the inner `Bytes` exactly once.
-    drop(unsafe { Box::from_raw(owner.as_ptr()) });
+    /// Releases a unique initialized heap owner.
+    ///
+    /// Two loads recover the stored base and layout; no placement math is
+    /// redone on release. The owner fields are copied out before `dealloc`
+    /// because the owner lives inside the allocation being freed.
+    ///
+    /// # Safety
+    ///
+    /// No other handle may reference this allocation.
+    #[inline]
+    unsafe fn release(header: NonNull<Self>) {
+        // SAFETY: guaranteed by the caller.
+        let header_ref = unsafe { header.as_ref() };
+        debug_assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
+        let header_addr = header.as_ptr() as usize;
+        let data_addr = header_ref.data_base.as_ptr() as usize;
+        let base = if header_addr < data_addr {
+            header.cast::<u8>()
+        } else {
+            header_ref.data_base
+        };
+        // SAFETY: `(alloc_size, alloc_align)` is exactly the layout the
+        // allocation was created with (a heap-owner invariant).
+        let layout = unsafe {
+            Layout::from_size_align_unchecked(header_ref.alloc_size, header_ref.alloc_align)
+        };
+        // SAFETY: base/layout came from the global allocator; the header borrow
+        // ended above (its fields were copied to locals).
+        unsafe { dealloc(base.as_ptr(), layout) };
+    }
+
+    /// Releases a front-header heap allocation without touching its reserved
+    /// owner record.
+    ///
+    /// # Safety
+    ///
+    /// `base`, `ptr`, and `cap` must describe a live front-header allocation
+    /// whose mutable handle is unique.
+    #[inline(always)]
+    unsafe fn release_front(base: NonNull<Self>, ptr: NonNull<u8>, cap: usize) {
+        let alloc_size = Self::front_alloc_size(base, ptr, cap);
+        // SAFETY: front heap allocations are created with this exact layout.
+        let layout =
+            unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<Self>()) };
+        // SAFETY: base/layout came from the global allocator on the front branch.
+        unsafe { dealloc(base.as_ptr().cast::<u8>(), layout) };
+    }
 }
 
 #[cfg(test)]
@@ -1241,13 +1257,13 @@ mod tests {
     #[test]
     fn test_heap_layout_places_tail_header_after_data() {
         let page = page_size();
-        let (data, usable, owner) = allocate_aligned(4096, page, false);
+        let (data, usable, owner) = HeapOwner::allocate_aligned(4096, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
         assert_eq!(usable, 4096);
 
         // SAFETY: owner was just allocated and is live.
         let header = unsafe { owner.heap() };
-        assert!((header.as_ptr() as usize).is_multiple_of(align_of::<HeapHeader>()));
+        assert!((header.as_ptr() as usize).is_multiple_of(align_of::<HeapOwner>()));
         assert!(header.as_ptr() as usize >= data.as_ptr() as usize + 4096);
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }, data);
@@ -1259,7 +1275,7 @@ mod tests {
 
     #[test]
     fn test_heap_zeroed_only_exposes_usable_region() {
-        let (data, _, owner) = allocate_aligned(64, page_size(), true);
+        let (data, _, owner) = HeapOwner::allocate_aligned(64, page_size(), true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
@@ -1271,10 +1287,10 @@ mod tests {
     fn test_heap_unaligned_capacity_rounds_usable_region_up() {
         // A capacity that is not a multiple of the header alignment gains the
         // padding bytes that precede the header; they are genuinely writable.
-        let (_, usable, owner) = allocate_aligned(10, 1, false);
+        let (_, usable, owner) = HeapOwner::allocate_aligned(10, 1, false);
         // SAFETY: owner is unique and live.
         let capacity = unsafe { owner.usable_capacity() };
-        assert_eq!(capacity, 10usize.next_multiple_of(align_of::<HeapHeader>()));
+        assert_eq!(capacity, 10usize.next_multiple_of(align_of::<HeapOwner>()));
         assert_eq!(usable, capacity);
         // SAFETY: owner is unique and must be released by this test.
         unsafe { owner.release_unique() };
@@ -1282,14 +1298,14 @@ mod tests {
 
     #[test]
     fn test_front_heap_mut_drop_does_not_read_reserved_header() {
-        let (data, owner) = allocate_aligned_mut(64, 1, false);
-        assert!((data.as_ptr() as usize).is_multiple_of(align_of::<HeapHeader>()));
+        let (data, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
+        assert!((data.as_ptr() as usize).is_multiple_of(align_of::<HeapOwner>()));
         assert!(owner.is_front_heap_for_mut(data));
         // SAFETY: owner is unique and must be released by this test. This path
         // must not read the uninitialized front header.
         unsafe { owner.release_unique_mut_at(data, 64) };
 
-        let (data, owner) = allocate_aligned_mut(64, 1, false);
+        let (data, owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
         // SAFETY: `17 <= 64`, so the advanced pointer stays within the
         // allocation's usable region.
         let advanced = unsafe { data.add(17) };
@@ -1301,7 +1317,7 @@ mod tests {
 
     #[test]
     fn test_front_heap_materializes_before_shared_owner() {
-        let (data, mut owner) = allocate_aligned_mut(64, 1, false);
+        let (data, mut owner) = HeapOwner::allocate_aligned_mut(64, 1, false);
         // SAFETY: `17 <= 64`, so the advanced pointer stays within the
         // allocation's usable region.
         let advanced = unsafe { data.add(17) };
@@ -1324,7 +1340,7 @@ mod tests {
     #[test]
     fn test_mut_allocator_uses_tail_header_for_high_alignment() {
         let page = page_size();
-        let (data, owner) = allocate_aligned_mut(64, page, false);
+        let (data, owner) = HeapOwner::allocate_aligned_mut(64, page, false);
         assert!((data.as_ptr() as usize).is_multiple_of(page));
         assert!(!owner.is_front_heap_for_mut(data));
         // SAFETY: owner is unique and must be released by this test.
@@ -1333,7 +1349,7 @@ mod tests {
 
     #[test]
     fn test_front_heap_zeroed_exposes_zeroed_data_region() {
-        let (data, owner) = allocate_aligned_mut(64, 1, true);
+        let (data, owner) = HeapOwner::allocate_aligned_mut(64, 1, true);
         // SAFETY: data points at a zeroed usable region of length 64.
         let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr(), 64) };
         assert_eq!(bytes, &[0u8; 64]);
@@ -1343,7 +1359,7 @@ mod tests {
 
     #[test]
     fn test_external_owner_refcount() {
-        let (_, len, owner) = owner_from_bytes(Bytes::from_static(b"abc"));
+        let (_, len, owner) = OwnerRef::from_bytes(Bytes::from_static(b"abc"));
         assert_eq!(len, 3);
         assert!(owner.is_external());
         // SAFETY: owner is live.
@@ -1364,7 +1380,7 @@ mod tests {
     fn test_external_owner_keeps_inner_bytes_alive() {
         let payload = Bytes::from(vec![7u8; 32]);
         let inner_ptr = payload.as_ptr();
-        let (ptr, len, owner) = owner_from_bytes(payload);
+        let (ptr, len, owner) = OwnerRef::from_bytes(payload);
         assert_eq!(ptr.as_ptr().cast_const(), inner_ptr);
         assert_eq!(len, 32);
         // SAFETY: owner is live and external.
@@ -1376,14 +1392,14 @@ mod tests {
 
     #[test]
     fn test_empty_vec_has_no_owner() {
-        let (_, len, owner) = owner_from_vec(Vec::new());
+        let (_, len, owner) = OwnerRef::from_vec(Vec::new());
         assert_eq!(len, 0);
         assert!(owner.is_empty());
     }
 
     #[test]
     fn test_empty_bytes_has_no_owner() {
-        let (_, len, owner) = owner_from_bytes(Bytes::new());
+        let (_, len, owner) = OwnerRef::from_bytes(Bytes::new());
         assert_eq!(len, 0);
         assert!(owner.is_empty());
     }
@@ -1396,14 +1412,14 @@ mod tests {
         vec.extend_from_slice(&[1u8, 2, 3, 4]);
         let base_addr = vec.as_ptr() as usize;
         let cap = vec.capacity();
-        let (ptr, len, owner) = owner_from_vec(vec);
+        let (ptr, len, owner) = OwnerRef::from_vec(vec);
         assert_eq!(ptr.as_ptr() as usize, base_addr);
         assert_eq!(len, 4);
         assert!(!owner.is_external());
         assert!(!owner.is_pooled());
         assert!(!owner.is_empty());
 
-        let expected_header = base_addr + vec_adoption_header_offset(base_addr, len, cap).unwrap();
+        let expected_header = base_addr + HeapOwner::vec_adoption_header_offset(base_addr, len, cap).unwrap();
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }.as_ptr() as usize, base_addr);
         // SAFETY: owner is unique and live.
@@ -1423,7 +1439,7 @@ mod tests {
         // owner path (allocation-free promotable `Bytes`).
         let vec = vec![5u8, 6, 7];
         assert_eq!(vec.len(), vec.capacity());
-        let (ptr, len, owner) = owner_from_vec(vec);
+        let (ptr, len, owner) = OwnerRef::from_vec(vec);
         assert_eq!(len, 3);
         assert!(owner.is_external());
         // SAFETY: ptr points into the payload kept alive by the owner.
@@ -1439,14 +1455,14 @@ mod tests {
         // versus external decision matches the placement rule exactly. The
         // exact threshold depends on the runtime base address, so the rule is
         // recomputed per vec rather than hardcoded.
-        for spare in 0..(size_of::<HeapHeader>() + 2 * align_of::<HeapHeader>()) {
+        for spare in 0..(size_of::<HeapOwner>() + 2 * align_of::<HeapOwner>()) {
             let len = 16;
             let mut vec = Vec::with_capacity(len + spare);
             vec.extend_from_slice(&[9u8; 16]);
             let base_addr = vec.as_ptr() as usize;
             let cap = vec.capacity();
-            let fits = vec_adoption_header_offset(base_addr, len, cap).is_some();
-            let (_, _, owner) = owner_from_vec(vec);
+            let fits = HeapOwner::vec_adoption_header_offset(base_addr, len, cap).is_some();
+            let (_, _, owner) = OwnerRef::from_vec(vec);
             assert_eq!(
                 owner.is_external(),
                 !fits,
@@ -1459,17 +1475,17 @@ mod tests {
 
     #[test]
     fn test_vec_adoption_rejects_header_before_base() {
-        let align = align_of::<HeapHeader>();
+        let align = align_of::<HeapOwner>();
         let base_addr = align - 1;
-        let cap = size_of::<HeapHeader>();
-        let header_addr = round_down(base_addr + cap - size_of::<HeapHeader>(), align);
+        let cap = size_of::<HeapOwner>();
+        let header_addr = HeapOwner::round_down(base_addr + cap - size_of::<HeapOwner>(), align);
         assert!(header_addr < base_addr);
-        assert_eq!(vec_adoption_header_offset(base_addr, 0, cap), None);
+        assert_eq!(HeapOwner::vec_adoption_header_offset(base_addr, 0, cap), None);
     }
 
     #[test]
     fn test_heap_owner_shared_clone_and_drop() {
-        let (_, _, owner) = allocate_aligned(64, 1, false);
+        let (_, _, owner) = HeapOwner::allocate_aligned(64, 1, false);
         // SAFETY: owner is live.
         unsafe { owner.clone_shared() };
         // SAFETY: owner is live.
@@ -1487,10 +1503,10 @@ mod tests {
     #[test]
     fn test_pooled_layout_is_data_only() {
         let size = 1024;
-        let layout = pooled_layout(size, NZUsize!(64).get());
+        let layout = PooledOwner::layout(size, NZUsize!(64).get());
         assert_eq!(layout.size(), size);
         assert!(layout.align() >= 64);
-        assert!(align_of::<PooledSlot>() >= 4);
+        assert!(align_of::<PooledOwner>() >= 4);
     }
 }
 
@@ -1528,7 +1544,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let (_, len, owner) = owner_from_bytes(bytes);
+            let (_, len, owner) = OwnerRef::from_bytes(bytes);
             assert_eq!(len, 3);
 
             // Three references: this thread plus two spawned droppers.
@@ -1561,7 +1577,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let (_, _, owner) = owner_from_bytes(bytes);
+            let (_, _, owner) = OwnerRef::from_bytes(bytes);
 
             // Two handles: this thread and the spawned thread. The spawned
             // thread clones from its own live handle while this thread drops,
@@ -1590,7 +1606,7 @@ mod loom_tests {
         loom::model(|| {
             let released = Arc::new(AtomicUsize::new(0));
             let bytes = Bytes::from_owner(Tracker(released.clone()));
-            let (_, _, owner) = owner_from_bytes(bytes);
+            let (_, _, owner) = OwnerRef::from_bytes(bytes);
 
             // Two handles: this thread checks uniqueness (the try_into_mut
             // gate) while the other drops. Observing unique must mean the
