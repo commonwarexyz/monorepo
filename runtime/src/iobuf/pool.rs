@@ -613,21 +613,7 @@ impl SizeClassHandle {
         prefill: bool,
     ) -> Self {
         let layout = pooled_layout(size, alignment);
-        // The routing fields are cached in every buffer's pooled slot, where
-        // they are stored as u32. Truncation would route returned buffers into
-        // the wrong thread-local cache, so refuse to construct instead.
-        let header_class_id = u32::try_from(class_id).expect("class_id must fit in u32");
-        let header_cache_capacity =
-            u32::try_from(thread_cache_capacity).expect("thread_cache_capacity must fit in u32");
-        let freelist = Freelist::with_usable_size(
-            max,
-            parallelism,
-            size,
-            layout,
-            prefill,
-            header_class_id,
-            header_cache_capacity,
-        );
+        let freelist = Freelist::new(max, parallelism, layout, prefill);
         let class = SizeClass {
             class_id,
             size,
@@ -726,9 +712,10 @@ impl std::ops::Deref for SizeClassHandle {
 /// global freelist retains the class, and returning to the global freelist
 /// releases it.
 #[must_use]
-#[repr(transparent)]
 pub(crate) struct SizeClassLease {
     token: SizeClassToken,
+    class_id: usize,
+    thread_cache_capacity: usize,
 }
 
 // SAFETY: `SizeClassLease` owns one strong reference to a `SizeClass`, which is
@@ -742,9 +729,27 @@ impl SizeClassLease {
     #[inline(always)]
     fn retain(class: &SizeClassHandle) -> Self {
         let token = class.token;
+        // The route is copied into the lease so buffer return can pick the
+        // thread-local cache without dereferencing the class object.
         // SAFETY: the borrowed `class` owns one strong reference for `token`.
         unsafe { token.retain() };
-        Self { token }
+        Self {
+            token,
+            class_id: class.class_id,
+            thread_cache_capacity: class.thread_cache_capacity,
+        }
+    }
+
+    /// Returns the TLS cache registry id for the owning size class.
+    #[inline(always)]
+    const fn class_id(&self) -> usize {
+        self.class_id
+    }
+
+    /// Returns the per-thread cache capacity for the owning size class.
+    #[inline(always)]
+    const fn thread_cache_capacity(&self) -> usize {
+        self.thread_cache_capacity
     }
 
     /// Returns the referenced size class.
@@ -1226,19 +1231,16 @@ impl BufferPoolThreadCache {
     /// global freelist.
     ///
     /// Cache routing reads `class_id` and `thread_cache_capacity` from the
-    /// pooled slot (a line the release path has already loaded) instead of
-    /// dereferencing the class object, keeping the dependent-load chain on the
-    /// return fast path one level shorter.
+    /// live slot lease (on the slot line the release path has already loaded)
+    /// instead of dereferencing the class object, keeping the dependent-load
+    /// chain on the return fast path one level shorter.
     #[inline(always)]
     pub(super) fn push(buffer: PooledBuffer) {
-        let class_id = buffer.class_id() as usize;
-        // Id 0 marks standalone (test/bench) freelist buffers, which have no
-        // owning class and must never enter pool return routing.
-        debug_assert_ne!(
-            class_id, 0,
-            "unrouted pooled buffer entered pool return path"
-        );
-        let thread_cache_capacity = buffer.thread_cache_capacity();
+        // SAFETY: pooled buffers entering the pool return path have an
+        // initialized live lease.
+        let lease = unsafe { buffer.lease() };
+        let class_id = lease.class_id();
+        let thread_cache_capacity = lease.thread_cache_capacity();
         if thread_cache_capacity == 0 {
             TlsSizeClassCacheEntry { buffer }.return_global();
             return;
@@ -1270,8 +1272,11 @@ impl BufferPoolThreadCache {
     /// only contains the initialized-cache lookup and local push.
     #[inline(never)]
     fn push_slow(buffer: PooledBuffer) {
-        let class_id = buffer.class_id() as usize;
-        let thread_cache_capacity = buffer.thread_cache_capacity() as usize;
+        // SAFETY: pooled buffers entering the pool return path have an
+        // initialized live lease.
+        let lease = unsafe { buffer.lease() };
+        let class_id = lease.class_id();
+        let thread_cache_capacity = lease.thread_cache_capacity();
         // Returning a pooled buffer can happen from arbitrary Drop code,
         // including during thread-local destruction. If the local cache is
         // unavailable, fall back to the global freelist instead of panicking.
@@ -1490,10 +1495,9 @@ impl std::fmt::Debug for BufferPool {
 /// Relaxed ordering is sufficient: the atomic operation is only used to assign
 /// unique ids, not to publish any associated size-class state.
 ///
-/// Id 0 is reserved: standalone freelists (tests and benches) stamp their
-/// buffers with class id 0 to mean "no owning size class". Starting real ids
-/// at 1 lets the pool return path assert that an unrouted buffer never enters
-/// thread-cache routing.
+/// Id 0 is reserved so zero remains an invalid class route. Real ids start at
+/// 1 and are copied into live slot leases while buffers are outside the global
+/// freelist.
 static NEXT_SIZE_CLASS_ID: AtomicUsize = AtomicUsize::new(1);
 
 impl BufferPool {

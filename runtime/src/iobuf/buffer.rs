@@ -638,14 +638,9 @@ struct HeapHeader {
 ///
 /// The owning freelist stores one cache-line-padded slot entry per possible
 /// pooled buffer. Stable fields (`refs` sentinel, `data_base`, `capacity`,
-/// `slot`, `class_id`, `thread_cache_capacity`) are written when the slot is
-/// created and remain associated with that slot until the size class drops.
-/// The lease is live only while the slot is outside the global freelist.
-///
-/// `class_id` and `thread_cache_capacity` duplicate fields of the owning
-/// `SizeClass` so the buffer-return fast path can route into the right
-/// thread-local cache from the slot line alone, without a dependent dereference
-/// of the class object.
+/// `slot`) are written when the slot is created and remain associated with
+/// that slot until the size class drops. The lease is live only while the slot
+/// is outside the global freelist.
 #[repr(C)]
 pub struct PooledSlot {
     /// Shared refcount; must stay at offset 0 (see [`OwnerRef::refs`]).
@@ -659,11 +654,6 @@ pub struct PooledSlot {
     capacity: usize,
     /// Stable slot id within the owning freelist.
     slot: u32,
-    /// Dense process-global id of the owning size class (the thread-local
-    /// cache registry key).
-    class_id: u32,
-    /// Per-thread cache capacity of the owning size class.
-    thread_cache_capacity: u32,
 }
 
 impl PooledSlot {
@@ -674,15 +664,13 @@ impl PooledSlot {
     /// at it and no [`PooledBuffer`] may be built from it.
     #[inline]
     #[allow(clippy::missing_const_for_fn)]
-    pub fn new(slot: u32, capacity: usize, class_id: u32, thread_cache_capacity: u32) -> Self {
+    pub fn new(slot: u32, capacity: usize) -> Self {
         Self {
             refs: AtomicUsize::new(1),
             lease: MaybeUninit::uninit(),
             data_base: NonNull::dangling(),
             capacity,
             slot,
-            class_id,
-            thread_cache_capacity,
         }
     }
 }
@@ -704,10 +692,9 @@ struct ExternalOwner {
 /// A raw pooled allocation handle whose layout is stored by its size class.
 ///
 /// This handle is a pointer to the owning side-table slot. The slot stores the
-/// data pointer, stable slot id, capacity, return routing, refcount sentinel,
-/// and optional live lease. Checkout initializes only the lease field in place
-/// and returns an [`OwnerRef`] to that slot; return to the global freelist
-/// consumes the lease.
+/// data pointer, stable slot id, capacity, refcount sentinel, and optional live
+/// lease. Checkout initializes only the lease field in place and returns an
+/// [`OwnerRef`] to that slot; return to the global freelist consumes the lease.
 ///
 /// `PooledBuffer` has no `Drop`: callers must return it to the originating
 /// freelist or deallocate it with the exact layout used for allocation.
@@ -807,29 +794,6 @@ impl PooledBuffer {
         // SAFETY: `PooledBuffer` is constructed only for created slots, whose
         // stable side-table fields are initialized.
         unsafe { self.slot.as_ref().slot }
-    }
-
-    /// Returns the owning size class's dense process-global id.
-    ///
-    /// Cached in the slot so the buffer-return fast path can route into the
-    /// right thread-local cache without dereferencing the class object.
-    ///
-    #[inline(always)]
-    pub(crate) const fn class_id(&self) -> u32 {
-        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
-        // stable side-table fields are initialized.
-        unsafe { self.slot.as_ref().class_id }
-    }
-
-    /// Returns the owning size class's per-thread cache capacity.
-    ///
-    /// Cached in the slot for the same reason as [`Self::class_id`].
-    ///
-    #[inline(always)]
-    pub(crate) const fn thread_cache_capacity(&self) -> u32 {
-        // SAFETY: `PooledBuffer` is constructed only for created slots, whose
-        // stable side-table fields are initialized.
-        unsafe { self.slot.as_ref().thread_cache_capacity }
     }
 
     /// Initializes the pooled lease for a buffer leaving global state.

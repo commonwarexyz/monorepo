@@ -203,31 +203,12 @@ impl Freelist {
     ///
     /// If `prefill` is true, creates `capacity` buffers and makes them
     /// immediately available in the freelist.
-    #[cfg(any(test, feature = "bench"))]
+    ///
     pub fn new(
         capacity: NonZeroU32,
         parallelism: NonZeroUsize,
         layout: Layout,
         prefill: bool,
-    ) -> Self {
-        let usable_size = layout.size();
-        // Standalone freelists have no owning size class; buffers created here
-        // never enter the pool's thread-local cache routing.
-        Self::with_usable_size(capacity, parallelism, usable_size, layout, prefill, 0, 0)
-    }
-
-    /// Creates a new fixed-capacity freelist with an explicit usable data size.
-    ///
-    /// `class_id` and `thread_cache_capacity` are the owning size class's
-    /// routing fields, cached in every created buffer's pooled slot entry.
-    pub(super) fn with_usable_size(
-        capacity: NonZeroU32,
-        parallelism: NonZeroUsize,
-        usable_size: usize,
-        layout: Layout,
-        prefill: bool,
-        class_id: u32,
-        thread_cache_capacity: u32,
     ) -> Self {
         assert!(layout.size() > 0, "layout size must be non-zero");
         let capacity = capacity.get() as usize;
@@ -260,15 +241,8 @@ impl Freelist {
             .map(|_| CachePadded::new(AtomicU64::new(0)))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        let slots = (0..capacity)
-            .map(|slot| {
-                CachePadded::new(UnsafeCell::new(PooledSlot::new(
-                    slot as u32,
-                    usable_size,
-                    class_id,
-                    thread_cache_capacity,
-                )))
-            })
+        let slots = (0..capacity as u32)
+            .map(|slot| CachePadded::new(UnsafeCell::new(PooledSlot::new(slot, layout.size()))))
             .collect::<Vec<_>>()
             .into_boxed_slice();
 
@@ -1289,12 +1263,8 @@ mod loom_tests {
     // layouts so both degenerate and striped cases stay exercised.
 
     fn single_word_freelist(capacity: u32) -> Freelist {
-        Freelist::new(
-            NZU32!(capacity),
-            NZUsize!(1),
-            Layout::from_size_align(64, 64).unwrap(),
-            false,
-        )
+        let layout = Layout::from_size_align(64, 64).unwrap();
+        Freelist::new(NZU32!(capacity), NZUsize!(1), layout, false)
     }
 
     // Each geometry gives a model a small bitmap layout: one or more active
@@ -1313,18 +1283,14 @@ mod loom_tests {
             match self {
                 Self::SingleWordSingleBit => single_word_freelist(1),
                 Self::SingleWordMultiBit => single_word_freelist(2),
-                Self::MultiWordSingleBit => Freelist::new(
-                    NZU32!(4),
-                    NZUsize!(4),
-                    Layout::from_size_align(64, 64).unwrap(),
-                    false,
-                ),
-                Self::MultiWordMultiBit => Freelist::new(
-                    NZU32!(4),
-                    NZUsize!(2),
-                    Layout::from_size_align(64, 64).unwrap(),
-                    false,
-                ),
+                Self::MultiWordSingleBit => {
+                    let layout = Layout::from_size_align(64, 64).unwrap();
+                    Freelist::new(NZU32!(4), NZUsize!(4), layout, false)
+                }
+                Self::MultiWordMultiBit => {
+                    let layout = Layout::from_size_align(64, 64).unwrap();
+                    Freelist::new(NZU32!(4), NZUsize!(2), layout, false)
+                }
             }
         }
 

@@ -68,8 +68,6 @@ fn new_slots(capacity: usize) -> Box<[CachePadded<UnsafeCell<PooledSlot>>]> {
             CachePadded::new(UnsafeCell::new(PooledSlot::new(
                 slot as u32,
                 BENCH_BUFFER_CAPACITY,
-                0,
-                0,
             )))
         })
         .collect::<Vec<_>>()
