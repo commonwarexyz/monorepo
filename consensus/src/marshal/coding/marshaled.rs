@@ -919,12 +919,7 @@ where
                 };
                 handle.await.expect("failed to sync proposed block");
                 durable_tx.send_lossy(true);
-                debug!(
-                    ?round,
-                    ?commitment,
-                    success,
-                    "proposed new block"
-                );
+                debug!(?round, ?commitment, success, "proposed new block");
             }
             .instrument(span)
         });
