@@ -395,13 +395,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
-    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
         if self.ctx.should_fail(Op::Sync) {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Err(Error::Io(injected_io_error())));
             return rx;
         }
-        self.inner.start_sync()
+        self.inner.start_sync().await
     }
 }
 
@@ -470,7 +470,7 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"data".to_vec()).await.unwrap();
 
-        let result = blob.start_sync().await.expect("sync sender dropped");
+        let result = blob.start_sync().await.await.expect("sync sender dropped");
         assert!(matches!(result, Err(Error::Io(_))));
     }
 

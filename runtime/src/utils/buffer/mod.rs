@@ -127,7 +127,7 @@ mod tests {
             Ok(())
         }
 
-        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Ok(()));
             rx
@@ -256,7 +256,7 @@ mod tests {
             Ok(())
         }
 
-        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
             let (tx, rx) = oneshot::channel();
             {
                 let mut state = self.state.lock();

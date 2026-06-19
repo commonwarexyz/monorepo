@@ -170,7 +170,7 @@ pub(super) mod partition_sync_fault {
             self.inner.sync().await
         }
 
-        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
             if self.partition == self.fail_partition {
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(Err(Error::Io(IoError::other(
@@ -178,7 +178,7 @@ pub(super) mod partition_sync_fault {
                 ))));
                 return rx;
             }
-            self.inner.start_sync()
+            self.inner.start_sync().await
         }
     }
 }

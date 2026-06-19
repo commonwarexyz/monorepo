@@ -148,18 +148,19 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
-    fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
         self.auditor.event(b"start_sync", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
         });
-        self.inner.start_sync()
+        self.inner.start_sync().await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
+        deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
@@ -186,8 +187,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_audited_start_sync() {
-        use crate::deterministic::Auditor;
-
         // Two independent storages run the same sequence of operations.
         let auditor1 = Arc::new(Auditor::default());
         let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
@@ -204,6 +203,7 @@ mod tests {
         blob1
             .start_sync()
             .await
+            .await
             .expect("sync sender dropped")
             .unwrap();
         assert_ne!(
@@ -216,6 +216,7 @@ mod tests {
         blob2
             .start_sync()
             .await
+            .await
             .expect("sync sender dropped")
             .unwrap();
         assert_eq!(
@@ -227,8 +228,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_audited_storage_combined() {
-        use crate::deterministic::Auditor;
-
         // Initialize the first storage and auditor
         let inner1 = MemStorage::new(test_pool());
         let auditor1 = Arc::new(Auditor::default());
@@ -382,7 +381,7 @@ mod tests {
             Ok(())
         }
 
-        fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
             let (tx, rx) = oneshot::channel();
             let _ = tx.send(Ok(()));
             rx
