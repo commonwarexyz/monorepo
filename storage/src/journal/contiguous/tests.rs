@@ -173,9 +173,7 @@ pub(super) mod partition_sync_fault {
         async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
             if self.partition == self.fail_partition {
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send(Err(Error::Io(IoError::other(
-                    "injected partition sync fault",
-                ))));
+                let _ = tx.send(self.sync().await);
                 return rx;
             }
             self.inner.start_sync().await
