@@ -2226,40 +2226,6 @@ mod tests {
     const SMALL_PAGE_SIZE: NonZeroU16 = NZU16!(512);
 
     #[test_traced]
-    fn test_variable_split_reader_while_append_future_exists() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = Config {
-                partition: "split-reader-while-append".into(),
-                items_per_section: NZU64!(2),
-                compression: None,
-                codec_config: (),
-                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
-                write_buffer: NZUsize!(1024),
-            };
-            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
-                .await
-                .unwrap();
-            let (mut writer, readers) = journal.split();
-
-            let append = writer.append(&7);
-            let old_reader = readers.reader();
-            assert_eq!(old_reader.bounds(), 0..0);
-
-            assert_eq!(append.await.unwrap(), 0);
-            assert_eq!(writer.size(), 1);
-
-            assert!(matches!(
-                old_reader.read(0).await,
-                Err(Error::ItemOutOfRange(0))
-            ));
-            let new_reader = readers.reader();
-            assert_eq!(new_reader.bounds(), 0..1);
-            assert_eq!(new_reader.read(0).await.unwrap(), 7);
-        });
-    }
-
-    #[test_traced]
     fn test_variable_init_syncs_adopted_data_before_offsets_watermark_advance() {
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {

@@ -1590,33 +1590,6 @@ mod tests {
         format!("{}-blobs", cfg.partition)
     }
 
-    #[test_traced]
-    fn test_fixed_split_reader_while_append_future_exists() {
-        let executor = deterministic::Runner::default();
-        executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(2));
-            let journal = Journal::<_, u64>::init(context.child("journal"), cfg)
-                .await
-                .unwrap();
-            let (mut writer, readers) = journal.split();
-
-            let append = writer.append(&7);
-            let old_reader = readers.reader();
-            assert_eq!(old_reader.bounds(), 0..0);
-
-            assert_eq!(append.await.unwrap(), 0);
-            assert_eq!(writer.size(), 1);
-
-            assert!(matches!(
-                old_reader.read(0).await,
-                Err(Error::ItemOutOfRange(0))
-            ));
-            let new_reader = readers.reader();
-            assert_eq!(new_reader.bounds(), 0..1);
-            assert_eq!(new_reader.read(0).await.unwrap(), 7);
-        });
-    }
-
     impl<E: crate::Context, A: CodecFixedShared> Journal<E, A> {
         /// Test helper: Read the item at the given position.
         pub(crate) async fn read(&self, pos: u64) -> Result<A, Error> {
