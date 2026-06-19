@@ -311,7 +311,8 @@ mod tests {
             name: &[u8],
             versions: std::ops::RangeInclusive<u16>,
         ) -> Result<(Self::Blob, u64, u16), RError> {
-            let (inner, len, version) = self.inner.open_versioned(partition, name, versions).await?;
+            let (inner, len, version) =
+                self.inner.open_versioned(partition, name, versions).await?;
             Ok((
                 DelayedSyncBlob {
                     inner,
@@ -351,7 +352,11 @@ mod tests {
             self.inner.read_at(offset, len).await
         }
 
-        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), RError> {
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), RError> {
             self.inner.write_at(offset, bufs).await
         }
 

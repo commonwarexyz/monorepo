@@ -2867,11 +2867,7 @@ mod tests {
                 participants,
                 schemes,
                 ..
-            } = bls12381_threshold_vrf::fixture::<V, _>(
-                &mut context,
-                NAMESPACE,
-                NUM_VALIDATORS,
-            );
+            } = bls12381_threshold_vrf::fixture::<V, _>(&mut context, NAMESPACE, NUM_VALIDATORS);
             let mut oracle = setup_network_with_participants(
                 context.child("network"),
                 NZUsize!(1),

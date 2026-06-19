@@ -350,8 +350,11 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
 
     /// Start syncing both journals for given section.
     pub async fn start_sync(&self, section: u64) -> Result<Handle<()>, Error> {
-        let (index, values) =
-            try_join(self.index.start_sync(section), self.values.start_sync(section)).await?;
+        let (index, values) = try_join(
+            self.index.start_sync(section),
+            self.values.start_sync(section),
+        )
+        .await?;
         Ok(Handle::from_future(async move {
             let (index, values) = join(index, values).await;
             index?;
