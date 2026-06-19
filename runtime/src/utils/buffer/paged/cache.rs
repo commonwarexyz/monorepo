@@ -495,7 +495,7 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
-        BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        BufferPoolConfig, Clock as _, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
         Supervisor as _,
     };
     use commonware_cryptography::Crc32;
@@ -576,6 +576,10 @@ mod tests {
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
         }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
+        }
     }
 
     #[derive(Clone)]
@@ -654,6 +658,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 

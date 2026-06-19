@@ -24,7 +24,7 @@ use super::Header;
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
-    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
+    utils, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
@@ -387,7 +387,24 @@ impl crate::Blob for Blob {
         self.io_handle
             .sync(self.file.clone())
             .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+            .map_err(|err| match err {
+                Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
+                err => err,
+            })
+    }
+
+    async fn start_sync(&self) -> Handle<()> {
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        let receiver = self.io_handle.start_sync(self.file.clone()).await;
+        Handle::from_future(async move {
+            match receiver.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(Error::Io(e))) => Err(Error::BlobSyncFailed(partition, hex(&name), e)),
+                Ok(Err(err)) => Err(err),
+                Err(_) => Err(Error::Closed),
+            }
+        })
     }
 }
 
@@ -940,6 +957,38 @@ mod tests {
             .sync()
             .await
             .expect_err("sync should fail without a loop");
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "blob sync failed: partition/{} error: failed to send work",
+                hex(b"blob")
+            )
+        );
+
+        let _ = std::fs::remove_dir_all(&storage_directory);
+    }
+
+    #[tokio::test]
+    async fn test_blob_start_sync_reports_handle_disconnect() {
+        // Verify start_sync completion errors use the same blob-specific wrapper as sync.
+        let storage_directory = create_test_directory();
+        let path = storage_directory.join("disconnected_start_sync");
+        let file = File::create(&path).unwrap();
+
+        let mut registry = Registry::default();
+        let pool = test_pool(&mut registry.sub_registry("pool"));
+        let (submitter, io_loop) = iouring::IoUringLoop::new(
+            iouring::Config::default(),
+            &mut registry.sub_registry("iouring"),
+        );
+        drop(io_loop);
+
+        let blob = Blob::new("partition".into(), b"blob", file, submitter, pool);
+        let err = blob
+            .start_sync()
+            .await
+            .await
+            .expect_err("start_sync should fail without a loop");
         assert_eq!(
             err.to_string(),
             format!(

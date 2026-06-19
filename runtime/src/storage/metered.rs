@@ -1,12 +1,12 @@
 use crate::{
     telemetry::metrics::{raw, Counter, Gauge, Register},
-    Buf, Error, IoBufs, IoBufsMut,
+    Buf, Error, Handle, IoBufs, IoBufsMut,
 };
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
 };
-use tracing::{field::Empty, Span};
+use tracing::{field::Empty, Instrument as _, Span};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -223,6 +223,22 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.metrics.storage_syncs.inc();
         self.inner.sync().await
     }
+
+    #[tracing::instrument(
+        name = "runtime.storage.blob.start_sync",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition)
+    )]
+    #[allow(clippy::async_yields_async)]
+    async fn start_sync(&self) -> Handle<()> {
+        self.metrics.storage_syncs.inc();
+        let handle = self.inner.start_sync().await;
+        Handle::from_future(handle.instrument(tracing::info_span!(
+            "runtime.storage.blob.sync",
+            partition = %self.partition,
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +369,24 @@ mod tests {
         assert_eq!(
             open_blobs_after_drop, 0,
             "open_blobs metric was not decremented after dropping the blob"
+        );
+    }
+
+    /// Test that `start_sync` increments the sync metric, matching `sync`.
+    #[tokio::test]
+    async fn test_metered_start_sync_increments_metric() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        blob.start_sync().await.await.unwrap();
+        assert_eq!(
+            storage.metrics.storage_syncs.get(),
+            1,
+            "storage_syncs metric was not incremented after start_sync"
         );
     }
 

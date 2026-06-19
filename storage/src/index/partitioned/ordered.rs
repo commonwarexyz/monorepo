@@ -2,9 +2,7 @@
 
 use crate::{
     index::{
-        ordered::Index as OrderedIndex,
-        partitioned::partition_index_and_sub_key,
-        storage::{iter_chain, Record},
+        ordered::Index as OrderedIndex, partitioned::partition_index_and_sub_key, storage::Values,
         Ordered as OrderedTrait, Unordered as UnorderedTrait,
     },
     translator::Translator,
@@ -49,21 +47,21 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         (&mut self.partitions[i], sub_key)
     }
 
-    /// Returns the head record of the chain for the lexicographically first translated key across
+    /// Returns an iterator over the values of the lexicographically first translated key across
     /// all partitions, or None if every partition is empty.
-    fn first_translated_record(&self) -> Option<&Record<V>> {
+    fn first_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
         self.partitions
             .iter()
-            .find_map(|p| p.first_translated_record())
+            .find_map(|p| p.first_translated_values())
     }
 
-    /// Returns the head record of the chain for the lexicographically last translated key across
+    /// Returns an iterator over the values of the lexicographically last translated key across
     /// all partitions, or None if every partition is empty.
-    fn last_translated_record(&self) -> Option<&Record<V>> {
+    fn last_translated_values(&self) -> Option<Values<'_, T::Key, V, T>> {
         self.partitions
             .iter()
             .rev()
-            .find_map(|p| p.last_translated_record())
+            .find_map(|p| p.last_translated_values())
     }
 }
 
@@ -198,15 +196,17 @@ impl<T: Translator, V: Send + Sync, const P: usize> OrderedTrait for Index<T, V,
     {
         let (partition_index, sub_key) = partition_index_and_sub_key::<P>(key);
 
-        if let Some(r) = self.partitions[partition_index].prev_translated_record_no_cycle(sub_key) {
-            return Some((iter_chain(r), false));
+        if let Some(values) =
+            self.partitions[partition_index].prev_translated_values_no_cycle(sub_key)
+        {
+            return Some((values, false));
         }
         for partition in self.partitions[..partition_index].iter().rev() {
-            if let Some(r) = partition.last_translated_record() {
-                return Some((iter_chain(r), false));
+            if let Some(values) = partition.last_translated_values() {
+                return Some((values, false));
             }
         }
-        self.last_translated_record().map(|r| (iter_chain(r), true))
+        self.last_translated_values().map(|values| (values, true))
     }
 
     fn next_translated_key<'a>(
@@ -218,30 +218,31 @@ impl<T: Translator, V: Send + Sync, const P: usize> OrderedTrait for Index<T, V,
     {
         let (partition_index, sub_key) = partition_index_and_sub_key::<P>(key);
 
-        if let Some(r) = self.partitions[partition_index].next_translated_record_no_cycle(sub_key) {
-            return Some((iter_chain(r), false));
+        if let Some(values) =
+            self.partitions[partition_index].next_translated_values_no_cycle(sub_key)
+        {
+            return Some((values, false));
         }
         for partition in self.partitions[partition_index + 1..].iter() {
-            if let Some(r) = partition.first_translated_record() {
-                return Some((iter_chain(r), false));
+            if let Some(values) = partition.first_translated_values() {
+                return Some((values, false));
             }
         }
-        self.first_translated_record()
-            .map(|r| (iter_chain(r), true))
+        self.first_translated_values().map(|values| (values, true))
     }
 
     fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.first_translated_record().map(iter_chain)
+        self.first_translated_values()
     }
 
     fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.last_translated_record().map(iter_chain)
+        self.last_translated_values()
     }
 }
 
