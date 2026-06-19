@@ -1007,7 +1007,8 @@ mod tests {
     use commonware_cryptography::{
         certificate::mocks::Fixture, ed25519::PrivateKey, Digest as _, Signer as _,
     };
-    use commonware_utils::{channel::oneshot::error::TryRecvError, test_rng_seeded};
+    use commonware_runtime::{deterministic, Runner as _};
+    use commonware_utils::{channel::oneshot::error::TryRecvError, test_rng_seeded, NZUsize};
 
     type TestMessage = Message<harness::S, Standard<harness::B>>;
     type TestPending = Pending<harness::S, Standard<harness::B>>;
@@ -1270,6 +1271,21 @@ mod tests {
                 }) if *commitment == expected_commitment && !response.is_closed()
             )
         })
+    }
+
+    #[test]
+    fn durable_methods_return_false_when_mailbox_closes_before_sync_handle() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let (sender, receiver) =
+                commonware_actor::mailbox::new::<TestMessage>(context, NZUsize!(1));
+            let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender);
+            drop(receiver);
+
+            assert!(!mailbox.proposed(round(1), block(1)).await);
+            assert!(!mailbox.verified(round(2), block(2)).await);
+            assert!(!mailbox.certified(round(3), block(3)).await);
+        });
     }
 
     #[test]
