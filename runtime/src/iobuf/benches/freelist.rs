@@ -20,7 +20,7 @@
 //! freelist.
 
 use super::utils::{measure, Threading};
-use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer, PooledSlot};
+use commonware_runtime::iobuf::bench::{Freelist, PooledBuffer, PooledOwner};
 use commonware_utils::sync::Mutex;
 use criterion::Criterion;
 use crossbeam_queue::ArrayQueue;
@@ -48,12 +48,12 @@ const BENCH_LAYOUT: Layout =
 fn new_buffers(
     capacity: usize,
 ) -> (
-    Box<[CachePadded<UnsafeCell<PooledSlot>>]>,
+    Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
     Vec<PooledBuffer>,
 ) {
     let slots = (0..capacity)
         .map(|slot| {
-            CachePadded::new(UnsafeCell::new(PooledSlot::new(
+            CachePadded::new(UnsafeCell::new(PooledOwner::new(
                 slot as u32,
                 BENCH_BUFFER_CAPACITY,
             )))
@@ -67,7 +67,7 @@ fn new_buffers(
             let slot_ptr = NonNull::new(slot_ptr).expect("slot pointers are non-null");
             // SAFETY: each benchmark slot is initialized once before the
             // buffer is published to a baseline container.
-            unsafe { PooledBuffer::new_in_slot(slot_ptr, BENCH_LAYOUT, false) }
+            unsafe { PooledBuffer::new(slot_ptr, BENCH_LAYOUT, false) }
         })
         .collect();
 
@@ -174,7 +174,7 @@ fn bench_name<S: FreelistImplementation>(
 }
 
 struct MutexVec {
-    _slots: Box<[CachePadded<UnsafeCell<PooledSlot>>]>,
+    _slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
     buffers: Mutex<Vec<PooledBuffer>>,
 }
 
@@ -222,7 +222,7 @@ impl Drop for MutexVec {
 }
 
 struct ArrayQueueFreelist {
-    _slots: Box<[CachePadded<UnsafeCell<PooledSlot>>]>,
+    _slots: Box<[CachePadded<UnsafeCell<PooledOwner>>]>,
     queue: ArrayQueue<PooledBuffer>,
 }
 
