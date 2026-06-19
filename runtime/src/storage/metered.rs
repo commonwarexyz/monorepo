@@ -225,6 +225,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
+    #[tracing::instrument(
+        name = "runtime.storage.blob.start_sync",
+        level = "info",
+        skip_all,
+        fields(partition = %self.partition)
+    )]
     async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
         self.metrics.storage_syncs.inc();
         self.inner.start_sync().await
