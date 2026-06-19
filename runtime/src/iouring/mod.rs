@@ -469,7 +469,7 @@ impl Handle {
         self.start_sync(file)
             .await
             .await
-            .map_err(|_| Error::SyncFailed(std::io::Error::other("failed to read result")))?
+            .map_err(|_| Error::Io(std::io::Error::other("failed to read result")))?
     }
 
     /// Begin a logical fsync request, returning the completion receiver without waiting.
@@ -488,11 +488,9 @@ impl Handle {
             let Request::Sync(request) = err.0 else {
                 unreachable!("sync enqueue returned wrong request variant");
             };
-            let _ = request
-                .sender
-                .send(Err(Error::SyncFailed(std::io::Error::other(
-                    "failed to send work",
-                ))));
+            let _ = request.sender.send(Err(Error::Io(std::io::Error::other(
+                "failed to send work",
+            ))));
         }
         rx
     }

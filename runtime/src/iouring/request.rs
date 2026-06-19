@@ -623,15 +623,13 @@ impl SyncRequest {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => false,
             CqeResult::Cancelled => {
-                self.result = Some(Err(Error::SyncFailed(std::io::Error::from_raw_os_error(
+                self.result = Some(Err(Error::Io(std::io::Error::from_raw_os_error(
                     libc::ECANCELED,
                 ))));
                 true
             }
             CqeResult::Error(code) => {
-                self.result = Some(Err(Error::SyncFailed(std::io::Error::from_raw_os_error(
-                    -code,
-                ))));
+                self.result = Some(Err(Error::Io(std::io::Error::from_raw_os_error(-code))));
                 true
             }
             CqeResult::Zero | CqeResult::Positive(_) => {
@@ -1336,8 +1334,8 @@ mod tests {
             .expect("missing timeout cancel result")
             .expect_err("expected timeout cancel error");
         match err {
-            Error::SyncFailed(err) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
-            other => panic!("expected SyncFailed, got {other:?}"),
+            Error::Io(err) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
+            other => panic!("expected io error, got {other:?}"),
         }
 
         // Hard errors should round-trip as std::io::Error values.
@@ -1353,8 +1351,8 @@ mod tests {
             .expect("missing hard error result")
             .expect_err("expected hard error");
         match err {
-            Error::SyncFailed(err) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
-            other => panic!("expected SyncFailed, got {other:?}"),
+            Error::Io(err) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
+            other => panic!("expected io error, got {other:?}"),
         }
 
         // Both zero and positive CQE results should count as sync success.
@@ -1557,9 +1555,9 @@ mod tests {
             sender: tx,
         });
         request.timeout();
-        assert!(matches!(
-            block_on(rx).expect("missing sync timeout"),
-            Err(Error::Timeout)
-        ));
+        let err = block_on(rx)
+            .expect("missing sync timeout")
+            .expect_err("sync timeout should be an error");
+        assert!(matches!(err, Error::Timeout));
     }
 }
