@@ -277,10 +277,10 @@ mod tests {
         run_storage_tests(storage).await;
     }
 
-    /// Dropping the `start_sync` receiver before the background sync completes must not
-    /// break the blob: the handle stays usable and a later sync still persists data.
+    /// Dropping the `start_sync` receiver must not break the blob: the handle stays
+    /// usable and a later sync still persists data.
     #[tokio::test]
-    async fn test_start_sync_dropped_handle() {
+    async fn test_start_sync_dropped_receiver() {
         let mut rng = rand::rngs::StdRng::from_entropy();
         let storage_directory =
             env::temp_dir().join(format!("storage_tokio_start_sync_{}", rng.gen::<u64>()));
