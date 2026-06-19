@@ -45,10 +45,36 @@ where
         metric: MetricHandle,
     },
     Completion {
-        receiver: Abortable<oneshot::Receiver<Result<T, Error>>>,
+        future: Abortable<Completion<T>>,
         abort_handle: AbortHandle,
         span: Option<Span>,
     },
+}
+
+enum Completion<T>
+where
+    T: Send + 'static,
+{
+    Receiver(oneshot::Receiver<Result<T, Error>>),
+    Future(Pin<Box<dyn Future<Output = Result<T, Error>> + Send + 'static>>),
+}
+
+impl<T> Unpin for Completion<T> where T: Send + 'static {}
+
+impl<T> Future for Completion<T>
+where
+    T: Send + 'static,
+{
+    type Output = Result<T, Error>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match &mut *self {
+            Self::Receiver(receiver) => Pin::new(receiver)
+                .poll(cx)
+                .map(|result| result.unwrap_or(Err(Error::Closed))),
+            Self::Future(future) => future.as_mut().poll(cx),
+        }
+    }
 }
 
 impl<T> Handle<T>
@@ -116,7 +142,22 @@ where
         let (abort_handle, abort_registration) = AbortHandle::new_pair();
         Self {
             state: HandleState::Completion {
-                receiver: Abortable::new(receiver, abort_registration),
+                future: Abortable::new(Completion::Receiver(receiver), abort_registration),
+                abort_handle,
+                span: None,
+            },
+        }
+    }
+
+    /// Returns a handle backed by a completion future.
+    pub fn from_future<F>(future: F) -> Self
+    where
+        F: Future<Output = Result<T, Error>> + Send + 'static,
+    {
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
+        Self {
+            state: HandleState::Completion {
+                future: Abortable::new(Completion::Future(Box::pin(future)), abort_registration),
                 abort_handle,
                 span: None,
             },
@@ -196,13 +237,15 @@ where
             HandleState::Task { receiver, .. } => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.unwrap_or_else(|_| Err(Error::Closed))),
-            HandleState::Completion { receiver, span, .. } => {
+            HandleState::Completion {
+                future,
+                span,
+                ..
+            } => {
                 let _guard = span.clone().map(Span::entered);
-                Pin::new(receiver).poll(cx).map(|result| match result {
-                    Ok(Ok(result)) => result,
-                    Ok(Err(_)) => Err(Error::Closed),
-                    Err(_) => Err(Error::Aborted),
-                })
+                Pin::new(future)
+                    .poll(cx)
+                    .map(|result| result.unwrap_or(Err(Error::Aborted)))
             }
         }
     }

@@ -230,6 +230,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         skip_all,
         fields(partition = %self.partition)
     )]
+    #[allow(clippy::async_yields_async)]
     async fn start_sync(&self) -> Handle<()> {
         self.metrics.storage_syncs.inc();
         self.inner.start_sync().await.with_span(tracing::info_span!(
