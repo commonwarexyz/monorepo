@@ -142,7 +142,7 @@ use bytes::Bytes;
 use std::{
     alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
     mem::{align_of, offset_of, size_of, ManuallyDrop, MaybeUninit},
-    ptr::{addr_of_mut, NonNull},
+    ptr::{self, addr_of_mut, NonNull},
     sync::atomic::Ordering,
 };
 
@@ -190,49 +190,54 @@ const _: () = assert!(offset_of!(ExternalOwner, refs) == 0);
 /// lifecycle work because the payload is immortal. Code that needs to recover
 /// mutable ownership therefore checks both `owner.is_empty()` and `len == 0`.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct OwnerRef(usize);
+#[repr(transparent)]
+pub(crate) struct OwnerRef(*mut ());
+
+// SAFETY: `OwnerRef` is a tagged owner pointer. Shared access to the pointed-to
+// owner state is synchronized through the owner's atomic refcount.
+unsafe impl Send for OwnerRef {}
+// SAFETY: same argument as `Send`.
+unsafe impl Sync for OwnerRef {}
 
 impl OwnerRef {
     #[inline(always)]
     pub(crate) const fn empty() -> Self {
-        Self(OWNER_EMPTY)
+        Self(ptr::null_mut())
     }
 
     #[inline(always)]
     pub(crate) const fn is_empty(self) -> bool {
-        self.0 == OWNER_EMPTY
+        self.0.is_null()
     }
 
     /// Returns the kind tag stored in the low pointer bits.
     #[inline(always)]
-    const fn tag(self) -> usize {
-        self.0 & OWNER_TAG_MASK
+    fn tag(self) -> usize {
+        self.0.addr() & OWNER_TAG_MASK
     }
 
     #[inline(always)]
-    pub(crate) const fn is_pooled(self) -> bool {
+    pub(crate) fn is_pooled(self) -> bool {
         self.tag() == OWNER_POOLED
     }
 
     #[inline(always)]
-    pub(crate) const fn is_external(self) -> bool {
+    pub(crate) fn is_external(self) -> bool {
         self.tag() == OWNER_EXTERNAL
     }
 
     /// Builds an owner ref from an owner pointer and its kind tag.
     ///
-    /// The pointer's provenance is exposed so [`Self::untag`] can recover a
-    /// usable pointer from the stored address. Construction reads no bytes
-    /// through `ptr`, so the pointed-to header may be uninitialized.
+    /// Construction reads no bytes through `ptr`, so the pointed-to header may
+    /// be uninitialized.
     #[inline(always)]
     fn from_tagged<T>(ptr: NonNull<T>, tag: usize) -> Self {
         debug_assert_eq!(ptr.as_ptr().addr() & OWNER_TAG_MASK, 0);
-        Self(ptr.as_ptr().expose_provenance() | tag)
+        let ptr = ptr.cast::<()>().as_ptr();
+        Self(ptr.with_addr(ptr.addr() | tag))
     }
 
     /// Recovers the untagged owner pointer.
-    ///
-    /// Restores the provenance exposed by [`Self::from_tagged`].
     ///
     /// # Safety
     ///
@@ -240,10 +245,16 @@ impl OwnerRef {
     #[inline(always)]
     unsafe fn untag<T>(self) -> NonNull<T> {
         debug_assert!(!self.is_empty());
-        let ptr = std::ptr::with_exposed_provenance_mut::<T>(self.0 & !OWNER_TAG_MASK);
+        let ptr = self.0.with_addr(self.0.addr() & !OWNER_TAG_MASK).cast::<T>();
         // SAFETY: non-empty owner refs are built from non-null pointers, and
         // masking the tag bits cannot zero a heap/box/slot address.
         unsafe { NonNull::new_unchecked(ptr) }
+    }
+
+    #[inline(always)]
+    fn split(self) -> (usize, *mut ()) {
+        let addr = self.0.addr();
+        (addr & OWNER_TAG_MASK, self.0.with_addr(addr & !OWNER_TAG_MASK))
     }
 
     /// Creates a heap owner ref from a [`HeapHeader`] pointer.
@@ -452,9 +463,10 @@ impl OwnerRef {
     /// an initialized lease.
     #[inline(always)]
     pub(crate) unsafe fn release_unique(self) {
-        if self.tag() == OWNER_POOLED {
+        let (tag, owner) = self.split();
+        if tag == OWNER_POOLED {
             // SAFETY: unique pooled owner with initialized lease.
-            unsafe { release_pooled(self.pooled()) };
+            unsafe { release_pooled(NonNull::new_unchecked(owner.cast())) };
             return;
         }
         // SAFETY: same contract as this method.
@@ -475,10 +487,10 @@ impl OwnerRef {
     /// This must be called only for a uniquely-owned mutable handle.
     #[inline(always)]
     pub(crate) unsafe fn release_unique_mut_at(self, ptr: NonNull<u8>, cap: usize) {
-        let tag = self.tag();
+        let (tag, owner) = self.split();
         if tag == OWNER_POOLED {
             // SAFETY: unique pooled owner with initialized lease.
-            unsafe { release_pooled(self.pooled()) };
+            unsafe { release_pooled(NonNull::new_unchecked(owner.cast())) };
             return;
         }
         if tag == OWNER_EMPTY {
@@ -488,11 +500,11 @@ impl OwnerRef {
         if self.is_front_heap_for_mut(ptr) {
             // SAFETY: front heap owners are allocated with `front_heap_layout`
             // and `ptr + cap` is the allocation end.
-            unsafe { release_front_heap(self.heap(), ptr, cap) };
+            unsafe { release_front_heap(NonNull::new_unchecked(owner.cast()), ptr, cap) };
             return;
         }
         // SAFETY: unique tail-header heap owner.
-        unsafe { release_heap(self.heap()) };
+        unsafe { release_heap(NonNull::new_unchecked(owner.cast())) };
     }
 
     /// Initializes a reserved front heap header before sharing the owner.
@@ -537,7 +549,7 @@ impl OwnerRef {
     /// the two heap layouts without spending a tag bit.
     #[inline(always)]
     fn is_front_heap_for_mut(self, ptr: NonNull<u8>) -> bool {
-        self.tag() == OWNER_HEAP && (self.0 & !OWNER_TAG_MASK) < ptr.as_ptr().addr()
+        self.tag() == OWNER_HEAP && (self.0.addr() & !OWNER_TAG_MASK) < ptr.as_ptr().addr()
     }
 
     /// Returns true when this owner has exactly one live reference.
