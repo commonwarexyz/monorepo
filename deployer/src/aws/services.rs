@@ -42,13 +42,6 @@ pub const GRAFANA_VERSION: &str = "11.5.2";
 /// Version of Samply to download and install
 pub const SAMPLY_VERSION: &str = "0.13.1";
 
-/// Docker image for the tracer trace viewer
-///
-/// The image is multi-arch (amd64 and arm64), so the same reference works
-/// regardless of the monitoring instance architecture. The container serves
-/// the UI on port 8080.
-pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:latest";
-
 /// Version of libjemalloc2 package for Ubuntu 24.04
 pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
 
@@ -81,6 +74,73 @@ const UBUNTU_ARCHIVE_ARM64: &str = "http://ports.ubuntu.com/ubuntu-ports/pool";
 
 /// Ubuntu package archive base URL for x86_64
 const UBUNTU_ARCHIVE_X86_64: &str = "http://archive.ubuntu.com/ubuntu/pool";
+
+/// Docker image for the tracer trace viewer
+///
+/// The image is multi-arch (amd64 and arm64), so the same reference works
+/// regardless of the monitoring instance architecture. The container serves
+/// the UI on port 8080.
+pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:latest";
+
+#[derive(Clone, Copy)]
+struct DockerTool {
+    service: &'static str,
+    description: &'static str,
+    image: &'static str,
+    network_host: bool,
+    env: &'static [(&'static str, &'static str)],
+    after: &'static [&'static str],
+}
+
+const DOCKER_TOOLS: &[DockerTool] = &[DockerTool {
+    service: "tracer",
+    description: "Tracer Trace Viewer",
+    image: TRACER_IMAGE,
+    network_host: true,
+    env: &[("TEMPO_URL", "http://127.0.0.1:3200")],
+    after: &["tempo.service"],
+}];
+
+impl DockerTool {
+    fn service_file(self) -> String {
+        let after = self.after.join(" ");
+        let network = if self.network_host {
+            " --network host"
+        } else {
+            ""
+        };
+        let mut env = String::new();
+        for (key, value) in self.env {
+            env.push_str(" --env ");
+            env.push_str(key);
+            env.push('=');
+            env.push_str(value);
+        }
+
+        format!(
+            r#"[Unit]
+Description={description}
+After=network.target docker.service {after}
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker rm -f {service}
+ExecStart=/usr/bin/docker run --rm --name {service}{network}{env} {image}
+TimeoutStopSec=60
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+"#,
+            service = self.service,
+            description = self.description,
+            after = after,
+            network = network,
+            env = env,
+            image = self.image,
+        )
+    }
+}
 
 // S3 key functions for tool binaries
 //
@@ -256,10 +316,6 @@ pub fn tempo_config_s3_key() -> String {
 
 pub fn tempo_service_s3_key() -> String {
     format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tempo/service")
-}
-
-pub fn tracer_service_s3_key() -> String {
-    format!("{TOOLS_CONFIGS_PREFIX}/{DEPLOYER_VERSION}/tracer/service")
 }
 
 pub fn node_exporter_service_s3_key() -> String {
@@ -683,26 +739,6 @@ overrides:
       max_bytes_per_trace: 100000000
 "#;
 
-/// Systemd service file content for the tracer trace viewer
-///
-/// The container runs with host networking so its fixed :8080 listener binds
-/// directly on the instance and TEMPO_URL can reference the local Tempo HTTP
-/// endpoint (port 3200, from TEMPO_CONFIG).
-pub const TRACER_SERVICE: &str = r#"[Unit]
-Description=Tracer Trace Viewer
-After=network.target docker.service tempo.service
-Requires=docker.service
-
-[Service]
-ExecStartPre=-/usr/bin/docker rm -f tracer
-ExecStart=/usr/bin/docker run --rm --name tracer --network host --env TEMPO_URL=http://127.0.0.1:3200 ghcr.io/clabby/tracer-web:latest
-TimeoutStopSec=60
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-"#;
-
 /// URLs for monitoring service installation
 pub struct MonitoringUrls {
     pub prometheus_bin: String,
@@ -731,7 +767,6 @@ pub struct MonitoringUrls {
     pub pyroscope_service: String,
     pub tempo_service: String,
     pub node_exporter_service: String,
-    pub tracer_service: String,
 }
 
 /// Phase 1: Download files from S3 on monitoring instance
@@ -776,14 +811,13 @@ sudo systemctl unmask prometheus loki pyroscope tempo node_exporter grafana-serv
 {WGET} -O /home/ubuntu/pyroscope.service '{}' &
 {WGET} -O /home/ubuntu/tempo.service '{}' &
 {WGET} -O /home/ubuntu/node_exporter.service '{}' &
-{WGET} -O /home/ubuntu/tracer.service '{}' &
 wait
 
 # Verify all downloads succeeded
 for f in prometheus.tar.gz grafana.deb loki.zip pyroscope.tar.gz tempo.tar.gz node_exporter.tar.gz \
          fonts-dejavu-mono.deb fonts-dejavu-core.deb fontconfig-config.deb libfontconfig1.deb unzip.deb adduser.deb musl.deb prometheus.yml datasources.yml all.yml dashboard.json node-exporter-full.json \
          loki.yml pyroscope.yml tempo.yml prometheus.service loki.service pyroscope.service \
-         tempo.service node_exporter.service tracer.service; do
+         tempo.service node_exporter.service; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -816,8 +850,37 @@ done
         urls.pyroscope_service,
         urls.tempo_service,
         urls.node_exporter_service,
-        urls.tracer_service,
     )
+}
+
+fn install_docker_tools_cmd(tools: &[DockerTool]) -> String {
+    if tools.is_empty() {
+        return String::new();
+    }
+
+    let mut cmd = String::from(
+        r#"# Install Docker tools
+sudo apt-get update -y
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+"#,
+    );
+
+    for tool in tools {
+        cmd.push_str("sudo docker pull ");
+        cmd.push_str(tool.image);
+        cmd.push('\n');
+        cmd.push_str("sudo tee /etc/systemd/system/");
+        cmd.push_str(tool.service);
+        cmd.push_str(".service >/dev/null <<'EOF'\n");
+        cmd.push_str(&tool.service_file());
+        cmd.push_str("EOF\n");
+    }
+
+    cmd
+}
+
+pub(crate) fn docker_tool_services() -> impl Iterator<Item = &'static str> {
+    DOCKER_TOOLS.iter().map(|tool| tool.service)
 }
 
 /// Phase 2: Setup services on monitoring instance (does not start them)
@@ -826,6 +889,7 @@ pub(crate) fn install_monitoring_setup_cmd(
     architecture: Architecture,
 ) -> String {
     let arch = architecture.as_str();
+    let docker_tools = install_docker_tools_cmd(DOCKER_TOOLS);
     format!(
         r#"set -e
 
@@ -886,10 +950,7 @@ sudo mv /home/ubuntu/node_exporter-*.linux-{arch} /opt/node_exporter/
 sudo ln -sf /opt/node_exporter/node_exporter-*.linux-{arch}/node_exporter /opt/node_exporter/node_exporter
 sudo chmod +x /opt/node_exporter/node_exporter
 
-# Install Docker and pull the tracer image
-sudo apt-get update -y
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
-sudo docker pull {tracer_image}
+{docker_tools}
 
 # Configure Grafana
 sudo sed -i '/^\[auth.anonymous\]$/,/^\[/ {{ /^; *enabled = /s/.*/enabled = true/; /^; *org_role = /s/.*/org_role = Admin/ }}' /etc/grafana/grafana.ini
@@ -917,15 +978,14 @@ sudo mv /home/ubuntu/loki.service /etc/systemd/system/loki.service
 sudo mv /home/ubuntu/pyroscope.service /etc/systemd/system/pyroscope.service
 sudo mv /home/ubuntu/tempo.service /etc/systemd/system/tempo.service
 sudo mv /home/ubuntu/node_exporter.service /etc/systemd/system/node_exporter.service
-sudo mv /home/ubuntu/tracer.service /etc/systemd/system/tracer.service
 "#,
-        tracer_image = TRACER_IMAGE,
     )
 }
 
 /// Continuation of monitoring install command (services startup)
-pub const fn start_monitoring_services_cmd() -> &'static str {
-    r#"set -e
+pub(crate) fn start_monitoring_services_cmd() -> String {
+    let mut cmd = String::from(
+        r#"set -e
 
 sudo chown -R grafana:grafana /etc/grafana /var/lib/grafana
 
@@ -941,11 +1001,25 @@ sudo systemctl start pyroscope
 sudo systemctl enable pyroscope
 sudo systemctl start tempo
 sudo systemctl enable tempo
-sudo systemctl start tracer
-sudo systemctl enable tracer
-sudo systemctl restart grafana-server
+"#,
+    );
+
+    for service in docker_tool_services() {
+        cmd.push_str("sudo systemctl start ");
+        cmd.push_str(service);
+        cmd.push('\n');
+        cmd.push_str("sudo systemctl enable ");
+        cmd.push_str(service);
+        cmd.push('\n');
+    }
+
+    cmd.push_str(
+        r#"sudo systemctl restart grafana-server
 sudo systemctl enable grafana-server
-"#
+"#,
+    );
+
+    cmd
 }
 
 /// URLs for binary instance installation
@@ -1417,6 +1491,37 @@ WantedBy=timers.target
 mod tests {
     use super::*;
 
+    fn monitoring_urls() -> MonitoringUrls {
+        MonitoringUrls {
+            prometheus_bin: "prometheus".to_string(),
+            grafana_bin: "grafana".to_string(),
+            loki_bin: "loki".to_string(),
+            pyroscope_bin: "pyroscope".to_string(),
+            tempo_bin: "tempo".to_string(),
+            node_exporter_bin: "node-exporter".to_string(),
+            fonts_dejavu_mono_deb: "fonts-dejavu-mono".to_string(),
+            fonts_dejavu_core_deb: "fonts-dejavu-core".to_string(),
+            fontconfig_config_deb: "fontconfig-config".to_string(),
+            libfontconfig_deb: "libfontconfig".to_string(),
+            unzip_deb: "unzip".to_string(),
+            adduser_deb: "adduser".to_string(),
+            musl_deb: "musl".to_string(),
+            prometheus_config: "prometheus-config".to_string(),
+            datasources_yml: "datasources".to_string(),
+            all_yml: "dashboards".to_string(),
+            dashboard: "dashboard".to_string(),
+            node_exporter_dashboard: "node-exporter-dashboard".to_string(),
+            loki_yml: "loki-config".to_string(),
+            pyroscope_yml: "pyroscope-config".to_string(),
+            tempo_yml: "tempo-config".to_string(),
+            prometheus_service: "prometheus-service".to_string(),
+            loki_service: "loki-service".to_string(),
+            pyroscope_service: "pyroscope-service".to_string(),
+            tempo_service: "tempo-service".to_string(),
+            node_exporter_service: "node-exporter-service".to_string(),
+        }
+    }
+
     #[test]
     fn test_binary_s3_keys_arm64() {
         let arch = Architecture::Arm64;
@@ -1560,10 +1665,6 @@ mod tests {
             format!("tools/configs/{version}/tempo/service")
         );
         assert_eq!(
-            tracer_service_s3_key(),
-            format!("tools/configs/{version}/tracer/service")
-        );
-        assert_eq!(
             node_exporter_service_s3_key(),
             format!("tools/configs/{version}/node-exporter/service")
         );
@@ -1595,36 +1696,7 @@ mod tests {
 
     #[test]
     fn test_monitoring_installs_node_exporter_dashboard() {
-        let urls = MonitoringUrls {
-            prometheus_bin: "prometheus".to_string(),
-            grafana_bin: "grafana".to_string(),
-            loki_bin: "loki".to_string(),
-            pyroscope_bin: "pyroscope".to_string(),
-            tempo_bin: "tempo".to_string(),
-            node_exporter_bin: "node-exporter".to_string(),
-            fonts_dejavu_mono_deb: "fonts-dejavu-mono".to_string(),
-            fonts_dejavu_core_deb: "fonts-dejavu-core".to_string(),
-            fontconfig_config_deb: "fontconfig-config".to_string(),
-            libfontconfig_deb: "libfontconfig".to_string(),
-            unzip_deb: "unzip".to_string(),
-            adduser_deb: "adduser".to_string(),
-            musl_deb: "musl".to_string(),
-            prometheus_config: "prometheus-config".to_string(),
-            datasources_yml: "datasources".to_string(),
-            all_yml: "dashboards".to_string(),
-            dashboard: "dashboard".to_string(),
-            node_exporter_dashboard: "node-exporter-dashboard".to_string(),
-            loki_yml: "loki-config".to_string(),
-            pyroscope_yml: "pyroscope-config".to_string(),
-            tempo_yml: "tempo-config".to_string(),
-            prometheus_service: "prometheus-service".to_string(),
-            loki_service: "loki-service".to_string(),
-            pyroscope_service: "pyroscope-service".to_string(),
-            tempo_service: "tempo-service".to_string(),
-            node_exporter_service: "node-exporter-service".to_string(),
-            tracer_service: "tracer-service".to_string(),
-        };
-
+        let urls = monitoring_urls();
         let download = install_monitoring_download_cmd(&urls);
         assert!(download.contains("-O /home/ubuntu/node-exporter-full.json"));
         assert!(download.contains("node-exporter-dashboard"));
@@ -1639,54 +1711,23 @@ mod tests {
 
     #[test]
     fn test_monitoring_installs_tracer() {
-        let urls = MonitoringUrls {
-            prometheus_bin: "prometheus".to_string(),
-            grafana_bin: "grafana".to_string(),
-            loki_bin: "loki".to_string(),
-            pyroscope_bin: "pyroscope".to_string(),
-            tempo_bin: "tempo".to_string(),
-            node_exporter_bin: "node-exporter".to_string(),
-            fonts_dejavu_mono_deb: "fonts-dejavu-mono".to_string(),
-            fonts_dejavu_core_deb: "fonts-dejavu-core".to_string(),
-            fontconfig_config_deb: "fontconfig-config".to_string(),
-            libfontconfig_deb: "libfontconfig".to_string(),
-            unzip_deb: "unzip".to_string(),
-            adduser_deb: "adduser".to_string(),
-            musl_deb: "musl".to_string(),
-            prometheus_config: "prometheus-config".to_string(),
-            datasources_yml: "datasources".to_string(),
-            all_yml: "dashboards".to_string(),
-            dashboard: "dashboard".to_string(),
-            node_exporter_dashboard: "node-exporter-dashboard".to_string(),
-            loki_yml: "loki-config".to_string(),
-            pyroscope_yml: "pyroscope-config".to_string(),
-            tempo_yml: "tempo-config".to_string(),
-            prometheus_service: "prometheus-service".to_string(),
-            loki_service: "loki-service".to_string(),
-            pyroscope_service: "pyroscope-service".to_string(),
-            tempo_service: "tempo-service".to_string(),
-            node_exporter_service: "node-exporter-service".to_string(),
-            tracer_service: "tracer-service".to_string(),
-        };
-
+        let urls = monitoring_urls();
         let download = install_monitoring_download_cmd(&urls);
-        assert!(download.contains("-O /home/ubuntu/tracer.service 'tracer-service'"));
+        assert!(!download.contains("tracer.service"));
 
         let setup = install_monitoring_setup_cmd(PROMETHEUS_VERSION, Architecture::Arm64);
+        assert!(setup.contains("# Install Docker tools"));
         assert!(setup.contains(&format!("sudo docker pull {TRACER_IMAGE}")));
-        assert!(setup
-            .contains("sudo mv /home/ubuntu/tracer.service /etc/systemd/system/tracer.service"));
+        assert!(setup.contains("sudo tee /etc/systemd/system/tracer.service"));
 
         let start = start_monitoring_services_cmd();
         assert!(start.contains("sudo systemctl start tracer"));
         assert!(start.contains("sudo systemctl enable tracer"));
 
-        // The service file embeds the image literally; keep it in sync with TRACER_IMAGE
-        // (used for the pre-pull during setup).
-        assert!(TRACER_SERVICE.contains(&format!(
+        assert!(setup.contains(&format!(
             "--env TEMPO_URL=http://127.0.0.1:3200 {TRACER_IMAGE}"
         )));
-        assert!(TRACER_SERVICE.contains("--network host"));
+        assert!(setup.contains("--network host"));
     }
 
     #[test]
