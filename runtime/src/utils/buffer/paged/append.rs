@@ -1389,7 +1389,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, IoBufsMut, Runner as _, Storage as _, Handle,
+        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Storage as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;

@@ -1,6 +1,6 @@
 use crate::{
     telemetry::metrics::{raw, Counter, Gauge, Register},
-    Buf, Error, IoBufs, IoBufsMut, Handle,
+    Buf, Error, Handle, IoBufs, IoBufsMut,
 };
 use std::{
     ops::{Deref, RangeInclusive},

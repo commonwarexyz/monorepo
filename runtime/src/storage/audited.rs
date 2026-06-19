@@ -1,4 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut, Handle};
+use crate::{deterministic::Auditor, Error, Handle, IoBufs, IoBufsMut};
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -165,8 +165,8 @@ mod tests {
             tests::run_storage_tests,
         },
         telemetry::metrics::Registry,
-        Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
-        Handle,
+        Blob as _, BufferPool, BufferPoolConfig, Error, Handle, IoBuf, IoBufs, IoBufsMut,
+        Storage as _,
     };
     use commonware_utils::sync::Mutex;
     use std::sync::Arc;

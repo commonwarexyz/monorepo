@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut, Handle};
+use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
 use std::{io::SeekFrom, sync::Arc};

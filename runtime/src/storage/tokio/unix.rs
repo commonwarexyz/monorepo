@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut, Handle};
+use crate::{Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut};
 use cfg_if::cfg_if;
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;

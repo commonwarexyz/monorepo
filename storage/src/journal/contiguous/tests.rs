@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
-        deterministic, telemetry::metrics, Blob, Clock, Error, IoBufs, IoBufsMut, Metrics, Name,
-        Storage, Supervisor, Handle,
+        deterministic, telemetry::metrics, Blob, Clock, Error, Handle, IoBufs, IoBufsMut, Metrics,
+        Name, Storage, Supervisor,
     };
     use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
     use std::{

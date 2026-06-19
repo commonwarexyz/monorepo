@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Buf, BufferPool, IoBufs, IoBufsMut, Handle};
+use crate::{Buf, BufferPool, Handle, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
 use commonware_utils::sync::{Mutex, RwLock};

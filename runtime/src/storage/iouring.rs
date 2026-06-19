@@ -24,7 +24,7 @@ use super::Header;
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
-    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut, Handle,
+    utils, Buf, BufferPool, Error, Handle, IoBufs, IoBufsMut,
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};

@@ -144,8 +144,7 @@ where
 
     pub(crate) fn with_span(mut self, span: Span) -> Self {
         if let HandleState::Completion {
-            span: handle_span,
-            ..
+            span: handle_span, ..
         } = &mut self.state
         {
             *handle_span = Some(span);

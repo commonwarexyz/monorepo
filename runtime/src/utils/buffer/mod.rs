@@ -12,8 +12,8 @@ pub use write::Write;
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, Buf, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Spawner, Storage, Supervisor as _, Handle,
+        deterministic, Blob as _, Buf, BufMut, Clock, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
+        Runner, Spawner, Storage, Supervisor as _,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
