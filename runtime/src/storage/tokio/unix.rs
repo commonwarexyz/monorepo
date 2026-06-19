@@ -9,7 +9,7 @@ use std::{
     os::{fd::AsRawFd, unix::fs::FileExt},
     sync::Arc,
 };
-use tokio::{runtime::Handle, task};
+use tokio::task;
 
 // Cap iovec batch size: larger iovecs reduce syscall count but increase
 // per-write kernel setup overhead.
@@ -21,24 +21,21 @@ pub struct Blob {
     name: Vec<u8>,
     file: Arc<File>,
     pool: BufferPool,
-    handle: Handle,
 }
 
 impl Blob {
-    pub fn new(
-        partition: String,
-        name: &[u8],
-        file: File,
-        pool: BufferPool,
-        handle: Handle,
-    ) -> Self {
+    pub fn new(partition: String, name: &[u8], file: File, pool: BufferPool) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(file),
             pool,
-            handle,
         }
+    }
+
+    fn sync_inner(file: &File, partition: &str, name: &[u8]) -> Result<(), Error> {
+        file.sync_all()
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e))
     }
 
     fn write_single_at(file: &File, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -188,8 +185,7 @@ impl crate::Blob for Blob {
                 let name = self.name.clone();
                 task::spawn_blocking(move || {
                     Self::write_vectored_at(&file, offset, bufs, None)?;
-                    file.sync_all()
-                        .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e))
+                    Self::sync_inner(&file, &partition, &name)
                 })
                 .await
                 .map_err(|_| Error::WriteFailed)?
@@ -212,19 +208,21 @@ impl crate::Blob for Blob {
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.clone();
-        task::spawn_blocking(move || file.sync_all())
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        task::spawn_blocking(move || Self::sync_inner(&file, &partition, &name))
             .await
-            .map_err(|e| e.into())
-            .and_then(|r| r)
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))?;
-        Ok(())
+            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e.into()))?
     }
 
     async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
-        let this = self.clone();
-        self.handle.spawn(async move {
-            let _ = tx.send(this.sync().await);
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        task::spawn_blocking(move || {
+            let result = Self::sync_inner(&file, &partition, &name);
+            let _ = tx.send(result);
         });
         rx
     }

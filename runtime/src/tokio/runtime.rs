@@ -423,7 +423,6 @@ impl crate::Runner for Runner {
                             self.cfg.maximum_buffer_size,
                         ),
                         storage_buffer_pool.clone(),
-                        runtime.handle().clone(),
                     ),
                     &mut runtime_registry,
                 );

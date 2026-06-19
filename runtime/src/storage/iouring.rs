@@ -388,9 +388,7 @@ impl crate::Blob for Blob {
             .sync(self.file.clone())
             .await
             .map_err(|err| match err {
-                Error::SyncFailed(e) => {
-                    Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e)
-                }
+                Error::Io(e) => Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e),
                 err => err,
             })
     }

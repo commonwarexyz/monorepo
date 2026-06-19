@@ -6,7 +6,6 @@ use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
-    runtime::Handle,
     sync::Mutex,
 };
 
@@ -19,23 +18,15 @@ pub struct Blob {
     // we could remove this lock.
     file: Arc<Mutex<fs::File>>,
     pool: BufferPool,
-    handle: Handle,
 }
 
 impl Blob {
-    pub fn new(
-        partition: String,
-        name: &[u8],
-        file: fs::File,
-        pool: BufferPool,
-        handle: Handle,
-    ) -> Self {
+    pub fn new(partition: String, name: &[u8], file: fs::File, pool: BufferPool) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(Mutex::new(file)),
             pool,
-            handle,
         }
     }
 
@@ -62,10 +53,10 @@ impl Blob {
         }
     }
 
-    async fn sync_inner(&self, file: &fs::File) -> Result<(), Error> {
+    async fn sync_inner(file: &fs::File, partition: &str, name: &[u8]) -> Result<(), Error> {
         file.sync_all()
             .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e))
     }
 }
 
@@ -127,7 +118,7 @@ impl crate::Blob for Blob {
 
         let mut file = self.file.lock().await;
         Self::write_at_inner(&mut file, offset, &mut bufs).await?;
-        self.sync_inner(&file).await
+        Self::sync_inner(&file, &self.partition, &self.name).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -143,14 +134,18 @@ impl crate::Blob for Blob {
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
-        self.sync_inner(&file).await
+        Self::sync_inner(&file, &self.partition, &self.name).await
     }
 
     async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
-        let this = self.clone();
-        self.handle.spawn(async move {
-            let _ = tx.send(this.sync().await);
+        let file = self.file.clone();
+        let partition = self.partition.clone();
+        let name = self.name.clone();
+        tokio::spawn(async move {
+            let file = file.lock().await;
+            let result = Self::sync_inner(&file, &partition, &name).await;
+            let _ = tx.send(result);
         });
         rx
     }

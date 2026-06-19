@@ -250,7 +250,6 @@ impl crate::Blob for Blob {
     }
 
     async fn start_sync(&self) -> oneshot::Receiver<Result<(), crate::Error>> {
-        // The deterministic backend syncs synchronously, so resolve immediately.
         let (tx, rx) = oneshot::channel();
         let _ = tx.send(self.sync_inner());
         rx

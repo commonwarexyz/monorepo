@@ -116,8 +116,6 @@ stability_scope!(BETA {
         BlobResizeFailed(String, String, IoError),
         #[error("blob sync failed: {0}/{1} error: {2}")]
         BlobSyncFailed(String, String, IoError),
-        #[error("sync failed: {0}")]
-        SyncFailed(IoError),
         #[error("blob insufficient length")]
         BlobInsufficientLength,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
@@ -763,8 +761,8 @@ stability_scope!(BETA {
 
         /// Begin syncing all pending data durably.
         ///
-        /// Awaiting this future waits until the backend has accepted or launched the sync work.
-        /// Awaiting the returned [oneshot::Receiver] waits for durability.
+        /// Awaiting this future waits until the backend has accepted or launched the sync work;
+        /// awaiting the returned [oneshot::Receiver] waits for durability.
         fn start_sync(
             &self,
         ) -> impl Future<Output = oneshot::Receiver<Result<(), Error>>> + Send;
