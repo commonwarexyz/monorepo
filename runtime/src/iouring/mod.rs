@@ -488,9 +488,9 @@ impl Handle {
             let Request::Sync(request) = err.0 else {
                 unreachable!("sync enqueue returned wrong request variant");
             };
-            let _ = request.sender.send(Err(Error::Io(std::io::Error::other(
-                "failed to send work",
-            ))));
+            let _ = request
+                .sender
+                .send(Err(Error::Io(std::io::Error::other("failed to send work"))));
         }
         rx
     }
