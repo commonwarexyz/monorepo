@@ -277,8 +277,8 @@ mod tests {
         run_storage_tests(storage).await;
     }
 
-    /// Dropping the `start_sync` handle before the background sync completes must not
-    /// break the blob: the data still persists and the handle stays usable.
+    /// Dropping the `start_sync` receiver before the background sync completes must not
+    /// break the blob: the handle stays usable and a later sync still persists data.
     #[tokio::test]
     async fn test_start_sync_dropped_handle() {
         let mut rng = rand::rngs::StdRng::from_entropy();
@@ -290,10 +290,10 @@ mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
         blob.write_at(0, b"hello world").await.unwrap();
 
-        // Drop the handle immediately; the launched sync task must keep running.
+        // Drop the completion receiver immediately.
         drop(blob.start_sync().await);
 
-        // The handle is still usable, and a subsequent sync persists the data.
+        // The blob remains usable, and a subsequent sync persists the data.
         blob.start_sync()
             .await
             .await
