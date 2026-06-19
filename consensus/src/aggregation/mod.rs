@@ -65,6 +65,21 @@
 //! the likelihood of local recovery, participants should tune the [Config::activity_timeout] to a value larger than the expected
 //! drift of online participants (even if all participants are synchronous the tip advancement logic will advance to the `f+1`th highest
 //! reported tip and drop all work below that tip minus the [Config::activity_timeout]).
+//!
+//! ## Epoch-Independent Signatures
+//!
+//! The attestation in a [types::Ack] covers only the [types::Item] (height and digest), not the
+//! epoch, and the ack namespace does not rotate per epoch. This is intentional: participants
+//! attest to an externally agreed-upon log that does not change across epochs, so an attestation
+//! to an item is valid regardless of the epoch in which it was produced. [types::Certificate]s
+//! likewise do not bind an epoch, keeping them verifiable across epoch transitions.
+//!
+//! The epoch field on [types::Ack] is unauthenticated metadata that selects the scheme used to
+//! verify the attestation and assemble the certificate. This is safe because the engine
+//! only accepts an ack delivered by its signer (the authenticated sender must match the
+//! attestation's signer index), and a signer gains nothing by relabeling its own ack that it could
+//! not achieve by signing the item directly in the target epoch. Integrations that perform
+//! per-epoch accounting from [types::Activity] should not treat the epoch as signed intent.
 
 pub mod scheme;
 pub mod types;

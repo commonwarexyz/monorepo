@@ -135,6 +135,8 @@ impl<D: Digest> EncodeSize for Item<D> {
     }
 }
 
+/// The signed message covers only the height and digest, intentionally excluding the epoch.
+/// See the [module docs](super#epoch-independent-signatures).
 impl<D: Digest> Subject for &Item<D> {
     type Namespace = Namespace;
 
@@ -165,7 +167,10 @@ where
 pub struct Ack<S: Scheme, D: Digest> {
     /// The item being acknowledged
     pub item: Item<D>,
-    /// The epoch in which this acknowledgment was created
+    /// The epoch in which this acknowledgment was created.
+    ///
+    /// Not part of the signed message: it selects the scheme used to verify the attestation and
+    /// assemble a certificate. See the [module docs](super#epoch-independent-signatures).
     pub epoch: Epoch,
     /// Scheme-specific attestation material
     pub attestation: Attestation<S>,
@@ -186,7 +191,9 @@ impl<S: Scheme, D: Digest> Ack<S, D> {
 
     /// Creates a new acknowledgment by signing an item with a validator's key.
     ///
-    /// The signature uses domain separation to prevent cross-protocol attacks.
+    /// The signature uses domain separation to prevent cross-protocol attacks. The epoch is
+    /// carried in the ack but is not part of the signed message. See the
+    /// [module docs](super#epoch-independent-signatures).
     ///
     /// # Determinism
     ///
