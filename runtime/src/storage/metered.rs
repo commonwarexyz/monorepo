@@ -6,7 +6,7 @@ use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
 };
-use tracing::{field::Empty, Span};
+use tracing::{field::Empty, Instrument as _, Span};
 
 pub struct Metrics {
     pub open_blobs: Gauge,
@@ -233,10 +233,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
     #[allow(clippy::async_yields_async)]
     async fn start_sync(&self) -> Handle<()> {
         self.metrics.storage_syncs.inc();
-        self.inner.start_sync().await.with_span(tracing::info_span!(
+        let handle = self.inner.start_sync().await;
+        Handle::from_future(handle.instrument(tracing::info_span!(
             "runtime.storage.blob.sync",
             partition = %self.partition,
-        ))
+        )))
     }
 }
 

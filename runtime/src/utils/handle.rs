@@ -21,7 +21,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
-use tracing::{error, Span};
+use tracing::error;
 
 /// Handle to an asynchronous result.
 ///
@@ -47,7 +47,6 @@ where
     Completion {
         future: Abortable<Completion<T>>,
         abort_handle: AbortHandle,
-        span: Option<Span>,
     },
 }
 
@@ -144,7 +143,6 @@ where
             state: HandleState::Completion {
                 future: Abortable::new(Completion::Receiver(receiver), abort_registration),
                 abort_handle,
-                span: None,
             },
         }
     }
@@ -159,7 +157,6 @@ where
             state: HandleState::Completion {
                 future: Abortable::new(Completion::Future(Box::pin(future)), abort_registration),
                 abort_handle,
-                span: None,
             },
         }
     }
@@ -183,17 +180,7 @@ where
         Self::from_receiver(receiver)
     }
 
-    pub(crate) fn with_span(mut self, span: Span) -> Self {
-        if let HandleState::Completion {
-            span: handle_span, ..
-        } = &mut self.state
-        {
-            *handle_span = Some(span);
-        }
-        self
-    }
-
-    /// Abort the spawned task or stop waiting for a completion receiver.
+    /// Abort the spawned task or stop waiting for a completion.
     pub fn abort(&self) {
         match &self.state {
             HandleState::Task {
@@ -237,16 +224,9 @@ where
             HandleState::Task { receiver, .. } => Pin::new(receiver)
                 .poll(cx)
                 .map(|result| result.unwrap_or_else(|_| Err(Error::Closed))),
-            HandleState::Completion {
-                future,
-                span,
-                ..
-            } => {
-                let _guard = span.clone().map(Span::entered);
-                Pin::new(future)
-                    .poll(cx)
-                    .map(|result| result.unwrap_or(Err(Error::Aborted)))
-            }
+            HandleState::Completion { future, .. } => Pin::new(future)
+                .poll(cx)
+                .map(|result| result.unwrap_or(Err(Error::Aborted))),
         }
     }
 }
