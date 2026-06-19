@@ -25,9 +25,9 @@ use tracing::{error, Span};
 
 /// Handle to an asynchronous result.
 ///
-/// Handles returned by [`crate::Spawner::spawn`] abort the spawned task. Handles created from
-/// completion receivers only stop waiting when aborted, resolving to [`Error::Aborted`]; they do
-/// not cancel the underlying work.
+/// Handles returned by [`crate::Spawner::spawn`] abort the spawned task. Completion handles only
+/// stop waiting when aborted, resolving to [`Error::Aborted`]; they do not cancel the underlying
+/// work.
 pub struct Handle<T>
 where
     T: Send + 'static,
