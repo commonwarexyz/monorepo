@@ -13,6 +13,8 @@ type VerificationTaskMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
 /// accepted the block and completed the required durable store. A resolved
 /// `false` records a live local rejection. A dropped sender means the task did
 /// not complete, so certification may fall back to its recovery fetch path.
+/// Storage sync failures are fatal to the local marshal state and must panic
+/// before resolving the task.
 ///
 /// Tasks are inserted when a block enters proposal or verification handling and
 /// taken (consumed) when certification is ready to act on the result. Stale

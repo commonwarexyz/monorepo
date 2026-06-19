@@ -472,15 +472,13 @@ where
                 let Some(application_valid) = verdict else {
                     return;
                 };
-                if !application_valid {
-                    tx.send_lossy(false);
+
+                // A false app verdict is a live rejection; only true requires
+                // a completed durable store.
+                if application_valid && !durable {
                     return;
                 }
-                if !durable {
-                    debug!(?round, "marshal unable to accept block");
-                    return;
-                }
-                tx.send_lossy(true);
+                tx.send_lossy(application_valid);
             }
             .instrument(span)
         });
@@ -573,7 +571,6 @@ where
                     // the write to the notarized cache. `certified` is
                     // idempotent, so crash-recovery double-invocation is safe.
                     if !marshaled.marshal.certified(round, block).await {
-                        debug!(?round, "marshal unable to accept block");
                         return;
                     }
                     tx.send_lossy(true);
@@ -847,19 +844,15 @@ where
                     verification_tasks.insert(round, commitment, durable_rx);
                     let verified_rx = marshal.verified_deferred(round, parent);
                     let success = tx.send_lossy(commitment);
-                    let durable = match verified_rx.await {
-                        Ok(handle) => {
-                            handle.await.expect("failed to sync re-proposed block");
-                            true
-                        }
-                        Err(_) => false,
+                    let Ok(handle) = verified_rx.await else {
+                        return;
                     };
-                    durable_tx.send_lossy(durable);
+                    handle.await.expect("failed to sync re-proposed block");
+                    durable_tx.send_lossy(true);
                     debug!(
                         ?round,
                         ?commitment,
                         success,
-                        durable,
                         "re-proposed parent block at epoch boundary"
                     );
                     return;
@@ -921,15 +914,17 @@ where
                 verification_tasks.insert(round, commitment, durable_rx);
                 let proposed_rx = marshal.proposed_deferred(round, coded_block);
                 let success = tx.send_lossy(commitment);
-                let durable = match proposed_rx.await {
-                    Ok(handle) => {
-                        handle.await.expect("failed to sync proposed block");
-                        true
-                    }
-                    Err(_) => false,
+                let Ok(handle) = proposed_rx.await else {
+                    return;
                 };
-                durable_tx.send_lossy(durable);
-                debug!(?round, ?commitment, success, durable, "proposed new block");
+                handle.await.expect("failed to sync proposed block");
+                durable_tx.send_lossy(true);
+                debug!(
+                    ?round,
+                    ?commitment,
+                    success,
+                    "proposed new block"
+                );
             }
             .instrument(span)
         });
@@ -1069,7 +1064,6 @@ where
                     // Valid re-proposal: notify the marshal and complete the
                     // certification gate task for `certify`.
                     if !marshal.verified(round, block).await {
-                        debug!(?round, "marshal unable to accept block");
                         return;
                     }
                     task_tx.send_lossy(true);
