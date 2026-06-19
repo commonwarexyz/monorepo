@@ -846,7 +846,10 @@ where
                     let verified_rx = marshal.verified_deferred(round, parent);
                     let success = tx.send_lossy(commitment);
                     let durable = match verified_rx.await {
-                        Ok(handle) => handle.await.is_ok(),
+                        Ok(handle) => {
+                            handle.await.expect("failed to sync re-proposed block");
+                            true
+                        }
                         Err(_) => false,
                     };
                     durable_tx.send_lossy(durable);
@@ -917,7 +920,10 @@ where
                 let proposed_rx = marshal.proposed_deferred(round, coded_block);
                 let success = tx.send_lossy(commitment);
                 let durable = match proposed_rx.await {
-                    Ok(handle) => handle.await.is_ok(),
+                    Ok(handle) => {
+                        handle.await.expect("failed to sync proposed block");
+                        true
+                    }
                     Err(_) => false,
                 };
                 durable_tx.send_lossy(durable);

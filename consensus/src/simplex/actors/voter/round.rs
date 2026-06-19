@@ -570,10 +570,9 @@ impl<S: Scheme, D: Digest> Round<S, D> {
                 );
 
                 // Replaying our local notarize restores a verified proposal and
-                // the fact that we already voted. Only leader-owned rounds gain
-                // the local certification shortcut from this replay; follower
-                // rounds also journal local notarize votes over other leaders'
-                // proposals.
+                // the fact that we already voted. For leader-owned rounds, the
+                // proposal was built locally; follower rounds also journal local
+                // notarize votes over other leaders' proposals.
                 //
                 // This relies on journal replay remaining append-ordered. By the
                 // time we replay a local vote for round `v`, the earlier

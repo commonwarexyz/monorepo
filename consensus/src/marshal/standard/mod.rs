@@ -2858,6 +2858,62 @@ mod tests {
         }
     }
 
+    #[test_traced("WARN")]
+    #[should_panic(expected = "failed to sync verified block")]
+    fn test_mailbox_verified_sync_failure_panics() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|mut context| async move {
+            let Fixture {
+                participants,
+                schemes,
+                ..
+            } = bls12381_threshold_vrf::fixture::<V, _>(
+                &mut context,
+                NAMESPACE,
+                NUM_VALIDATORS,
+            );
+            let mut oracle = setup_network_with_participants(
+                context.child("network"),
+                NZUsize!(1),
+                participants.clone(),
+            )
+            .await;
+            let me = participants[0].clone();
+
+            let application = Application::<B>::manual_ack();
+            let setup = StandardHarness::setup_validator_with(
+                context.child("validator").with_attribute("index", 0),
+                &mut oracle,
+                me,
+                ConstantProvider::new(schemes[0].clone()),
+                NZUsize!(1),
+                application.clone(),
+            )
+            .await;
+            let marshal = setup.mailbox;
+            assert_eq!(application.acknowledged().await, Height::zero());
+            context.sleep(Duration::from_millis(10)).await;
+
+            // Sync failures are fatal to the local storage state. They must not be
+            // converted into a `false` certification/verification verdict.
+            context.storage_fault_config().write().sync_rate = Some(1.0);
+
+            let genesis = make_raw_block(Sha256::hash(b""), Height::zero(), 0);
+            let round = Round::new(Epoch::zero(), View::new(1));
+            let block = B::new::<Sha256>(
+                Ctx {
+                    round,
+                    leader: default_leader(),
+                    parent: (View::zero(), genesis.digest()),
+                },
+                genesis.digest(),
+                Height::new(1),
+                100,
+            );
+            let _ = marshal.verified(round, block).await;
+        });
+    }
+
     /// Recorded `send` call on the [`RecordingBuffer`].
     type BufferSend = (Round, B, Recipients<PublicKey>);
 

@@ -335,7 +335,10 @@ where
                     let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
                     let success = tx.send_lossy(digest);
                     let durable = match verified_rx.await {
-                        Ok(handle) => handle.await.is_ok(),
+                        Ok(handle) => {
+                            handle.await.expect("failed to sync re-proposed block");
+                            true
+                        }
                         Err(_) => false,
                     };
                     durable_tx.send_lossy(durable);
@@ -401,7 +404,10 @@ where
                 let proposed_rx = marshal.proposed_deferred(consensus_context.round, built_block);
                 let success = tx.send_lossy(digest);
                 let durable = match proposed_rx.await {
-                    Ok(handle) => handle.await.is_ok(),
+                    Ok(handle) => {
+                        handle.await.expect("failed to sync proposed block");
+                        true
+                    }
                     Err(_) => false,
                 };
                 durable_tx.send_lossy(durable);
@@ -439,8 +445,8 @@ where
     ) -> oneshot::Receiver<bool> {
         // Register the durability task synchronously so `certify` always finds it, even
         // while the block subscription / durable sync is still in flight. A `true` result means
-        // the block is durably persisted; a dropped sender (early exit) or `false` sends
-        // certify to its fetch-and-persist path.
+        // the block is durably persisted; a `false` result is a live local verdict; a dropped
+        // sender means verification did not complete and certification should use recovery fetch.
         let round = context.round;
         let (durable_tx, durable_rx) = oneshot::channel();
         self.verification_tasks.insert(round, digest, durable_rx);
@@ -570,24 +576,30 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             async move {
-                // A `true` result means the block is durably persisted, so we can certify.
+                // Preserve a live local verdict. Missing local state after an unclean restart
+                // has no task and falls through to the round-bound fetch path below.
                 if let Some(task) = task {
-                    let durable = select! {
+                    let result = select! {
                         _ = tx.closed() => return,
-                        result = task => matches!(result, Ok(true)),
+                        result = task => result,
                     };
-                    if durable {
-                        tx.send_lossy(true);
-                        return;
+                    match result {
+                        Ok(true) => {
+                            tx.send_lossy(true);
+                            return;
+                        }
+                        Ok(false) => {
+                            tx.send_lossy(false);
+                            return;
+                        }
+                        Err(_) => {}
                     }
                 }
 
-                // No durable local copy (no local verify, an invalid local verify, or a
-                // dropped task): fetch the notarized block and persist it. We trust the
-                // notarization regardless of any local verify verdict, and a Byzantine
-                // leader can form a notarization after sending the proposal to only f+1
-                // honest validators, so the validators left without the block must fetch
-                // it here to certify and avoid getting stuck.
+                // No local verification task (for example after an unclean restart): fetch the
+                // notarized block and persist it. A Byzantine leader can form a notarization
+                // after sending the proposal to only f+1 honest validators, so the validators
+                // left without the block must fetch it here to certify and avoid getting stuck.
                 let block_rx =
                     marshal.subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
                 let Some(block) =

@@ -871,7 +871,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
         match self.proposed_deferred(round, block).await {
-            Ok(handle) => handle.await.is_ok(),
+            Ok(handle) => {
+                handle.await.expect("failed to sync proposed block");
+                true
+            }
             Err(_) => false,
         }
     }
@@ -901,7 +904,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
         match self.verified_deferred(round, block).await {
-            Ok(handle) => handle.await.is_ok(),
+            Ok(handle) => {
+                handle.await.expect("failed to sync verified block");
+                true
+            }
             Err(_) => false,
         }
     }
@@ -919,7 +925,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             ack: Some(ack),
         });
         match receiver.await {
-            Ok(handle) => handle.await.is_ok(),
+            Ok(handle) => {
+                handle.await.expect("failed to sync certified block");
+                true
+            }
             Err(_) => false,
         }
     }
