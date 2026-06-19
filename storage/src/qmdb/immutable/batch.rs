@@ -2,7 +2,7 @@
 
 use super::Immutable;
 use crate::{
-    journal::{authenticated, contiguous::Mutable},
+    journal::authenticated,
     merkle::{Family, Location},
     qmdb::{
         any::{batch::lookup_sorted, ValueEncoding},
@@ -105,7 +105,7 @@ where
     ) -> Self
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -135,7 +135,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -169,7 +169,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -239,7 +239,7 @@ where
     ) -> Arc<MerkleizedBatch<F, H::Digest, K, V, S>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         T: Translator,
     {
@@ -332,7 +332,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         H: CHasher<Digest = D>,
         T: Translator,
@@ -358,7 +358,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         C::Item: EncodeShared,
         H: CHasher<Digest = D>,
         T: Translator,
@@ -433,7 +433,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
+    C: authenticated::Inner<E, Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,

@@ -5,7 +5,10 @@
 
 use crate::{
     index::Ordered as OrderedIndex,
-    journal::contiguous::{Contiguous, Mutable, Reader},
+    journal::{
+        authenticated,
+        contiguous::{Contiguous, Reader},
+    },
     merkle::{self, hasher::Standard as StandardHasher, Location},
     qmdb::{
         any::{
@@ -88,7 +91,7 @@ pub type Db<F, E, C, K, V, I, H, const N: usize, S> =
 impl<
         F: merkle::Graftable,
         E: Context,
-        C: Contiguous<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location<F>>,
@@ -185,7 +188,7 @@ where
 impl<
         F: merkle::Graftable,
         E: Context,
-        C: Mutable<Item = Operation<F, K, V>>,
+        C: authenticated::Inner<E, Item = Operation<F, K, V>>,
         K: Key,
         V: ValueEncoding,
         I: OrderedIndex<Value = Location<F>>,

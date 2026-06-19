@@ -1,8 +1,10 @@
 use crate::{
+    journal::{authenticated, contiguous::Reader as ContiguousReader},
     merkle::{Family, Location, Proof},
     qmdb::{
         self,
         any::{
+            db::Db as AnyDb,
             ordered::{
                 fixed::{Db as OrderedFixedDb, Operation as OrderedFixedOperation},
                 variable::{Db as OrderedVariableDb, Operation as OrderedVariableOperation},
@@ -16,16 +18,19 @@ use crate::{
         immutable::{
             fixed::{Db as ImmutableFixedDb, Operation as ImmutableFixedOp},
             variable::{Db as ImmutableVariableDb, Operation as ImmutableVariableOp},
+            Immutable,
         },
         keyless::{
             fixed::{Db as KeylessFixedDb, Operation as KeylessFixedOp},
             variable::{Db as KeylessVariableDb, Operation as KeylessVariableOp},
+            Keyless,
         },
-        operation::Key,
+        operation::{Key, Operation as QmdbOperation},
     },
     translator::Translator,
     Context,
 };
+use commonware_codec::{CodecShared, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_utils::{
@@ -101,6 +106,65 @@ impl<F: Family, Op, D: Digest> FetchedOperations<F, Op, D> {
             pinned_nodes,
         }
     }
+}
+
+/// A resolver backed by a live authenticated-log reader.
+pub struct LogResolver<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: authenticated::Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    log: authenticated::Reader<F, E, C, H>,
+}
+
+impl<F, E, C, H> Clone for LogResolver<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: authenticated::Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            log: self.log.clone(),
+        }
+    }
+}
+
+impl<F, E, C, H> LogResolver<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: authenticated::Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    /// Create a resolver from an authenticated-log reader.
+    pub const fn new(log: authenticated::Reader<F, E, C, H>) -> Self {
+        Self { log }
+    }
+}
+
+/// A database that can expose a lock-free resolver reader.
+pub trait Provider: Send + Sync + 'static {
+    /// The merkle family backing the resolver's proofs.
+    type Family: Family;
+
+    /// The digest type used in proofs returned by the resolver.
+    type Digest: Digest;
+
+    /// The type of operations returned by the resolver.
+    type Op;
+
+    /// The resolver handle produced by this database.
+    type Resolver: Resolver<Family = Self::Family, Digest = Self::Digest, Op = Self::Op>;
+
+    /// Return a resolver backed by this database's published read state.
+    fn resolver(&self) -> Self::Resolver;
 }
 
 impl<F: Family, Op: std::fmt::Debug, D: Digest> std::fmt::Debug for FetchResult<F, Op, D> {
@@ -221,6 +285,197 @@ pub trait Resolver: Send + Sync + Clone + 'static {
     ) -> impl Future<Output = Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>>
            + Send
            + 'a;
+}
+
+impl<F, E, C, H> Resolver for LogResolver<F, E, C, H>
+where
+    F: Family,
+    E: Context + 'static,
+    C: authenticated::Inner<E> + 'static,
+    C::Item: QmdbOperation<F> + EncodeShared + Send + Sync + 'static,
+    C::Reader: 'static,
+    H: Hasher + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = C::Item;
+    type Error = qmdb::Error<F>;
+
+    async fn get_operations(
+        &self,
+        op_count: Location<Self::Family>,
+        start_loc: Location<Self::Family>,
+        max_ops: NonZeroU64,
+        include_pinned_nodes: bool,
+        _cancel_rx: oneshot::Receiver<()>,
+    ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        let snapshot = self.log.snapshot();
+        let historical = snapshot.clone();
+        fetch_operations(
+            op_count,
+            start_loc,
+            max_ops,
+            include_pinned_nodes,
+            |op_count, start_loc, max_ops| async move {
+                let inactive_peaks =
+                    qmdb::inactive_peaks_at::<F, _>(&historical, op_count, |op| op.has_floor())
+                        .await?;
+                historical
+                    .historical_proof(op_count, start_loc, max_ops, inactive_peaks)
+                    .await
+                    .map_err(Into::into)
+            },
+            |start_loc| async move {
+                snapshot
+                    .pinned_nodes_at(start_loc)
+                    .await
+                    .map_err(Into::into)
+            },
+        )
+        .await
+    }
+}
+
+impl<F, E, C, H> super::compact::Resolver for LogResolver<F, E, C, H>
+where
+    F: Family,
+    E: Context + 'static,
+    C: authenticated::Inner<E> + 'static,
+    C::Item: QmdbOperation<F> + EncodeShared + Send + Sync + 'static,
+    C::Reader: 'static,
+    H: Hasher + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = C::Item;
+    type Error = super::compact::ServeError<F, H::Digest>;
+
+    async fn get_compact_state(
+        &self,
+        target: super::compact::Target<Self::Family, Self::Digest>,
+    ) -> Result<super::compact::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error>
+    {
+        target
+            .validate()
+            .map_err(super::compact::ServeError::InvalidTarget)?;
+
+        let snapshot = self.log.snapshot();
+        let leaf_count = Location::new(snapshot.bounds().end);
+        let inactive_peaks =
+            qmdb::inactive_peaks_at::<F, _>(&snapshot, leaf_count, |op| op.has_floor())
+                .await
+                .map_err(super::compact::ServeError::Database)?;
+        let current = super::compact::Target::new(
+            snapshot
+                .root(inactive_peaks)
+                .map_err(qmdb::Error::from)
+                .map_err(super::compact::ServeError::Database)?,
+            leaf_count,
+        );
+        if target.root != current.root || target.leaf_count != current.leaf_count {
+            return Err(super::compact::ServeError::StaleTarget {
+                requested: target,
+                current,
+            });
+        }
+
+        let last_commit_loc = Location::new(*leaf_count - 1);
+        let (last_commit_proof, mut operations) = snapshot
+            .historical_proof(
+                leaf_count,
+                last_commit_loc,
+                NonZeroU64::new(1).unwrap(),
+                inactive_peaks,
+            )
+            .await
+            .map_err(qmdb::Error::from)
+            .map_err(super::compact::ServeError::Database)?;
+        let last_commit_op = operations
+            .pop()
+            .ok_or(super::compact::ServeError::Database(
+                qmdb::Error::DataCorrupted("missing last commit operation"),
+            ))?;
+        let pinned_nodes = snapshot
+            .pinned_nodes_at(leaf_count)
+            .await
+            .map_err(qmdb::Error::from)
+            .map_err(super::compact::ServeError::Database)?;
+
+        Ok(super::compact::State {
+            leaf_count,
+            pinned_nodes,
+            last_commit_op,
+            last_commit_proof,
+        }
+        .into())
+    }
+}
+
+impl<F, E, C, I, H, U, const N: usize, S> Provider for AnyDb<F, E, C, I, H, U, N, S>
+where
+    F: Family,
+    E: Context + 'static,
+    C: authenticated::Inner<E> + 'static,
+    C::Item: QmdbOperation<F> + CodecShared + Send + Sync + 'static,
+    C::Reader: 'static,
+    I: crate::index::Unordered<Value = Location<F>> + 'static,
+    H: Hasher + 'static,
+    U: Send + Sync + 'static,
+    S: Strategy + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = C::Item;
+    type Resolver = LogResolver<F, E, C, H>;
+
+    fn resolver(&self) -> Self::Resolver {
+        LogResolver::new(self.log.read_handle())
+    }
+}
+
+impl<F, E, V, C, H, S> Provider for Keyless<F, E, V, C, H, S>
+where
+    F: Family,
+    E: Context + 'static,
+    V: qmdb::any::value::ValueEncoding + Send + Sync + 'static,
+    C: authenticated::Inner<E, Item = qmdb::keyless::Operation<F, V>> + 'static,
+    C::Reader: 'static,
+    H: Hasher + 'static,
+    S: Strategy + 'static,
+    qmdb::keyless::Operation<F, V>: EncodeShared + QmdbOperation<F> + Send + Sync + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = qmdb::keyless::Operation<F, V>;
+    type Resolver = LogResolver<F, E, C, H>;
+
+    fn resolver(&self) -> Self::Resolver {
+        LogResolver::new(self.journal.read_handle())
+    }
+}
+
+impl<F, E, K, V, C, H, T, S> Provider for Immutable<F, E, K, V, C, H, T, S>
+where
+    F: Family,
+    E: Context + 'static,
+    K: Key + Send + Sync + 'static,
+    V: qmdb::any::value::ValueEncoding + Send + Sync + 'static,
+    C: authenticated::Inner<E, Item = qmdb::immutable::Operation<F, K, V>> + 'static,
+    C::Reader: 'static,
+    H: Hasher + 'static,
+    T: Translator + Send + Sync + 'static,
+    T::Key: Send + Sync,
+    S: Strategy + 'static,
+    qmdb::immutable::Operation<F, K, V>: EncodeShared + QmdbOperation<F> + Send + Sync + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = qmdb::immutable::Operation<F, K, V>;
+    type Resolver = LogResolver<F, E, C, H>;
+
+    fn resolver(&self) -> Self::Resolver {
+        LogResolver::new(self.journal.read_handle())
+    }
 }
 
 macro_rules! impl_resolver {

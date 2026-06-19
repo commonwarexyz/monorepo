@@ -9,7 +9,7 @@
 use crate::{
     journal::{
         contiguous::{
-            fixed::{Config as JConfig, Journal},
+            fixed::{Config as JConfig, Journal, Reader as JournalReader},
             Many, Reader,
         },
         Error as JError,
@@ -26,7 +26,7 @@ use commonware_codec::DecodeExt;
 use commonware_cryptography::Digest;
 use commonware_parallel::Strategy;
 use commonware_runtime::{buffer::paged::CacheRef, Clock, Metrics, Storage as RStorage};
-use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64};
+use commonware_utils::{range::NonEmptyRange, sequence::prefixed_u64::U64, sync::Mutex};
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
@@ -130,7 +130,7 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strate
     /// A memory resident Merkle structure used to build the structure and cache updates. It caches
     /// all un-synced nodes, and the pinned node set as derived from both its own pruning boundary
     /// and the full structure's pruning boundary.
-    pub(crate) mem: Mem<F, D>,
+    pub(crate) mem: Arc<Mutex<Mem<F, D>>>,
 
     /// The highest position for which this structure has been pruned, or 0 if it has never been
     /// pruned.
@@ -151,6 +151,25 @@ pub struct Merkle<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strate
     pub(crate) strategy: S,
 }
 
+/// A read-only snapshot of a journal-backed Merkle structure.
+pub struct ReaderSnapshot<F: Family, E: RStorage + Clock + Metrics, D: Digest> {
+    mem: Arc<Mutex<Mem<F, D>>>,
+    pruned_to_pos: Position<F>,
+    journal: JournalReader<E, D>,
+    metadata: BTreeMap<U64, Vec<u8>>,
+}
+
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> Clone for ReaderSnapshot<F, E, D> {
+    fn clone(&self) -> Self {
+        Self {
+            mem: self.mem.clone(),
+            pruned_to_pos: self.pruned_to_pos,
+            journal: self.journal.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
 /// Prefix used for nodes in the metadata prefixed U8 key.
 const NODE_PREFIX: u8 = 0;
 
@@ -158,15 +177,25 @@ const NODE_PREFIX: u8 = 0;
 pub(crate) const PRUNED_TO_PREFIX: u8 = 1;
 
 impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F, E, D, S> {
+    /// Return an owned read snapshot of this Merkle structure.
+    pub fn reader(&self) -> ReaderSnapshot<F, E, D> {
+        ReaderSnapshot {
+            mem: self.mem.clone(),
+            pruned_to_pos: self.pruned_to_pos,
+            journal: self.journal.reader(),
+            metadata: self.metadata.snapshot(),
+        }
+    }
+
     /// Return the total number of nodes in the structure, irrespective of any pruning. The next
     /// added element's position will have this value.
     pub fn size(&self) -> Position<F> {
-        self.mem.size()
+        self.mem.lock().size()
     }
 
     /// Return the total number of leaves in the structure.
     pub fn leaves(&self) -> Location<F> {
-        self.mem.leaves()
+        self.mem.lock().leaves()
     }
 
     /// Attempt to get a node from the metadata, with fallback to journal lookup if it fails.
@@ -209,7 +238,8 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
     /// count.
     pub fn bounds(&self) -> std::ops::Range<Location<F>> {
-        Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")..self.mem.leaves()
+        Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")
+            ..self.mem.lock().leaves()
     }
 
     /// Adds the pinned nodes based on `prune_pos` to `mem`.
@@ -261,7 +291,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 pinned_nodes: vec![],
             })?;
             return Ok(Self {
-                mem,
+                mem: Arc::new(Mutex::new(mem)),
                 pruned_to_pos: Position::new(0),
                 journal,
                 metadata,
@@ -390,7 +420,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         }
 
         Ok(Self {
-            mem,
+            mem: Arc::new(Mutex::new(mem)),
             pruned_to_pos: effective_prune_pos,
             journal,
             metadata,
@@ -508,7 +538,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         journal.prune(*prune_pos).await?;
 
         Ok(Self {
-            mem,
+            mem: Arc::new(Mutex::new(mem)),
             pruned_to_pos: prune_pos,
             journal,
             metadata,
@@ -552,7 +582,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     }
 
     pub async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
-        if let Some(node) = self.mem.get_node(position) {
+        if let Some(node) = self.mem.lock().get_node(position) {
             return Ok(Some(node));
         }
 
@@ -604,8 +634,9 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         // Encode the nodes missing from the journal directly to bytes and snapshot the pinned
         // node set for the current pruning boundary.
         let (sync_target_leaves, encoded, pinned_nodes) = {
-            let size = self.mem.size();
-            let sync_target_leaves = self.mem.leaves();
+            let mem = self.mem.lock();
+            let size = mem.size();
+            let sync_target_leaves = mem.leaves();
 
             assert!(
                 journal_size <= size,
@@ -616,7 +647,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             }
 
             // Encode the un-journaled tail to an owned buffer before the journal I/O below.
-            let (head, tail) = self.mem.nodes_from(journal_size);
+            let (head, tail) = mem.nodes_from(journal_size);
             let encoded = self.journal.prepare_append(Many::Nested(&[head, tail]));
 
             // Recompute pinned nodes since we'll need to repopulate the cache after it is cleared
@@ -624,7 +655,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             let prune_loc = Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos");
             let mut pinned_nodes = BTreeMap::new();
             for pos in F::nodes_to_pin(prune_loc) {
-                let digest = self.mem.get_node_unchecked(pos);
+                let digest = mem.get_node_unchecked(pos);
                 pinned_nodes.insert(pos, *digest);
             }
 
@@ -637,10 +668,12 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
         // Now that the missing nodes are readable from the journal, it's safe to prune them from
         // the mem. We prune to the previously captured leaf count.
-        self.mem
-            .prune(sync_target_leaves)
-            .expect("captured leaves is in bounds");
-        self.mem.add_pinned_nodes(pinned_nodes);
+        {
+            let mut mem = self.mem.lock();
+            mem.prune(sync_target_leaves)
+                .expect("captured leaves is in bounds");
+            mem.add_pinned_nodes(pinned_nodes);
+        }
 
         Ok(())
     }
@@ -654,7 +687,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// Returns [Error::LeafOutOfBounds] if `loc` exceeds the current leaf count.
     pub async fn prune(&mut self, loc: Location<F>) -> Result<(), Error<F>> {
         let pos = Position::try_from(loc)?;
-        if loc > self.mem.leaves() {
+        if loc > self.mem.lock().leaves() {
             return Err(Error::LeafOutOfBounds(loc));
         }
         if pos <= self.pruned_to_pos {
@@ -669,7 +702,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         let pinned_nodes = self.update_metadata(pos).await?;
 
         self.journal.prune(*pos).await?;
-        self.mem.add_pinned_nodes(pinned_nodes);
+        self.mem.lock().add_pinned_nodes(pinned_nodes);
         self.pruned_to_pos = pos;
 
         Ok(())
@@ -681,13 +714,13 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         hasher: &impl Hasher<F, Digest = D>,
         inactive_peaks: usize,
     ) -> Result<D, Error<F>> {
-        self.mem.root(hasher, inactive_peaks)
+        self.mem.lock().root(hasher, inactive_peaks)
     }
 
     /// Prune as many nodes as possible, leaving behind at most items_per_blob nodes in the current
     /// blob.
     pub async fn prune_all(&mut self) -> Result<(), Error<F>> {
-        let leaves = self.mem.leaves();
+        let leaves = self.mem.lock().leaves();
         if leaves != 0 {
             self.prune(leaves).await?;
         }
@@ -715,8 +748,13 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         // Write the nodes cached in the memory-resident structure to the journal, aborting after
         // write_count nodes have been written.
         let mut written_count = 0usize;
-        for i in *journal_size..*self.mem.size() {
-            let node = *self.mem.get_node_unchecked(Position::new(i));
+        let nodes = {
+            let mem = self.mem.lock();
+            (*journal_size..*mem.size())
+                .map(|i| *mem.get_node_unchecked(Position::new(i)))
+                .collect::<Vec<_>>()
+        };
+        for node in nodes {
             self.journal.append(&node).await?;
             written_count += 1;
             if written_count >= write_limit {
@@ -731,14 +769,14 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     #[cfg(test)]
     /// Return a copy of the currently pinned nodes for recovery tests.
     pub fn get_pinned_nodes(&self) -> BTreeMap<Position<F>, D> {
-        self.mem.pinned_nodes()
+        self.mem.lock().pinned_nodes()
     }
 
     #[cfg(test)]
     /// Simulate a crash after pruning metadata is written but before the journal is pruned.
     pub async fn simulate_pruning_failure(mut self, prune_to: Location<F>) -> Result<(), Error<F>> {
         let prune_to_pos = Position::try_from(prune_to)?;
-        assert!(prune_to_pos <= self.mem.size());
+        assert!(prune_to_pos <= self.mem.lock().size());
 
         // Flush items cached in the mem to disk to ensure the current state is recoverable.
         self.sync().await?;
@@ -758,7 +796,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// Already-committed ancestors are skipped automatically.
     /// Applying a batch from a different fork returns [`Error::StaleBatch`].
     pub fn apply_batch(&mut self, batch: &batch::MerkleizedBatch<F, D, S>) -> Result<(), Error<F>> {
-        self.mem.apply_batch(batch)?;
+        self.mem.lock().apply_batch(batch)?;
         Ok(())
     }
 
@@ -767,18 +805,21 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
     /// The batch has no data (the committed items are on disk, not in memory).
     /// This is the starting point for building owned batch chains.
     pub(crate) fn to_batch(&self) -> Arc<batch::MerkleizedBatch<F, D, S>> {
-        batch::MerkleizedBatch::from_mem_with_strategy(&self.mem, self.strategy.clone())
+        batch::MerkleizedBatch::from_mem_with_strategy(&self.mem.lock(), self.strategy.clone())
     }
 
     /// Borrow the committed Mem for the duration of the closure.
     pub fn with_mem<R>(&self, f: impl FnOnce(&Mem<F, D>) -> R) -> R {
-        f(&self.mem)
+        f(&self.mem.lock())
     }
 
     /// Create a new speculative batch with this structure as its parent.
     pub fn new_batch(&self) -> UnmerkleizedBatch<F, D, S> {
         UnmerkleizedBatch {
-            inner: self.mem.new_batch_with_strategy(self.strategy.clone()),
+            inner: self
+                .mem
+                .lock()
+                .new_batch_with_strategy(self.strategy.clone()),
         }
     }
 
@@ -829,9 +870,10 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
         // Truncate the in-memory structure to the target size.
         // If the in-memory structure has been pruned past the target (e.g. after sync),
         // rebuild from the journal/metadata instead.
-        if new_size >= Position::try_from(self.mem.bounds().start).expect("valid mem bounds start")
+        if new_size
+            >= Position::try_from(self.mem.lock().bounds().start).expect("valid mem bounds start")
         {
-            self.mem.truncate(new_size);
+            self.mem.lock().truncate(new_size);
         } else {
             let mut pinned_nodes = Vec::new();
             for pos in F::nodes_to_pin(destination_loc) {
@@ -851,10 +893,104 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
                 self.pruned_to_pos,
             )
             .await?;
-            self.mem = mem;
+            *self.mem.lock() = mem;
         }
 
         Ok(())
+    }
+}
+
+impl<F: Family, E: RStorage + Clock + Metrics, D: Digest> ReaderSnapshot<F, E, D> {
+    /// Return the total number of nodes in the snapshot.
+    pub fn size(&self) -> Position<F> {
+        self.mem.lock().size()
+    }
+
+    /// Return the total number of leaves in the snapshot.
+    pub fn leaves(&self) -> Location<F> {
+        self.mem.lock().leaves()
+    }
+
+    /// Returns [start, end) where `start` is the oldest retained leaf and `end` is the total leaf
+    /// count.
+    pub fn bounds(&self) -> std::ops::Range<Location<F>> {
+        Location::try_from(self.pruned_to_pos).expect("valid pruned_to_pos")
+            ..self.mem.lock().leaves()
+    }
+
+    /// Compute the root of the snapshot.
+    pub fn root(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        inactive_peaks: usize,
+    ) -> Result<D, Error<F>> {
+        self.mem.lock().root(hasher, inactive_peaks)
+    }
+
+    /// Get a node from the snapshot.
+    pub async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        if let Some(node) = self.mem.lock().get_node(position) {
+            return Ok(Some(node));
+        }
+
+        if let Some(bytes) = self.metadata.get(&U64::new(NODE_PREFIX, *position)) {
+            let digest = D::decode(bytes.as_ref())
+                .map_err(|_| Error::DataCorrupted("could not read digest at requested pos"))?;
+            return Ok(Some(digest));
+        }
+
+        match self.journal.read(*position).await {
+            Ok(item) => Ok(Some(item)),
+            Err(JError::ItemPruned(_)) => Ok(None),
+            Err(e) => Err(Error::Journal(e)),
+        }
+    }
+
+    /// Return the pinned nodes needed to authenticate a lower leaf boundary at `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<D>, Error<F>> {
+        if !loc.is_valid() {
+            return Err(Error::LocationOverflow(loc));
+        }
+        let futs = F::nodes_to_pin(loc)
+            .map(|p| async move { self.get_node(p).await?.ok_or(Error::ElementPruned(p)) })
+            .collect::<Vec<_>>();
+        futures::future::try_join_all(futs).await
+    }
+
+    /// Return an inclusion proof for the elements in `range` against a historical state with
+    /// `leaves` leaves.
+    pub async fn historical_range_proof(
+        &self,
+        hasher: &impl Hasher<F, Digest = D>,
+        leaves: Location<F>,
+        range: core::ops::Range<Location<F>>,
+        inactive_peaks: usize,
+    ) -> Result<Proof<F, D>, Error<F>> {
+        if leaves > self.leaves() {
+            return Err(Error::RangeOutOfBounds(leaves));
+        }
+        crate::merkle::verification::historical_range_proof(
+            hasher,
+            self,
+            leaves,
+            range,
+            inactive_peaks,
+        )
+        .await
+    }
+}
+
+impl<F: Family, E: RStorage + Clock + Metrics + Sync, D: Digest> crate::merkle::storage::Storage<F>
+    for ReaderSnapshot<F, E, D>
+{
+    type Digest = D;
+
+    async fn size(&self) -> Position<F> {
+        self.size()
+    }
+
+    async fn get_node(&self, position: Position<F>) -> Result<Option<D>, Error<F>> {
+        Self::get_node(self, position).await
     }
 }
 
@@ -877,11 +1013,11 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Readable
     }
 
     fn get_node(&self, pos: Position<F>) -> Option<D> {
-        self.mem.get_node(pos)
+        self.mem.lock().get_node(pos)
     }
 
     fn pruning_boundary(&self) -> Location<F> {
-        self.mem.pruning_boundary()
+        self.mem.lock().pruning_boundary()
     }
 }
 

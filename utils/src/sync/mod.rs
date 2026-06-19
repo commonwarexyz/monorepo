@@ -26,8 +26,8 @@
 //! Async lock guards may span `.await` when needed, but keep those critical sections as small as
 //! possible because long-held guards increase contention and deadlock risk.
 
-use core::ops::{Deref, DerefMut};
 pub use arc_swap::{ArcSwap, ArcSwapAny, ArcSwapOption, Guard};
+use core::ops::{Deref, DerefMut};
 pub use parking_lot::{
     Condvar, Mutex, MutexGuard, Once, RwLock, RwLockReadGuard, RwLockWriteGuard,
 };

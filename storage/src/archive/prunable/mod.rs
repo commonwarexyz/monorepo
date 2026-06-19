@@ -171,7 +171,7 @@ use commonware_runtime::buffer::paged::CacheRef;
 use std::num::{NonZeroU64, NonZeroUsize};
 
 mod storage;
-pub use storage::Archive;
+pub use storage::{Archive, Reader};
 
 /// Configuration for [Archive] storage.
 #[derive(Clone)]

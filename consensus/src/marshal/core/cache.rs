@@ -12,11 +12,13 @@ use commonware_storage::{
     metadata::{self, Metadata},
     translator::TwoCap,
 };
+use commonware_utils::sync::Mutex;
 use rand::Rng;
 use std::{
     cmp::max,
     collections::BTreeMap,
     num::{NonZero, NonZeroUsize},
+    sync::Arc,
     time::Duration,
 };
 use tracing::{debug, info};
@@ -66,12 +68,65 @@ where
     >,
 }
 
+#[allow(clippy::type_complexity)]
+struct CacheReader<R, V, S>
+where
+    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    V: Variant,
+    S: Scheme,
+{
+    verified_blocks: prunable::Reader<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
+    notarized_blocks: prunable::Reader<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
+    certified_blocks: prunable::Reader<TwoCap, R, <V::Block as Digestible>::Digest, V::StoredBlock>,
+    notarizations: prunable::Reader<
+        TwoCap,
+        R,
+        <V::Block as Digestible>::Digest,
+        Notarization<S, V::Commitment>,
+    >,
+    finalizations: prunable::Reader<
+        TwoCap,
+        R,
+        <V::Block as Digestible>::Digest,
+        Finalization<S, V::Commitment>,
+    >,
+}
+
+type CacheReaders<R, V, S> = Arc<Mutex<BTreeMap<Epoch, CacheReader<R, V, S>>>>;
+
+impl<R, V, S> Clone for CacheReader<R, V, S>
+where
+    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    V: Variant,
+    S: Scheme,
+{
+    fn clone(&self) -> Self {
+        Self {
+            verified_blocks: self.verified_blocks.clone(),
+            notarized_blocks: self.notarized_blocks.clone(),
+            certified_blocks: self.certified_blocks.clone(),
+            notarizations: self.notarizations.clone(),
+            finalizations: self.finalizations.clone(),
+        }
+    }
+}
+
 impl<R, V, S> Cache<R, V, S>
 where
     R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
     V: Variant,
     S: Scheme,
 {
+    fn reader(&self) -> CacheReader<R, V, S> {
+        CacheReader {
+            verified_blocks: self.verified_blocks.reader(),
+            notarized_blocks: self.notarized_blocks.reader(),
+            certified_blocks: self.certified_blocks.reader(),
+            notarizations: self.notarizations.reader(),
+            finalizations: self.finalizations.reader(),
+        }
+    }
+
     /// Prune view-indexed archives to the given view.
     async fn prune_by_view(&mut self, min_view: View) {
         match futures::try_join!(
@@ -116,6 +171,31 @@ where
 
     /// A map from epoch to its cache
     caches: BTreeMap<Epoch, Cache<R, V, S>>,
+
+    read_state: CacheReaders<R, V, S>,
+}
+
+/// Cheap read handle for marshal cache storage.
+pub(crate) struct Reader<R, V, S>
+where
+    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    V: Variant,
+    S: Scheme,
+{
+    caches: CacheReaders<R, V, S>,
+}
+
+impl<R, V, S> Clone for Reader<R, V, S>
+where
+    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    V: Variant,
+    S: Scheme,
+{
+    fn clone(&self) -> Self {
+        Self {
+            caches: self.caches.clone(),
+        }
+    }
 }
 
 impl<R, V, S> Manager<R, V, S>
@@ -151,6 +231,7 @@ where
             block_codec_config,
             metadata,
             caches: BTreeMap::new(),
+            read_state: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
 
@@ -260,6 +341,15 @@ where
             },
         );
         assert!(existing.is_none(), "cache already exists for epoch {epoch}");
+        let reader = self.caches.get(&epoch).expect("cache inserted").reader();
+        self.read_state.lock().insert(epoch, reader);
+    }
+
+    /// Return a cheap read handle.
+    pub(crate) fn reader(&self) -> Reader<R, V, S> {
+        Reader {
+            caches: self.read_state.clone(),
+        }
     }
 
     /// Helper to initialize an archive.
@@ -404,19 +494,6 @@ where
         }
     }
 
-    /// Get a notarization from the prunable archive by round.
-    pub(crate) async fn get_notarization(
-        &self,
-        round: Round,
-    ) -> Option<Notarization<S, V::Commitment>> {
-        let cache = self.caches.get(&round.epoch())?;
-        cache
-            .notarizations
-            .get(Identifier::Index(round.view().get()))
-            .await
-            .expect("failed to get notarization")
-    }
-
     /// Get the block previously persisted in the verified archive for `round`.
     pub(crate) async fn get_verified(&self, round: Round) -> Option<V::StoredBlock> {
         let cache = self.caches.get(&round.epoch())?;
@@ -512,6 +589,7 @@ where
             .filter(|epoch| *epoch < new_floor)
             .collect();
         for epoch in old_epochs.iter() {
+            self.read_state.lock().remove(epoch);
             let Cache {
                 verified_blocks: vb,
                 notarized_blocks: nb,
@@ -545,5 +623,76 @@ where
         for cache in self.caches.values_mut() {
             cache.prune_by_height(height).await;
         }
+    }
+}
+
+impl<R, V, S> Reader<R, V, S>
+where
+    R: BufferPooler + Rng + Spawner + Metrics + Clock + Storage,
+    V: Variant,
+    S: Scheme,
+{
+    fn epoch(&self, epoch: Epoch) -> Option<CacheReader<R, V, S>> {
+        self.caches.lock().get(&epoch).cloned()
+    }
+
+    fn epochs_desc(&self) -> Vec<CacheReader<R, V, S>> {
+        self.caches.lock().values().rev().cloned().collect()
+    }
+
+    /// Get a notarization from the prunable archive by round.
+    pub(crate) async fn get_notarization(
+        &self,
+        round: Round,
+    ) -> Option<Notarization<S, V::Commitment>> {
+        let cache = self.epoch(round.epoch())?;
+        cache
+            .notarizations
+            .get(Identifier::Index(round.view().get()))
+            .await
+            .expect("failed to get notarization")
+    }
+
+    /// Looks for a block (certified by height, verified, or notarized) that matches `predicate`.
+    pub(crate) async fn find_block_matching(
+        &self,
+        digest: <V::Block as Digestible>::Digest,
+        mut predicate: impl FnMut(&V::StoredBlock) -> bool,
+    ) -> Option<V::StoredBlock> {
+        for cache in self.epochs_desc() {
+            if let Some(block) = cache
+                .verified_blocks
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get verified block")
+            {
+                if predicate(&block) {
+                    return Some(block);
+                }
+            }
+
+            if let Some(block) = cache
+                .notarized_blocks
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get notarized block")
+            {
+                if predicate(&block) {
+                    return Some(block);
+                }
+            }
+
+            if let Some(block) = cache
+                .certified_blocks
+                .get(Identifier::Key(&digest))
+                .await
+                .expect("failed to get certified block")
+            {
+                if predicate(&block) {
+                    return Some(block);
+                }
+            }
+        }
+        None
     }
 }

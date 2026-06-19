@@ -704,7 +704,7 @@ pub(crate) mod test {
             type Merkle = TestMmr;
 
             fn into_log_components(self) -> (Self::Merkle, Self::Journal) {
-                (self.log.merkle, self.log.journal)
+                self.log.into_components()
             }
 
             async fn pinned_nodes_at(&self, loc: mmr::Location) -> Vec<Digest> {

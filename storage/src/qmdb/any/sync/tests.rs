@@ -5,7 +5,6 @@
 //! The shared functions are `pub(crate)` so that `current::sync::tests` can reuse them.
 
 use crate::{
-    journal::contiguous::Contiguous,
     merkle::{self, Location},
     qmdb::{
         self,
@@ -50,9 +49,6 @@ pub(crate) type OpOf<H> = <DbOf<H> as qmdb::sync::Database>::Op;
 
 /// Type alias for the config type of a harness.
 pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
-
-/// Type alias for the journal type of a harness.
-pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
 
 /// Trait for cleanup operations in tests.
 pub(crate) trait Destructible {
@@ -141,7 +137,6 @@ pub(crate) fn test_sync_empty_operations_no_panic<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -187,7 +182,6 @@ where
     resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
         Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -222,7 +216,6 @@ pub(crate) fn test_sync<H: SyncTestHarness>(target_db_ops: usize, fetch_batch_si
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -304,7 +297,6 @@ pub(crate) fn test_sync_subset_of_target_database<H: SyncTestHarness>(target_db_
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -370,7 +362,6 @@ pub(crate) fn test_sync_use_existing_db_partial_match<H: SyncTestHarness>(origin
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -464,7 +455,6 @@ where
     resolver::tests::FailResolver<H::Family, OpOf<H>, Digest>:
         Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone + OperationTrait<H::Family, Key = Digest>,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -548,7 +538,6 @@ pub(crate) fn test_target_update_lower_bound_decrease<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -623,7 +612,6 @@ pub(crate) fn test_target_update_upper_bound_decrease<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -692,7 +680,6 @@ pub(crate) fn test_target_update_bounds_increase<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -777,7 +764,6 @@ pub(crate) fn test_target_update_on_done_client<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -846,7 +832,6 @@ pub(crate) fn test_target_update_prune_only_rejected<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -913,7 +898,6 @@ pub(crate) fn test_sync_waits_for_explicit_finish<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1034,7 +1018,6 @@ pub(crate) fn test_sync_reports_progress_for_reached_targets_before_explicit_fin
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1155,7 +1138,6 @@ pub(crate) fn test_sync_handles_early_finish_signal<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1218,7 +1200,6 @@ pub(crate) fn test_sync_fails_when_finish_sender_dropped<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1267,7 +1248,6 @@ pub(crate) fn test_sync_allows_dropped_reached_target_receiver<H: SyncTestHarnes
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1321,7 +1301,6 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
 ) where
     Arc<AsyncRwLock<Option<DbOf<H>>>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1366,7 +1345,7 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>(
                     NextStep::Continue(new_client) => new_client,
                     NextStep::Complete(_) => panic!("client should not be complete"),
                 };
-                let log_size = client.journal().size().await;
+                let log_size = qmdb::sync::Journal::size(client.journal()).await;
                 if log_size > initial_lower_bound {
                     break client;
                 }
@@ -1432,7 +1411,6 @@ pub(crate) fn test_sync_database_persistence<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode + Clone,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1505,7 +1483,6 @@ pub(crate) fn test_sync_post_sync_usability<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1561,7 +1538,6 @@ pub(crate) fn test_from_sync_result_nonempty_to_nonempty_exact_match<H: SyncTest
 where
     DbOf<H>: FromSyncTestable,
     OpOf<H>: Encode + Clone,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1608,7 +1584,6 @@ pub(crate) fn test_from_sync_result_nonempty_to_nonempty_partial_match<H: SyncTe
 where
     DbOf<H>: FromSyncTestable,
     OpOf<H>: Encode + Clone,
-    JournalOf<H>: Contiguous,
 {
     const NUM_OPS: usize = 100;
     const NUM_ADDITIONAL_OPS: usize = 5;
@@ -1686,7 +1661,6 @@ pub(crate) fn test_from_sync_result_empty_to_nonempty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
     OpOf<H>: Encode + Clone,
-    JournalOf<H>: Contiguous,
 {
     const NUM_OPS: usize = 100;
     let executor = deterministic::Runner::default();
@@ -1744,7 +1718,6 @@ pub(crate) fn test_from_sync_result_empty_to_empty<H: SyncTestHarness>()
 where
     DbOf<H>: FromSyncTestable,
     OpOf<H>: Encode + Clone,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1845,7 +1818,6 @@ pub(crate) fn test_sync_retries_bad_pinned_nodes<H: SyncTestHarness>()
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -1982,7 +1954,6 @@ pub(crate) fn test_sync_waits_for_boundary_retry_after_target_update<H: SyncTest
 where
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = Digest>,
     OpOf<H>: Encode,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -2067,7 +2038,7 @@ where
 
         let _ = release_historical_gap_tx.send(());
 
-        let journal_start = engine.journal().size().await;
+        let journal_start = qmdb::sync::Journal::size(engine.journal()).await;
         for step_idx in 0..4 {
             let next_step = engine.step();
             pin_mut!(next_step);
@@ -2079,7 +2050,7 @@ where
                         NextStep::Complete(_) => panic!("boundary retry should still be required"),
                     };
                     assert_eq!(
-                        engine.journal().size().await,
+                        qmdb::sync::Journal::size(engine.journal()).await,
                         journal_start,
                         "replayed fresh boundary responses must not advance the journal"
                     );

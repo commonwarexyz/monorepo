@@ -313,6 +313,39 @@ where
 {
 }
 
+/// A database that can expose a lock-free compact-sync resolver reader.
+pub trait Provider: Send + Sync + 'static {
+    /// The merkle family backing the resolver's proofs.
+    type Family: Family;
+
+    /// The digest type used in proofs returned by the resolver.
+    type Digest: Digest;
+
+    /// The type of operation returned by the resolver.
+    type Op;
+
+    /// The resolver handle produced by this database.
+    type Resolver: Resolver<Family = Self::Family, Digest = Self::Digest, Op = Self::Op>;
+
+    /// Return a resolver backed by this database's published read state.
+    fn resolver(&self) -> Self::Resolver;
+}
+
+impl<T> Provider for T
+where
+    T: super::resolver::Provider,
+    T::Resolver: Resolver<Family = T::Family, Digest = T::Digest, Op = T::Op>,
+{
+    type Family = T::Family;
+    type Digest = T::Digest;
+    type Op = T::Op;
+    type Resolver = T::Resolver;
+
+    fn resolver(&self) -> Self::Resolver {
+        super::resolver::Provider::resolver(self)
+    }
+}
+
 /// Database types that can be initialized directly from compact state.
 pub trait Database: Sized + Send {
     type Family: Family;

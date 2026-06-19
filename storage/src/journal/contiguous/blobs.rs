@@ -7,7 +7,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob, Error as RError, IoBuf, IoBufMut, IoBufs,
 };
-use commonware_utils::sync::ArcSwap;
+use commonware_utils::sync::ArcSwapOption;
 use futures::future::try_join_all;
 use std::{
     collections::BTreeMap,
@@ -39,7 +39,7 @@ impl Metrics {
 
 /// Atomically publishes the latest reader state for split journals.
 pub(super) struct Publisher<T> {
-    current: Arc<ArcSwap<T>>,
+    current: Arc<ArcSwapOption<T>>,
 }
 
 impl<T> Clone for Publisher<T> {
@@ -54,18 +54,29 @@ impl<T> Publisher<T> {
     /// Create a new publisher.
     pub(super) fn new(current: T) -> Self {
         Self {
-            current: Arc::new(ArcSwap::from_pointee(current)),
+            current: Arc::new(ArcSwapOption::from_pointee(current)),
         }
     }
 
     /// Clone the latest published state.
     pub(super) fn get(&self) -> Arc<T> {
-        self.current.load_full()
+        self.current
+            .load_full()
+            .expect("published state should be available")
     }
 
     /// Replace the latest published state.
     pub(super) fn publish(&self, current: T) {
-        self.current.store(Arc::new(current));
+        self.current.store(Some(Arc::new(current)));
+    }
+
+    /// Clear the latest published state if there are no external reader factories.
+    pub(super) fn clear_if_exclusive(&self) -> bool {
+        if Arc::strong_count(&self.current) > 2 {
+            return false;
+        }
+        self.current.store(None);
+        true
     }
 }
 

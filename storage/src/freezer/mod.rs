@@ -215,7 +215,7 @@ mod storage;
 use commonware_runtime::buffer::paged::CacheRef;
 use commonware_utils::Array;
 use std::num::NonZeroUsize;
-pub use storage::{Checkpoint, Cursor, Freezer};
+pub use storage::{Checkpoint, Cursor, Freezer, Reader};
 use thiserror::Error;
 
 /// Subject of a [Freezer::get] operation.

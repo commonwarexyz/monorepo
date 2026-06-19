@@ -621,7 +621,7 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             context.child("probe_stale"),
             &config,
             &stale_target,
-            &db.any.log.journal,
+            db.any.log.journal(),
         )
         .await
         .unwrap()
@@ -635,7 +635,7 @@ fn test_current_local_boundary_nodes_rejects_target_before_local_lower_bound() {
             context.child("probe_matching"),
             &config,
             &matching_target,
-            &db.any.log.journal,
+            db.any.log.journal(),
         )
         .await
         .unwrap()

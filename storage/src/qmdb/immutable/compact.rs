@@ -88,6 +88,88 @@ where
 type CompactStateResult<F, K, V, D> =
     Result<compact_sync::State<F, Operation<F, K, V>, D>, compact_sync::ServeError<F, D>>;
 
+/// Resolver for compact immutable sync backed by the published witness tip.
+pub struct Resolver<F, K, V, D, C>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    Operation<F, K, V>: Read<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+{
+    witness: witness::Reader<F, D>,
+    commit_codec_config: C,
+    _phantom: PhantomData<(K, V)>,
+}
+
+impl<F, K, V, D, C> Clone for Resolver<F, K, V, D, C>
+where
+    F: Family,
+    K: Key,
+    V: ValueEncoding,
+    D: Digest,
+    Operation<F, K, V>: Read<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            witness: self.witness.clone(),
+            commit_codec_config: self.commit_codec_config.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<F, K, V, D, C> compact_sync::Resolver for Resolver<F, K, V, D, C>
+where
+    F: Family,
+    K: Key + Send + Sync + 'static,
+    V: ValueEncoding + Send + Sync + 'static,
+    D: Digest,
+    Operation<F, K, V>: Encode + Read<Cfg = C> + Send + Sync + Clone + 'static,
+    C: Clone + Send + Sync + 'static,
+{
+    type Family = F;
+    type Digest = D;
+    type Op = Operation<F, K, V>;
+    type Error = compact_sync::ServeError<F, D>;
+
+    async fn get_compact_state(
+        &self,
+        target: compact_sync::Target<Self::Family, Self::Digest>,
+    ) -> Result<compact_sync::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.witness
+            .state(target, &self.commit_codec_config)
+            .map(Into::into)
+    }
+}
+
+impl<F, E, K, V, H, C, S> compact_sync::Provider for Db<F, E, K, V, H, C, S>
+where
+    F: Family,
+    E: Context + 'static,
+    K: Key + Send + Sync + 'static,
+    V: ValueEncoding + Send + Sync + 'static,
+    H: Hasher + 'static,
+    Operation<F, K, V>: EncodeShared + Encode + Read<Cfg = C> + Send + Sync + Clone + 'static,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, K, V>;
+    type Resolver = Resolver<F, K, V, H::Digest, C>;
+
+    fn resolver(&self) -> Self::Resolver {
+        Resolver {
+            witness: self.witness.reader(),
+            commit_codec_config: self.commit_codec_config.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 /// A speculative batch for a compact immutable db.
 #[allow(clippy::type_complexity)]
 pub struct UnmerkleizedBatch<F, H, K, V, S: Strategy>

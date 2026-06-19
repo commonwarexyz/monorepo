@@ -13,9 +13,9 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, IoBuf,
 };
-use commonware_utils::{Array, Span};
+use commonware_utils::{sync::Mutex, Array, Span};
 use futures::future::{try_join, try_join_all};
-use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref};
+use std::{cmp::Ordering, collections::BTreeSet, num::NonZeroUsize, ops::Deref, sync::Arc};
 use tracing::debug;
 
 /// The percentage of table entries that must reach `table_resize_frequency`
@@ -412,6 +412,8 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     // Combined key index + value storage with crash recovery
     oversized: Oversized<E, Record<K>, V>,
 
+    read_state: Arc<Mutex<ReadState>>,
+
     // Target size for value blob sections
     blob_target_size: u64,
 
@@ -430,6 +432,31 @@ pub struct Freezer<E: BufferPooler + Context, K: Array, V: CodecShared> {
     unnecessary_reads: Counter,
     unnecessary_writes: Counter,
     resizes: Counter,
+}
+
+struct ReadState {
+    table_size: u32,
+}
+
+/// A cheap read handle for [Freezer].
+pub struct Reader<E: BufferPooler + Context, K: Array, V: CodecShared> {
+    table: E::Blob,
+    oversized: crate::journal::segmented::oversized::Reader<E, Record<K>, V>,
+    state: Arc<Mutex<ReadState>>,
+    gets: Counter,
+    unnecessary_reads: Counter,
+}
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Clone for Reader<E, K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            table: self.table.clone(),
+            oversized: self.oversized.clone(),
+            state: self.state.clone(),
+            gets: self.gets.clone(),
+            unnecessary_reads: self.unnecessary_reads.clone(),
+        }
+    }
 }
 
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
@@ -757,6 +784,9 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             table_resize_chunk_size: config.table_resize_chunk_size,
             table,
             oversized,
+            read_state: Arc::new(Mutex::new(ReadState {
+                table_size: checkpoint.table_size,
+            })),
             blob_target_size: config.value_target_size,
             current_section: checkpoint.section,
             next_epoch: checkpoint.epoch.checked_add(1).expect("epoch overflow"),
@@ -783,8 +813,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     ///
     /// To determine the appropriate entry, we AND the key's hash with the current table size.
     fn table_index(&self, key: &K) -> u32 {
+        Self::table_index_for(self.table_size, key)
+    }
+
+    fn table_index_for(table_size: u32, key: &K) -> u32 {
         let hash = Crc32::checksum(key.as_ref());
-        hash & (self.table_size - 1)
+        hash & (table_size - 1)
     }
 
     /// Determine if the table should be resized.
@@ -808,6 +842,17 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         }
 
         Ok(())
+    }
+
+    /// Return a cheap read handle.
+    pub fn reader(&self) -> Reader<E, K, V> {
+        Reader {
+            table: self.table.clone(),
+            oversized: self.oversized.reader(),
+            state: self.read_state.clone(),
+            gets: self.gets.clone(),
+            unnecessary_reads: self.unnecessary_reads.clone(),
+        }
     }
 
     /// Put a key-value pair into the [Freezer].
@@ -891,64 +936,12 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
         Ok(Cursor::new(self.current_section, value_offset, value_size))
     }
 
-    /// Get the value for a given [Cursor].
-    async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
-        let value = self
-            .oversized
-            .get_value(cursor.section(), cursor.offset(), cursor.size())
-            .await?;
-
-        Ok(value)
-    }
-
-    /// Get the first value for a given key.
-    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        self.gets.inc();
-
-        // Get head of the chain from table
-        let table_index = self.table_index(key);
-        let (entry1, entry2) = Self::read_table(&self.table, table_index).await?;
-        let Some((mut section, mut position, _)) = Self::read_latest_entry(&entry1, &entry2) else {
-            return Ok(None);
-        };
-
-        // Follow the linked list chain to find the first matching key
-        loop {
-            // Get the key entry from the fixed key index (efficient, good cache locality)
-            let key_entry = self.oversized.get(section, position).await?;
-
-            // Check if this key matches
-            if key_entry.key.as_ref() == key.as_ref() {
-                let value = self
-                    .oversized
-                    .get_value(section, key_entry.value_offset, key_entry.value_size)
-                    .await?;
-                return Ok(Some(value));
-            }
-
-            // Increment unnecessary reads
-            self.unnecessary_reads.inc();
-
-            // Follow the chain
-            let Some(next) = key_entry.next() else {
-                break; // End of chain
-            };
-            section = next.0;
-            position = next.1;
-        }
-
-        Ok(None)
-    }
-
     /// Get the value for a given [Identifier].
     ///
     /// If a [Cursor] is known for the required key, it
     /// is much faster to use it than searching for a `key`.
     pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
-        match identifier {
-            Identifier::Cursor(cursor) => self.get_cursor(cursor).await.map(Some),
-            Identifier::Key(key) => self.get_key(key).await,
-        }
+        self.reader().get(identifier).await
     }
 
     /// Resize the table by doubling its size and split each entry into two.
@@ -1034,6 +1027,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
             self.table_size = old_size * 2;
             self.table_resize_threshold = self.table_size as u64 * RESIZE_THRESHOLD / 100;
             self.resize_progress = None;
+            self.read_state.lock().table_size = self.table_size;
             debug!(
                 old = old_size,
                 new = self.table_size,
@@ -1133,6 +1127,59 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Freezer<E, K, V> {
     #[cfg(test)]
     pub const fn resizable(&self) -> u32 {
         self.resizable
+    }
+}
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Reader<E, K, V> {
+    /// Get the value for a given [Cursor].
+    pub async fn get_cursor(&self, cursor: Cursor) -> Result<V, Error> {
+        self.oversized
+            .get_value(cursor.section(), cursor.offset(), cursor.size())
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Get the first value for a given key.
+    pub async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+        self.gets.inc();
+
+        let table_size = self.state.lock().table_size;
+        let table_index = Freezer::<E, K, V>::table_index_for(table_size, key);
+        let (entry1, entry2) = Freezer::<E, K, V>::read_table(&self.table, table_index).await?;
+        let Some((mut section, mut position, _)) =
+            Freezer::<E, K, V>::read_latest_entry(&entry1, &entry2)
+        else {
+            return Ok(None);
+        };
+
+        loop {
+            let key_entry = self.oversized.get(section, position).await?;
+            if key_entry.key.as_ref() == key.as_ref() {
+                let value = self
+                    .oversized
+                    .get_value(section, key_entry.value_offset, key_entry.value_size)
+                    .await?;
+                return Ok(Some(value));
+            }
+
+            self.unnecessary_reads.inc();
+
+            let Some(next) = key_entry.next() else {
+                break;
+            };
+            section = next.0;
+            position = next.1;
+        }
+
+        Ok(None)
+    }
+
+    /// Get the value for a given [Identifier].
+    pub async fn get<'a>(&'a self, identifier: Identifier<'a, K>) -> Result<Option<V>, Error> {
+        match identifier {
+            Identifier::Cursor(cursor) => self.get_cursor(cursor).await.map(Some),
+            Identifier::Key(key) => self.get_key(key).await,
+        }
     }
 }
 

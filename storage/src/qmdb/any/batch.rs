@@ -4,7 +4,7 @@ use crate::{
     index::{Ordered as OrderedIndex, Unordered as UnorderedIndex},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Reader},
     },
     merkle::{Family, Location},
     qmdb::{
@@ -640,7 +640,7 @@ where
     ) -> Vec<Location<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
         // Extra slack (*3/2) avoids re-allocations when index collisions cause more than one
@@ -722,7 +722,7 @@ where
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, U, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>>,
         R: Reader<Item = Operation<F, U>>,
     {
@@ -979,7 +979,7 @@ where
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         let mut values = self.get_many(&[key], db).await?;
@@ -998,7 +998,7 @@ where
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         if keys.is_empty() {
@@ -1090,7 +1090,7 @@ where
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
         self.merkleize_with_floor_scan(db, metadata, |floor, tip, limit, out| {
@@ -1113,7 +1113,7 @@ where
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
     {
         let mut resolved = core::mem::take(&mut *self.resolved.lock());
@@ -1305,7 +1305,7 @@ where
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
         self.merkleize_with_floor_scan(db, metadata, |floor, tip, limit, out| {
@@ -1328,7 +1328,7 @@ where
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, S>>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
     {
         let mut resolved = core::mem::take(&mut *self.resolved.lock());
@@ -1773,7 +1773,7 @@ where
     ) -> Result<Option<U::Value>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
@@ -1800,7 +1800,7 @@ where
     ) -> Result<Vec<Option<U::Value>>, crate::qmdb::Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
@@ -1855,7 +1855,7 @@ where
     F: Family,
     E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -1893,7 +1893,7 @@ where
     F: Family,
     E: Context,
     U: update::Update + Send + Sync + 'static,
-    C: Mutable<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -2004,7 +2004,7 @@ impl<F: Family, E, C, I, H, U, const N: usize, S> Db<F, E, C, I, H, U, N, S>
 where
     E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -2070,7 +2070,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
@@ -2104,7 +2104,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
@@ -2148,7 +2148,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>>,
         H: Hasher,
         S: Strategy,
@@ -2179,7 +2179,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: OrderedIndex<Value = Location<F>>,
         H: Hasher,
         S: Strategy,

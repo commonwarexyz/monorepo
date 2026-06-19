@@ -219,6 +219,15 @@ impl<E: Context, K: Span, V: Codec> Metadata<E, K, V> {
         self.map.get(key)
     }
 
+    /// Return an owned snapshot of the current metadata map.
+    pub(crate) fn snapshot(&self) -> BTreeMap<K, V>
+    where
+        K: Clone,
+        V: Clone,
+    {
+        self.map.clone()
+    }
+
     /// Get a mutable reference to a value from [Metadata] (if it exists).
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         // Get value

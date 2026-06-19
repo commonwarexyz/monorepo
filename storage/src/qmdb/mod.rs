@@ -44,7 +44,7 @@
 use crate::{
     index::{Cursor, Unordered as Index},
     journal::{
-        contiguous::{Mutable, Reader},
+        contiguous::{Contiguous, Mutable, Reader},
         Error as JournalError,
     },
     merkle::{hasher::Standard as StandardHasher, Bagging, Family, Location},
@@ -404,17 +404,21 @@ pub(crate) struct FloorHelper<
     'a,
     F: Family,
     I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
+    C: Mutable,
+    R: Contiguous<Item = C::Item>,
 > {
     pub snapshot: &'a mut I,
     pub log: &'a mut C,
+    pub readers: &'a R,
 }
 
-impl<F, I, C> FloorHelper<'_, F, I, C>
+impl<F, I, C, R> FloorHelper<'_, F, I, C, R>
 where
     F: Family,
     I: Index<Value = Location<F>>,
-    C: Mutable<Item: Operation<F>>,
+    C: Mutable,
+    C::Item: Operation<F>,
+    R: Contiguous<Item = C::Item>,
 {
     /// Moves the given operation to the tip of the log if it is active, rendering its old location
     /// inactive. If the operation was not active, then this is a no-op. Returns whether the
@@ -469,7 +473,7 @@ where
             let old_loc = inactivity_floor_loc;
             inactivity_floor_loc += 1;
             let op = {
-                let reader = self.log.reader().await;
+                let reader = self.readers.reader().await;
                 reader.read(*old_loc).await?
             };
             if self.move_op_if_active(op, old_loc).await? {

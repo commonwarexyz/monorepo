@@ -81,7 +81,7 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Reader},
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
@@ -164,7 +164,7 @@ pub struct Immutable<
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
+    C: authenticated::Inner<E, Item = Operation<F, K, V>>,
     H: CHasher,
     T: Translator,
     S: Strategy,
@@ -202,7 +202,7 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>>,
+    C: authenticated::Inner<E, Item = Operation<F, K, V>>,
     C::Item: EncodeShared,
     H: CHasher,
     T: Translator,
@@ -229,7 +229,7 @@ where
         let mut snapshot = Index::new(context.child("snapshot"), translator);
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.journal.reader().await;
+            let reader = journal.reader().await;
             let bounds = reader.bounds();
             let last_commit_loc =
                 Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
@@ -416,13 +416,8 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
         let last_commit_loc = self.last_commit_loc;
-        let Operation::Commit(metadata, _floor) = self
-            .journal
-            .journal
-            .reader()
-            .await
-            .read(*last_commit_loc)
-            .await?
+        let Operation::Commit(metadata, _floor) =
+            self.journal.reader().await.read(*last_commit_loc).await?
         else {
             unreachable!("no commit operation at location of last commit {last_commit_loc}");
         };
@@ -605,7 +600,7 @@ where
         // Iterate in reverse so front-insertion preserves ascending loc order
         // for repeated keys, matching the ordering that apply_batch produces.
         if rewind_floor < old_floor {
-            let reader = self.journal.journal.reader().await;
+            let reader = self.journal.reader().await;
             let gap_end = core::cmp::min(*old_floor, rewind_size);
             for loc in (*rewind_floor..gap_end).rev() {
                 if let Operation::Set(key, _) = reader.read(loc).await? {
@@ -807,7 +802,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("first")).await;
@@ -853,7 +848,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -889,7 +884,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with 2 keys.
@@ -965,7 +960,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -997,7 +992,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -1040,7 +1035,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -1092,7 +1087,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs and prove ranges over them.
@@ -1142,7 +1137,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Insert 1000 keys then sync.
@@ -1198,7 +1193,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -1237,7 +1232,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         // Build a db with `ELEMENTS` key/value pairs then prune some of them.
@@ -1346,7 +1341,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -1409,7 +1404,7 @@ pub(super) mod test {
     ) -> Range<Location<F>>
     where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         commit_sets_with_floor(db, sets, metadata, Location::new(0)).await
@@ -1423,7 +1418,7 @@ pub(super) mod test {
     ) -> Range<Location<F>>
     where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut batch = db.new_batch();
@@ -1446,7 +1441,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1514,7 +1509,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1558,7 +1553,7 @@ pub(super) mod test {
             -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_small_sections_db(context.child("db")).await;
@@ -1626,7 +1621,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1668,7 +1663,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("db")).await;
@@ -1705,7 +1700,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1756,7 +1751,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1794,7 +1789,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1840,7 +1835,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1882,7 +1877,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1932,7 +1927,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -1972,7 +1967,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2028,7 +2023,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2072,7 +2067,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2121,7 +2116,7 @@ pub(super) mod test {
             -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db_small_sections(context.child("db")).await;
@@ -2172,7 +2167,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2206,7 +2201,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2257,7 +2252,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2303,7 +2298,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2351,7 +2346,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2393,7 +2388,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2434,7 +2429,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2477,7 +2472,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2523,7 +2518,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -2574,7 +2569,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2626,7 +2621,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2680,7 +2675,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2729,7 +2724,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2771,7 +2766,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2830,7 +2825,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2885,7 +2880,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -2935,7 +2930,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -2996,7 +2991,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -3058,7 +3053,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -3105,7 +3100,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("first")).await;
@@ -3161,7 +3156,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("test")).await;
@@ -3273,7 +3268,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;
@@ -3336,7 +3331,7 @@ pub(super) mod test {
         ) -> Pin<Box<dyn Future<Output = TestDb<F, V, C>> + Send>>,
     ) where
         V: ValueEncoding<Value = Digest>,
-        C: Mutable<Item = Operation<F, Digest, V>>,
+        C: authenticated::Inner<deterministic::Context, Item = Operation<F, Digest, V>>,
         C::Item: EncodeShared,
     {
         let mut db = open_db(context.child("db")).await;

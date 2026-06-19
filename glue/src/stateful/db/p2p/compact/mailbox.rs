@@ -6,15 +6,15 @@ use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{merkle::Family, qmdb::sync::compact};
 use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock};
-use std::{collections::VecDeque, future::Future, sync::Arc};
+use std::{collections::VecDeque, sync::Arc};
 
-struct CancelGuard<DB, F: Family, Op, D: Digest> {
-    sender: Sender<Message<DB, F, Op, D>>,
+struct CancelGuard<R, F: Family, Op, D: Digest> {
+    sender: Sender<Message<R, F, Op, D>>,
     request: Option<handler::Request<F, D>>,
 }
 
-impl<DB, F: Family, Op, D: Digest> CancelGuard<DB, F, Op, D> {
-    const fn new(sender: Sender<Message<DB, F, Op, D>>, request: handler::Request<F, D>) -> Self {
+impl<R, F: Family, Op, D: Digest> CancelGuard<R, F, Op, D> {
+    const fn new(sender: Sender<Message<R, F, Op, D>>, request: handler::Request<F, D>) -> Self {
         Self {
             sender,
             request: Some(request),
@@ -26,7 +26,7 @@ impl<DB, F: Family, Op, D: Digest> CancelGuard<DB, F, Op, D> {
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Drop for CancelGuard<DB, F, Op, D> {
+impl<R, F: Family, Op, D: Digest> Drop for CancelGuard<R, F, Op, D> {
     fn drop(&mut self) {
         let Some(request) = self.request.take() else {
             return;
@@ -40,8 +40,8 @@ impl<DB, F: Family, Op, D: Digest> Drop for CancelGuard<DB, F, Op, D> {
 #[error("response dropped before completion")]
 pub struct ResponseDropped;
 
-pub(super) enum Message<DB, F: Family, Op, D: Digest> {
-    AttachDatabase(Arc<TracedAsyncRwLock<DB>>),
+pub(super) enum Message<R, F: Family, Op, D: Digest> {
+    AttachDatabase(R),
     GetState {
         request: handler::Request<F, D>,
         response: oneshot::Sender<Result<compact::FetchResult<F, Op, D>, ResponseDropped>>,
@@ -51,7 +51,7 @@ pub(super) enum Message<DB, F: Family, Op, D: Digest> {
     },
 }
 
-impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
+impl<R, F: Family, Op, D: Digest> Message<R, F, Op, D> {
     fn response_closed(&self) -> bool {
         match self {
             Self::AttachDatabase(_) | Self::CancelState { .. } => false,
@@ -60,12 +60,12 @@ impl<DB, F: Family, Op, D: Digest> Message<DB, F, Op, D> {
     }
 }
 
-pub(super) struct Pending<DB, F: Family, Op, D: Digest> {
-    database: Option<Arc<TracedAsyncRwLock<DB>>>,
-    messages: VecDeque<Message<DB, F, Op, D>>,
+pub(super) struct Pending<R, F: Family, Op, D: Digest> {
+    database: Option<R>,
+    messages: VecDeque<Message<R, F, Op, D>>,
 }
 
-impl<DB, F: Family, Op, D: Digest> Default for Pending<DB, F, Op, D> {
+impl<R, F: Family, Op, D: Digest> Default for Pending<R, F, Op, D> {
     fn default() -> Self {
         Self {
             database: None,
@@ -74,14 +74,14 @@ impl<DB, F: Family, Op, D: Digest> Default for Pending<DB, F, Op, D> {
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<DB, F, Op, D> {
+impl<R, F: Family, Op, D: Digest> Overflow<Message<R, F, Op, D>> for Pending<R, F, Op, D> {
     fn is_empty(&self) -> bool {
         self.database.is_none() && self.messages.is_empty()
     }
 
     fn drain<P>(&mut self, mut push: P)
     where
-        P: FnMut(Message<DB, F, Op, D>) -> Option<Message<DB, F, Op, D>>,
+        P: FnMut(Message<R, F, Op, D>) -> Option<Message<R, F, Op, D>>,
     {
         if let Some(database) = self.database.take() {
             if let Some(Message::AttachDatabase(database)) = push(Message::AttachDatabase(database))
@@ -104,8 +104,8 @@ impl<DB, F: Family, Op, D: Digest> Overflow<Message<DB, F, Op, D>> for Pending<D
     }
 }
 
-impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
-    type Overflow = Pending<DB, F, Op, D>;
+impl<R, F: Family, Op, D: Digest> Policy for Message<R, F, Op, D> {
+    type Overflow = Pending<R, F, Op, D>;
 
     fn handle(overflow: &mut Self::Overflow, message: Self) {
         if message.response_closed() {
@@ -122,11 +122,11 @@ impl<DB, F: Family, Op, D: Digest> Policy for Message<DB, F, Op, D> {
 }
 
 /// Client-facing resolver mailbox used by compact QMDB sync.
-pub struct Mailbox<DB, F: Family, Op, H: Hasher> {
-    sender: Sender<Message<DB, F, Op, H::Digest>>,
+pub struct Mailbox<R, F: Family, Op, H: Hasher> {
+    sender: Sender<Message<R, F, Op, H::Digest>>,
 }
 
-impl<DB, F: Family, Op, H: Hasher> Clone for Mailbox<DB, F, Op, H> {
+impl<R, F: Family, Op, H: Hasher> Clone for Mailbox<R, F, Op, H> {
     fn clone(&self) -> Self {
         Self {
             sender: self.sender.clone(),
@@ -134,21 +134,21 @@ impl<DB, F: Family, Op, H: Hasher> Clone for Mailbox<DB, F, Op, H> {
     }
 }
 
-impl<DB, F: Family, Op, H: Hasher> Mailbox<DB, F, Op, H> {
-    pub(super) const fn new(sender: Sender<Message<DB, F, Op, H::Digest>>) -> Self {
+impl<R, F: Family, Op, H: Hasher> Mailbox<R, F, Op, H> {
+    pub(super) const fn new(sender: Sender<Message<R, F, Op, H::Digest>>) -> Self {
         Self { sender }
     }
 }
 
-impl<DB: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<DB, F, Op, H> {
-    pub fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) {
-        let _ = self.sender.enqueue(Message::AttachDatabase(db));
+impl<R: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<R, F, Op, H> {
+    pub fn attach_database(&self, resolver: R) {
+        let _ = self.sender.enqueue(Message::AttachDatabase(resolver));
     }
 }
 
-impl<DB, F, Op, H> compact::Resolver for Mailbox<DB, F, Op, H>
+impl<R, F, Op, H> compact::Resolver for Mailbox<R, F, Op, H>
 where
-    DB: Send + Sync + 'static,
+    R: Send + Sync + 'static,
     F: Family,
     Op: Send + Sync + Clone + 'static,
     H: Hasher,
@@ -175,16 +175,17 @@ where
     }
 }
 
-impl<DB, F, Op, H> AttachableResolver<DB> for Mailbox<DB, F, Op, H>
+impl<DB, F, Op, H> AttachableResolver<DB> for Mailbox<DB::Resolver, F, Op, H>
 where
-    DB: Send + Sync + 'static,
+    DB: compact::Provider + Send + Sync + 'static,
     F: Family,
     Op: Send + Sync + Clone + 'static,
     H: Hasher,
+    DB::Resolver: compact::Resolver<Family = F, Digest = H::Digest, Op = Op>,
 {
-    fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) -> impl Future<Output = ()> + Send {
-        Self::attach_database(self, db);
-        std::future::ready(())
+    async fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) {
+        let resolver = compact::Provider::resolver(&*db.read().await);
+        Self::attach_database(self, resolver);
     }
 }
 
@@ -195,7 +196,7 @@ mod tests {
     use commonware_runtime::{deterministic, Runner as _};
     use commonware_storage::{mmr, qmdb::sync::compact::Resolver as _};
     use commonware_utils::NZUsize;
-    use futures::future::poll_fn;
+    use futures::{future::poll_fn, Future};
     use std::task::Poll;
 
     #[test]

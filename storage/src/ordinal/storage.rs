@@ -8,11 +8,15 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, MetricsExt as _},
     Blob, Buf, BufMut, BufferPooler, Error as RError,
 };
-use commonware_utils::{bitmap::BitMap, sync::AsyncMutex};
+use commonware_utils::{
+    bitmap::BitMap,
+    sync::{AsyncMutex, Mutex},
+};
 use futures::future::try_join_all;
 use std::{
     collections::{btree_map::Entry, BTreeMap, BTreeSet},
     marker::PhantomData,
+    sync::Arc,
 };
 use tracing::{debug, warn};
 
@@ -79,6 +83,8 @@ pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     // RMap for interval tracking
     intervals: RMap,
 
+    read_state: Arc<Mutex<ReadState<E>>>,
+
     // Pending sections to be synced. The async mutex serializes
     // concurrent sync calls so a second sync cannot return before
     // the first has finished flushing.
@@ -92,6 +98,32 @@ pub struct Ordinal<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
     pruned: Counter,
 
     _phantom: PhantomData<V>,
+}
+
+struct ReadState<E: BufferPooler + Context> {
+    blobs: BTreeMap<u64, Write<E::Blob>>,
+    intervals: RMap,
+}
+
+/// A cheap read handle for an [Ordinal].
+pub struct Reader<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> {
+    config: Config,
+    state: Arc<Mutex<ReadState<E>>>,
+    gets: Counter,
+    has: Counter,
+    _phantom: PhantomData<V>,
+}
+
+impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Clone for Reader<E, V> {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            state: self.state.clone(),
+            gets: self.gets.clone(),
+            has: self.has.clone(),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
@@ -249,7 +281,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         );
 
         // Wrap blobs in write buffers
-        let blobs = blobs
+        let blobs: BTreeMap<u64, Write<E::Blob>> = blobs
             .into_iter()
             .map(|(index, (blob, len))| {
                 (
@@ -265,12 +297,20 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
         let has = context.counter("has", "Number of has calls");
         let syncs = context.counter("syncs", "Number of sync calls");
         let pruned = context.counter("pruned", "Number of pruned blobs");
+        let read_state = Arc::new(Mutex::new(ReadState {
+            blobs: blobs
+                .iter()
+                .map(|(&section, blob)| (section, blob.clone()))
+                .collect(),
+            intervals: intervals.clone(),
+        }));
 
         Ok(Self {
             context,
             config,
             blobs,
             intervals,
+            read_state,
             pending: AsyncMutex::new(BTreeSet::new()),
             puts,
             gets,
@@ -293,12 +333,9 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 .context
                 .open(&self.config.partition, &section.to_be_bytes())
                 .await?;
-            entry.insert(Write::from_pooler(
-                &self.context,
-                blob,
-                len,
-                self.config.write_buffer,
-            ));
+            let blob = Write::from_pooler(&self.context, blob, len, self.config.write_buffer);
+            entry.insert(blob.clone());
+            self.read_state.lock().blobs.insert(section, blob);
             debug!(section, "created blob");
         }
 
@@ -311,65 +348,55 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
 
         // Add to intervals
         self.intervals.insert(index);
+        self.read_state.lock().intervals.insert(index);
 
         Ok(())
     }
 
+    /// Return a cheap read handle.
+    pub fn reader(&self) -> Reader<E, V> {
+        Reader {
+            config: self.config.clone(),
+            state: self.read_state.clone(),
+            gets: self.gets.clone(),
+            has: self.has.clone(),
+            _phantom: PhantomData,
+        }
+    }
+
     /// Get the value for a given index.
     pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
-        self.gets.inc();
-
-        // If get isn't in an interval, it doesn't exist and we don't need to access disk
-        if self.intervals.get(&index).is_none() {
-            return Ok(None);
-        }
-
-        // Read from disk
-        let items_per_blob = self.config.items_per_blob.get();
-        let section = index / items_per_blob;
-        let blob = self.blobs.get(&section).unwrap();
-        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
-        let mut read_buf = blob.read_at(offset, Record::<V>::SIZE).await?;
-        let record = Record::<V>::read(&mut read_buf)?;
-
-        // If record is valid, return it
-        if record.is_valid() {
-            Ok(Some(record.value))
-        } else {
-            Err(Error::InvalidRecord(index))
-        }
+        self.reader().get(index).await
     }
 
     /// Check if an index exists.
     pub fn has(&self, index: u64) -> bool {
-        self.has.inc();
-
-        self.intervals.get(&index).is_some()
+        self.reader().has(index)
     }
 
     /// Get the next gap information for backfill operations.
     pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
+        self.reader().next_gap(index)
     }
 
     /// Get an iterator over all ranges in the [Ordinal].
-    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
+    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.reader().ranges()
     }
 
     /// Get an iterator over ranges that overlap or follow `from`.
-    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> + '_ {
-        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.reader().ranges_from(from)
     }
 
     /// Retrieve the first index in the [Ordinal].
     pub fn first_index(&self) -> Option<u64> {
-        self.intervals.first_index()
+        self.reader().first_index()
     }
 
     /// Retrieve the last index in the [Ordinal].
     pub fn last_index(&self) -> Option<u64> {
-        self.intervals.last_index()
+        self.reader().last_index()
     }
 
     /// Returns up to `max` missing items starting from `start`.
@@ -377,7 +404,7 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
     /// This method iterates through gaps between existing ranges, collecting missing indices
     /// until either `max` items are found or there are no more gaps to fill.
     pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(start, max)
+        self.reader().missing_items(start, max)
     }
 
     /// Prune indices older than `min` by removing entire blobs.
@@ -407,6 +434,9 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
                 let start_index = section * items_per_blob;
                 let end_index = (section + 1) * items_per_blob - 1;
                 self.intervals.remove(start_index, end_index);
+                let mut state = self.read_state.lock();
+                state.blobs.remove(&section);
+                state.intervals.remove(start_index, end_index);
                 debug!(section, start_index, end_index, "pruned blob");
             }
 
@@ -463,6 +493,87 @@ impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Ordinal<E, V> {
             Err(err) => return Err(Error::Runtime(err)),
         }
         Ok(())
+    }
+}
+
+impl<E: BufferPooler + Context, V: CodecFixed<Cfg = ()>> Reader<E, V> {
+    /// Get the value for a given index.
+    pub async fn get(&self, index: u64) -> Result<Option<V>, Error> {
+        self.gets.inc();
+
+        let blob = {
+            let state = self.state.lock();
+            if state.intervals.get(&index).is_none() {
+                return Ok(None);
+            }
+
+            let items_per_blob = self.config.items_per_blob.get();
+            let section = index / items_per_blob;
+            state
+                .blobs
+                .get(&section)
+                .cloned()
+                .expect("interval references missing blob")
+        };
+
+        let items_per_blob = self.config.items_per_blob.get();
+        let offset = (index % items_per_blob) * Record::<V>::SIZE as u64;
+        let mut read_buf = blob.read_at(offset, Record::<V>::SIZE).await?;
+        let record = Record::<V>::read(&mut read_buf)?;
+
+        if record.is_valid() {
+            Ok(Some(record.value))
+        } else {
+            Err(Error::InvalidRecord(index))
+        }
+    }
+
+    /// Check if an index exists.
+    pub fn has(&self, index: u64) -> bool {
+        self.has.inc();
+        self.state.lock().intervals.get(&index).is_some()
+    }
+
+    /// Get the next gap information for backfill operations.
+    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.state.lock().intervals.next_gap(index)
+    }
+
+    /// Get an iterator over all ranges in the [Ordinal].
+    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.state
+            .lock()
+            .intervals
+            .iter()
+            .map(|(&s, &e)| (s, e))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// Get an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.state
+            .lock()
+            .intervals
+            .iter_from(from)
+            .map(|(&s, &e)| (s, e))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// Retrieve the first index in the [Ordinal].
+    pub fn first_index(&self) -> Option<u64> {
+        self.state.lock().intervals.first_index()
+    }
+
+    /// Retrieve the last index in the [Ordinal].
+    pub fn last_index(&self) -> Option<u64> {
+        self.state.lock().intervals.last_index()
+    }
+
+    /// Returns up to `max` missing items starting from `start`.
+    pub fn missing_items(&self, start: u64, max: usize) -> Vec<u64> {
+        self.state.lock().intervals.missing_items(start, max)
     }
 }
 

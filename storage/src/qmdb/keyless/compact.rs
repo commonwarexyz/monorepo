@@ -43,6 +43,7 @@ use commonware_codec::{Decode as _, Encode, EncodeShared, Read};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
+use core::marker::PhantomData;
 use std::sync::{Arc, Weak};
 
 /// Configuration for a compact keyless authenticated db.
@@ -80,6 +81,84 @@ where
 
 type CompactStateResult<F, V, D> =
     Result<compact_sync::State<F, Operation<F, V>, D>, compact_sync::ServeError<F, D>>;
+
+/// Resolver for compact keyless sync backed by the published witness tip.
+pub struct Resolver<F, V, D, C>
+where
+    F: Family,
+    V: ValueEncoding,
+    D: Digest,
+    Operation<F, V>: Read<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+{
+    witness: witness::Reader<F, D>,
+    commit_codec_config: C,
+    _phantom: PhantomData<V>,
+}
+
+impl<F, V, D, C> Clone for Resolver<F, V, D, C>
+where
+    F: Family,
+    V: ValueEncoding,
+    D: Digest,
+    Operation<F, V>: Read<Cfg = C>,
+    C: Clone + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        Self {
+            witness: self.witness.clone(),
+            commit_codec_config: self.commit_codec_config.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<F, V, D, C> compact_sync::Resolver for Resolver<F, V, D, C>
+where
+    F: Family,
+    V: ValueEncoding + Send + Sync + 'static,
+    D: Digest,
+    Operation<F, V>: Encode + Read<Cfg = C> + Send + Sync + Clone + 'static,
+    C: Clone + Send + Sync + 'static,
+{
+    type Family = F;
+    type Digest = D;
+    type Op = Operation<F, V>;
+    type Error = compact_sync::ServeError<F, D>;
+
+    async fn get_compact_state(
+        &self,
+        target: compact_sync::Target<Self::Family, Self::Digest>,
+    ) -> Result<compact_sync::FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
+        self.witness
+            .state(target, &self.commit_codec_config)
+            .map(Into::into)
+    }
+}
+
+impl<F, E, V, H, C, S> compact_sync::Provider for Db<F, E, V, H, C, S>
+where
+    F: Family,
+    E: Context + 'static,
+    V: ValueEncoding + Send + Sync + 'static,
+    H: Hasher + 'static,
+    Operation<F, V>: EncodeShared + Encode + Read<Cfg = C> + Send + Sync + Clone + 'static,
+    C: Clone + Send + Sync + 'static,
+    S: Strategy + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = Operation<F, V>;
+    type Resolver = Resolver<F, V, H::Digest, C>;
+
+    fn resolver(&self) -> Self::Resolver {
+        Resolver {
+            witness: self.witness.reader(),
+            commit_codec_config: self.commit_codec_config.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
 
 /// A speculative batch for a compact keyless db.
 #[allow(clippy::type_complexity)]

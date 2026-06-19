@@ -26,7 +26,7 @@
 //! 4. Decompress remaining bytes if compression enabled
 //! 5. Decode value
 
-use super::manager::{Config as ManagerConfig, Manager, WriteFactory};
+use super::manager::{Config as ManagerConfig, Manager, Reader as ManagerReader, WriteFactory};
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecShared, FixedSize};
 use commonware_cryptography::{crc32, Crc32};
@@ -63,6 +63,28 @@ pub struct Glob<E: BufferPooler + Storage + Metrics, V: Codec> {
 
     /// Codec configuration.
     codec_config: V::Cfg,
+}
+
+/// A cheap read handle for glob value storage.
+pub struct Reader<E: BufferPooler + Storage + Metrics, V: Codec> {
+    manager: ManagerReader<commonware_runtime::buffer::Write<E::Blob>>,
+    compression: Option<u8>,
+    codec_config: V::Cfg,
+}
+
+impl<E, V> Clone for Reader<E, V>
+where
+    E: BufferPooler + Storage + Metrics,
+    V: Codec,
+    V::Cfg: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            manager: self.manager.clone(),
+            compression: self.compression,
+            codec_config: self.codec_config.clone(),
+        }
+    }
 }
 
 impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
@@ -118,53 +140,51 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok((offset, entry_size))
     }
 
-    /// Read value at offset with known size (from index entry).
-    ///
-    /// The offset should be the byte offset returned by `append()`.
-    /// Reads directly from blob without any caching.
-    pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
-        let writer = self
-            .manager
-            .get(section)?
-            .ok_or(Error::SectionOutOfRange(section))?;
-
-        // Read via buffered writer (handles read-through for buffered data)
-        let buf = writer.read_at(offset, size as usize).await?.coalesce();
-
-        // Entry format: [compressed_data] [crc32 (4 bytes)]
+    fn decode(buf: impl AsRef<[u8]>, compression: Option<u8>, cfg: &V::Cfg) -> Result<V, Error> {
+        let buf = buf.as_ref();
         if buf.len() < crc32::Digest::SIZE {
             return Err(Error::Runtime(RError::BlobInsufficientLength));
         }
 
         let data_len = buf.len() - crc32::Digest::SIZE;
-        let compressed_data = &buf.as_ref()[..data_len];
-        let stored_checksum = u32::from_be_bytes(
-            buf.as_ref()[data_len..]
-                .try_into()
-                .expect("checksum is 4 bytes"),
-        );
+        let compressed_data = &buf[..data_len];
+        let stored_checksum =
+            u32::from_be_bytes(buf[data_len..].try_into().expect("checksum is 4 bytes"));
 
-        // Verify checksum
         let checksum = Crc32::checksum(compressed_data);
         if checksum != stored_checksum {
             return Err(Error::ChecksumMismatch(stored_checksum, checksum));
         }
 
-        // Decompress if needed and decode
-        let value = if self.compression.is_some() {
+        if compression.is_some() {
             let decompressed =
                 decode_all(Cursor::new(compressed_data)).map_err(|_| Error::DecompressionFailed)?;
-            V::decode_cfg(decompressed.as_ref(), &self.codec_config).map_err(Error::Codec)?
+            V::decode_cfg(decompressed.as_ref(), cfg).map_err(Error::Codec)
         } else {
-            V::decode_cfg(compressed_data, &self.codec_config).map_err(Error::Codec)?
-        };
+            V::decode_cfg(compressed_data, cfg).map_err(Error::Codec)
+        }
+    }
 
-        Ok(value)
+    /// Read value at offset with known size (from index entry).
+    ///
+    /// The offset should be the byte offset returned by `append()`.
+    /// Reads directly from blob without any caching.
+    pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
+        self.reader().get(section, offset, size).await
     }
 
     /// Sync section to disk (flushes write buffer).
     pub async fn sync(&self, section: u64) -> Result<(), Error> {
         self.manager.sync(section).await
+    }
+
+    /// Return a cheap read handle.
+    pub fn reader(&self) -> Reader<E, V> {
+        Reader {
+            manager: self.manager.reader(),
+            compression: self.compression,
+            codec_config: self.codec_config.clone(),
+        }
     }
 
     /// Sync all sections to disk.
@@ -224,6 +244,18 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
     /// Destroy all blobs.
     pub async fn destroy(self) -> Result<(), Error> {
         self.manager.destroy().await
+    }
+}
+
+impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Reader<E, V> {
+    /// Read value at offset with known size.
+    pub async fn get(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
+        let writer = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+        let buf = writer.read_at(offset, size as usize).await?.coalesce();
+        Glob::<E, V>::decode(buf, self.compression, &self.codec_config)
     }
 }
 

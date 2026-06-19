@@ -5,24 +5,23 @@ use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode as _, Encode};
 use commonware_cryptography::{Hasher, PublicKey};
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Provider, Receiver, Sender};
+use commonware_p2p::{Blocker, Provider as PeerProvider, Receiver, Sender};
 use commonware_resolver::{p2p, Resolver as _};
 use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_storage::{
     merkle::{Family, Location, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT},
     qmdb::{self, sync::compact},
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncRwLock,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
 use rand::Rng;
-use std::{collections::BTreeMap, num::NonZeroUsize, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 use tracing::info;
 
-type DbResolver<DB> = Arc<TracedAsyncRwLock<DB>>;
+type DbResolver<DB> = <DB as compact::Provider>::Resolver;
 type DbOp<DB> = <DbResolver<DB> as compact::Resolver>::Op;
+type MailboxRx<F, DB, D> =
+    actor_mailbox::Receiver<mailbox::Message<DbResolver<DB>, F, DbOp<DB>, D>>;
 type Pending<F, Op, D> =
     oneshot::Sender<Result<compact::FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<Pending<F, Op, D>>>;
@@ -31,8 +30,9 @@ type PendingSubs<F, Op, D> = BTreeMap<handler::Request<F, D>, Vec<Pending<F, Op,
 pub struct Config<P, D, B, DB>
 where
     P: PublicKey,
-    D: Provider<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
+    DB: compact::Provider,
 {
     /// Provider for the current peer set.
     pub peer_provider: D,
@@ -65,7 +65,7 @@ where
     pub priority_responses: bool,
 }
 
-enum State<DB> {
+enum State<DB: compact::Provider> {
     NoDb,
     HasDb(DbResolver<DB>),
 }
@@ -81,16 +81,17 @@ pub struct Actor<E, P, D, B, F, DB, H>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Provider<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
+    DB: compact::Provider<Family = F, Digest = H::Digest>,
     DbResolver<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, DbOp<DB>, H::Digest>>,
+    mailbox_rx: MailboxRx<F, DB, H::Digest>,
     state: State<DB>,
     pending: PendingSubs<F, DbOp<DB>, H::Digest>,
 }
@@ -99,15 +100,19 @@ impl<E, P, D, B, F, DB, H> Actor<E, P, D, B, F, DB, H>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Provider<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
     H: Hasher,
+    DB: compact::Provider<Family = F, Digest = H::Digest>,
     DbResolver<DB>: compact::Resolver<Family = F, Digest = H::Digest>,
     DbOp<DB>: Codec<Cfg = ()> + Clone + Send + Sync + 'static,
 {
     /// Create a new compact resolver actor and mailbox.
-    pub fn new(context: E, mut config: Config<P, D, B, DB>) -> (Self, Mailbox<DB, F, DbOp<DB>, H>) {
+    pub fn new(
+        context: E,
+        mut config: Config<P, D, B, DB>,
+    ) -> (Self, Mailbox<DbResolver<DB>, F, DbOp<DB>, H>) {
         let state = config.database.take().map_or(State::NoDb, State::HasDb);
         let (mailbox_tx, mailbox_rx) =
             actor_mailbox::new(context.child("mailbox"), config.mailbox_size);
@@ -197,7 +202,7 @@ where
                     self.handle_deliver(key, value, response).await;
                 }
                 handler::EngineMessage::Produce { key, response } => {
-                    self.handle_produce(key, response).await;
+                    self.spawn_produce(key, response);
                 }
             },
         }
@@ -205,7 +210,7 @@ where
 
     fn handle_mailbox_message(
         &mut self,
-        message: mailbox::Message<DB, F, DbOp<DB>, H::Digest>,
+        message: mailbox::Message<DbResolver<DB>, F, DbOp<DB>, H::Digest>,
     ) -> MailboxAction<F, H::Digest> {
         match message {
             mailbox::Message::AttachDatabase(db) => {
@@ -329,15 +334,26 @@ where
         )
     }
 
-    async fn handle_produce(
-        &mut self,
+    fn spawn_produce(
+        &self,
         key: handler::Request<F, H::Digest>,
         response: oneshot::Sender<bytes::Bytes>,
     ) {
         let State::HasDb(database) = &self.state else {
             return;
         };
-        let Ok(fetch) = compact::Resolver::get_compact_state(database, key.to_target()).await
+        let database = database.clone();
+        self.context.child("serve").spawn(move |_| async move {
+            Self::handle_produce(database, key, response).await;
+        });
+    }
+
+    async fn handle_produce(
+        database: DbResolver<DB>,
+        key: handler::Request<F, H::Digest>,
+        response: oneshot::Sender<bytes::Bytes>,
+    ) {
+        let Ok(fetch) = compact::Resolver::get_compact_state(&database, key.to_target()).await
         else {
             return;
         };
@@ -355,15 +371,17 @@ mod tests {
     use commonware_storage::{
         merkle::Proof,
         mmr,
-        qmdb::keyless::fixed::{self as keyless_fixed, Operation as KeylessOp},
+        qmdb::{
+            keyless::fixed::{self as keyless_fixed, Operation as KeylessOp},
+            sync::compact::Provider as CompactProvider,
+        },
     };
     use commonware_utils::{
         channel::{mpsc, oneshot},
         sequence::U64,
-        sync::TracedAsyncRwLock,
         NZUsize,
     };
-    use std::{sync::Arc, time::Duration};
+    use std::time::Duration;
 
     #[derive(Clone, Debug)]
     struct DummyProvider;
@@ -394,6 +412,7 @@ mod tests {
 
     type TestDb =
         keyless_fixed::CompactDb<mmr::Family, deterministic::Context, U64, Sha256, Sequential>;
+    type TestResolver = DbResolver<TestDb>;
     type TestActor = Actor<
         deterministic::Context,
         ed25519::PublicKey,
@@ -406,7 +425,7 @@ mod tests {
     type TestOp = KeylessOp<mmr::Family, U64>;
 
     fn test_config(
-        database: Option<Arc<TracedAsyncRwLock<TestDb>>>,
+        database: Option<TestResolver>,
     ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
         Config {
             peer_provider: DummyProvider,
@@ -463,12 +482,10 @@ mod tests {
         db.sync().await.unwrap();
 
         let target = db.target();
-        let fetch = compact::Resolver::get_compact_state(
-            &Arc::new(TracedAsyncRwLock::new("test", db)),
-            target.clone(),
-        )
-        .await
-        .expect("compact state should be available");
+        let fetch =
+            compact::Resolver::get_compact_state(&CompactProvider::resolver(&db), target.clone())
+                .await
+                .expect("compact state should be available");
         (target, fetch)
     }
 
@@ -578,12 +595,12 @@ mod tests {
         deterministic::Runner::default().start(|context| async move {
             let db = init_db(context.child("db")).await;
             let target = db.target();
-            let db = Arc::new(TracedAsyncRwLock::new("test", db));
-            let (mut actor, _mailbox) = TestActor::new(context, test_config(Some(db)));
+            let resolver = CompactProvider::resolver(&db);
+            let (actor, _mailbox) = TestActor::new(context, test_config(Some(resolver)));
             let request = handler::Request::from_target(target.clone());
             let (response_tx, response_rx) = oneshot::channel();
 
-            actor.handle_produce(request, response_tx).await;
+            actor.spawn_produce(request, response_tx);
 
             let encoded = response_rx.await.expect("response should be served");
             let cfg = (

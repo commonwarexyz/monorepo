@@ -29,7 +29,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable, Reader as _},
+        contiguous::{fixed, variable, Reader as _},
     },
     merkle::{
         full::{self, Merkle},
@@ -62,7 +62,10 @@ use crate::{
             FixedConfig, VariableConfig,
         },
         operation::{Committable, Key, Operation as _},
-        sync::{resolver::fetch_operations, Database, DatabaseConfig as Config},
+        sync::{
+            resolver::{fetch_operations, LogResolver, Provider},
+            Database, DatabaseConfig as Config,
+        },
     },
     translator::Translator,
     Context,
@@ -110,7 +113,7 @@ where
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
     T: Translator,
-    J: Mutable<Item = Operation<F, U>>,
+    J: authenticated::Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
@@ -307,7 +310,7 @@ macro_rules! impl_current_sync_database {
                     return Ok(None);
                 }
 
-                let reader = Contiguous::reader(journal).await;
+                let reader = journal.reader();
                 let bounds = reader.bounds();
                 if Location::new(bounds.start) > target.range.start()
                     || Location::new(bounds.end) != target.range.end()
@@ -391,6 +394,28 @@ impl_current_sync_database!(
 //
 // The resolver for `current` databases serves ops-level proofs (not grafted proofs) from
 // the inner `any` db. The sync engine verifies each batch against the ops root.
+
+impl<F, E, C, I, H, U, const N: usize, S> Provider for db::Db<F, E, C, I, H, U, N, S>
+where
+    F: Graftable,
+    E: Context + 'static,
+    C: authenticated::Inner<E> + 'static,
+    C::Item: qmdb::operation::Operation<F> + CodecShared + Send + Sync + 'static,
+    C::Reader: 'static,
+    I: crate::index::Unordered<Value = Location<F>> + 'static,
+    H: Hasher + 'static,
+    U: Update + Send + Sync + 'static,
+    S: Strategy + 'static,
+{
+    type Family = F;
+    type Digest = H::Digest;
+    type Op = C::Item;
+    type Resolver = LogResolver<F, E, C, H>;
+
+    fn resolver(&self) -> Self::Resolver {
+        LogResolver::new(self.any.log.read_handle())
+    }
+}
 
 macro_rules! impl_current_resolver {
     ($db:ident, $op:ident, $val_bound:ident, $key_bound:path $(; $($where_extra:tt)+)?) => {

@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 
 /// A collection that manages disjoint, inclusive ranges `[start, end]`.
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RMap {
     ranges: BTreeMap<u64, u64>,
 }

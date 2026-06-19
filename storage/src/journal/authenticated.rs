@@ -7,7 +7,7 @@
 
 use crate::{
     journal::{
-        contiguous::{fixed, variable, Contiguous, Many, Mutable, Reader},
+        contiguous::{fixed, variable, Contiguous, Many, Mutable, Reader as ContiguousReader},
         Error as JournalError,
     },
     merkle::{
@@ -27,7 +27,8 @@ use commonware_codec::{CodecFixedShared, CodecShared, Encode, EncodeShared};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_macros::boxed;
 use commonware_parallel::Strategy;
-use core::num::NonZeroU64;
+use commonware_utils::sync::ArcSwapOption;
+use core::num::{NonZeroU64, NonZeroUsize};
 use futures::{try_join, TryFutureExt as _};
 use thiserror::Error;
 use tracing::{debug, warn};
@@ -242,6 +243,198 @@ impl<F: Family, D: Digest, Item: Send + Sync, S: Strategy> Readable
     }
 }
 
+/// Published read state for an authenticated journal.
+struct ReadState<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    merkle: merkle::full::ReaderSnapshot<F, E, H::Digest>,
+    journal: C::Reader,
+    hasher: StandardHasher<H>,
+}
+
+/// A live read handle for an authenticated journal.
+pub struct Reader<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    published: Arc<ArcSwapOption<ReadState<F, E, C, H>>>,
+}
+
+impl<F, E, C, H> Clone for Reader<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            published: self.published.clone(),
+        }
+    }
+}
+
+/// A single consistent read snapshot from an authenticated journal.
+pub struct Snapshot<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    state: Arc<ReadState<F, E, C, H>>,
+}
+
+impl<F, E, C, H> Clone for Snapshot<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<F, E, C, H> Reader<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    /// Return a single consistent snapshot of the latest published read state.
+    pub fn snapshot(&self) -> Snapshot<F, E, C, H> {
+        Snapshot {
+            state: self
+                .published
+                .load_full()
+                .expect("published read state should be available"),
+        }
+    }
+}
+
+impl<F, E, C, H> Snapshot<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    /// Compute the root of the snapshot using `inactive_peaks`.
+    pub fn root(&self, inactive_peaks: usize) -> Result<H::Digest, Error<F>> {
+        Ok(self.state.merkle.root(&self.state.hasher, inactive_peaks)?)
+    }
+
+    /// Return the pinned Merkle nodes for a lower operation boundary of `loc`.
+    pub async fn pinned_nodes_at(&self, loc: Location<F>) -> Result<Vec<H::Digest>, Error<F>> {
+        self.state
+            .merkle
+            .pinned_nodes_at(loc)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Generate a historical proof with respect to the state of the Merkle structure when it had
+    /// `historical_leaves` leaves.
+    pub async fn historical_proof(
+        &self,
+        historical_leaves: Location<F>,
+        start_loc: Location<F>,
+        max_ops: NonZeroU64,
+        inactive_peaks: usize,
+    ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
+        let bounds = self.state.journal.bounds();
+
+        if *historical_leaves > bounds.end {
+            return Err(merkle::Error::RangeOutOfBounds(Location::new(bounds.end)).into());
+        }
+        if start_loc >= historical_leaves {
+            return Err(merkle::Error::RangeOutOfBounds(start_loc).into());
+        }
+
+        let end_loc = std::cmp::min(historical_leaves, start_loc.saturating_add(max_ops.get()));
+        let proof = self
+            .state
+            .merkle
+            .historical_range_proof(
+                &self.state.hasher,
+                historical_leaves,
+                start_loc..end_loc,
+                inactive_peaks,
+            )
+            .await?;
+
+        let positions: Vec<u64> = (*start_loc..*end_loc).collect();
+        let ops = self.state.journal.read_many(&positions).await?;
+
+        Ok((proof, ops))
+    }
+}
+
+impl<F, E, C, H> ContiguousReader for Snapshot<F, E, C, H>
+where
+    F: Family,
+    E: Context,
+    C: Inner<E>,
+    C::Item: EncodeShared,
+    H: Hasher,
+{
+    type Item = C::Item;
+
+    fn bounds(&self) -> core::ops::Range<u64> {
+        self.state.journal.bounds()
+    }
+
+    async fn read(&self, position: u64) -> Result<Self::Item, JournalError> {
+        self.state.journal.read(position).await
+    }
+
+    fn read_many(
+        &self,
+        positions: &[u64],
+    ) -> impl core::future::Future<Output = Result<Vec<Self::Item>, JournalError>> + Send
+    where
+        Self::Item: Send,
+    {
+        self.state.journal.read_many(positions)
+    }
+
+    fn try_read_sync(&self, position: u64) -> Option<Self::Item> {
+        self.state.journal.try_read_sync(position)
+    }
+
+    fn replay(
+        &self,
+        buffer: NonZeroUsize,
+        start_pos: u64,
+    ) -> impl core::future::Future<
+        Output = Result<
+            impl futures::Stream<Item = Result<(u64, Self::Item), JournalError>> + Send,
+            JournalError,
+        >,
+    > + Send {
+        self.state.journal.replay(buffer, start_pos)
+    }
+}
+
 /// An append-only data structure that maintains a sequential journal of items alongside a
 /// Merkle-family structure. The item at index i in the journal corresponds to the leaf at Location
 /// i in the Merkle structure. This structure enables efficient proofs that an item is included in
@@ -250,7 +443,8 @@ pub struct Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
@@ -258,24 +452,58 @@ where
     /// Invariant: leaf i corresponds to item i in the journal.
     pub(crate) merkle: Merkle<F, E, H::Digest, S>,
 
-    /// Journal of items.
+    /// Writer for journal items.
     /// Invariant: item i corresponds to leaf i in the Merkle structure.
-    pub(crate) journal: C,
+    pub(crate) writer: C::Writer,
+
+    /// Reader factory for journal items.
+    /// Invariant: item i corresponds to leaf i in the Merkle structure.
+    pub(crate) readers: C::Readers,
 
     pub(crate) hasher: StandardHasher<H>,
+
+    published: Arc<ArcSwapOption<ReadState<F, E, C, H>>>,
 }
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
+    fn read_state(&self) -> ReadState<F, E, C, H> {
+        ReadState {
+            merkle: self.merkle.reader(),
+            journal: C::reader(&self.readers),
+            hasher: self.hasher.clone(),
+        }
+    }
+
+    fn publish(&self) {
+        self.published.store(Some(Arc::new(self.read_state())));
+    }
+
+    fn unpublish_if_exclusive(&self) -> bool {
+        if Arc::strong_count(&self.published) > 1 {
+            return false;
+        }
+        self.published.store(None);
+        true
+    }
+
+    /// Return a live read handle for this authenticated journal.
+    pub fn read_handle(&self) -> Reader<F, E, C, H> {
+        Reader {
+            published: self.published.clone(),
+        }
+    }
+
     /// Returns the Location of the next item appended to the journal.
     pub async fn size(&self) -> Location<F> {
-        Location::new(self.journal.size().await)
+        Location::new(self.writer.size().await)
     }
 
     /// Compute the root of the Merkle structure using `inactive_peaks` and the bagging carried by
@@ -331,13 +559,27 @@ where
             ancestor_items: Vec::new(),
         })
     }
+
+    /// Borrow the underlying contiguous journal.
+    #[cfg(test)]
+    pub(crate) fn journal(&self) -> &C {
+        C::journal(&self.writer)
+    }
+
+    /// Recover the authenticated journal's storage components.
+    #[cfg(test)]
+    pub(crate) fn into_components(self) -> (Merkle<F, E, H::Digest, S>, C) {
+        let Self { merkle, writer, .. } = self;
+        (merkle, C::into_journal(writer))
+    }
 }
 
 impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
@@ -348,10 +590,11 @@ where
         // Though not necessary for recovery, we flush the merkle structure (without syncing it) to
         // limit memory bloat.
         try_join!(
-            self.journal.commit().map_err(Error::Journal),
+            self.writer.commit().map_err(Error::Journal),
             self.merkle.flush().map_err(Error::Merkle)
         )?;
 
+        self.publish();
         Ok(())
     }
 }
@@ -360,7 +603,8 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
@@ -372,16 +616,25 @@ where
         hasher: StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<Self, Error<F>> {
-        Self::align(&mut merkle, &journal, &hasher, apply_batch_size).await?;
+        let (writer, readers) = journal.split();
+        Self::align(&mut merkle, &readers, &hasher, apply_batch_size).await?;
 
         // Sync the Merkle structure to disk to avoid having to repeat any recovery that may have
         // been performed on next startup.
         merkle.sync().await?;
 
+        let published = Arc::new(ArcSwapOption::from_pointee(ReadState {
+            merkle: merkle.reader(),
+            journal: C::reader(&readers),
+            hasher: hasher.clone(),
+        }));
+
         Ok(Self {
             merkle,
-            journal,
+            writer,
+            readers,
             hasher,
+            published,
         })
     }
 
@@ -391,12 +644,12 @@ where
     /// bloat.
     async fn align(
         merkle: &mut Merkle<F, E, H::Digest, S>,
-        journal: &C,
+        readers: &C::Readers,
         hasher: &StandardHasher<H>,
         apply_batch_size: u64,
     ) -> Result<(), Error<F>> {
         // Rewind Merkle structure elements that are ahead of the journal.
-        let journal_size = journal.size().await;
+        let journal_size = readers.size().await;
         let mut merkle_leaves = merkle.leaves();
         if merkle_leaves > journal_size {
             let rewind_count = merkle_leaves - journal_size;
@@ -417,7 +670,7 @@ where
                 replay_count, "Merkle structure lags behind journal, replaying journal to catch up"
             );
 
-            let reader = journal.reader().await;
+            let reader = readers.reader().await;
             while merkle_leaves < journal_size {
                 let batch = {
                     let mut batch = merkle.new_batch();
@@ -437,7 +690,7 @@ where
         }
 
         // At this point the Merkle structure and journal should be consistent.
-        assert_eq!(journal.size().await, *merkle.leaves());
+        assert_eq!(readers.size().await, *merkle.leaves());
 
         Ok(())
     }
@@ -447,12 +700,13 @@ where
         let encoded_item = item.encode();
 
         // Append item to the journal, then update the Merkle structure state.
-        let loc = self.journal.append(item).await?;
+        let loc = self.writer.append(item).await?;
         let unmerkleized_batch = self.merkle.new_batch().add(&self.hasher, &encoded_item);
         let batch = self
             .merkle
             .with_mem(|mem| unmerkleized_batch.merkleize(mem, &self.hasher));
         self.merkle.apply_batch(&batch)?;
+        self.publish();
 
         Ok(Location::new(loc))
     }
@@ -493,7 +747,7 @@ where
         // batches are skipped by tracking cumulative leaf count.
         // Batches are collected into a single append_many call to acquire the
         // journal's write lock once instead of per-batch.
-        let committed_leaves = self.journal.size().await;
+        let committed_leaves = self.writer.size().await;
         let base_leaves = *Location::<F>::try_from(base_size)?;
         let mut batch_leaf_end = base_leaves;
         let mut batches: Vec<&[C::Item]> = Vec::with_capacity(batch.ancestor_items.len() + 1);
@@ -508,23 +762,35 @@ where
             batches.push(&batch.items);
         }
         if !batches.is_empty() {
-            self.journal.append_many(Many::Nested(&batches)).await?;
+            self.writer.append_many(Many::Nested(&batches)).await?;
         }
 
         self.merkle.apply_batch(&batch.inner)?;
-        assert_eq!(*self.merkle.leaves(), self.journal.size().await);
+        assert_eq!(*self.merkle.leaves(), self.writer.size().await);
+        self.publish();
         Ok(())
     }
 
     /// Rewind the journal and Merkle structure.
     pub async fn rewind(&mut self, size: u64) -> Result<(), Error<F>> {
-        self.journal.rewind(size).await?;
+        if !self.unpublish_if_exclusive() {
+            return Err(Error::Journal(JournalError::BlobInUse(0)));
+        }
+
+        if let Err(err) = C::rewind(&mut self.writer, size).await {
+            self.publish();
+            return Err(err.into());
+        }
 
         let leaves = *self.merkle.leaves();
         if leaves > size {
-            self.merkle.rewind((leaves - size) as usize).await?;
+            if let Err(err) = self.merkle.rewind((leaves - size) as usize).await {
+                self.publish();
+                return Err(err.into());
+            }
         }
 
+        self.publish();
         Ok(())
     }
 
@@ -552,7 +818,7 @@ where
         // replay the items between the structure's last element and the journal's first element.
         self.merkle.sync().await?;
 
-        let journal_pruned = self.journal.prune(*prune_loc).await?;
+        let journal_pruned = self.writer.prune(*prune_loc).await?;
         let bounds = self.reader().await.bounds();
         let boundary = Location::new(bounds.start);
         let merkle_boundary = self.merkle.bounds().start;
@@ -562,6 +828,7 @@ where
             self.merkle.prune(boundary).await?;
         }
 
+        self.publish();
         Ok((boundary, journal_pruned || boundary > merkle_boundary))
     }
 }
@@ -570,7 +837,8 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
@@ -616,7 +884,7 @@ where
         max_ops: NonZeroU64,
         inactive_peaks: usize,
     ) -> Result<(Proof<F, H::Digest>, Vec<C::Item>), Error<F>> {
-        let reader = self.journal.reader().await;
+        let reader = self.readers.reader().await;
         let bounds = reader.bounds();
 
         if *historical_leaves > bounds.end {
@@ -650,16 +918,18 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
     /// Destroy the authenticated journal, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error<F>> {
+        let Self { merkle, writer, .. } = self;
         try_join!(
-            self.journal.destroy().map_err(Error::Journal),
-            self.merkle.destroy().map_err(Error::Merkle),
+            C::destroy(writer).map_err(Error::Journal),
+            merkle.destroy().map_err(Error::Merkle),
         )?;
 
         Ok(())
@@ -668,10 +938,11 @@ where
     /// Durably persist the journal, ensuring no recovery is required on startup.
     pub async fn sync(&mut self) -> Result<(), Error<F>> {
         try_join!(
-            self.journal.sync().map_err(Error::Journal),
+            self.writer.sync().map_err(Error::Journal),
             self.merkle.sync().map_err(Error::Merkle)
         )?;
 
+        self.publish();
         Ok(())
     }
 }
@@ -709,15 +980,24 @@ macro_rules! impl_journal_new {
 
                 let hasher = StandardHasher::<H>::new(bagging);
                 let mut merkle = Merkle::init(context.child("merkle"), &hasher, merkle_cfg).await?;
-                Self::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE).await?;
+                let (mut writer, readers) = journal.split();
+                Self::align(&mut merkle, &readers, &hasher, APPLY_BATCH_SIZE).await?;
 
-                journal.sync().await?;
+                writer.sync().await?;
                 merkle.sync().await?;
+
+                let published = Arc::new(ArcSwapOption::from_pointee(ReadState {
+                    merkle: merkle.reader(),
+                    journal: <$journal_mod::Journal<E, O> as Inner<E>>::reader(&readers),
+                    hasher: hasher.clone(),
+                }));
 
                 Ok(Self {
                     merkle,
-                    journal,
+                    writer,
+                    readers,
                     hasher,
+                    published,
                 })
             }
         }
@@ -731,18 +1011,19 @@ impl<F, E, C, H, S> Contiguous for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
     type Item = C::Item;
 
-    async fn reader(&self) -> impl Reader<Item = C::Item> + '_ {
-        self.journal.reader().await
+    async fn reader(&self) -> impl ContiguousReader<Item = C::Item> + '_ {
+        self.readers.reader().await
     }
 
     async fn size(&self) -> u64 {
-        self.journal.size().await
+        self.writer.size().await
     }
 }
 
@@ -750,10 +1031,17 @@ impl<F, E, C, H, S> Mutable for Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Mutable<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     H: Hasher,
     S: Strategy,
 {
+    type Item = C::Item;
+
+    async fn size(&self) -> u64 {
+        self.writer.size().await
+    }
+
     async fn append(&mut self, item: &Self::Item) -> Result<u64, JournalError> {
         let res = self.append(item).await.map_err(Self::map_error)?;
 
@@ -762,7 +1050,7 @@ where
 
     async fn prune(&mut self, min_position: u64) -> Result<bool, JournalError> {
         let prune_to = {
-            let reader = self.journal.reader().await;
+            let reader = self.readers.reader().await;
             let bounds = reader.bounds();
             min_position.min(bounds.end)
         };
@@ -774,10 +1062,6 @@ where
         Ok(pruned)
     }
 
-    async fn rewind(&mut self, size: u64) -> Result<(), JournalError> {
-        self.rewind(size).await.map_err(Self::map_error)
-    }
-
     async fn commit(&mut self) -> Result<(), JournalError> {
         Self::commit(self).await.map_err(Self::map_error)
     }
@@ -785,16 +1069,49 @@ where
     async fn sync(&mut self) -> Result<(), JournalError> {
         Self::sync(self).await.map_err(Self::map_error)
     }
-
-    async fn destroy(self) -> Result<(), JournalError> {
-        Self::destroy(self).await.map_err(Self::map_error)
-    }
 }
 
 /// A [Mutable] journal that can serve as the inner journal of an authenticated [Journal].
-pub trait Inner<E: Context>: Mutable {
+pub trait Inner<E: Context>: Send + Sync {
+    /// The type of items stored in the journal.
+    type Item;
+
     /// The configuration needed to initialize this journal.
     type Config: Clone + Send;
+
+    /// The writer side of the split journal.
+    type Writer: Mutable<Item = Self::Item>;
+
+    /// The reader factory side of the split journal.
+    type Readers: Contiguous<Item = Self::Item> + Clone;
+
+    /// An owned read snapshot created by the reader factory.
+    type Reader: ContiguousReader<Item = Self::Item> + Clone + Send + Sync;
+
+    /// Split this initialized journal into write and read sides.
+    fn split(self) -> (Self::Writer, Self::Readers);
+
+    /// Acquire an owned reader snapshot from the factory.
+    fn reader(readers: &Self::Readers) -> Self::Reader;
+
+    /// Borrow the underlying journal from its writer.
+    #[cfg(test)]
+    fn journal(writer: &Self::Writer) -> &Self;
+
+    /// Recover the underlying journal from its writer.
+    #[cfg(test)]
+    fn into_journal(writer: Self::Writer) -> Self;
+
+    /// Rewind the underlying journal writer to the given size.
+    fn rewind(
+        writer: &mut Self::Writer,
+        size: u64,
+    ) -> impl core::future::Future<Output = Result<(), JournalError>> + Send;
+
+    /// Destroy the underlying journal writer.
+    fn destroy(
+        writer: Self::Writer,
+    ) -> impl core::future::Future<Output = Result<(), JournalError>> + Send;
 
     /// Initialize an authenticated [Journal] backed by this journal type.
     fn init<F: Family, H: Hasher, S: Strategy>(
@@ -814,13 +1131,14 @@ impl<F, E, C, H, S> Journal<F, E, C, H, S>
 where
     F: Family,
     E: Context,
-    C: Contiguous<Item: EncodeShared>,
+    C: Inner<E>,
+    C::Item: EncodeShared,
     S: Strategy,
     H: Hasher,
 {
     /// Test helper: Read the item at the given location.
     pub(crate) async fn read(&self, loc: Location<F>) -> Result<C::Item, Error<F>> {
-        self.journal
+        self.readers
             .reader()
             .await
             .read(*loc)
@@ -1056,13 +1374,14 @@ mod tests {
     /// Verify that align() correctly handles empty Merkle and journal components.
     async fn test_align_with_empty_mmr_and_journal_inner<F: Family + PartialEq>(context: Context) {
         let (mut merkle, journal, hasher) = create_components::<F>(context, "align-empty").await;
+        let (_, readers) = journal.split();
 
-        TestJournal::<F>::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE)
+        TestJournal::<F>::align(&mut merkle, &readers, &hasher, APPLY_BATCH_SIZE)
             .await
             .unwrap();
 
         assert_eq!(merkle.leaves(), Location::<F>::new(0));
-        assert_eq!(journal.size(), 0);
+        assert_eq!(readers.size().await, 0);
     }
 
     #[test_traced("INFO")]
@@ -1103,13 +1422,14 @@ mod tests {
         journal.sync().await.unwrap();
 
         // Merkle has 20 leaves, journal has 21 operations (20 ops + 1 commit)
-        TestJournal::<F>::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE)
+        let (_, readers) = journal.split();
+        TestJournal::<F>::align(&mut merkle, &readers, &hasher, APPLY_BATCH_SIZE)
             .await
             .unwrap();
 
         // Merkle should have been aligned to match journal
         assert_eq!(merkle.leaves(), Location::<F>::new(21));
-        assert_eq!(journal.size(), 21);
+        assert_eq!(readers.size().await, 21);
     }
 
     #[test_traced("WARN")]
@@ -1141,13 +1461,14 @@ mod tests {
         journal.sync().await.unwrap();
 
         // Journal has 21 operations, Merkle has 0 leaves
-        TestJournal::<F>::align(&mut merkle, &journal, &hasher, APPLY_BATCH_SIZE)
+        let (_, readers) = journal.split();
+        TestJournal::<F>::align(&mut merkle, &readers, &hasher, APPLY_BATCH_SIZE)
             .await
             .unwrap();
 
         // Merkle should have been replayed to match journal
         assert_eq!(merkle.leaves(), Location::<F>::new(21));
-        assert_eq!(journal.size(), 21);
+        assert_eq!(readers.size().await, 21);
     }
 
     #[test_traced("WARN")]

@@ -1,7 +1,7 @@
 use crate::{
     journal::{
         authenticated,
-        contiguous::{Contiguous as _, Mutable, Reader as _},
+        contiguous::{Contiguous as _, Reader as _},
     },
     merkle::{
         full::{self, Merkle},
@@ -25,8 +25,9 @@ where
     F: Family,
     E: Context,
     V: ValueEncoding + Codec,
-    C: Mutable<Item = Operation<F, V>> + sync::Journal<F, Context = E, Op = Operation<F, V>>,
-    C::Config: Clone + Send,
+    C: authenticated::Inner<E, Item = Operation<F, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, V>>,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     S: Strategy,
     Operation<F, V>: EncodeShared,
@@ -35,7 +36,7 @@ where
     type Op = Operation<F, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = super::Config<C::Config, S>;
+    type Config = super::Config<<C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 

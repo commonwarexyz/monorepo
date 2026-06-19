@@ -6,7 +6,6 @@
 //! by the [`sync_tests_for_harness!`] macro.
 
 use crate::{
-    journal::contiguous::Contiguous,
     merkle::{self, full::Config as MerkleConfig, Location},
     qmdb::{
         self,
@@ -39,8 +38,6 @@ use std::{
 pub(crate) type DbOf<H> = <H as SyncTestHarness>::Db;
 pub(crate) type OpOf<H> = <DbOf<H> as qmdb::sync::Database>::Op;
 pub(crate) type ConfigOf<H> = <DbOf<H> as qmdb::sync::Database>::Config;
-pub(crate) type JournalOf<H> = <DbOf<H> as qmdb::sync::Database>::Journal;
-
 const PAGE_SIZE: NonZeroU16 = NZU16!(77);
 const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(9);
 
@@ -288,7 +285,6 @@ pub(crate) fn test_target_update_during_sync<H: SyncTestHarness>()
 where
     OpOf<H>: Encode + Clone + Send + Sync,
     Arc<DbOf<H>>: Resolver<Family = H::Family, Op = OpOf<H>, Digest = sha256::Digest>,
-    JournalOf<H>: Contiguous,
 {
     let executor = deterministic::Runner::default();
     executor.start(|mut context| async move {
@@ -332,7 +328,7 @@ where
                     NextStep::Continue(new_client) => new_client,
                     NextStep::Complete(_) => panic!("client should not be complete"),
                 };
-                let log_size = Contiguous::size(client.journal()).await;
+                let log_size = qmdb::sync::Journal::size(client.journal()).await;
                 if log_size > *initial_lower_bound {
                     break client;
                 }

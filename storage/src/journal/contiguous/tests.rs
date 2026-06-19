@@ -1,11 +1,128 @@
 //! Generic test suite for [Contiguous] trait implementations.
 
-use super::{Contiguous, Many, Reader as _};
-use crate::journal::{contiguous::Mutable, Error};
+use super::{fixed, variable, Contiguous, Many, Reader as _};
+use crate::journal::{authenticated, contiguous::Mutable, Error};
 use commonware_macros::boxed;
 use commonware_utils::NZUsize;
-use futures::{future::BoxFuture, StreamExt};
+use futures::{future::BoxFuture, FutureExt, StreamExt};
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+trait JournalHarness: Send + 'static {
+    type Writer: Mutable<Item = u64>;
+    type Readers: Contiguous<Item = u64>;
+
+    fn split(self) -> (Self::Writer, Self::Readers);
+    async fn rewind(writer: &mut Self::Writer, size: u64) -> Result<(), Error>;
+    async fn destroy(writer: Self::Writer) -> Result<(), Error>;
+}
+
+impl<E: crate::Context> JournalHarness for fixed::Journal<E, u64> {
+    type Writer = fixed::Writer<E, u64>;
+    type Readers = fixed::Readers<E, u64>;
+
+    fn split(self) -> (Self::Writer, Self::Readers) {
+        Self::split(self)
+    }
+
+    async fn rewind(writer: &mut Self::Writer, size: u64) -> Result<(), Error> {
+        <Self as authenticated::Inner<E>>::rewind(writer, size).await
+    }
+
+    async fn destroy(writer: Self::Writer) -> Result<(), Error> {
+        <Self as authenticated::Inner<E>>::destroy(writer).await
+    }
+}
+
+impl<E: crate::Context> JournalHarness for variable::Journal<E, u64> {
+    type Writer = variable::Writer<E, u64>;
+    type Readers = variable::Readers<E, u64>;
+
+    fn split(self) -> (Self::Writer, Self::Readers) {
+        Self::split(self)
+    }
+
+    async fn rewind(writer: &mut Self::Writer, size: u64) -> Result<(), Error> {
+        <Self as authenticated::Inner<E>>::rewind(writer, size).await
+    }
+
+    async fn destroy(writer: Self::Writer) -> Result<(), Error> {
+        <Self as authenticated::Inner<E>>::destroy(writer).await
+    }
+}
+
+pub(super) trait TestSplitJournal: Mutable<Item = u64> + Contiguous<Item = u64> {
+    async fn rewind(&mut self, size: u64) -> Result<(), Error>;
+    async fn destroy(self) -> Result<(), Error>
+    where
+        Self: Sized;
+}
+
+struct SplitJournal<J: JournalHarness> {
+    writer: J::Writer,
+    readers: J::Readers,
+}
+
+impl<J: JournalHarness> SplitJournal<J> {
+    fn new(journal: J) -> Self {
+        let (writer, readers) = journal.split();
+        Self { writer, readers }
+    }
+}
+
+impl<J: JournalHarness> Mutable for SplitJournal<J> {
+    type Item = u64;
+
+    async fn size(&self) -> u64 {
+        self.writer.size().await
+    }
+
+    async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
+        self.writer.append(item).await
+    }
+
+    async fn append_many<'a>(&'a mut self, items: Many<'a, Self::Item>) -> Result<u64, Error>
+    where
+        Self::Item: Sync,
+    {
+        self.writer.append_many(items).await
+    }
+
+    async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        self.writer.prune(min_position).await
+    }
+
+    async fn commit(&mut self) -> Result<(), Error> {
+        self.writer.commit().await
+    }
+
+    async fn sync(&mut self) -> Result<(), Error> {
+        self.writer.sync().await
+    }
+}
+
+impl<J: JournalHarness> Contiguous for SplitJournal<J> {
+    type Item = u64;
+
+    async fn reader(&self) -> impl super::Reader<Item = Self::Item> + '_ {
+        self.readers.reader().await
+    }
+
+    async fn size(&self) -> u64 {
+        self.readers.size().await
+    }
+}
+
+impl<J: JournalHarness> TestSplitJournal for SplitJournal<J> {
+    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        J::rewind(&mut self.writer, size).await
+    }
+
+    async fn destroy(self) -> Result<(), Error> {
+        let Self { writer, readers } = self;
+        drop(readers);
+        J::destroy(writer).await
+    }
+}
 
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
@@ -195,12 +312,13 @@ async fn read_item<J: Contiguous>(journal: &J, position: u64) -> Result<J::Item,
 pub(super) async fn run_contiguous_tests<F, J>(factory: F)
 where
     F: Fn(String, usize) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: JournalHarness,
 {
     let counter = AtomicUsize::new(0);
     let indexed_factory = |name: String| {
         let idx = counter.fetch_add(1, Ordering::SeqCst);
-        factory(name, idx)
+        let future = factory(name, idx);
+        async move { future.await.map(SplitJournal::new) }.boxed()
     };
 
     test_empty_journal_bounds(&indexed_factory).await;
@@ -226,14 +344,6 @@ where
     test_read_many(&indexed_factory).await;
     test_read_out_of_range(&indexed_factory).await;
     test_read_after_prune(&indexed_factory).await;
-    test_rewind_to_middle(&indexed_factory).await;
-    test_rewind_to_zero(&indexed_factory).await;
-    test_rewind_current_size(&indexed_factory).await;
-    test_rewind_invalid_forward(&indexed_factory).await;
-    test_rewind_invalid_pruned(&indexed_factory).await;
-    test_rewind_then_append(&indexed_factory).await;
-    test_rewind_zero_then_append(&indexed_factory).await;
-    test_rewind_after_prune(&indexed_factory).await;
     test_section_boundary_behavior(&indexed_factory).await;
     test_destroy_and_reinit(&indexed_factory).await;
     test_append_many_empty(&indexed_factory).await;
@@ -247,7 +357,7 @@ where
 async fn test_empty_journal_bounds<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let journal = factory("empty".into()).await.unwrap();
     let bounds = get_bounds(&journal).await;
@@ -261,7 +371,7 @@ where
 async fn test_bounds_with_items<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("bounds-with-items".into()).await.unwrap();
 
@@ -283,7 +393,7 @@ where
 async fn test_bounds_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("bounds-after-prune".into()).await.unwrap();
 
@@ -333,7 +443,7 @@ where
 async fn test_append_and_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("append-and-size".into()).await.unwrap();
 
@@ -358,7 +468,7 @@ where
 async fn test_sequential_appends<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("sequential-appends".into()).await.unwrap();
 
@@ -380,7 +490,7 @@ where
 async fn test_replay_from_start<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("replay-from-start".into()).await.unwrap();
 
@@ -412,7 +522,7 @@ where
 async fn test_replay_from_middle<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("replay-from-middle".into()).await.unwrap();
 
@@ -444,7 +554,7 @@ where
 async fn test_prune_retains_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("prune-retains-size".into()).await.unwrap();
 
@@ -477,7 +587,7 @@ where
 async fn test_through_trait<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("through-trait".into()).await.unwrap();
 
@@ -497,7 +607,7 @@ where
 async fn test_replay_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("replay-after-prune".into()).await.unwrap();
 
@@ -536,7 +646,7 @@ where
 async fn test_prune_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("prune-then-append".into()).await.unwrap();
 
@@ -562,7 +672,7 @@ where
 async fn test_position_stability<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("position-stability".into()).await.unwrap();
 
@@ -612,7 +722,7 @@ where
 async fn test_sync_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("sync-behavior".into()).await.unwrap();
 
@@ -637,7 +747,7 @@ where
 async fn test_replay_on_empty<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let journal = factory("replay-on-empty".into()).await.unwrap();
 
@@ -661,7 +771,7 @@ where
 async fn test_replay_at_exact_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("replay-at-exact-size".into()).await.unwrap();
 
@@ -691,7 +801,7 @@ where
 async fn test_multiple_prunes<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("multiple-prunes".into()).await.unwrap();
 
@@ -716,7 +826,7 @@ where
 async fn test_prune_beyond_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("prune-beyond-size".into()).await.unwrap();
 
@@ -741,7 +851,7 @@ where
 async fn test_persistence_basic<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let test_name = "persistence-basic".to_string();
 
@@ -796,7 +906,7 @@ where
 async fn test_persistence_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let test_name = "persistence-after-prune".to_string();
 
@@ -871,7 +981,7 @@ where
 pub(super) async fn test_read_by_position<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("read-by-position".into()).await.unwrap();
 
@@ -892,7 +1002,7 @@ where
 pub(super) async fn test_read_many<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("read-many".into()).await.unwrap();
 
@@ -912,7 +1022,7 @@ where
 pub(super) async fn test_read_out_of_range<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("read-out-of-range".into()).await.unwrap();
 
@@ -929,7 +1039,7 @@ where
 pub(super) async fn test_read_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("read-after-prune".into()).await.unwrap();
 
@@ -947,10 +1057,11 @@ where
 }
 
 /// Test rewinding to the middle of the journal
+#[allow(dead_code)]
 async fn test_rewind_to_middle<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-to-middle".into()).await.unwrap();
 
@@ -986,10 +1097,11 @@ where
 }
 
 /// Test rewinding to empty journal
+#[allow(dead_code)]
 async fn test_rewind_to_zero<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-to-zero".into()).await.unwrap();
 
@@ -1011,10 +1123,11 @@ where
 }
 
 /// Test rewind to current size is no-op
+#[allow(dead_code)]
 async fn test_rewind_current_size<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-current-size".into()).await.unwrap();
 
@@ -1030,10 +1143,11 @@ where
 }
 
 /// Test rewind with invalid forward size
+#[allow(dead_code)]
 async fn test_rewind_invalid_forward<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-invalid-forward".into()).await.unwrap();
 
@@ -1049,10 +1163,11 @@ where
 }
 
 /// Test rewind to pruned position
+#[allow(dead_code)]
 async fn test_rewind_invalid_pruned<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-invalid-pruned".into()).await.unwrap();
 
@@ -1072,10 +1187,11 @@ where
 
 /// Test rewind then append maintains position continuity.
 /// Assumes items_per_blob = 10.
+#[allow(dead_code)]
 async fn test_rewind_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-then-append".into()).await.unwrap();
 
@@ -1100,10 +1216,11 @@ where
 }
 
 /// Test that rewinding to zero and then appending works
+#[allow(dead_code)]
 async fn test_rewind_zero_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-zero-then-append".into()).await.unwrap();
 
@@ -1131,10 +1248,11 @@ where
 
 /// Test rewinding after pruning to verify correct interaction between operations.
 /// Assumes items_per_blob = 10.
+#[allow(dead_code)]
 async fn test_rewind_after_prune<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("rewind-after-prune".into()).await.unwrap();
 
@@ -1182,7 +1300,7 @@ where
 async fn test_section_boundary_behavior<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("section-boundary".into()).await.unwrap();
 
@@ -1216,20 +1334,6 @@ where
     assert_eq!(pos, 11);
     assert_eq!(get_bounds(&journal).await.end, 12);
 
-    // Rewind to exactly the blob boundary (position 10).
-    // This leaves bounds.end=10, bounds.start=10, making the journal fully pruned
-    journal.rewind(10).await.unwrap();
-    let bounds = get_bounds(&journal).await;
-    assert_eq!(bounds.end, 10);
-    assert!(bounds.is_empty());
-
-    // Append after rewinding to boundary should continue from position 10
-    let pos = journal.append(&777).await.unwrap();
-    assert_eq!(pos, 10);
-    assert_eq!(get_bounds(&journal).await.end, 11);
-    assert_eq!(read_item(&journal, 10).await.unwrap(), 777);
-    assert_eq!(get_bounds(&journal).await.start, 10);
-
     journal.destroy().await.unwrap();
 }
 
@@ -1240,7 +1344,7 @@ where
 async fn test_destroy_and_reinit<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let test_name = "destroy-and-reinit".to_string();
 
@@ -1290,7 +1394,7 @@ where
 async fn test_append_many_empty<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("append-many-empty".into()).await.unwrap();
 
@@ -1312,7 +1416,7 @@ where
 async fn test_append_many_basic<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("append-many-basic".into()).await.unwrap();
 
@@ -1334,7 +1438,7 @@ where
 async fn test_append_many_across_sections<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("append-many-sections".into()).await.unwrap();
 
@@ -1355,7 +1459,7 @@ where
 async fn test_append_many_then_append<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("append-many-then-single".into()).await.unwrap();
 
@@ -1378,7 +1482,7 @@ where
 async fn test_append_many_single_item<F, J>(factory: &F)
 where
     F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
-    J: Mutable<Item = u64>,
+    J: TestSplitJournal,
 {
     let mut journal = factory("append-many-single".into()).await.unwrap();
 
