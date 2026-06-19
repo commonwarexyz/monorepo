@@ -53,10 +53,10 @@ impl Blob {
         }
     }
 
-    async fn sync_inner(&self, file: &fs::File) -> Result<(), Error> {
+    async fn sync_inner(file: &fs::File, partition: &str, name: &[u8]) -> Result<(), Error> {
         file.sync_all()
             .await
-            .map_err(|e| Error::BlobSyncFailed(self.partition.clone(), hex(&self.name), e))
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e))
     }
 }
 
@@ -118,7 +118,7 @@ impl crate::Blob for Blob {
 
         let mut file = self.file.lock().await;
         Self::write_at_inner(&mut file, offset, &mut bufs).await?;
-        self.sync_inner(&file).await
+        Self::sync_inner(&file, &self.partition, &self.name).await
     }
 
     async fn resize(&self, len: u64) -> Result<(), Error> {
@@ -134,7 +134,7 @@ impl crate::Blob for Blob {
 
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
-        self.sync_inner(&file).await
+        Self::sync_inner(&file, &self.partition, &self.name).await
     }
 
     async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
@@ -144,10 +144,7 @@ impl crate::Blob for Blob {
         let name = self.name.clone();
         tokio::spawn(async move {
             let file = file.lock().await;
-            let result = file
-                .sync_all()
-                .await
-                .map_err(|e| Error::BlobSyncFailed(partition, hex(&name), e));
+            let result = Self::sync_inner(&file, &partition, &name).await;
             let _ = tx.send(result);
         });
         rx
