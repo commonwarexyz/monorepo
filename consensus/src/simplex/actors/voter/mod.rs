@@ -5533,8 +5533,8 @@ mod tests {
             mailbox
                 .resolved(Certificate::Notarization(notarization));
 
-            // A finalize for the leader-owned view proves the voter recovered
-            // the local certification shortcut after replay.
+            // A finalize for the leader-owned view proves replay restored the
+            // local proposal state and the voter certified it through the automaton.
             loop {
                 match batcher_receiver.recv().await.unwrap() {
                     batcher::Message::Constructed(Vote::Finalize(finalize))
