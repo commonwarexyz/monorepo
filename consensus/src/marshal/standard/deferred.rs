@@ -456,7 +456,7 @@ where
                     debug!(
                         ?round,
                         ?digest,
-                        "verification task closed before certification, falling back to embedded context"
+                        "certification gate task closed before certification, falling back to embedded context"
                     );
                     let fallback = marshaled.certify_from_embedded_context(round, digest).await;
                     let result = select! {
@@ -727,7 +727,7 @@ where
         let mut marshaled = self.clone();
         let round = context.round;
 
-        // Register the verification task synchronously so `certify` finds a pending
+        // Register the certification gate task synchronously so `certify` finds a pending
         // entry even while the optimistic block subscription is still waiting locally.
         // This lets `certify` take the task and bump a round-bound notarized fetch
         // via `hint_notarized`.
@@ -846,7 +846,7 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
-        // Attempt to retrieve the existing verification task for this (round, payload).
+        // Attempt to retrieve the existing certification gate task for this round/digest.
         let task = self.verification_tasks.take(round, digest);
         if let Some(task) = task {
             return self.certify_from_existing_task(round, digest, task).await;
@@ -888,9 +888,9 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`] and cleans up old verification tasks.
+    /// Relays a report to the underlying [`Application`] and cleans up old certification gate tasks.
     fn report(&mut self, update: Self::Activity) -> Feedback {
-        // Clean up verification tasks for rounds <= the finalized round.
+        // Clean up certification gate tasks for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);
         }
@@ -1139,7 +1139,7 @@ mod tests {
             let verify_result = marshaled
                 .verify(unsupported_context, block_commitment)
                 .await;
-            // Wait for optimistic verify to complete so the verification task is registered
+            // Wait for optimistic verify to complete so the certification gate task is registered
             let optimistic_result = verify_result.await;
 
             // The optimistic verify should return false because the block is in an unsupported epoch
@@ -1244,7 +1244,7 @@ mod tests {
     }
 
     /// Dropping the optimistic verify receiver before the block is available can close the
-    /// synchronously-registered verification task. `certify` must recover through the
+    /// synchronously-registered certification gate task. `certify` must recover through the
     /// embedded-context path instead of returning the closed task to consensus.
     #[test_traced("WARN")]
     fn test_deferred_certify_recovers_after_verify_receiver_drop() {

@@ -648,7 +648,7 @@ where
                     debug!(
                         ?round,
                         ?payload,
-                        "verification task closed before certification, falling back to embedded context"
+                        "certification gate task closed before certification, falling back to embedded context"
                     );
                     let fallback = marshaled.certify_from_embedded_context(round, payload).await;
                     let result = select! {
@@ -1017,7 +1017,7 @@ where
             let round = consensus_context.round;
             let verification_tasks = self.verification_tasks.clone();
 
-            // Register a verification task synchronously before spawning work so
+            // Register a certification gate task synchronously before spawning work so
             // `certify` can always find it (no race with task startup).
             let (task_tx, task_rx) = oneshot::channel();
             verification_tasks.insert(round, payload, task_rx);
@@ -1065,7 +1065,7 @@ where
                     }
 
                     // Valid re-proposal: notify the marshal and complete the
-                    // verification task for `certify`.
+                    // certification gate task for `certify`.
                     if !marshal.verified(round, block).await {
                         debug!(?round, "marshal unable to accept block");
                         return;
@@ -1157,7 +1157,7 @@ where
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.coding.certify", level = "info", skip_all, fields(round = %round, commitment = %payload))]
     async fn certify(&mut self, round: Round, payload: Self::Digest) -> oneshot::Receiver<bool> {
-        // First, check for an in-progress verification task from `verify()`.
+        // First, check for an in-progress certification gate task.
         let task = self.verification_tasks.take(round, payload);
         if let Some(task) = task {
             return self.certify_from_existing_task(round, payload, task).await;
@@ -1208,9 +1208,9 @@ where
 {
     type Activity = A::Activity;
 
-    /// Relays a report to the underlying [`Application`] and cleans up old verification data.
+    /// Relays a report to the underlying [`Application`] and cleans up old certification gate data.
     fn report(&mut self, update: Self::Activity) -> Feedback {
-        // Clean up verification tasks and contexts for rounds <= the finalized round.
+        // Clean up certification gate tasks and contexts for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
             self.verification_tasks.retain_after(round);
         }

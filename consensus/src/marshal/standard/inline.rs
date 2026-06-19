@@ -549,7 +549,8 @@ where
     }
 }
 
-/// Inline mode only waits for block availability during certification.
+/// Inline certification consumes a registered durability task when present, and
+/// falls back to a round-bound fetch/persist path after restart.
 impl<E, S, A, B, ES> CertifiableAutomaton for Inline<E, S, A, B, ES>
 where
     E: Rng + Spawner + Metrics + Clock,
@@ -596,10 +597,11 @@ where
                     }
                 }
 
-                // No local verification task (for example after an unclean restart): fetch the
-                // notarized block and persist it. A Byzantine leader can form a notarization
-                // after sending the proposal to only f+1 honest validators, so the validators
-                // left without the block must fetch it here to certify and avoid getting stuck.
+                // No local certification gate task (for example after an unclean restart):
+                // fetch the notarized block and persist it. A Byzantine leader can form a
+                // notarization after sending the proposal to only f+1 honest validators, so
+                // the validators left without the block must fetch it here to certify and
+                // avoid getting stuck.
                 let block_rx =
                     marshal.subscribe_by_digest(digest, DigestFallback::FetchByRound { round });
                 let Some(block) =
