@@ -70,9 +70,22 @@ impl<T> Publisher<T> {
         self.current.store(Some(Arc::new(current)));
     }
 
-    /// Clear the latest published state if there are no external reader factories.
+    /// Clear the latest published state if the writer owns the publisher exclusively.
+    #[cfg(test)]
     pub(super) fn clear_if_exclusive(&self) -> bool {
-        if Arc::strong_count(&self.current) > 2 {
+        if Arc::strong_count(&self.current) != 1 {
+            return false;
+        }
+        self.current.store(None);
+        true
+    }
+
+    /// Clear the latest published state if ownership is exactly this publisher and `other`.
+    pub(super) fn clear_if_shared_with(&self, other: &Self) -> bool {
+        if !Arc::ptr_eq(&self.current, &other.current) {
+            return false;
+        }
+        if Arc::strong_count(&self.current) != 2 {
             return false;
         }
         self.current.store(None);

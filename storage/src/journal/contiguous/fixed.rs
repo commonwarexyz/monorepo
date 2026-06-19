@@ -1167,12 +1167,30 @@ impl<E: Context, A: CodecFixedShared> Writer<E, A> {
         Ok(pruned)
     }
 
-    /// Rewind to `size` when no external reader factory can create new snapshots.
+    /// Rewind to `size` when no reader factory can create new snapshots.
+    #[cfg(test)]
     pub(crate) async fn rewind(&mut self, size: u64) -> Result<(), Error> {
         if !self.published.clear_if_exclusive() {
             return Err(Error::BlobInUse(0));
         }
 
+        self.rewind_unpublished(size).await
+    }
+
+    /// Rewind to `size` when this writer is paired only with `readers`.
+    pub(crate) async fn rewind_with_readers(
+        &mut self,
+        readers: &Readers<E, A>,
+        size: u64,
+    ) -> Result<(), Error> {
+        if !self.published.clear_if_shared_with(&readers.published) {
+            return Err(Error::BlobInUse(0));
+        }
+
+        self.rewind_unpublished(size).await
+    }
+
+    async fn rewind_unpublished(&mut self, size: u64) -> Result<(), Error> {
         let result = self.journal.rewind(size).await;
         self.publish();
         result
@@ -1604,8 +1622,12 @@ impl<E: Context, A: CodecFixedShared> crate::journal::authenticated::Inner<E> fo
         writer.into_journal()
     }
 
-    async fn rewind(writer: &mut Self::Writer, size: u64) -> Result<(), Error> {
-        writer.rewind(size).await
+    async fn rewind(
+        writer: &mut Self::Writer,
+        readers: &Self::Readers,
+        size: u64,
+    ) -> Result<(), Error> {
+        writer.rewind_with_readers(readers, size).await
     }
 
     async fn destroy(writer: Self::Writer) -> Result<(), Error> {

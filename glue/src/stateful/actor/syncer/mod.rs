@@ -183,6 +183,8 @@ where
 {
     /// The database handle set.
     pub databases: A::Databases,
+    /// Resolver handles used to serve sync requests from the database set.
+    pub serving_resolvers: <A::Databases as DatabaseSet<E>>::ServingResolvers,
     /// The anchor at which state sync completed.
     pub anchor: Anchor<BlockDigest<A, E>>,
 }
@@ -195,6 +197,7 @@ where
     fn clone(&self) -> Self {
         Self {
             databases: self.databases.clone(),
+            serving_resolvers: self.serving_resolvers.clone(),
             anchor: self.anchor,
         }
     }
@@ -408,22 +411,23 @@ where
         V::into_inner(marshal_block)
     };
 
-    let databases = A::Databases::init(context.child("db_set"), db_config).await;
     let processed_targets = A::sync_targets(&floor_block);
+    let (databases, serving_resolvers) = A::Databases::init_at_targets_with_resolvers(
+        context.child("db_set"),
+        db_config,
+        processed_targets.clone(),
+    )
+    .await;
 
     // In the case that the committed targets do not match the marshal floor, we may
     // have suffered a crash that left the set in an inconsistent state. In this case,
-    // we attempt to repair by rewinding the databases back to the marshal floor. If
-    // the rewind fails to produce a consistent state, we must crash. This can occur
-    // if the databases were corrupted or pruned too aggressively.
-    if databases.committed_targets().await != processed_targets {
-        databases.rewind_to_targets(processed_targets.clone()).await;
-        let rewound_targets = databases.committed_targets().await;
-        assert!(
-            rewound_targets == processed_targets,
-            "databases must be consistent with marshal floor after rewind"
-        );
-    }
+    // initialization repairs by rewinding raw databases before serving resolver handles are
+    // created. If the rewind fails to produce a consistent state, we must crash. This can occur if
+    // the databases were corrupted or pruned too aggressively.
+    assert!(
+        databases.committed_targets().await == processed_targets,
+        "databases must be consistent with marshal floor after rewind"
+    );
 
     // Once startup has aligned databases with marshal, future boots should skip peer
     // state sync and recover from the later of this anchor and marshal's durable
@@ -436,7 +440,11 @@ where
         digest: floor_block.digest(),
     };
     StartupResult {
-        sync: SyncResult { databases, anchor },
+        sync: SyncResult {
+            databases,
+            serving_resolvers,
+            anchor,
+        },
         skip_finalized_until,
     }
 }

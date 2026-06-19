@@ -156,11 +156,12 @@ where
                 debug!("syncer received stop signal, shutting down");
             },
             result = &mut state_sync_task => match result {
-                Ok((databases, anchor)) => {
+                Ok((databases, serving_resolvers, anchor)) => {
                     Self::publish_artifact(
                         &mut self.artifact,
                         &mut self.sync_complete,
                         databases,
+                        serving_resolvers,
                         anchor,
                     );
                     state_sync_task = None.into();
@@ -187,11 +188,12 @@ where
                         // finished. Treat that close as "wait for the in-flight sync task to
                         // publish its artifact", not as a hard failure.
                         match (&mut state_sync_task).await {
-                            Ok((databases, anchor)) => {
+                            Ok((databases, serving_resolvers, anchor)) => {
                                 Self::publish_artifact(
                                     &mut self.artifact,
                                     &mut self.sync_complete,
                                     databases,
+                                    serving_resolvers,
                                     anchor,
                                 );
                                 state_sync_task = None.into();
@@ -213,9 +215,14 @@ where
         artifact: &mut Option<SyncResult<E, A>>,
         sync_complete: &mut Option<oneshot::Sender<SyncResult<E, A>>>,
         databases: A::Databases,
+        serving_resolvers: <A::Databases as DatabaseSet<E>>::ServingResolvers,
         anchor: Anchor<BlockDigest<A, E>>,
     ) {
-        let sync_result = SyncResult { databases, anchor };
+        let sync_result = SyncResult {
+            databases,
+            serving_resolvers,
+            anchor,
+        };
         *artifact = Some(sync_result.clone());
         if let Some(sync_complete) = sync_complete.take() {
             sync_complete.send_lossy(sync_result);

@@ -232,9 +232,9 @@ where
         message: mailbox::Message<DbResolver<DB>, F, Op<DB>, DatabaseRoot<DB>>,
     ) -> MailboxAction<F> {
         match message {
-            mailbox::Message::AttachDatabase(db) => {
+            mailbox::Message::AttachResolver(db) => {
                 let replacing_existing = matches!(self.state, State::HasDb(_));
-                info!(replacing_existing, "attached resolver database");
+                info!(replacing_existing, "attached serving resolver");
                 self.state = State::HasDb(db);
                 let _ = self.metrics.has_database.try_set(1i64);
                 MailboxAction::None
@@ -570,7 +570,7 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
             let op_count = db.read().await.bounds().await.end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(resolver(&db).await));
+            actor.handle_mailbox_message(mailbox::Message::AttachResolver(resolver(&db).await));
 
             let (response_tx, response_rx) = oneshot::channel();
             actor.spawn_produce(test_request_at(op_count), response_tx);
@@ -588,7 +588,7 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             let op_count = db.read().await.bounds().await.end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(resolver(&db).await));
+            actor.handle_mailbox_message(mailbox::Message::AttachResolver(resolver(&db).await));
 
             let request = handler::Request {
                 op_count,

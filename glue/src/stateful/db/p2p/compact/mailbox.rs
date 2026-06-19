@@ -5,8 +5,8 @@ use crate::stateful::db::AttachableResolver;
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_storage::{merkle::Family, qmdb::sync::compact};
-use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock};
-use std::{collections::VecDeque, sync::Arc};
+use commonware_utils::channel::oneshot;
+use std::collections::VecDeque;
 
 struct CancelGuard<R, F: Family, Op, D: Digest> {
     sender: Sender<Message<R, F, Op, D>>,
@@ -41,7 +41,7 @@ impl<R, F: Family, Op, D: Digest> Drop for CancelGuard<R, F, Op, D> {
 pub struct ResponseDropped;
 
 pub(super) enum Message<R, F: Family, Op, D: Digest> {
-    AttachDatabase(R),
+    AttachResolver(R),
     GetState {
         request: handler::Request<F, D>,
         response: oneshot::Sender<Result<compact::FetchResult<F, Op, D>, ResponseDropped>>,
@@ -54,21 +54,21 @@ pub(super) enum Message<R, F: Family, Op, D: Digest> {
 impl<R, F: Family, Op, D: Digest> Message<R, F, Op, D> {
     fn response_closed(&self) -> bool {
         match self {
-            Self::AttachDatabase(_) | Self::CancelState { .. } => false,
+            Self::AttachResolver(_) | Self::CancelState { .. } => false,
             Self::GetState { response, .. } => response.is_closed(),
         }
     }
 }
 
 pub(super) struct Pending<R, F: Family, Op, D: Digest> {
-    database: Option<R>,
+    resolver: Option<R>,
     messages: VecDeque<Message<R, F, Op, D>>,
 }
 
 impl<R, F: Family, Op, D: Digest> Default for Pending<R, F, Op, D> {
     fn default() -> Self {
         Self {
-            database: None,
+            resolver: None,
             messages: VecDeque::new(),
         }
     }
@@ -76,17 +76,17 @@ impl<R, F: Family, Op, D: Digest> Default for Pending<R, F, Op, D> {
 
 impl<R, F: Family, Op, D: Digest> Overflow<Message<R, F, Op, D>> for Pending<R, F, Op, D> {
     fn is_empty(&self) -> bool {
-        self.database.is_none() && self.messages.is_empty()
+        self.resolver.is_none() && self.messages.is_empty()
     }
 
     fn drain<P>(&mut self, mut push: P)
     where
         P: FnMut(Message<R, F, Op, D>) -> Option<Message<R, F, Op, D>>,
     {
-        if let Some(database) = self.database.take() {
-            if let Some(Message::AttachDatabase(database)) = push(Message::AttachDatabase(database))
+        if let Some(resolver) = self.resolver.take() {
+            if let Some(Message::AttachResolver(resolver)) = push(Message::AttachResolver(resolver))
             {
-                self.database = Some(database);
+                self.resolver = Some(resolver);
                 return;
             }
         }
@@ -113,8 +113,8 @@ impl<R, F: Family, Op, D: Digest> Policy for Message<R, F, Op, D> {
         }
 
         match message {
-            Self::AttachDatabase(database) => {
-                overflow.database = Some(database);
+            Self::AttachResolver(resolver) => {
+                overflow.resolver = Some(resolver);
             }
             message => overflow.messages.push_back(message),
         }
@@ -141,8 +141,8 @@ impl<R, F: Family, Op, H: Hasher> Mailbox<R, F, Op, H> {
 }
 
 impl<R: Send + Sync, F: Family, Op: Send, H: Hasher> Mailbox<R, F, Op, H> {
-    pub fn attach_database(&self, resolver: R) {
-        let _ = self.sender.enqueue(Message::AttachDatabase(resolver));
+    pub fn attach_resolver(&self, resolver: R) {
+        let _ = self.sender.enqueue(Message::AttachResolver(resolver));
     }
 }
 
@@ -175,17 +175,15 @@ where
     }
 }
 
-impl<DB, F, Op, H> AttachableResolver<DB> for Mailbox<DB::Resolver, F, Op, H>
+impl<R, F, Op, H> AttachableResolver<R> for Mailbox<R, F, Op, H>
 where
-    DB: compact::Provider + Send + Sync + 'static,
     F: Family,
     Op: Send + Sync + Clone + 'static,
     H: Hasher,
-    DB::Resolver: compact::Resolver<Family = F, Digest = H::Digest, Op = Op>,
+    R: compact::Resolver<Family = F, Digest = H::Digest, Op = Op> + Send + Sync + 'static,
 {
-    async fn attach_database(&self, db: Arc<TracedAsyncRwLock<DB>>) {
-        let resolver = compact::Provider::resolver(&*db.read().await);
-        Self::attach_database(self, resolver);
+    async fn attach_resolver(&self, resolver: R) {
+        Self::attach_resolver(self, resolver);
     }
 }
 
@@ -253,7 +251,7 @@ mod tests {
                 Message::CancelState { request } => {
                     assert_eq!(request.to_target(), target);
                 }
-                Message::AttachDatabase(_) => panic!("unexpected attach message"),
+                Message::AttachResolver(_) => panic!("unexpected attach message"),
                 Message::GetState { .. } => panic!("unexpected duplicate request"),
             }
         });

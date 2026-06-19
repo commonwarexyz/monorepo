@@ -25,7 +25,7 @@ impl<E: crate::Context> JournalHarness for fixed::Journal<E, u64> {
     }
 
     async fn rewind(writer: &mut Self::Writer, size: u64) -> Result<(), Error> {
-        <Self as authenticated::Inner<E>>::rewind(writer, size).await
+        writer.rewind(size).await
     }
 
     async fn destroy(writer: Self::Writer) -> Result<(), Error> {
@@ -42,7 +42,7 @@ impl<E: crate::Context> JournalHarness for variable::Journal<E, u64> {
     }
 
     async fn rewind(writer: &mut Self::Writer, size: u64) -> Result<(), Error> {
-        <Self as authenticated::Inner<E>>::rewind(writer, size).await
+        writer.rewind(size).await
     }
 
     async fn destroy(writer: Self::Writer) -> Result<(), Error> {
@@ -351,6 +351,7 @@ where
     test_append_many_across_sections(&indexed_factory).await;
     test_append_many_then_append(&indexed_factory).await;
     test_append_many_single_item(&indexed_factory).await;
+    test_split_rewind_refused_while_readers_factory_alive(&indexed_factory).await;
 }
 
 /// Test that an empty journal has empty bounds (start == end == 0).
@@ -1092,6 +1093,28 @@ where
     let pos = journal.append(&999).await.unwrap();
     assert_eq!(pos, 12);
     assert_eq!(read_item(&journal, 12).await.unwrap(), 999);
+
+    journal.destroy().await.unwrap();
+}
+
+/// Test that split writers cannot rewind while the reader factory can still create snapshots.
+async fn test_split_rewind_refused_while_readers_factory_alive<F, J>(factory: &F)
+where
+    F: Fn(String) -> BoxFuture<'static, Result<J, Error>>,
+    J: TestSplitJournal,
+{
+    let mut journal = factory("split-rewind-readers-live".into()).await.unwrap();
+
+    for i in 0..15u64 {
+        journal.append(&i).await.unwrap();
+    }
+
+    assert!(matches!(journal.rewind(5).await, Err(Error::BlobInUse(_))));
+
+    let reader = journal.reader().await;
+    assert_eq!(reader.bounds(), 0..15);
+    assert_eq!(reader.read(14).await.unwrap(), 14);
+    drop(reader);
 
     journal.destroy().await.unwrap();
 }

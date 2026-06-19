@@ -1,5 +1,5 @@
 use crate::stateful::{
-    db::{DatabaseSet, ManagedDb, Merkleized, Unmerkleized},
+    db::{DatabaseSet, ManagedDb, Merkleized, ServingDb, Unmerkleized},
     Application, Proposed,
 };
 use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt as _, Write};
@@ -82,6 +82,12 @@ impl<E: Send> ManagedDb<E> for TestDb {
     async fn rewind_to_target(&mut self, _target: Self::SyncTarget) -> Result<(), Self::Error> {
         Ok(())
     }
+}
+
+impl ServingDb for TestDb {
+    type Resolver = ();
+
+    fn resolver(&self) -> Self::Resolver {}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

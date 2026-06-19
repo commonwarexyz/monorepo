@@ -213,9 +213,9 @@ where
         message: mailbox::Message<DbResolver<DB>, F, DbOp<DB>, H::Digest>,
     ) -> MailboxAction<F, H::Digest> {
         match message {
-            mailbox::Message::AttachDatabase(db) => {
+            mailbox::Message::AttachResolver(db) => {
                 let replacing_existing = matches!(self.state, State::HasDb(_));
-                info!(replacing_existing, "attached compact resolver database");
+                info!(replacing_existing, "attached compact serving resolver");
                 self.state = State::HasDb(db);
                 MailboxAction::None
             }

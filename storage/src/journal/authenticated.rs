@@ -777,7 +777,7 @@ where
             return Err(Error::Journal(JournalError::BlobInUse(0)));
         }
 
-        if let Err(err) = C::rewind(&mut self.writer, size).await {
+        if let Err(err) = C::rewind(&mut self.writer, &self.readers, size).await {
             self.publish();
             return Err(err.into());
         }
@@ -1105,6 +1105,7 @@ pub trait Inner<E: Context>: Send + Sync {
     /// Rewind the underlying journal writer to the given size.
     fn rewind(
         writer: &mut Self::Writer,
+        readers: &Self::Readers,
         size: u64,
     ) -> impl core::future::Future<Output = Result<(), JournalError>> + Send;
 

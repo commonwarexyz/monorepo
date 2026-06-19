@@ -80,6 +80,7 @@ use commonware_consensus::{
 use commonware_cryptography::Digest;
 use commonware_macros::select;
 use commonware_runtime::{reschedule, Metrics, Spawner};
+use commonware_storage::qmdb::sync::compact;
 use commonware_utils::{
     channel::{fallible::AsyncFallibleExt, mpsc, oneshot, ring},
     sync::TracedAsyncRwLock,
@@ -229,6 +230,26 @@ pub trait ManagedDb<E>: Send + Sync + Sized {
     ) -> impl Future<Output = Result<(), Self::Error>> + Send;
 }
 
+/// A database that can expose a cloneable serving resolver without a shared DB lock.
+pub trait ServingDb: Send + Sync + Sized {
+    /// Resolver handle used by P2P serving actors.
+    type Resolver: Clone + Send + Sync + 'static;
+
+    /// Return a live resolver handle backed by this database's published read state.
+    fn resolver(&self) -> Self::Resolver;
+}
+
+impl<T> ServingDb for T
+where
+    T: compact::Provider,
+{
+    type Resolver = T::Resolver;
+
+    fn resolver(&self) -> Self::Resolver {
+        compact::Provider::resolver(self)
+    }
+}
+
 /// A collection of individually locked [`ManagedDb`] instances.
 ///
 /// Each database is wrapped in [`Shared`], so the set is cheap to
@@ -256,8 +277,31 @@ pub trait DatabaseSet<E>: Clone + Send + Sync + 'static {
     /// targets, one per database.
     type SyncTargets: Clone + PartialEq + Send + Sync;
 
+    /// Resolver handles used by P2P serving actors.
+    type ServingResolvers: Clone + Send + 'static;
+
     /// Construct the database set from its configuration.
     fn init(context: E, config: Self::Config) -> impl Future<Output = Self> + Send;
+
+    /// Construct the database set and return serving resolver handles.
+    ///
+    /// Implementations create resolver handles before wrapping databases in [`Shared`], avoiding
+    /// a shared DB read lock during resolver attachment.
+    fn init_with_resolvers(
+        context: E,
+        config: Self::Config,
+    ) -> impl Future<Output = (Self, Self::ServingResolvers)> + Send;
+
+    /// Construct the database set at the provided targets and return serving resolver handles.
+    ///
+    /// Implementations rewind raw databases before creating resolver handles and wrapping them in
+    /// [`Shared`], so recovery-time rewind never runs while a serving resolver holds database
+    /// resources open.
+    fn init_at_targets_with_resolvers(
+        context: E,
+        config: Self::Config,
+        targets: Self::SyncTargets,
+    ) -> impl Future<Output = (Self, Self::ServingResolvers)> + Send;
 
     /// Create unmerkleized batches from each database's committed state.
     ///
@@ -412,8 +456,8 @@ where
     /// Error returned if any database in the set fails state sync.
     type Error: Debug + Send;
 
-    /// Run one-time state sync and return the initialized set
-    /// together with the anchor all databases converged on.
+    /// Run one-time state sync and return the initialized set, serving resolver handles,
+    /// and the anchor all databases converged on.
     #[allow(clippy::too_many_arguments)]
     fn sync(
         context: E,
@@ -423,21 +467,49 @@ where
         targets: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
-    ) -> impl Future<Output = Result<(Self, Anchor<D>), Self::Error>> + Send;
+    ) -> impl Future<Output = Result<(Self, Self::ServingResolvers, Anchor<D>), Self::Error>> + Send;
 }
 
 /// Implement [`DatabaseSet`] for a single [`ManagedDb`] behind a lock.
-impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
+impl<E: Send + Sync, T: ManagedDb<E> + ServingDb + 'static> DatabaseSet<E> for Shared<T> {
     type Unmerkleized = T::Unmerkleized;
     type Merkleized = T::Merkleized;
     type Config = T::Config;
     type SyncTargets = T::SyncTarget;
+    type ServingResolvers = T::Resolver;
 
     async fn init(context: E, config: Self::Config) -> Self {
         let db = T::init(context, config)
             .await
             .expect("database init failed");
         Self::new(TracedAsyncRwLock::new("stateful.db", db))
+    }
+
+    async fn init_with_resolvers(context: E, config: Self::Config) -> (Self, Self::ServingResolvers) {
+        let db = T::init(context, config)
+            .await
+            .expect("database init failed");
+        let resolver = db.resolver();
+        (Self::new(TracedAsyncRwLock::new("stateful.db", db)), resolver)
+    }
+
+    async fn init_at_targets_with_resolvers(
+        context: E,
+        config: Self::Config,
+        target: Self::SyncTargets,
+    ) -> (Self, Self::ServingResolvers) {
+        let mut db = T::init(context, config)
+            .await
+            .expect("database init failed");
+        if db.sync_target().await != target {
+            rewind_or_panic::<E, T>(&mut db, target.clone(), None).await;
+            assert!(
+                db.sync_target().await == target,
+                "database must be consistent with marshal floor after rewind"
+            );
+        }
+        let resolver = db.resolver();
+        (Self::new(TracedAsyncRwLock::new("stateful.db", db)), resolver)
     }
 
     async fn new_batches(&self) -> Self::Unmerkleized {
@@ -479,7 +551,7 @@ impl<E: Send + Sync, T: ManagedDb<E> + 'static> DatabaseSet<E> for Shared<T> {
 impl<E, T, R, D> StateSyncSet<E, R, D> for Shared<T>
 where
     E: Send + Sync + Metrics,
-    T: StateSyncDb<E, R> + 'static,
+    T: StateSyncDb<E, R> + ServingDb + 'static,
     R: Send + 'static,
     D: Digest,
 {
@@ -494,7 +566,7 @@ where
         target: Self::SyncTargets,
         tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
         sync_config: SyncEngineConfig,
-    ) -> Result<(Self, Anchor<D>), Self::Error> {
+    ) -> Result<(Self, Self::ServingResolvers, Anchor<D>), Self::Error> {
         let (target_tx, target_rx) = mpsc::channel(sync_config.update_channel_size.get());
         let (finish_tx, finish_rx) = mpsc::channel(1);
         let (reached_tx, mut reached_rx) = mpsc::channel(1);
@@ -574,12 +646,14 @@ where
 
         let (db_result, (converged_anchor, converged_target)) = join!(sync, coordinator);
         let database = db_result?;
+        let resolver = database.resolver();
         assert!(
             T::sync_target(&database).await == converged_target,
             "state sync database target does not match the coordinator target",
         );
         Ok((
             Self::new(TracedAsyncRwLock::new("stateful.db", database)),
+            resolver,
             converged_anchor,
         ))
     }
@@ -640,13 +714,14 @@ where
 /// [`ManagedDb`] instances.
 macro_rules! impl_database_set {
     ($($T:ident : $idx:tt),+) => {
-        impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + 'static),+> DatabaseSet<E>
+        impl<E: Send + Sync + Metrics, $($T: ManagedDb<E> + ServingDb + 'static),+> DatabaseSet<E>
             for ($(Shared<$T>,)+)
         {
             type Unmerkleized = ($($T::Unmerkleized,)+);
             type Merkleized = ($($T::Merkleized,)+);
             type Config = ($($T::Config,)+);
             type SyncTargets = ($($T::SyncTarget,)+);
+            type ServingResolvers = ($($T::Resolver,)+);
 
             async fn init(context: E, config: Self::Config) -> Self {
                 let result = join!($(
@@ -667,6 +742,76 @@ macro_rules! impl_database_set {
                     },
                 )+);
                 result
+            }
+
+            async fn init_with_resolvers(context: E, config: Self::Config) -> (Self, Self::ServingResolvers) {
+                let result = join!($(
+                    async {
+                        let db = $T::init(
+                                context.child(concat!("db_", stringify!($idx))),
+                                config.$idx,
+                            )
+                            .await
+                            .expect(concat!(
+                                "database init failed (index ",
+                                stringify!($idx),
+                                ", type ",
+                                stringify!($T),
+                                ")",
+                            ));
+                        let resolver = db.resolver();
+                        (
+                            Arc::new(TracedAsyncRwLock::new(concat!("stateful.db.", stringify!($idx)), db)),
+                            resolver,
+                        )
+                    },
+                )+);
+                (($(
+                    result.$idx.0,
+                )+), ($(
+                    result.$idx.1,
+                )+))
+            }
+
+            async fn init_at_targets_with_resolvers(
+                context: E,
+                config: Self::Config,
+                targets: Self::SyncTargets,
+            ) -> (Self, Self::ServingResolvers) {
+                let result = join!($(
+                    async {
+                        let mut db = $T::init(
+                                context.child(concat!("db_", stringify!($idx))),
+                                config.$idx,
+                            )
+                            .await
+                            .expect(concat!(
+                                "database init failed (index ",
+                                stringify!($idx),
+                                ", type ",
+                                stringify!($T),
+                                ")",
+                            ));
+                        let target = targets.$idx.clone();
+                        if db.sync_target().await != target {
+                            rewind_or_panic::<E, $T>(&mut db, target.clone(), Some($idx)).await;
+                            assert!(
+                                db.sync_target().await == target,
+                                "database must be consistent with marshal floor after rewind"
+                            );
+                        }
+                        let resolver = db.resolver();
+                        (
+                            Arc::new(TracedAsyncRwLock::new(concat!("stateful.db.", stringify!($idx)), db)),
+                            resolver,
+                        )
+                    },
+                )+);
+                (($(
+                    result.$idx.0,
+                )+), ($(
+                    result.$idx.1,
+                )+))
             }
 
             async fn new_batches(&self) -> Self::Unmerkleized {
@@ -775,7 +920,7 @@ macro_rules! impl_state_sync_set {
             E: Send + Sync + Spawner + Metrics + 'static,
             D: Digest + 'static,
             $(
-                $T: StateSyncDb<E, $R> + 'static,
+                $T: StateSyncDb<E, $R> + ServingDb + 'static,
                 $R: Send + 'static,
             )+
         {
@@ -790,7 +935,7 @@ macro_rules! impl_state_sync_set {
                 targets: Self::SyncTargets,
                 tip_updates: ring::Receiver<TipUpdate<D, Self::SyncTargets>>,
                 sync_config: SyncEngineConfig,
-            ) -> Result<(Self, Anchor<D>), Self::Error> {
+            ) -> Result<(Self, Self::ServingResolvers, Anchor<D>), Self::Error> {
                 let db_channels = ($(
                     DbSyncChannels::<<$T as ManagedDb<E>>::SyncTarget>::new(
                         sync_config.update_channel_size.get(),
@@ -1017,10 +1162,14 @@ macro_rules! impl_state_sync_set {
                                 let (sync_result, _) = join!(sync, forward_reached);
                                 let result = sync_result
                                     .map(|database| {
-                                        Arc::new(TracedAsyncRwLock::new(
-                                            concat!("stateful.db.", stringify!($idx)),
-                                            database,
-                                        ))
+                                        let resolver = database.resolver();
+                                        (
+                                            Arc::new(TracedAsyncRwLock::new(
+                                                concat!("stateful.db.", stringify!($idx)),
+                                                database,
+                                            )),
+                                            resolver,
+                                        )
                                     })
                                     .map_err(|err| {
                                         format!(
@@ -1060,17 +1209,19 @@ macro_rules! impl_state_sync_set {
                 }
 
                 let synced = ($(synced.$idx?,)+);
+                let databases = ($(synced.$idx.0,)+);
+                let serving_resolvers = ($(synced.$idx.1,)+);
                 let Some((converged_anchor, converged_targets)) = converged_anchor else {
                     return Err("state sync coordinator did not report a converged anchor".into());
                 };
-                if <Self as DatabaseSet<E>>::committed_targets(&synced).await != converged_targets {
+                if <Self as DatabaseSet<E>>::committed_targets(&databases).await != converged_targets {
                     return Err(
                         "state sync database targets do not match the coordinator target set"
                             .into(),
                     );
                 }
 
-                Ok((synced, converged_anchor))
+                Ok((databases, serving_resolvers, converged_anchor))
             }
         }
     };
@@ -1400,43 +1551,43 @@ async fn prune_or_panic<E, T: ManagedDb<E>>(
     }
 }
 
-/// A resolver that can attach a database at runtime.
+/// A resolver that can attach a serving handle at runtime.
 ///
-/// Implementations receive a database handle after startup so they can
-/// serve incoming sync requests once the database is initialized.
-pub trait AttachableResolver<DB>: Clone + Send + Sync + 'static {
-    /// Attach a database for serving incoming requests.
-    fn attach_database(&self, db: Shared<DB>) -> impl Future<Output = ()> + Send;
+/// Implementations receive a cloneable resolver handle after startup so they
+/// can serve incoming sync requests once the database is initialized.
+pub trait AttachableResolver<R>: Clone + Send + Sync + 'static {
+    /// Attach a resolver handle for serving incoming requests.
+    fn attach_resolver(&self, resolver: R) -> impl Future<Output = ()> + Send;
 }
 
-/// Attach a database set to a resolver set with matching shape.
-pub trait AttachableResolverSet<DBs>: Clone + Send + Sync + 'static {
-    /// Attach all databases to their corresponding resolvers.
-    fn attach_databases(&self, databases: DBs) -> impl Future<Output = ()> + Send;
+/// Attach a serving resolver set to a resolver set with matching shape.
+pub trait AttachableResolverSet<Rs>: Clone + Send + Sync + 'static {
+    /// Attach all serving resolver handles to their corresponding resolvers.
+    fn attach_resolvers(&self, resolvers: Rs) -> impl Future<Output = ()> + Send;
 }
 
-impl<R, DB> AttachableResolverSet<Shared<DB>> for R
+impl<R, H> AttachableResolverSet<H> for R
 where
-    R: AttachableResolver<DB>,
-    DB: Send + Sync + 'static,
+    R: AttachableResolver<H>,
+    H: Send + 'static,
 {
-    async fn attach_databases(&self, db: Shared<DB>) {
-        self.attach_database(db).await;
+    async fn attach_resolvers(&self, resolver: H) {
+        self.attach_resolver(resolver).await;
     }
 }
 
 macro_rules! impl_attachable_resolver_set {
-    ($($R:ident : $DB:ident : $idx:tt),+) => {
-        impl<$($R, $DB),+> AttachableResolverSet<($(Shared<$DB>,)+)> for ($($R,)+)
+    ($($R:ident : $H:ident : $idx:tt),+) => {
+        impl<$($R, $H),+> AttachableResolverSet<($($H,)+)> for ($($R,)+)
         where
             $(
-                $R: AttachableResolver<$DB>,
-                $DB: Send + Sync + 'static,
+                $R: AttachableResolver<$H>,
+                $H: Send + 'static,
             )+
         {
-            async fn attach_databases(&self, databases: ($(Shared<$DB>,)+)) {
+            async fn attach_resolvers(&self, resolvers: ($($H,)+)) {
                 futures::join!($(
-                    self.$idx.attach_database(databases.$idx),
+                    self.$idx.attach_resolver(resolvers.$idx),
                 )+);
             }
         }
@@ -1479,7 +1630,7 @@ impl_attachable_resolver_set!(
 mod tests {
     use super::{
         drain_single_tip_updates, Anchor, AttachableResolver, AttachableResolverSet,
-        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, Shared, StateSyncDb,
+        CoordinatorAction, CoordinatorState, DatabaseSet, ManagedDb, ServingDb, Shared, StateSyncDb,
         StateSyncSet, SyncEngineConfig, TipUpdate, MAX_CHANNEL_DRAIN_PER_TICK,
     };
     use crate::stateful::tests::mocks::{anchor as mock_anchor, TestMerkleized, TestUnmerkleized};
@@ -1673,6 +1824,37 @@ mod tests {
     struct DistinctObservedFastSyncDb {
         final_target: u64,
     }
+
+    macro_rules! impl_unit_serving_db {
+        ($($T:ty),+ $(,)?) => {
+            $(
+                impl ServingDb for $T {
+                    type Resolver = ();
+
+                    fn resolver(&self) -> Self::Resolver {}
+                }
+            )+
+        };
+    }
+
+    impl_unit_serving_db!(
+        TestDb,
+        CountingRewindDb,
+        PruneCountingDb,
+        BlockingFinalizeDb,
+        FailingFinalizeDb,
+        SlowSyncDb,
+        RejectDuplicateTargetSyncDb,
+        StaleReachedSyncDb,
+        FastSyncDb,
+        ImmediateStateSyncDb,
+        FailingStateSyncDb,
+        MismatchedTargetSyncDb,
+        FinishClosedSyncDb,
+        ObservedSlowSyncDb,
+        ObservedFastSyncDb,
+        DistinctObservedFastSyncDb,
+    );
 
     #[derive(Clone)]
     struct SlowSyncController {
@@ -2897,7 +3079,8 @@ mod tests {
             context.sleep(Duration::from_millis(1)).await;
             release.store(true, Ordering::SeqCst);
 
-            let (_database, converged_anchor) = sync.await.expect("sync task should complete");
+            let (_database, _serving_resolver, converged_anchor) =
+                sync.await.expect("sync task should complete");
             assert_eq!(converged_anchor, anchor(0));
         });
     }
@@ -2972,7 +3155,8 @@ mod tests {
             let _ = tip_tx.send(TipUpdate::new(anchor(1), 1)).await;
             drop(tip_tx);
 
-            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            let (database, _serving_resolver, converged_anchor) =
+                sync.await.expect("sync task should complete");
             let final_target = database.read().await.final_target;
             assert_eq!(
                 final_target, 2,
@@ -3027,7 +3211,8 @@ mod tests {
             release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 
-            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            let (database, _serving_resolver, converged_anchor) =
+                sync.await.expect("sync task should complete");
             assert_eq!(database.read().await.final_target, 7);
             assert_eq!(converged_anchor, anchor(9));
         });
@@ -3067,7 +3252,8 @@ mod tests {
 
             let _ = tip_tx.send(TipUpdate::new(anchor(2), 2)).await;
 
-            let (database, converged_anchor) = sync.await.expect("sync task should complete");
+            let (database, _serving_resolver, converged_anchor) =
+                sync.await.expect("sync task should complete");
             let final_target = database.read().await.final_target;
             assert_eq!(
                 final_target, 2,
@@ -3124,7 +3310,8 @@ mod tests {
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 
-            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            let (synced, _serving_resolvers, converged_anchor) =
+                sync.await.expect("sync task should complete");
             let slow_target = synced.0.read().await.final_target;
             let fast_target = synced.1.read().await.final_target;
 
@@ -3185,7 +3372,8 @@ mod tests {
             context.sleep(Duration::from_millis(1)).await;
             slow_release.store(true, Ordering::SeqCst);
 
-            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            let (synced, _serving_resolvers, converged_anchor) =
+                sync.await.expect("sync task should complete");
             let slow_target = synced.0.read().await.final_target;
             let fast_target = synced.1.read().await.final_target;
             assert_eq!(
@@ -3498,7 +3686,8 @@ mod tests {
             }
             drop(tip_tx);
 
-            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            let (synced, _serving_resolvers, converged_anchor) =
+                sync.await.expect("sync task should complete");
             let slow_target = synced.0.read().await.final_target;
             let fast_target = synced.1.read().await.final_target;
 
@@ -3565,7 +3754,8 @@ mod tests {
             drop(tip_tx);
             slow_release.store(true, Ordering::SeqCst);
 
-            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            let (synced, _serving_resolvers, converged_anchor) =
+                sync.await.expect("sync task should complete");
             let slow_target = synced.0.read().await.final_target;
             let fast_target = synced.1.read().await.final_target;
 
@@ -3630,7 +3820,8 @@ mod tests {
             slow_release.store(true, Ordering::SeqCst);
             drop(tip_tx);
 
-            let (synced, converged_anchor) = sync.await.expect("sync task should complete");
+            let (synced, _serving_resolvers, converged_anchor) =
+                sync.await.expect("sync task should complete");
             let slow_target = synced.0.read().await.final_target;
             let fast_target = synced.1.read().await.final_target;
 
@@ -3645,17 +3836,15 @@ mod tests {
         });
     }
 
-    #[derive(Default)]
-    struct AttachDb1;
-
-    #[derive(Default)]
-    struct AttachDb2;
-
     #[derive(Clone)]
     struct RecordingResolver {
         id: &'static str,
         log: Arc<commonware_utils::sync::Mutex<Vec<&'static str>>>,
     }
+
+    struct ResolverHandle1;
+
+    struct ResolverHandle2;
 
     impl RecordingResolver {
         fn new(
@@ -3666,8 +3855,8 @@ mod tests {
         }
     }
 
-    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for RecordingResolver {
-        async fn attach_database(&self, _db: Shared<DB>) {
+    impl<H: Send + 'static> AttachableResolver<H> for RecordingResolver {
+        async fn attach_resolver(&self, _resolver: H) {
             self.log.lock().push(self.id);
         }
     }
@@ -3677,9 +3866,8 @@ mod tests {
         deterministic::Runner::default().start(|_| async move {
             let log = Arc::new(commonware_utils::sync::Mutex::new(Vec::new()));
             let resolver = RecordingResolver::new("db1", log.clone());
-            let db = Arc::new(TracedAsyncRwLock::new("test", AttachDb1));
 
-            resolver.attach_databases(db).await;
+            resolver.attach_resolvers(ResolverHandle1).await;
             assert_eq!(&*log.lock(), &["db1"]);
         });
     }
@@ -3692,12 +3880,9 @@ mod tests {
                 RecordingResolver::new("resolver_0", log.clone()),
                 RecordingResolver::new("resolver_1", log.clone()),
             );
-            let databases = (
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb1)),
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb2)),
-            );
+            let resolvers_to_attach = (ResolverHandle1, ResolverHandle1);
 
-            resolvers.attach_databases(databases).await;
+            resolvers.attach_resolvers(resolvers_to_attach).await;
             assert_eq!(&*log.lock(), &["resolver_0", "resolver_1"]);
         });
     }
@@ -3710,12 +3895,9 @@ mod tests {
                 RecordingResolver::new("db1", log.clone()),
                 RecordingResolver::new("db2", log.clone()),
             );
-            let databases = (
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb1)),
-                Arc::new(TracedAsyncRwLock::new("test", AttachDb2)),
-            );
+            let resolvers_to_attach = (ResolverHandle1, ResolverHandle2);
 
-            resolvers.attach_databases(databases).await;
+            resolvers.attach_resolvers(resolvers_to_attach).await;
             assert_eq!(&*log.lock(), &["db1", "db2"]);
         });
     }
