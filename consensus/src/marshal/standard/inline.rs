@@ -513,11 +513,12 @@ where
                         None => return,
                     };
 
-                // Run application verification and the durable store concurrently. The
-                // notarize vote is cast as soon as app verification completes (it does
-                // not wait on the store); certify awaits the store via the registered
-                // durability task. The sync handle is requested as soon as the join starts,
-                // so it overlaps app verification and consensus voting.
+                // Run application verification and the candidate store concurrently. The
+                // block has passed structural ancestry checks, but may still fail application
+                // verification. Storing it now is intentional: these caches provide candidate
+                // availability/recovery, not an app-validity decision. The notarize vote
+                // follows the app verdict, while certify awaits the registered gate that
+                // resolves true only after both app verification succeeds and the store is durable.
                 let store_block = block.clone();
                 let store_marshal = marshal.clone();
                 let store = async move { store_marshal.verified(round, store_block).await };

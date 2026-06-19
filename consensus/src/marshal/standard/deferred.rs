@@ -270,11 +270,12 @@ where
                         None => return,
                     };
 
-                // Run application verification and the durable store concurrently.
-                // Durability is independent of validity, so the sync handle is requested as
-                // soon as the join starts and overlaps app verification instead of
-                // following it. This task gates the finalize vote: `certify` awaits its
-                // verdict, sent only after both complete.
+                // Run application verification and the candidate store concurrently.
+                // The block has passed structural ancestry checks, but may still fail
+                // application verification. Storing it now is intentional: these caches
+                // provide candidate availability/recovery, not an app-validity decision.
+                // This task gates the finalize vote by resolving true only after both
+                // app verification succeeds and the store is durable.
                 let store_block = block.clone();
                 let mut store_marshal = marshal.clone();
                 let store =
@@ -291,8 +292,9 @@ where
                 );
                 let (verdict, durable) = futures::join!(verify, store);
 
-                // Accept the block only when it is both valid and durable; otherwise
-                // vote `false` (rejected) or drop the task (early exit / store failure).
+                // Certify the block only when it is both valid and durable. App-invalid
+                // candidates may already be in the cache from the concurrent store above,
+                // so the returned verdict is the authority for consensus progress.
                 let Some(application_valid) = verdict else {
                     return;
                 };

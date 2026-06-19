@@ -292,7 +292,11 @@ where
         archive
     }
 
-    /// Add a verified block to the prunable archive.
+    /// Add a verify-stage candidate block to the prunable archive.
+    ///
+    /// The archive name is historical: callers may start this durability work
+    /// after structural validation and before the application verdict is known.
+    /// Consensus must not treat presence in this cache as application validity.
     pub(crate) async fn put_verified(
         &mut self,
         round: Round,
