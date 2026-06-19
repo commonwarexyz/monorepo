@@ -28,7 +28,7 @@ use crate::{
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
-use commonware_utils::sync::Mutex;
+use commonware_utils::{channel::oneshot, sync::Mutex};
 use std::{
     fs::{self, File},
     io::{Error as IoError, Read, Seek, SeekFrom, Write},
