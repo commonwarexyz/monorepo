@@ -2,7 +2,10 @@ use super::Header;
 use crate::{Buf, BufferPool, IoBufs, IoBufsMut};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
-use commonware_utils::sync::{Mutex, RwLock};
+use commonware_utils::{
+    channel::oneshot,
+    sync::{Mutex, RwLock},
+};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
@@ -147,6 +150,25 @@ impl Blob {
             pool,
         }
     }
+
+    fn sync_inner(&self) -> Result<(), crate::Error> {
+        // Create new content for partition
+        let new_content = self.content.read().clone();
+
+        // Update partition content
+        let mut partitions = self.partitions.lock();
+        let partition = partitions
+            .get_mut(&self.partition)
+            .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
+        let content = partition
+            .get_mut(&self.name)
+            .ok_or(crate::Error::BlobMissing(
+                self.partition.clone(),
+                hex(&self.name),
+            ))?;
+        *content = new_content;
+        Ok(())
+    }
 }
 
 impl crate::Blob for Blob {
@@ -224,22 +246,14 @@ impl crate::Blob for Blob {
     }
 
     async fn sync(&self) -> Result<(), crate::Error> {
-        // Create new content for partition
-        let new_content = self.content.read().clone();
+        self.sync_inner()
+    }
 
-        // Update partition content
-        let mut partitions = self.partitions.lock();
-        let partition = partitions
-            .get_mut(&self.partition)
-            .ok_or(crate::Error::PartitionMissing(self.partition.clone()))?;
-        let content = partition
-            .get_mut(&self.name)
-            .ok_or(crate::Error::BlobMissing(
-                self.partition.clone(),
-                hex(&self.name),
-            ))?;
-        *content = new_content;
-        Ok(())
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), crate::Error>> {
+        // The deterministic backend syncs synchronously, so resolve immediately.
+        let (tx, rx) = oneshot::channel();
+        let _ = tx.send(self.sync_inner());
+        rx
     }
 }
 

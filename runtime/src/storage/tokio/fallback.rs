@@ -1,10 +1,12 @@
 use super::Header;
 use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
 use commonware_formatting::hex;
+use commonware_utils::channel::oneshot;
 use std::{io::SeekFrom, sync::Arc};
 use tokio::{
     fs,
     io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt},
+    runtime::Handle,
     sync::Mutex,
 };
 
@@ -17,15 +19,23 @@ pub struct Blob {
     // we could remove this lock.
     file: Arc<Mutex<fs::File>>,
     pool: BufferPool,
+    handle: Handle,
 }
 
 impl Blob {
-    pub fn new(partition: String, name: &[u8], file: fs::File, pool: BufferPool) -> Self {
+    pub fn new(
+        partition: String,
+        name: &[u8],
+        file: fs::File,
+        pool: BufferPool,
+        handle: Handle,
+    ) -> Self {
         Self {
             partition,
             name: name.into(),
             file: Arc::new(Mutex::new(file)),
             pool,
+            handle,
         }
     }
 
@@ -134,5 +144,14 @@ impl crate::Blob for Blob {
     async fn sync(&self) -> Result<(), Error> {
         let file = self.file.lock().await;
         self.sync_inner(&file).await
+    }
+
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        let (tx, rx) = oneshot::channel();
+        let this = self.clone();
+        self.handle.spawn(async move {
+            let _ = tx.send(this.sync().await);
+        });
+        rx
     }
 }

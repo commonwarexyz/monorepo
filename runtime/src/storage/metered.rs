@@ -2,6 +2,7 @@ use crate::{
     telemetry::metrics::{raw, Counter, Gauge, Register},
     Buf, Error, IoBufs, IoBufsMut,
 };
+use commonware_utils::channel::oneshot;
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
@@ -223,6 +224,11 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.metrics.storage_syncs.inc();
         self.inner.sync().await
     }
+
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        self.metrics.storage_syncs.inc();
+        self.inner.start_sync().await
+    }
 }
 
 #[cfg(test)]
@@ -353,6 +359,28 @@ mod tests {
         assert_eq!(
             open_blobs_after_drop, 0,
             "open_blobs metric was not decremented after dropping the blob"
+        );
+    }
+
+    /// Test that `start_sync` increments the sync metric, matching `sync`.
+    #[tokio::test]
+    async fn test_metered_start_sync_increments_metric() {
+        let mut registry = Registry::default();
+        let inner = MemoryStorage::new(test_pool(&mut registry.sub_registry("pool")));
+        let storage = Storage::new(inner, &mut registry.sub_registry("storage"));
+
+        let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
+        blob.write_at(0, b"hello world").await.unwrap();
+
+        blob.start_sync()
+            .await
+            .await
+            .expect("sync sender dropped")
+            .unwrap();
+        assert_eq!(
+            storage.metrics.storage_syncs.get(),
+            1,
+            "storage_syncs metric was not incremented after start_sync"
         );
     }
 

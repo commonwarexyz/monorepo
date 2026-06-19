@@ -12,6 +12,7 @@ pub(super) mod partition_sync_fault {
         deterministic, telemetry::metrics, Blob, Clock, Error, IoBufs, IoBufsMut, Metrics, Name,
         Storage, Supervisor,
     };
+    use commonware_utils::channel::oneshot;
     use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
     use std::{
         future::Future,
@@ -167,6 +168,17 @@ pub(super) mod partition_sync_fault {
                 return Err(Error::Io(IoError::other("injected partition sync fault")));
             }
             self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            if self.partition == self.fail_partition {
+                let (tx, rx) = oneshot::channel();
+                let _ = tx.send(Err(Error::Io(IoError::other(
+                    "injected partition sync fault",
+                ))));
+                return rx;
+            }
+            self.inner.start_sync().await
         }
     }
 }

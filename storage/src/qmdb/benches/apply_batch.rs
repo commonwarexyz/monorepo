@@ -239,7 +239,7 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let ctx = context::get::<Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        total += bench_direct_apply(&ctx, updates).await;
+                        total += Box::pin(bench_direct_apply(&ctx, updates)).await;
                     }
                     total
                 });
@@ -256,7 +256,8 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let ctx = context::get::<Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        total += bench_apply_with_uncommitted_ancestor(&ctx, updates).await;
+                        total +=
+                            Box::pin(bench_apply_with_uncommitted_ancestor(&ctx, updates)).await;
                     }
                     total
                 });
@@ -273,7 +274,8 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let ctx = context::get::<Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        total += bench_apply_with_committed_ancestor(&ctx, updates).await;
+                        total +=
+                            Box::pin(bench_apply_with_committed_ancestor(&ctx, updates)).await;
                     }
                     total
                 });
@@ -290,7 +292,8 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let ctx = context::get::<Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        total += bench_apply_committed_uncommitted_chain(&ctx, updates).await;
+                        total +=
+                            Box::pin(bench_apply_committed_uncommitted_chain(&ctx, updates)).await;
                     }
                     total
                 });
@@ -307,7 +310,7 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let ctx = context::get::<Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        total += bench_apply_multi_uncommitted(&ctx, updates).await;
+                        total += Box::pin(bench_apply_multi_uncommitted(&ctx, updates)).await;
                     }
                     total
                 });
@@ -324,7 +327,7 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let ctx = context::get::<Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        total += bench_imm_direct_apply(&ctx, updates).await;
+                        total += Box::pin(bench_imm_direct_apply(&ctx, updates)).await;
                     }
                     total
                 });
@@ -341,7 +344,9 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let ctx = context::get::<Context>();
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
-                        total += bench_imm_apply_with_uncommitted_ancestor(&ctx, updates).await;
+                        total +=
+                            Box::pin(bench_imm_apply_with_uncommitted_ancestor(&ctx, updates))
+                                .await;
                     }
                     total
                 });

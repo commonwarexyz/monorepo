@@ -126,6 +126,12 @@ mod tests {
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
         }
+
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Ok(()));
+            rx
+        }
     }
 
     #[derive(Default)]
@@ -248,6 +254,17 @@ mod tests {
             state.durable = state.data.clone();
             state.full_syncs += 1;
             Ok(())
+        }
+
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            let (tx, rx) = oneshot::channel();
+            {
+                let mut state = self.state.lock();
+                state.durable = state.data.clone();
+                state.full_syncs += 1;
+            }
+            let _ = tx.send(Ok(()));
+            rx
         }
     }
 

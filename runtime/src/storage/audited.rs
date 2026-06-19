@@ -1,4 +1,5 @@
 use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut};
+use commonware_utils::channel::oneshot;
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -146,11 +147,20 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         });
         self.inner.sync().await
     }
+
+    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        self.auditor.event(b"start_sync", |hasher| {
+            hasher.update(self.partition.as_bytes());
+            hasher.update(&self.name);
+        });
+        self.inner.start_sync().await
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::{
+        deterministic::Auditor,
         storage::{
             audited::Storage as AuditedStorage, memory::Storage as MemStorage,
             tests::run_storage_tests,
@@ -158,7 +168,7 @@ mod tests {
         telemetry::metrics::Registry,
         Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
     };
-    use commonware_utils::sync::Mutex;
+    use commonware_utils::{channel::oneshot, sync::Mutex};
     use std::sync::Arc;
 
     fn test_pool() -> BufferPool {
@@ -176,9 +186,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_audited_storage_combined() {
-        use crate::deterministic::Auditor;
+    async fn test_audited_start_sync() {
+        // Two independent storages run the same sequence of operations.
+        let auditor1 = Arc::new(Auditor::default());
+        let storage1 = AuditedStorage::new(MemStorage::new(test_pool()), auditor1.clone());
+        let auditor2 = Arc::new(Auditor::default());
+        let storage2 = AuditedStorage::new(MemStorage::new(test_pool()), auditor2.clone());
 
+        let (blob1, _) = storage1.open("partition", b"test_blob").await.unwrap();
+        let (blob2, _) = storage2.open("partition", b"test_blob").await.unwrap();
+        blob1.write_at(0, b"hello world").await.unwrap();
+        blob2.write_at(0, b"hello world").await.unwrap();
+
+        // `start_sync` must record an auditor event, so the state advances.
+        let before = auditor1.state();
+        blob1
+            .start_sync()
+            .await
+            .await
+            .expect("sync sender dropped")
+            .unwrap();
+        assert_ne!(
+            auditor1.state(),
+            before,
+            "start_sync must record an auditor event"
+        );
+
+        // The recorded event must be deterministic across independent runs.
+        blob2
+            .start_sync()
+            .await
+            .await
+            .expect("sync sender dropped")
+            .unwrap();
+        assert_eq!(
+            auditor1.state(),
+            auditor2.state(),
+            "Hashes do not match after start_sync"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_audited_storage_combined() {
         // Initialize the first storage and auditor
         let inner1 = MemStorage::new(test_pool());
         let auditor1 = Arc::new(Auditor::default());
@@ -330,6 +379,12 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
+        }
+
+        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Ok(()));
+            rx
         }
     }
 
