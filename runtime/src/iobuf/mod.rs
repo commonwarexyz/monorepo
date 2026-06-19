@@ -165,7 +165,7 @@ impl IoBuf {
 
     /// Returns `true` if this buffer is tracked by a pool.
     #[inline]
-    pub const fn is_pooled(&self) -> bool {
+    pub fn is_pooled(&self) -> bool {
         self.owner.is_pooled()
     }
 
@@ -715,7 +715,7 @@ impl IoBufMut {
 
     /// Returns `true` if this buffer is tracked by a pool.
     #[inline]
-    pub const fn is_pooled(&self) -> bool {
+    pub fn is_pooled(&self) -> bool {
         self.owner.is_pooled()
     }
 
