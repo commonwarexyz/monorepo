@@ -24,7 +24,7 @@ use super::Header;
 use crate::{
     iouring::{self},
     telemetry::metrics::Register,
-    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut,
+    utils, Buf, BufferPool, Error, IoBufs, IoBufsMut, Handle,
 };
 use commonware_codec::Encode;
 use commonware_formatting::{from_hex, hex};
@@ -393,8 +393,8 @@ impl crate::Blob for Blob {
             })
     }
 
-    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
-        self.io_handle.start_sync(self.file.clone()).await
+    async fn start_sync(&self) -> Handle<()> {
+        Handle::from_receiver(self.io_handle.start_sync(self.file.clone()).await)
     }
 }
 

@@ -294,11 +294,7 @@ mod tests {
         drop(blob.start_sync().await);
 
         // The blob remains usable, and a subsequent sync persists the data.
-        blob.start_sync()
-            .await
-            .await
-            .expect("sync sender dropped")
-            .unwrap();
+        blob.start_sync().await.await.unwrap();
         drop(blob);
 
         let (blob, len) = storage.open("partition", b"test_blob").await.unwrap();

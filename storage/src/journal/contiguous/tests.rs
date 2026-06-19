@@ -10,9 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub(super) mod partition_sync_fault {
     use commonware_runtime::{
         deterministic, telemetry::metrics, Blob, Clock, Error, IoBufs, IoBufsMut, Metrics, Name,
-        Storage, Supervisor,
+        Storage, Supervisor, Handle,
     };
-    use commonware_utils::channel::oneshot;
     use governor::clock::{Clock as GovernorClock, ReasonablyRealtime};
     use std::{
         future::Future,
@@ -170,11 +169,9 @@ pub(super) mod partition_sync_fault {
             self.inner.sync().await
         }
 
-        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        async fn start_sync(&self) -> Handle<()> {
             if self.partition == self.fail_partition {
-                let (tx, rx) = oneshot::channel();
-                let _ = tx.send(self.sync().await);
-                return rx;
+                return Handle::ready(self.sync().await);
             }
             self.inner.start_sync().await
         }

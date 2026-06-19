@@ -496,7 +496,7 @@ mod tests {
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
         BufferPoolConfig, Clock as _, IoBufsMut, Runner as _, Spawner as _, Storage as _,
-        Supervisor as _,
+        Supervisor as _, Handle,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
@@ -577,10 +577,8 @@ mod tests {
             Ok(())
         }
 
-        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(self.sync().await);
-            rx
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 
@@ -662,10 +660,8 @@ mod tests {
             Ok(())
         }
 
-        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(self.sync().await);
-            rx
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 

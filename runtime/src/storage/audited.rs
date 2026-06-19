@@ -1,5 +1,4 @@
-use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut};
-use commonware_utils::channel::oneshot;
+use crate::{deterministic::Auditor, Error, IoBufs, IoBufsMut, Handle};
 use sha2::digest::Update;
 use std::sync::Arc;
 
@@ -148,7 +147,7 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
-    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> Handle<()> {
         self.auditor.event(b"start_sync", |hasher| {
             hasher.update(self.partition.as_bytes());
             hasher.update(&self.name);
@@ -167,8 +166,9 @@ mod tests {
         },
         telemetry::metrics::Registry,
         Blob as _, BufferPool, BufferPoolConfig, Error, IoBuf, IoBufs, IoBufsMut, Storage as _,
+        Handle,
     };
-    use commonware_utils::{channel::oneshot, sync::Mutex};
+    use commonware_utils::sync::Mutex;
     use std::sync::Arc;
 
     fn test_pool() -> BufferPool {
@@ -200,12 +200,7 @@ mod tests {
 
         // `start_sync` must record an auditor event, so the state advances.
         let before = auditor1.state();
-        blob1
-            .start_sync()
-            .await
-            .await
-            .expect("sync sender dropped")
-            .unwrap();
+        blob1.start_sync().await.await.unwrap();
         assert_ne!(
             auditor1.state(),
             before,
@@ -213,12 +208,7 @@ mod tests {
         );
 
         // The recorded event must be deterministic across independent runs.
-        blob2
-            .start_sync()
-            .await
-            .await
-            .expect("sync sender dropped")
-            .unwrap();
+        blob2.start_sync().await.await.unwrap();
         assert_eq!(
             auditor1.state(),
             auditor2.state(),
@@ -381,10 +371,8 @@ mod tests {
             Ok(())
         }
 
-        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(self.sync().await);
-            rx
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 

@@ -1,5 +1,5 @@
 use super::Header;
-use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, Error, IoBufs, IoBufsMut, Handle};
 use commonware_formatting::hex;
 use commonware_utils::channel::oneshot;
 use std::{io::SeekFrom, sync::Arc};
@@ -137,7 +137,7 @@ impl crate::Blob for Blob {
         Self::sync_inner(&file, &self.partition, &self.name).await
     }
 
-    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> Handle<()> {
         let (tx, rx) = oneshot::channel();
         let file = self.file.clone();
         let partition = self.partition.clone();
@@ -147,6 +147,6 @@ impl crate::Blob for Blob {
             let result = Self::sync_inner(&file, &partition, &name).await;
             let _ = tx.send(result);
         });
-        rx
+        Handle::from_receiver(rx)
     }
 }

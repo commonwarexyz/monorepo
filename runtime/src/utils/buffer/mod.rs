@@ -13,7 +13,7 @@ mod tests {
     use super::*;
     use crate::{
         deterministic, Blob as _, Buf, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Spawner, Storage, Supervisor as _,
+        Spawner, Storage, Supervisor as _, Handle,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
@@ -127,10 +127,8 @@ mod tests {
             Ok(())
         }
 
-        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(self.sync().await);
-            rx
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 
@@ -256,10 +254,8 @@ mod tests {
             Ok(())
         }
 
-        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(self.sync().await);
-            rx
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 

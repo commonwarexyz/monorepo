@@ -1389,11 +1389,11 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, IoBufsMut, Runner as _, Storage as _,
+        BufferPool, BufferPoolConfig, IoBufsMut, Runner as _, Storage as _, Handle,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{channel::oneshot, NZUsize, NZU16, NZU32};
+    use commonware_utils::{NZUsize, NZU16, NZU32};
     use std::{
         num::NonZeroU16,
         sync::{
@@ -2662,7 +2662,7 @@ mod tests {
             self.inner.sync().await
         }
 
-        async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+        async fn start_sync(&self) -> Handle<()> {
             self.inner.start_sync().await
         }
     }

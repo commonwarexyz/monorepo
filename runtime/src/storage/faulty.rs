@@ -1,11 +1,8 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{deterministic::BoxDynRng, Error, IoBufs, IoBufsMut};
+use crate::{deterministic::BoxDynRng, Error, IoBufs, IoBufsMut, Handle};
 use bytes::Buf;
-use commonware_utils::{
-    channel::oneshot,
-    sync::{Mutex, RwLock},
-};
+use commonware_utils::sync::{Mutex, RwLock};
 use rand::Rng;
 use std::{
     io::Error as IoError,
@@ -395,11 +392,9 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         self.inner.sync().await
     }
 
-    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> Handle<()> {
         if self.ctx.should_fail(Op::Sync) {
-            let (tx, rx) = oneshot::channel();
-            let _ = tx.send(Err(Error::Io(injected_io_error())));
-            return rx;
+            return Handle::ready(Err(Error::Io(injected_io_error())));
         }
         self.inner.start_sync().await
     }
@@ -470,7 +465,7 @@ mod tests {
         let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
         blob.write_at(0, b"data".to_vec()).await.unwrap();
 
-        let result = blob.start_sync().await.await.expect("sync sender dropped");
+        let result = blob.start_sync().await.await;
         assert!(matches!(result, Err(Error::Io(_))));
     }
 

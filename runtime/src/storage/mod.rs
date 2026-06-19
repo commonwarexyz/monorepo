@@ -897,11 +897,7 @@ pub(crate) mod tests {
         assert_eq!(len, 0);
 
         blob.write_at(0, b"hello world").await.unwrap();
-        blob.start_sync()
-            .await
-            .await
-            .expect("sync sender dropped")
-            .unwrap();
+        blob.start_sync().await.await.unwrap();
         drop(blob);
 
         // The bytes must survive a reopen, just as they would after `sync`.

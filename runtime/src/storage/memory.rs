@@ -1,11 +1,8 @@
 use super::Header;
-use crate::{Buf, BufferPool, IoBufs, IoBufsMut};
+use crate::{Buf, BufferPool, IoBufs, IoBufsMut, Handle};
 use commonware_codec::Encode;
 use commonware_formatting::hex;
-use commonware_utils::{
-    channel::oneshot,
-    sync::{Mutex, RwLock},
-};
+use commonware_utils::sync::{Mutex, RwLock};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, ops::RangeInclusive, sync::Arc};
 
@@ -249,10 +246,8 @@ impl crate::Blob for Blob {
         self.sync_inner()
     }
 
-    async fn start_sync(&self) -> oneshot::Receiver<Result<(), crate::Error>> {
-        let (tx, rx) = oneshot::channel();
-        let _ = tx.send(self.sync().await);
-        rx
+    async fn start_sync(&self) -> Handle<()> {
+        Handle::ready(self.sync().await)
     }
 }
 

@@ -1,8 +1,7 @@
 use crate::{
     telemetry::metrics::{raw, Counter, Gauge, Register},
-    Buf, Error, IoBufs, IoBufsMut,
+    Buf, Error, IoBufs, IoBufsMut, Handle,
 };
-use commonware_utils::channel::oneshot;
 use std::{
     ops::{Deref, RangeInclusive},
     sync::Arc,
@@ -231,9 +230,12 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         skip_all,
         fields(partition = %self.partition)
     )]
-    async fn start_sync(&self) -> oneshot::Receiver<Result<(), Error>> {
+    async fn start_sync(&self) -> Handle<()> {
         self.metrics.storage_syncs.inc();
-        self.inner.start_sync().await
+        self.inner.start_sync().await.with_span(tracing::info_span!(
+            "runtime.storage.blob.sync",
+            partition = %self.partition,
+        ))
     }
 }
 
@@ -378,11 +380,7 @@ mod tests {
         let (blob, _) = storage.open("partition", b"test_blob").await.unwrap();
         blob.write_at(0, b"hello world").await.unwrap();
 
-        blob.start_sync()
-            .await
-            .await
-            .expect("sync sender dropped")
-            .unwrap();
+        blob.start_sync().await.await.unwrap();
         assert_eq!(
             storage.metrics.storage_syncs.get(),
             1,
