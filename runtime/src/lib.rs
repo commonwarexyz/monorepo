@@ -759,10 +759,10 @@ stability_scope!(BETA {
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
 
-        /// Begin syncing all pending data durably.
+        /// Request that all pending data is durably persisted.
         ///
-        /// Awaiting this future waits until the backend has accepted or launched the sync work;
-        /// awaiting the returned [oneshot::Receiver] waits for durability.
+        /// Awaiting this future waits until the sync has started. Awaiting the returned
+        /// [oneshot::Receiver] waits for the same durability guarantee as [`Blob::sync`].
         fn start_sync(
             &self,
         ) -> impl Future<Output = oneshot::Receiver<Result<(), Error>>> + Send;
