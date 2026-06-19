@@ -16,16 +16,16 @@
 //! - [`IoBufsMut`]: Container for one or more mutable buffers
 //! - [`BufferPool`]: Pool of reusable, aligned buffers
 
-mod buffer;
 mod freelist;
+mod owner;
 mod pool;
 
-use buffer::{
-    allocate_aligned_mut, owner_from_bytes, owner_from_vec, try_adopt_vec, OwnerRef, PooledBuffer,
-};
 use bytes::{Buf, BufMut, Bytes, BytesMut, TryGetError};
 use commonware_codec::{util::at_least, BufsMut, EncodeSize, Error, RangeCfg, Read, Write};
 use crossbeam_utils::CachePadded;
+use owner::{
+    allocate_aligned_mut, owner_from_bytes, owner_from_vec, try_adopt_vec, OwnerRef, PooledBuffer,
+};
 pub use pool::{BufferPool, BufferPoolConfig, BufferPoolThreadCache, PoolError};
 use std::{
     collections::VecDeque,
@@ -67,8 +67,8 @@ pub const fn cache_line_size() -> usize {
 #[cfg(feature = "bench")]
 pub mod bench {
     pub use super::{
-        buffer::{PooledBuffer, PooledSlot},
         freelist::Freelist,
+        owner::{PooledBuffer, PooledSlot},
     };
 }
 
