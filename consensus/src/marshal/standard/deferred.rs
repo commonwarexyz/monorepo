@@ -1314,11 +1314,12 @@ mod tests {
         });
     }
 
-    /// The durable store runs concurrently with `app.verify`, not after it: while the
-    /// gated application verification is still blocked, the block is already persisted
-    /// (so it is queryable / recoverable). Releasing verification then lets certification
-    /// succeed. This is the parallel-store optimization that keeps the durable sync off the
-    /// certify critical path.
+    /// The store request runs concurrently with `app.verify`, not after it: while
+    /// gated application verification is still blocked, the block has already
+    /// reached marshal and is locally queryable even though the sync handle may
+    /// still be pending. Releasing verification then lets certification await
+    /// the registered durability task. Separate restart tests cover durable
+    /// recovery after certification.
     #[test_traced("WARN")]
     fn test_deferred_store_overlaps_app_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1395,15 +1396,15 @@ mod tests {
                 "optimistic verify should accept the available block"
             );
 
-            // Application verification is now blocked. The store runs concurrently with it,
-            // so the block is already durably persisted even though verification has not
-            // returned.
+            // Application verification is now blocked. The store request runs concurrently
+            // with it, so the block is locally queryable even though verification has not
+            // returned and the sync handle may still be pending.
             verify_started
                 .await
                 .expect("verify should reach the gated application");
             assert!(
                 marshal.get_block(&child_digest).await.is_some(),
-                "the durable store runs concurrently with app.verify, so the block is persisted while verification is still gated"
+                "the store request runs concurrently with app.verify, so the block is locally queryable while verification is still gated"
             );
 
             // Releasing verification lets certification succeed (valid and durable).

@@ -1158,11 +1158,12 @@ mod tests {
         });
     }
 
-    /// The durable store runs concurrently with `app.verify`, not after the notarize
-    /// vote: while the gated application verification is still blocked, the block is
-    /// already persisted (so it is queryable / recoverable). Releasing verification then
-    /// lets the notarize vote resolve and certification succeed. This is the parallel-store
-    /// optimization that keeps the durable sync off the verify and certify critical paths.
+    /// The store request runs concurrently with `app.verify`, not after the
+    /// notarize vote: while gated application verification is still blocked, the
+    /// block has already reached marshal and is locally queryable even though the
+    /// sync handle may still be pending. Releasing verification then lets the
+    /// notarize vote resolve and certification await the registered durability
+    /// task. Separate restart tests cover durable recovery after certification.
     #[test_traced("WARN")]
     fn test_inline_store_overlaps_app_verify() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
@@ -1228,15 +1229,15 @@ mod tests {
 
             let verify_rx = inline.verify(child_ctx, child_digest).await;
 
-            // Application verification is now blocked. The store runs concurrently with it,
-            // so the block is already persisted even though the notarize vote has not been
-            // cast (verify has not returned).
+            // Application verification is now blocked. The store request runs concurrently
+            // with it, so the block is locally queryable even though the notarize vote has
+            // not been cast and the sync handle may still be pending.
             verify_started
                 .await
                 .expect("verify should reach the gated application");
             assert!(
                 marshal.get_block(&child_digest).await.is_some(),
-                "the durable store runs concurrently with app.verify, so the block is persisted while verification is still gated"
+                "the store request runs concurrently with app.verify, so the block is locally queryable while verification is still gated"
             );
 
             // Releasing verification resolves the notarize vote and lets certification

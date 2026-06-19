@@ -4,15 +4,18 @@ use std::{collections::HashMap, hash::Hash, sync::Arc};
 
 type VerificationTaskMap<D> = HashMap<(Round, D), oneshot::Receiver<bool>>;
 
-/// A shared, thread-safe registry of in-flight block verification tasks.
+/// A shared, thread-safe registry of in-flight certification gate tasks.
 ///
 /// Each task is keyed by `(Round, D)` where `D` is a commitment or digest
-/// identifying the block under verification. The associated
-/// [`oneshot::Receiver<bool>`] resolves to `true` when the block passes
-/// deferred verification, or `false` otherwise.
+/// identifying the block. The associated [`oneshot::Receiver<bool>`] is
+/// consumed by certification and resolves to `true` only when that path may cast
+/// a finalize vote: local proposal durability has completed, or verification
+/// accepted the block and completed the required durable store. A resolved
+/// `false` records a live local rejection. A dropped sender means the task did
+/// not complete, so certification may fall back to its recovery fetch path.
 ///
-/// Tasks are inserted when a block enters the verification pipeline and
-/// taken (consumed) when the marshal is ready to act on the result. Stale
+/// Tasks are inserted when a block enters proposal or verification handling and
+/// taken (consumed) when certification is ready to act on the result. Stale
 /// entries are pruned after finalization via [`retain_after`](Self::retain_after).
 #[derive(Clone)]
 pub(crate) struct VerificationTasks<D>
@@ -42,12 +45,12 @@ where
         }
     }
 
-    /// Registers a verification task for the block identified by `(round, digest)`.
+    /// Registers a certification gate task for the block identified by `(round, digest)`.
     pub(crate) fn insert(&self, round: Round, digest: D, task: oneshot::Receiver<bool>) {
         self.inner.lock().insert((round, digest), task);
     }
 
-    /// Removes and returns the verification task for `(round, digest)`, if present.
+    /// Removes and returns the certification gate task for `(round, digest)`, if present.
     pub(crate) fn take(&self, round: Round, digest: D) -> Option<oneshot::Receiver<bool>> {
         self.inner.lock().remove(&(round, digest))
     }
