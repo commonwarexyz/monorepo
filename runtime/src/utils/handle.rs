@@ -35,6 +35,7 @@ where
     state: HandleState<T>,
 }
 
+/// Distinguishes handles that own spawned work from handles that only wait on completion.
 enum HandleState<T>
 where
     T: Send + 'static,
@@ -50,6 +51,7 @@ where
     },
 }
 
+/// Normalizes receiver-backed and future-backed completions behind one abortable future.
 enum Completion<T>
 where
     T: Send + 'static,
