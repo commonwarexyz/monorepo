@@ -9,7 +9,7 @@ use rand::Rng;
 use std::{
     collections::{BTreeSet, VecDeque},
     num::NonZeroUsize,
-    sync::Arc,
+    sync::{mpsc::TryRecvError, Arc},
     time::Duration,
 };
 
@@ -264,6 +264,11 @@ impl FifoState {
         match feedback {
             Unreliable::Outcome(Feedback::Ok) | Unreliable::Outcome(Feedback::Backoff) => {
                 assert!(feedback.accepted());
+                assert!(!feedback.is_rejected());
+                assert!(feedback
+                    .outcome()
+                    .expect("accepted feedback has an outcome")
+                    .accepted());
                 self.expected[message.sender as usize].push_back(message.sequence);
                 self.next_sequence[message.sender as usize] += 1;
                 if feedback == Unreliable::new(Feedback::Backoff) {
@@ -273,11 +278,16 @@ impl FifoState {
             Unreliable::Outcome(Feedback::Closed) => {
                 assert!(!self.receiver_alive);
                 assert!(!feedback.accepted());
+                assert!(!feedback.is_rejected());
+                assert_eq!(feedback.outcome(), Some(Feedback::Closed));
             }
             Unreliable::Rejected => {
                 // Policy rejected the message under overflow; the receiver never sees it,
                 // so we do not consume a sequence number or add to expected.
                 assert!(!feedback.accepted());
+                assert!(feedback.is_rejected());
+                assert_eq!(feedback, Unreliable::rejected());
+                assert_eq!(feedback.outcome(), None);
             }
         }
     }
@@ -387,6 +397,10 @@ where
     );
     let mut receiver = Some(receiver);
     let mut senders = vec![sender];
+    assert!(
+        format!("{:?}", senders[0]).contains(&format!("capacity: {capacity}")),
+        "sender debug must expose configured capacity"
+    );
     // Keep State alive so the backoff counter remains in the registry for assert_metric.
     let anchor = senders[0].clone();
     let mut state = FifoState::new();
@@ -504,6 +518,7 @@ where
         drop(senders);
         drop(anchor);
         drain_recv_fifo(&mut receiver, &mut state, usize::MAX).await;
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Disconnected));
         let metrics = context.encode();
         let backoff_metric = format!("{metric_prefix}_mailbox_backoff_total");
         let mailbox_prefix = format!("{metric_prefix}_mailbox_");
