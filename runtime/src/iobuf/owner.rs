@@ -245,7 +245,10 @@ impl OwnerRef {
     #[inline(always)]
     unsafe fn untag<T>(self) -> NonNull<T> {
         debug_assert!(!self.is_empty());
-        let ptr = self.0.with_addr(self.0.addr() & !OWNER_TAG_MASK).cast::<T>();
+        let ptr = self
+            .0
+            .with_addr(self.0.addr() & !OWNER_TAG_MASK)
+            .cast::<T>();
         // SAFETY: non-empty owner refs are built from non-null pointers, and
         // masking the tag bits cannot zero a heap/box/slot address.
         unsafe { NonNull::new_unchecked(ptr) }
@@ -254,7 +257,10 @@ impl OwnerRef {
     #[inline(always)]
     fn split(self) -> (usize, *mut ()) {
         let addr = self.0.addr();
-        (addr & OWNER_TAG_MASK, self.0.with_addr(addr & !OWNER_TAG_MASK))
+        (
+            addr & OWNER_TAG_MASK,
+            self.0.with_addr(addr & !OWNER_TAG_MASK),
+        )
     }
 
     /// Creates a heap owner ref from a [`HeapOwner`] pointer.
@@ -1241,8 +1247,7 @@ impl HeapOwner {
     unsafe fn release_front(base: NonNull<Self>, ptr: NonNull<u8>, cap: usize) {
         let alloc_size = Self::front_alloc_size(base, ptr, cap);
         // SAFETY: front heap allocations are created with this exact layout.
-        let layout =
-            unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<Self>()) };
+        let layout = unsafe { Layout::from_size_align_unchecked(alloc_size, align_of::<Self>()) };
         // SAFETY: base/layout came from the global allocator on the front branch.
         unsafe { dealloc(base.as_ptr().cast::<u8>(), layout) };
     }
@@ -1419,7 +1424,8 @@ mod tests {
         assert!(!owner.is_pooled());
         assert!(!owner.is_empty());
 
-        let expected_header = base_addr + HeapOwner::vec_adoption_header_offset(base_addr, len, cap).unwrap();
+        let expected_header =
+            base_addr + HeapOwner::vec_adoption_header_offset(base_addr, len, cap).unwrap();
         // SAFETY: owner is unique and live.
         assert_eq!(unsafe { owner.data_base() }.as_ptr() as usize, base_addr);
         // SAFETY: owner is unique and live.
@@ -1480,7 +1486,10 @@ mod tests {
         let cap = size_of::<HeapOwner>();
         let header_addr = HeapOwner::round_down(base_addr + cap - size_of::<HeapOwner>(), align);
         assert!(header_addr < base_addr);
-        assert_eq!(HeapOwner::vec_adoption_header_offset(base_addr, 0, cap), None);
+        assert_eq!(
+            HeapOwner::vec_adoption_header_offset(base_addr, 0, cap),
+            None
+        );
     }
 
     #[test]
