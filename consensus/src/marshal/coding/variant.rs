@@ -4,7 +4,7 @@ use crate::{
         coding::{
             shards,
             types::{
-                coding_config_for_participants, CodedBlock, CodedBlockCfg, CommitmentFor,
+                coding_config_for_participants, CodedBlock, CodedBlockCfg, CodingCommitment,
                 StoredCodedBlock,
             },
         },
@@ -28,14 +28,14 @@ use std::future::Future;
 #[derive(Default, Clone, Copy)]
 pub struct Coding<B, C, H, P>(std::marker::PhantomData<(B, C, H, P)>)
 where
-    B: CertifiableBlock<Context = Context<CommitmentFor<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey;
 
 impl<B, C, H, P> Variant for Coding<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<CommitmentFor<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -43,7 +43,7 @@ where
     type ApplicationBlock = B;
     type Block = CodedBlock<B, C, H>;
     type StoredBlock = StoredCodedBlock<B, C, H>;
-    type Commitment = CommitmentFor<B, C, H>;
+    type Commitment = CodingCommitment<B, C, H>;
 
     fn commitment(block: &Self::Block) -> Self::Commitment {
         // Commitment is deterministic from the coded block contents.
@@ -97,7 +97,7 @@ where
 
 impl<B, C, H, P> Buffer<Coding<B, C, H, P>> for shards::Mailbox<B, C, H, P>
 where
-    B: CertifiableBlock<Context = Context<CommitmentFor<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,
@@ -113,7 +113,7 @@ where
 
     async fn find_by_commitment(
         &self,
-        commitment: CommitmentFor<B, C, H>,
+        commitment: CodingCommitment<B, C, H>,
     ) -> Option<CodedBlock<B, C, H>> {
         self.get(commitment).await
     }
@@ -127,12 +127,12 @@ where
 
     fn subscribe_by_commitment(
         &self,
-        commitment: CommitmentFor<B, C, H>,
+        commitment: CodingCommitment<B, C, H>,
     ) -> Option<oneshot::Receiver<CodedBlock<B, C, H>>> {
         Some(self.subscribe(commitment))
     }
 
-    fn finalized(&self, commitment: CommitmentFor<B, C, H>) {
+    fn finalized(&self, commitment: CodingCommitment<B, C, H>) {
         self.prune(commitment);
     }
 
@@ -145,7 +145,7 @@ where
 impl<S, B, C, H, P> BlockProvider for Mailbox<S, Coding<B, C, H, P>>
 where
     S: Scheme,
-    B: CertifiableBlock<Context = Context<CommitmentFor<B, C, H>, P>>,
+    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, P>>,
     C: CodingScheme,
     H: Hasher,
     P: PublicKey,

@@ -144,7 +144,7 @@ use super::{
 };
 use crate::{
     marshal::coding::{
-        types::{CodedBlock, CommitmentFor, Shard, ShardFor},
+        types::{CodedBlock, CodingCommitment, Shard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -211,8 +211,7 @@ enum BlockSubscriptionKey<D: Digest, R: Digest, H: Digest> {
     Digest(D),
 }
 
-type EngineCommitment<B, C, H> = CommitmentFor<B, C, H>;
-type EngineShard<B, C, H> = ShardFor<B, C, H>;
+type EngineShard<B, C, H> = Shard<<B as Digestible>::Digest, C, H>;
 type EngineBlockSubscriptionKey<B, C, H> = BlockSubscriptionKey<
     <B as Digestible>::Digest,
     <C as CodingScheme>::Commitment,
@@ -326,7 +325,7 @@ where
     strategy: T,
 
     /// A map of [`Commitment`]s to [`ReconstructionState`]s.
-    state: BTreeMap<EngineCommitment<B, C, H>, ReconstructionState<P, B::Digest, C, H>>,
+    state: BTreeMap<CodingCommitment<B, C, H>, ReconstructionState<P, B::Digest, C, H>>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
     ///
@@ -353,7 +352,7 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
-    reconstructed_blocks: BTreeMap<EngineCommitment<B, C, H>, ReconstructedBlock<B, C, H>>,
+    reconstructed_blocks: BTreeMap<CodingCommitment<B, C, H>, ReconstructedBlock<B, C, H>>,
 
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
@@ -366,7 +365,7 @@ where
     /// Proposers are a special case: they satisfy readiness once their local
     /// proposal is cached because they already hold all shards.
     assigned_shard_verified_subscriptions:
-        BTreeMap<EngineCommitment<B, C, H>, Vec<oneshot::Sender<()>>>,
+        BTreeMap<CodingCommitment<B, C, H>, Vec<oneshot::Sender<()>>>,
 
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
     /// the keyed [`Commitment`].
@@ -621,7 +620,7 @@ where
     /// exception is the late leader-delivered shard for the assigned index,
     /// which we still accept so we can notify readiness and gossip it to
     /// slower peers.
-    fn should_handle_network_shard(&self, commitment: EngineCommitment<B, C, H>) -> bool {
+    fn should_handle_network_shard(&self, commitment: CodingCommitment<B, C, H>) -> bool {
         if self.reconstructed_blocks.contains_key(&commitment) {
             // State can be populated without a leader when a notarization arrives
             // before the leader announcement, or when our assigned shard was not
@@ -645,7 +644,7 @@ where
     #[allow(clippy::type_complexity)]
     fn try_reconstruct(
         &mut self,
-        commitment: EngineCommitment<B, C, H>,
+        commitment: CodingCommitment<B, C, H>,
     ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
@@ -712,7 +711,7 @@ where
     fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
-        commitment: EngineCommitment<B, C, H>,
+        commitment: CodingCommitment<B, C, H>,
         leader: P,
         round: Round,
     ) {
@@ -774,7 +773,7 @@ where
     fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
-        commitment: EngineCommitment<B, C, H>,
+        commitment: CodingCommitment<B, C, H>,
         round: Round,
     ) {
         if self.reconstructed_blocks.contains_key(&commitment) {
@@ -834,7 +833,7 @@ where
     /// reconstruct from many peer-gossiped shards. The local assigned shard is
     /// different: it is only valid when it came from the leader, and the leader's
     /// identity is needed before it can be accepted as assigned-shard evidence.
-    fn ingest_buffered_shards(&mut self, commitment: EngineCommitment<B, C, H>) -> bool {
+    fn ingest_buffered_shards(&mut self, commitment: CodingCommitment<B, C, H>) -> bool {
         let state = self
             .state
             .get(&commitment)
@@ -1001,7 +1000,7 @@ where
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
-        commitment: EngineCommitment<B, C, H>,
+        commitment: CodingCommitment<B, C, H>,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
             match state.take_pending_action() {
@@ -1048,7 +1047,7 @@ where
     /// shard for the local index, not to generic block reconstruction.
     fn handle_assigned_shard_verified_subscription(
         &mut self,
-        commitment: EngineCommitment<B, C, H>,
+        commitment: CodingCommitment<B, C, H>,
         response: oneshot::Sender<()>,
     ) {
         // Answer immediately if our own shard has been verified.
@@ -1108,7 +1107,7 @@ where
 
     /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// verification.
-    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: EngineCommitment<B, C, H>) {
+    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: CodingCommitment<B, C, H>) {
         if let Some(mut subscribers) = self
             .assigned_shard_verified_subscriptions
             .remove(&commitment)
@@ -1149,7 +1148,7 @@ where
     ///
     /// Removing these entries drops all senders, causing receivers to resolve
     /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: EngineCommitment<B, C, H>) {
+    fn drop_subscriptions(&mut self, commitment: CodingCommitment<B, C, H>) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
         self.block_subscriptions
@@ -1167,7 +1166,7 @@ where
     /// Byzantine leader can equivocate, producing multiple valid commitments
     /// in the same round. Both must remain recoverable until finalization
     /// determines which one is canonical.
-    fn prune(&mut self, through: EngineCommitment<B, C, H>) {
+    fn prune(&mut self, through: CodingCommitment<B, C, H>) {
         let cached = self
             .reconstructed_blocks
             .get(&through)

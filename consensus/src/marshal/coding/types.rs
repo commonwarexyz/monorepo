@@ -15,11 +15,8 @@ use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, sync::Arc};
 
 /// The typed coding commitment for an application block, coding scheme, and context hasher.
-pub type CommitmentFor<B, C, H, const N: usize = DEFAULT_COMMITMENT_SIZE> =
+pub type CodingCommitment<B, C, H, const N: usize = DEFAULT_COMMITMENT_SIZE> =
     Commitment<<B as Digestible>::Digest, <C as Scheme>::Commitment, <H as Hasher>::Digest, N>;
-
-/// The typed shard for an application block, coding scheme, and context hasher.
-pub type ShardFor<B, C, H> = Shard<<B as Digestible>::Digest, C, H>;
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
@@ -202,7 +199,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Create a new [`CodedBlock`] from an owned or shared [`Block`] and
     /// trusted [`Commitment`].
-    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: CommitmentFor<B, C, H>) -> Self {
+    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: CodingCommitment<B, C, H>) -> Self {
         Self {
             inner: inner.into(),
             config: commitment.config(),
@@ -281,7 +278,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> Committable for CodedBlock<B, C, H> {
-    type Commitment = CommitmentFor<B, C, H>;
+    type Commitment = CodingCommitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         Commitment::from((
@@ -324,7 +321,7 @@ pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
     /// The commitment the decoded block must match.
-    pub expected: CommitmentFor<B, C, H>,
+    pub expected: CodingCommitment<B, C, H>,
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
@@ -435,7 +432,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// to detect storage corruption, but does not re-encode the block.
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,
-    commitment: CommitmentFor<B, C, H>,
+    commitment: CodingCommitment<B, C, H>,
     _scheme: PhantomData<(C, H)>,
 }
 
@@ -484,7 +481,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for StoredCodedBlock<B, C, H> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Committable for StoredCodedBlock<B, C, H> {
-    type Commitment = CommitmentFor<B, C, H>;
+    type Commitment = CodingCommitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
