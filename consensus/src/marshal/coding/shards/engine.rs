@@ -144,7 +144,7 @@ use super::{
 };
 use crate::{
     marshal::coding::{
-        types::{hash_context, CodedBlock, CodingCommitment, Shard as CoreShard},
+        types::{hash_context, CodedBlock, Shard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -210,9 +210,6 @@ enum BlockSubscriptionKey<D: Digest, R: Digest, H: Digest> {
     Commitment(Commitment<D, R, H>),
     Digest(D),
 }
-
-type Shard<B, C, H> = CoreShard<<B as Digestible>::Digest, C, H>;
-
 /// Configuration for the [`Engine`].
 pub struct Config<P, S, X, D, C, H, B, T>
 where
@@ -320,7 +317,7 @@ where
     strategy: T,
 
     /// A map of [`Commitment`]s to [`ReconstructionState`]s.
-    state: BTreeMap<CodingCommitment<B, C, H>, ReconstructionState<P, B::Digest, C, H>>,
+    state: BTreeMap<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, ReconstructionState<P, B, C, H>>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
     ///
@@ -347,7 +344,7 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
-    reconstructed_blocks: BTreeMap<CodingCommitment<B, C, H>, ReconstructedBlock<B, C, H>>,
+    reconstructed_blocks: BTreeMap<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, ReconstructedBlock<B, C, H>>,
 
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
@@ -360,7 +357,7 @@ where
     /// Proposers are a special case: they satisfy readiness once their local
     /// proposal is cached because they already hold all shards.
     assigned_shard_verified_subscriptions:
-        BTreeMap<CodingCommitment<B, C, H>, Vec<oneshot::Sender<()>>>,
+        BTreeMap<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, Vec<oneshot::Sender<()>>>,
 
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
     /// the keyed [`Commitment`].
@@ -617,7 +614,7 @@ where
     /// exception is the late leader-delivered shard for the assigned index,
     /// which we still accept so we can notify readiness and gossip it to
     /// slower peers.
-    fn should_handle_network_shard(&self, commitment: CodingCommitment<B, C, H>) -> bool {
+    fn should_handle_network_shard(&self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) -> bool {
         if self.reconstructed_blocks.contains_key(&commitment) {
             // State can be populated without a leader when a notarization arrives
             // before the leader announcement, or when our assigned shard was not
@@ -641,7 +638,7 @@ where
     #[allow(clippy::type_complexity)]
     fn try_reconstruct(
         &mut self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
     ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
@@ -709,7 +706,7 @@ where
     fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         leader: P,
         round: Round,
     ) {
@@ -771,7 +768,7 @@ where
     fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         round: Round,
     ) {
         if self.reconstructed_blocks.contains_key(&commitment) {
@@ -831,7 +828,7 @@ where
     /// reconstruct from many peer-gossiped shards. The local assigned shard is
     /// different: it is only valid when it came from the leader, and the leader's
     /// identity is needed before it can be accepted as assigned-shard evidence.
-    fn ingest_buffered_shards(&mut self, commitment: CodingCommitment<B, C, H>) -> bool {
+    fn ingest_buffered_shards(&mut self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) -> bool {
         let state = self
             .state
             .get(&commitment)
@@ -998,7 +995,7 @@ where
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
             match state.take_pending_action() {
@@ -1045,7 +1042,7 @@ where
     /// shard for the local index, not to generic block reconstruction.
     fn handle_assigned_shard_verified_subscription(
         &mut self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         response: oneshot::Sender<()>,
     ) {
         // Answer immediately if our own shard has been verified.
@@ -1105,7 +1102,7 @@ where
 
     /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// verification.
-    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: CodingCommitment<B, C, H>) {
+    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) {
         if let Some(mut subscribers) = self
             .assigned_shard_verified_subscriptions
             .remove(&commitment)
@@ -1146,7 +1143,7 @@ where
     ///
     /// Removing these entries drops all senders, causing receivers to resolve
     /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: CodingCommitment<B, C, H>) {
+    fn drop_subscriptions(&mut self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
         self.block_subscriptions
@@ -1164,7 +1161,7 @@ where
     /// Byzantine leader can equivocate, producing multiple valid commitments
     /// in the same round. Both must remain recoverable until finalization
     /// determines which one is canonical.
-    fn prune(&mut self, through: CodingCommitment<B, C, H>) {
+    fn prune(&mut self, through: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) {
         let cached = self
             .reconstructed_blocks
             .get(&through)
@@ -1199,29 +1196,29 @@ where
 }
 
 /// Erasure coded block reconstruction state machine.
-enum ReconstructionState<P, D, C, H>
+enum ReconstructionState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
     /// Stage 1: accumulate shards. The leader's shard for our index is
     /// verified immediately; all other shards are buffered until enough
     /// are available for batch verification.
-    AwaitingQuorum(AwaitingQuorumState<P, D, C, H>),
+    AwaitingQuorum(AwaitingQuorumState<P, B, C, H>),
     /// Stage 2: batch validation passed; checked shards are available for
     /// reconstruction.
-    Ready(ReadyState<P, D, C, H>),
+    Ready(ReadyState<P, B, C, H>),
 }
 
 /// Action to take once assigned shard verification has been established.
 ///
 /// Participants broadcast the shard to all peers, while non-participants
 /// only notify local subscribers.
-enum AssignedShardVerifiedAction<D: Digest, C: CodingScheme, H: Hasher> {
+enum AssignedShardVerifiedAction<B: Digestible, C: CodingScheme, H: Hasher> {
     /// Broadcast the shard to all peers and notify local subscribers.
-    Broadcast(CoreShard<D, C, H>),
+    Broadcast(Shard<B, C, H>),
     /// Only notify local subscribers (non-participant validated the leader's shard).
     NotifyOnly,
 }
@@ -1233,10 +1230,10 @@ struct IndexedShard<C: CodingScheme> {
 }
 
 /// State shared across all reconstruction phases.
-struct CommonState<P, D, C, H>
+struct CommonState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1244,7 +1241,7 @@ where
     /// provided it.
     leader: Option<P>,
     /// Our validated shard and the action to take with it.
-    pending_action: Option<AssignedShardVerifiedAction<D, C, H>>,
+    pending_action: Option<AssignedShardVerifiedAction<B, C, H>>,
     /// Shards that have been verified and are ready to contribute to reconstruction.
     checked_shards: Vec<C::CheckedShard>,
     /// Bitmap tracking which participant indices have contributed a shard.
@@ -1264,14 +1261,14 @@ where
 /// buffered until enough are available to attempt batch validation. Once the
 /// leader is known, the leader's shard for our index is verified eagerly via
 /// `C::check`.
-struct AwaitingQuorumState<P, D, C, H>
+struct AwaitingQuorumState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
-    common: CommonState<P, D, C, H>,
+    common: CommonState<P, B, C, H>,
     /// Shards pending batch validation, keyed by sender.
     pending_shards: BTreeMap<P, IndexedShard<C>>,
 }
@@ -1280,20 +1277,20 @@ where
 ///
 /// Batch validation has passed. Checked shards are available for
 /// reconstruction.
-struct ReadyState<P, D, C, H>
+struct ReadyState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
-    common: CommonState<P, D, C, H>,
+    common: CommonState<P, B, C, H>,
 }
 
-impl<P, D, C, H> CommonState<P, D, C, H>
+impl<P, B, C, H> CommonState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1311,10 +1308,10 @@ where
     }
 }
 
-impl<P, D, C, H> CommonState<P, D, C, H>
+impl<P, B, C, H> CommonState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1329,7 +1326,7 @@ where
     fn verify_assigned_shard(
         &mut self,
         sender: P,
-        commitment: Commitment<D, C::Commitment, H::Digest>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         shard: IndexedShard<C>,
         is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
@@ -1350,7 +1347,7 @@ where
         self.checked_shards.push(checked);
         self.assigned_shard_verified = true;
         self.pending_action = Some(if is_participant {
-            AssignedShardVerifiedAction::Broadcast(CoreShard::new(
+            AssignedShardVerifiedAction::Broadcast(Shard::new(
                 commitment,
                 shard.index,
                 data.clone(),
@@ -1362,10 +1359,10 @@ where
     }
 }
 
-impl<P, D, C, H> AwaitingQuorumState<P, D, C, H>
+impl<P, B, C, H> AwaitingQuorumState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1373,11 +1370,11 @@ where
     /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
     fn try_transition(
         &mut self,
-        commitment: Commitment<D, C::Commitment, H::Digest>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         participants_len: u64,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,
-    ) -> Option<ReadyState<P, D, C, H>> {
+    ) -> Option<ReadyState<P, B, C, H>> {
         let minimum = usize::from(commitment.config().minimum_shards.get());
         if self.common.checked_shards.len() + self.pending_shards.len() < minimum {
             return None;
@@ -1446,10 +1443,10 @@ impl<'a, Sch: CertificateScheme, S: Strategy> InsertCtx<'a, Sch, S> {
     }
 }
 
-impl<P, D, C, H> ReconstructionState<P, D, C, H>
+impl<P, B, C, H> ReconstructionState<P, B, C, H>
 where
     P: PublicKey,
-    D: Digest,
+    B: Digestible,
     C: CodingScheme,
     H: Hasher,
 {
@@ -1462,7 +1459,7 @@ where
     }
 
     /// Access common state shared across all phases.
-    const fn common(&self) -> &CommonState<P, D, C, H> {
+    const fn common(&self) -> &CommonState<P, B, C, H> {
         match self {
             Self::AwaitingQuorum(state) => &state.common,
             Self::Ready(state) => &state.common,
@@ -1470,7 +1467,7 @@ where
     }
 
     /// Mutably access common state shared across all phases.
-    const fn common_mut(&mut self) -> &mut CommonState<P, D, C, H> {
+    const fn common_mut(&mut self) -> &mut CommonState<P, B, C, H> {
         match self {
             Self::AwaitingQuorum(state) => &mut state.common,
             Self::Ready(state) => &mut state.common,
@@ -1509,7 +1506,7 @@ where
     /// Takes the pending action for this commitment's validated shard.
     ///
     /// Returns [`None`] if the leader's shard hasn't been validated yet.
-    const fn take_pending_action(&mut self) -> Option<AssignedShardVerifiedAction<D, C, H>> {
+    const fn take_pending_action(&mut self) -> Option<AssignedShardVerifiedAction<B, C, H>> {
         self.common_mut().pending_action.take()
     }
 
@@ -1562,7 +1559,7 @@ where
     fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,
-        shard: CoreShard<D, C, H>,
+        shard: Shard<B, C, H>,
         ctx: InsertCtx<'_, Sch, S>,
         blocker: &mut X,
     ) -> bool

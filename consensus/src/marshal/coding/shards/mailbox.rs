@@ -1,13 +1,13 @@
 //! Mailbox for the shard buffer engine.
 
 use crate::{
-    marshal::coding::types::{CodedBlock, CodingCommitment},
-    types::Round,
+    marshal::coding::types::CodedBlock,
+    types::{coding::Commitment, Round},
     CertifiableBlock,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
 use commonware_coding::Scheme as CodingScheme;
-use commonware_cryptography::{Hasher, PublicKey};
+use commonware_cryptography::{Digestible, Hasher, PublicKey};
 use commonware_utils::channel::oneshot;
 use std::collections::VecDeque;
 
@@ -31,7 +31,7 @@ where
     /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
         /// The [`Commitment`] of the proposed block.
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         /// The leader's public key.
         leader: P,
         /// The round in which the commitment was proposed.
@@ -44,14 +44,14 @@ where
     /// for the commitment, but it does not satisfy assigned shard verification.
     Notarized {
         /// The [`Commitment`] of the notarized block.
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         /// The round in which the commitment was notarized.
         round: Round,
     },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
         /// The [`Commitment`] of the block to get.
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         /// The response channel.
         response: oneshot::Sender<Option<CodedBlock<B, C, H>>>,
     },
@@ -74,7 +74,7 @@ where
     /// is cached because they trivially have all shards.
     SubscribeAssignedShardVerified {
         /// The block's commitment.
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         /// The response channel.
         response: oneshot::Sender<()>,
     },
@@ -82,7 +82,7 @@ where
     /// by its [`Commitment`].
     SubscribeByCommitment {
         /// The block's digest.
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
         /// The response channel.
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     },
@@ -97,7 +97,7 @@ where
     /// A request to prune all caches at and below the given commitment.
     Prune {
         /// Inclusive prune target [`Commitment`].
-        through: CodingCommitment<B, C, H>,
+        through: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
     },
 }
 
@@ -221,7 +221,7 @@ where
     }
 
     /// Inform the engine of an externally proposed [`Commitment`].
-    pub fn discovered(&self, commitment: CodingCommitment<B, C, H>, leader: P, round: Round) {
+    pub fn discovered(&self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
             leader,
@@ -235,14 +235,14 @@ where
     /// lets the engine drain sender-indexed gossip shards from its peer buffers
     /// for the commitment. Leader-specific validation and assigned shard
     /// verification still require a later [`Self::discovered`] call.
-    pub fn notarized(&self, commitment: CodingCommitment<B, C, H>, round: Round) {
+    pub fn notarized(&self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, round: Round) {
         let _ = self
             .sender
             .enqueue(Message::Notarized { commitment, round });
     }
 
     /// Request a reconstructed block by its [`Commitment`].
-    pub async fn get(&self, commitment: CodingCommitment<B, C, H>) -> Option<CodedBlock<B, C, H>> {
+    pub async fn get(&self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) -> Option<CodedBlock<B, C, H>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetByCommitment {
             commitment,
@@ -272,7 +272,7 @@ where
     /// is cached because they trivially have all shards.
     pub fn subscribe_assigned_shard_verified(
         &self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
     ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
         let _ = self
@@ -285,7 +285,7 @@ where
     }
 
     /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
-    pub fn subscribe(&self, commitment: CodingCommitment<B, C, H>) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    pub fn subscribe(&self, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,
@@ -305,7 +305,7 @@ where
     }
 
     /// Request to prune all caches at and below the given commitment.
-    pub fn prune(&self, through: CodingCommitment<B, C, H>) {
+    pub fn prune(&self, through: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) {
         let _ = self.sender.enqueue(Message::Prune { through });
     }
 }

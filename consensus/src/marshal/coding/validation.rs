@@ -9,7 +9,7 @@ use crate::{
     CertifiableBlock, Epochable,
 };
 use commonware_coding::Config as CodingConfig;
-use commonware_cryptography::{Committable, Digest};
+use commonware_cryptography::{Committable, Digest, Digestible};
 
 /// Validation failures for coding proposal verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,12 +67,12 @@ pub(crate) fn validate_block<ES, B, R, C>(
     parent: &B,
     context: &B::Context,
     context_digest: C,
-    commitment: Commitment<B::Digest, R, C>,
-    parent_commitment: Commitment<B::Digest, R, C>,
+    commitment: Commitment<<B as Digestible>::Digest, R, C>,
+    parent_commitment: Commitment<<B as Digestible>::Digest, R, C>,
 ) -> Result<(), BlockError>
 where
     ES: Epocher,
-    B: CertifiableBlock + Committable<Commitment = Commitment<B::Digest, R, C>>,
+    B: CertifiableBlock + Committable<Commitment = Commitment<<B as Digestible>::Digest, R, C>>,
     R: Digest,
     C: Digest,
     B::Context: Epochable + PartialEq,
@@ -107,7 +107,7 @@ pub(crate) fn validate_reconstruction<B, R, C>(
     block: &B,
     config: CodingConfig,
     context_digest: C,
-    commitment: Commitment<B::Digest, R, C>,
+    commitment: Commitment<<B as Digestible>::Digest, R, C>,
 ) -> Result<(), ReconstructionError<C>>
 where
     B: CertifiableBlock,

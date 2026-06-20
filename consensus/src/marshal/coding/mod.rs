@@ -458,7 +458,7 @@ mod tests {
 
     fn genesis_coding_commitment<H: Hasher, B: CertifiableBlock>(
         block: &B,
-    ) -> Commitment<B::Digest, B::Digest, H::Digest> {
+    ) -> Commitment<<B as Digestible>::Digest, B::Digest, H::Digest> {
         Commitment::from((
             block.digest(),
             block.digest(),
