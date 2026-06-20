@@ -18,6 +18,9 @@ use std::{marker::PhantomData, sync::Arc};
 pub type CommitmentFor<B, C, H, const N: usize = DEFAULT_COMMITMENT_SIZE> =
     Commitment<<B as Digestible>::Digest, <C as Scheme>::Commitment, <H as Hasher>::Digest, N>;
 
+/// The typed shard for an application block, coding scheme, and context hasher.
+pub type ShardFor<B, C, H> = Shard<<B as Digestible>::Digest, C, H>;
+
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
 pub struct Shard<D: Digest, C: Scheme, H: Hasher> {

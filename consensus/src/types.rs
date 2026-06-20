@@ -841,7 +841,8 @@ commonware_macros::stability_scope!(ALPHA {
                 B::read(&mut cursor).map_err(|_| invalid("invalid block digest"))?;
                 R::read(&mut cursor).map_err(|_| invalid("invalid coding root"))?;
                 C::read(&mut cursor).map_err(|_| invalid("invalid context digest"))?;
-                CodingConfig::read(&mut cursor).map_err(|_| invalid("invalid embedded CodingConfig"))?;
+                CodingConfig::read(&mut cursor)
+                    .map_err(|_| invalid("invalid embedded CodingConfig"))?;
 
                 Ok(Self(arr, PhantomData))
             }

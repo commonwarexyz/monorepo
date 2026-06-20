@@ -144,7 +144,7 @@ use super::{
 };
 use crate::{
     marshal::coding::{
-        types::{CodedBlock, CommitmentFor, Shard},
+        types::{CodedBlock, CommitmentFor, Shard, ShardFor},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -212,7 +212,7 @@ enum BlockSubscriptionKey<D: Digest, R: Digest, H: Digest> {
 }
 
 type EngineCommitment<B, C, H> = CommitmentFor<B, C, H>;
-type EngineShard<B, C, H> = Shard<<B as Digestible>::Digest, C, H>;
+type EngineShard<B, C, H> = ShardFor<B, C, H>;
 type EngineBlockSubscriptionKey<B, C, H> = BlockSubscriptionKey<
     <B as Digestible>::Digest,
     <C as CodingScheme>::Commitment,
