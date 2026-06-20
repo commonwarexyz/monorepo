@@ -86,14 +86,14 @@ use crate::{
         },
         coding::{
             shards,
-            types::{coding_config_for_participants, hash_context, CodedBlock},
+            types::{coding_config_for_participants, hash_context, CodedBlock, CodingCommitment},
             validation::{validate_block, validate_proposal, ProposalError},
             Coding,
         },
         core, Update,
     },
     simplex::{scheme::Scheme, types::Context, Plan},
-    types::{coding::Commitment, Epoch, Epocher, Round},
+    types::{Epoch, Epocher, Round},
     Application, Automaton, Block, CertifiableAutomaton, CertifiableBlock, Epochable, Heightable,
     Relay, Reporter,
 };
@@ -128,10 +128,10 @@ use tracing::{debug, info_span, warn, Instrument as _};
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
-    B: CertifiableBlock<Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -159,10 +159,10 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -173,7 +173,7 @@ where
     scheme_provider: Z,
     epocher: ES,
     strategy: S,
-    verification_tasks: VerificationTasks<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>,
+    verification_tasks: VerificationTasks<CodingCommitment<B, C, H>>,
 
     build_duration: Timed,
     verify_duration: Timed,
@@ -186,10 +186,10 @@ impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -219,12 +219,12 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>,
+        Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -315,8 +315,8 @@ where
     /// extract its embedded context.
     async fn deferred_verify(
         &mut self,
-        consensus_context: Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>,
-        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
+        consensus_context: Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        commitment: CodingCommitment<B, C, H>,
         prefetched_block: Option<CodedBlock<B, C, H>>,
         stage: Stage,
     ) -> oneshot::Receiver<bool> {
@@ -467,7 +467,7 @@ where
     async fn certify_from_embedded_context(
         &mut self,
         round: Round,
-        payload: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
+        payload: CodingCommitment<B, C, H>,
     ) -> oneshot::Receiver<bool> {
         // Certify may be reached without an earlier `verify`, so the shard
         // engine may not know the leader yet. A notarized commitment is still
@@ -584,7 +584,7 @@ where
     async fn certify_from_existing_task(
         &mut self,
         round: Round,
-        payload: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
+        payload: CodingCommitment<B, C, H>,
         task: oneshot::Receiver<bool>,
     ) -> oneshot::Receiver<bool> {
         // `verify()` intentionally waits only for local candidate data. Once
@@ -658,16 +658,16 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>,
+        Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
-    type Digest = Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>;
+    type Digest = CodingCommitment<B, C, H>;
     type Context = Context<Self::Digest, <Z::Scheme as Verifier>::PublicKey>;
 
     /// Proposes a new block or re-proposes the epoch boundary block.
@@ -684,7 +684,7 @@ where
     #[tracing::instrument(name = "marshal.coding.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
         &mut self,
-        consensus_context: Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>,
+        consensus_context: Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
     ) -> oneshot::Receiver<Self::Digest> {
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -1094,12 +1094,12 @@ where
         E,
         Block = B,
         SigningScheme = Z::Scheme,
-        Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>,
+        Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
     >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
@@ -1119,15 +1119,15 @@ where
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<E, Block = B, Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>>,
+    A: Application<E, Block = B, Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {
-    type Digest = Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>;
+    type Digest = CodingCommitment<B, C, H>;
     type PublicKey = <Z::Scheme as Verifier>::PublicKey;
     type Plan = Plan<Self::PublicKey>;
 
@@ -1146,12 +1146,12 @@ where
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<E, Block = B, Context = Context<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>, <Z::Scheme as Verifier>::PublicKey>>
+    A: Application<E, Block = B, Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
         + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
-    Z: Provider<Scope = Epoch, Scheme: Scheme<Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>>>,
+    Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
     S: Strategy,
     ES: Epocher,
 {

@@ -11,11 +11,15 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, sync::Arc};
 
+/// The typed coding commitment for an application block, coding scheme, and context hasher.
+pub type CodingCommitment<B, C, H> =
+    Commitment<<B as Digestible>::Digest, <C as Scheme>::Commitment, <H as Hasher>::Digest>;
+
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
 pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
     /// The coding commitment
-    pub(crate) commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
+    pub(crate) commitment: CodingCommitment<B, C, H>,
     /// The index of this shard within the commitment.
     pub(crate) index: u16,
     /// An individual shard within the commitment.
@@ -26,7 +30,7 @@ pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
 
 impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
     pub const fn new(
-        commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
+        commitment: CodingCommitment<B, C, H>,
         index: u16,
         inner: C::Shard,
     ) -> Self {
@@ -44,7 +48,7 @@ impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
     }
 
     /// Returns the [`Commitment`] for this shard.
-    pub const fn commitment(&self) -> Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest> {
+    pub const fn commitment(&self) -> CodingCommitment<B, C, H> {
         self.commitment
     }
 
@@ -66,7 +70,7 @@ impl<B: Digestible, C: Scheme, H: Hasher> Clone for Shard<B, C, H> {
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Committable for Shard<B, C, H> {
-    type Commitment = Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>;
+    type Commitment = CodingCommitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
@@ -192,7 +196,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Create a new [`CodedBlock`] from an owned or shared [`Block`] and
     /// trusted [`Commitment`].
-    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>) -> Self {
+    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: CodingCommitment<B, C, H>) -> Self {
         Self {
             inner: inner.into(),
             config: commitment.config(),
@@ -271,7 +275,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> Committable for CodedBlock<B, C, H> {
-    type Commitment = Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>;
+    type Commitment = CodingCommitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         Commitment::from((
@@ -314,7 +318,7 @@ pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
     /// The commitment the decoded block must match.
-    pub expected: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
+    pub expected: CodingCommitment<B, C, H>,
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
@@ -425,7 +429,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// to detect storage corruption, but does not re-encode the block.
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,
-    commitment: Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>,
+    commitment: CodingCommitment<B, C, H>,
     _scheme: PhantomData<(C, H)>,
 }
 
@@ -474,7 +478,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for StoredCodedBlock<B, C, H> {
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Committable for StoredCodedBlock<B, C, H> {
-    type Commitment = Commitment<<B as Digestible>::Digest, C::Commitment, H::Digest>;
+    type Commitment = CodingCommitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
