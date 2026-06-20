@@ -144,7 +144,7 @@ use super::{
 };
 use crate::{
     marshal::coding::{
-        types::{CodedBlock, CodingCommitment, Shard},
+        types::{hash_context, CodedBlock, CodingCommitment, Shard as CoreShard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -211,12 +211,7 @@ enum BlockSubscriptionKey<D: Digest, R: Digest, H: Digest> {
     Digest(D),
 }
 
-type EngineShard<B, C, H> = Shard<<B as Digestible>::Digest, C, H>;
-type EngineBlockSubscriptionKey<B, C, H> = BlockSubscriptionKey<
-    <B as Digestible>::Digest,
-    <C as CodingScheme>::Commitment,
-    <H as Hasher>::Digest,
->;
+type Shard<B, C, H> = CoreShard<<B as Digestible>::Digest, C, H>;
 
 /// Configuration for the [`Engine`].
 pub struct Config<P, S, X, D, C, H, B, T>
@@ -237,7 +232,7 @@ where
     pub blocker: X,
 
     /// [`Read`] configuration for decoding [`Shard`]s.
-    pub shard_codec_cfg: <EngineShard<B, C, H> as Read>::Cfg,
+    pub shard_codec_cfg: <Shard<B, C, H> as Read>::Cfg,
 
     /// [`commonware_codec::Read`] configuration for decoding blocks.
     pub block_codec_cfg: B::Cfg,
@@ -316,7 +311,7 @@ where
     blocker: X,
 
     /// [`Read`] configuration for decoding [`Shard`]s.
-    shard_codec_cfg: <EngineShard<B, C, H> as Read>::Cfg,
+    shard_codec_cfg: <Shard<B, C, H> as Read>::Cfg,
 
     /// [`Read`] configuration for decoding [`CodedBlock`]s.
     block_codec_cfg: B::Cfg,
@@ -331,7 +326,7 @@ where
     ///
     /// Empty buffers are retained for active peers and only evicted when the
     /// peer leaves `latest.primary`.
-    peer_buffers: BTreeMap<P, VecDeque<EngineShard<B, C, H>>>,
+    peer_buffers: BTreeMap<P, VecDeque<Shard<B, C, H>>>,
 
     /// Maximum buffered pre-leader shards per peer.
     peer_buffer_size: NonZeroUsize,
@@ -370,8 +365,10 @@ where
     /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
     /// the keyed [`Commitment`].
     #[allow(clippy::type_complexity)]
-    block_subscriptions:
-        BTreeMap<EngineBlockSubscriptionKey<B, C, H>, Vec<oneshot::Sender<CodedBlock<B, C, H>>>>,
+    block_subscriptions: BTreeMap<
+        BlockSubscriptionKey<B::Digest, C::Commitment, H::Digest>,
+        Vec<oneshot::Sender<CodedBlock<B, C, H>>>,
+    >,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
@@ -432,12 +429,12 @@ where
         mut self,
         (sender, receiver): (impl Sender<PublicKey = P>, impl Receiver<PublicKey = P>),
     ) {
-        let mut sender = WrappedSender::<_, EngineShard<B, C, H>>::new(
+        let mut sender = WrappedSender::<_, Shard<B, C, H>>::new(
             self.context.network_buffer_pool().clone(),
             sender,
         );
         let (receiver_service, mut receiver) =
-            WrappedBackgroundReceiver::<_, P, X, _, EngineShard<B, C, H>>::new(
+            WrappedBackgroundReceiver::<_, P, X, _, Shard<B, C, H>>::new(
                 self.context.child("shard_ingress"),
                 receiver,
                 self.shard_codec_cfg.clone(),
@@ -559,9 +556,9 @@ where
     /// Handles a decoded shard received from the network.
     fn handle_network_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         peer: P,
-        shard: EngineShard<B, C, H>,
+        shard: Shard<B, C, H>,
     ) {
         self.metrics.shards_received.get_or_create_by(&peer).inc();
 
@@ -674,7 +671,8 @@ where
         let (inner, config): (B, CodingConfig) =
             Decode::decode_cfg(&mut blob.as_slice(), &(self.block_codec_cfg.clone(), ()))?;
 
-        match validate_reconstruction::<H, _, _>(&inner, config, commitment) {
+        let context_digest = hash_context::<H, _>(&inner.context());
+        match validate_reconstruction(&inner, config, context_digest, commitment) {
             Ok(()) => {}
             Err(InvariantError::BlockDigest) => {
                 return Err(Error::DigestMismatch);
@@ -710,7 +708,7 @@ where
     /// Handles leader announcements for a commitment and advances reconstruction.
     fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         commitment: CodingCommitment<B, C, H>,
         leader: P,
         round: Round,
@@ -772,7 +770,7 @@ where
     /// local assigned shard as verified.
     fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         commitment: CodingCommitment<B, C, H>,
         round: Round,
     ) {
@@ -803,7 +801,7 @@ where
     }
 
     /// Buffer a shard from a peer until a leader is known.
-    fn buffer_peer_shard(&mut self, peer: P, shard: EngineShard<B, C, H>) {
+    fn buffer_peer_shard(&mut self, peer: P, shard: Shard<B, C, H>) {
         if self.latest_primary_peers.position(&peer).is_none() {
             debug!(
                 ?peer,
@@ -906,7 +904,7 @@ where
     /// - Non-participants in aggregate membership receive the leader's shard.
     fn broadcast_shards<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         round: Round,
         mut block: CodedBlock<B, C, H>,
     ) {
@@ -982,8 +980,8 @@ where
     /// Gossips a validated [`Shard`] using [`commonware_p2p::Recipients::All`].
     fn broadcast_shard<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
-        shard: EngineShard<B, C, H>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
+        shard: Shard<B, C, H>,
     ) {
         let commitment = shard.commitment();
         let peers = sender.send(Recipients::All, shard, true);
@@ -999,7 +997,7 @@ where
     /// up and subscribers are notified.
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
-        sender: &mut WrappedSender<Sr, EngineShard<B, C, H>>,
+        sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
         commitment: CodingCommitment<B, C, H>,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
@@ -1079,7 +1077,7 @@ where
     /// Handles the registry of a block subscription.
     fn handle_block_subscription(
         &mut self,
-        key: EngineBlockSubscriptionKey<B, C, H>,
+        key: BlockSubscriptionKey<B::Digest, C::Commitment, H::Digest>,
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
         let block = match key {
@@ -1223,7 +1221,7 @@ where
 /// only notify local subscribers.
 enum AssignedShardVerifiedAction<D: Digest, C: CodingScheme, H: Hasher> {
     /// Broadcast the shard to all peers and notify local subscribers.
-    Broadcast(Shard<D, C, H>),
+    Broadcast(CoreShard<D, C, H>),
     /// Only notify local subscribers (non-participant validated the leader's shard).
     NotifyOnly,
 }
@@ -1352,7 +1350,7 @@ where
         self.checked_shards.push(checked);
         self.assigned_shard_verified = true;
         self.pending_action = Some(if is_participant {
-            AssignedShardVerifiedAction::Broadcast(Shard::new(
+            AssignedShardVerifiedAction::Broadcast(CoreShard::new(
                 commitment,
                 shard.index,
                 data.clone(),
@@ -1564,7 +1562,7 @@ where
     fn on_network_shard<Sch, S, X>(
         &mut self,
         sender: P,
-        shard: Shard<D, C, H>,
+        shard: CoreShard<D, C, H>,
         ctx: InsertCtx<'_, Sch, S>,
         blocker: &mut X,
     ) -> bool

@@ -392,11 +392,13 @@ where
                     },
                 };
 
-                if let Err(err) = validate_block::<H, _, _, _>(
+                let context_digest = hash_context::<H, _>(&block.context());
+                if let Err(err) = validate_block(
                     &epocher,
                     &block,
                     &parent,
                     &consensus_context,
+                    context_digest,
                     commitment,
                     parent_commitment,
                 ) {
@@ -916,8 +918,9 @@ where
         // Validate proposal-level invariants:
         // - coding config must match active participant set
         // - context digest must match unless this is a re-proposal
-        let proposal_context = (!is_reproposal).then_some(&consensus_context);
-        if let Err(err) = validate_proposal::<H, _, _, _>(payload, coding_config, proposal_context) {
+        let proposal_context_digest =
+            (!is_reproposal).then(|| hash_context::<H, _>(&consensus_context));
+        if let Err(err) = validate_proposal(payload, coding_config, proposal_context_digest) {
             match err {
                 ProposalError::CodingConfig => {
                     warn!(

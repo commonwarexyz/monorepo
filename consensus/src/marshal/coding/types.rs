@@ -1,10 +1,7 @@
 //! Types for erasure coding.
 
 use crate::{
-    types::{
-        coding::{Commitment, DEFAULT_COMMITMENT_SIZE},
-        Height,
-    },
+    types::{coding::Commitment, Height},
     Block, CertifiableBlock, Heightable,
 };
 use commonware_codec::{BufsMut, EncodeSize, Read, ReadExt, Write};
@@ -15,8 +12,8 @@ use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, sync::Arc};
 
 /// The typed coding commitment for an application block, coding scheme, and context hasher.
-pub type CodingCommitment<B, C, H, const N: usize = DEFAULT_COMMITMENT_SIZE> =
-    Commitment<<B as Digestible>::Digest, <C as Scheme>::Commitment, <H as Hasher>::Digest, N>;
+pub type CodingCommitment<B, C, H> =
+    Commitment<<B as Digestible>::Digest, <C as Scheme>::Commitment, <H as Hasher>::Digest>;
 
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
