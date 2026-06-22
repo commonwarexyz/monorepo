@@ -112,6 +112,11 @@ harness = false
 path = "src/index/benches/bench.rs"
 
 [[bench]]
+name = "index_scale"
+harness = false
+path = "src/index/benches/scale.rs"
+
+[[bench]]
 name="journal"
 harness = false
 path = "src/journal/benches/bench.rs"
