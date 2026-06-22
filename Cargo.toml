@@ -189,7 +189,6 @@ rand_core = "0.6.4"
 rand_distr = "0.4.3"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }
-reed-solomon-simd = "3.1.0"
 reqwest = "0.12.12"
 rstest = "0.26.1"
 serde = "1.0.218"
@@ -295,9 +294,6 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.rand_chacha]
-opt-level = 3
-
-[profile.test.package.reed-solomon-simd]
 opt-level = 3
 
 [profile.test.package.sha2]

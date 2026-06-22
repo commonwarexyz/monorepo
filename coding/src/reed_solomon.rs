@@ -4,15 +4,12 @@ use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, 
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
-use reed_solomon_simd::Error as RsError;
 use std::marker::PhantomData;
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
 pub enum Error {
-    #[error("reed-solomon error: {0}")]
-    ReedSolomon(#[from] RsError),
     #[error("inconsistent")]
     Inconsistent,
     #[error("invalid proof")]
@@ -196,13 +193,13 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
 ///
 /// Encoding prefixes the payload with its length, splits the result across
 /// `k` original shards, and rounds up to an even width required by
-/// `reed-solomon-simd`. Decode uses the same calculation to reject commitments
+/// the GF16 backend. Decode uses the same calculation to reject commitments
 /// that decode to the same payload with a non-canonical shard width.
 const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
     let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
 
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
+    // Ensure shard length is even so GF16 can interpret shards as 16-bit symbols.
     if !shard_len.is_multiple_of(2) {
         shard_len += 1;
     }
@@ -1311,7 +1308,6 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
     use commonware_utils::NZU16;
-    use reed_solomon_simd::ReedSolomonEncoder;
 
     type RS = ReedSolomon<Sha256>;
     const STRATEGY: Sequential = Sequential;
@@ -1417,17 +1413,13 @@ mod tests {
             padded[offset] ^= u.arbitrary::<u8>()? | 1;
         }
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
-        for shard in padded.chunks(shard_len) {
-            encoder.add_original_shard(shard).unwrap();
-        }
-        let recovery = encoder.encode().unwrap();
-
         let mut shards = padded
             .chunks(shard_len)
             .map(|shard| shard.to_vec())
             .collect::<Vec<_>>();
-        shards.extend(recovery.recovery_iter().map(|shard| shard.to_vec()));
+        let original_refs = padded.chunks(shard_len).collect::<Vec<_>>();
+        let recovery = encode_recoveries(k, m, shard_len, &original_refs).unwrap();
+        shards.extend(recovery.chunks(shard_len).map(<[u8]>::to_vec));
 
         let (root, chunks) = build_chunks(&shards);
         let selected = selected_indices(u, total, min)?;
@@ -1685,16 +1677,11 @@ mod tests {
         // Compute original data encoding
         let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
 
-        // Re-encode the data
-        let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
-        for shard in padded.chunks(shard_size) {
-            encoder.add_original_shard(shard).unwrap();
-        }
-        let recovery_result = encoder.encode().unwrap();
-        let mut recovery_shards: Vec<Vec<u8>> = recovery_result
-            .recovery_iter()
-            .map(|s| s.to_vec())
-            .collect();
+        let original_refs = padded.chunks(shard_size).collect::<Vec<_>>();
+        let recovery = encode_recoveries(min as usize, m as usize, shard_size, &original_refs)
+            .unwrap();
+        let mut recovery_shards: Vec<Vec<u8>> =
+            recovery.chunks(shard_size).map(<[u8]>::to_vec).collect();
 
         // Tamper with one recovery shard
         if !recovery_shards[0].is_empty() {
@@ -1756,13 +1743,10 @@ mod tests {
         let pad_offset = payload_end % shard_len;
         padded[pad_shard * shard_len + pad_offset] = 0xAA;
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
-        for shard in padded.chunks(shard_len) {
-            encoder.add_original_shard(shard).unwrap();
-        }
-        let recovery = encoder.encode().unwrap();
         let mut shards: Vec<Vec<u8>> = padded.chunks(shard_len).map(|s| s.to_vec()).collect();
-        shards.extend(recovery.recovery_iter().map(|s| s.to_vec()));
+        let original_refs = padded.chunks(shard_len).collect::<Vec<_>>();
+        let recovery = encode_recoveries(k, m, shard_len, &original_refs).unwrap();
+        shards.extend(recovery.chunks(shard_len).map(<[u8]>::to_vec));
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &shards {
@@ -1810,17 +1794,13 @@ mod tests {
         padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
         padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(data);
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, oversized_shard_len).unwrap();
-        for shard in padded.chunks(oversized_shard_len) {
-            encoder.add_original_shard(shard).unwrap();
-        }
-        let recovery = encoder.encode().unwrap();
-
         let mut oversized_shards: Vec<Vec<u8>> = padded
             .chunks(oversized_shard_len)
             .map(|shard| shard.to_vec())
             .collect();
-        oversized_shards.extend(recovery.recovery_iter().map(|shard| shard.to_vec()));
+        let original_refs = padded.chunks(oversized_shard_len).collect::<Vec<_>>();
+        let recovery = encode_recoveries(k, m, oversized_shard_len, &original_refs).unwrap();
+        oversized_shards.extend(recovery.chunks(oversized_shard_len).map(<[u8]>::to_vec));
 
         let mut builder = Builder::<Sha256>::new(total as usize);
         for shard in &oversized_shards {
