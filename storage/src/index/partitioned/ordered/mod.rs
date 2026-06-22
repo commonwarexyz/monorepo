@@ -169,9 +169,10 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SoaCursor<'_, 
 ///
 /// A spilled partition lives in the index's `spilled` side-table, each key mapping to its values
 /// newest-first. The cursor re-resolves the key's value vector through the side-table on each
-/// operation: spilling is the rare, attack-driven case, so the extra `BTreeMap` descent is off the
-/// hot path. Deleting a key's last value drops its entry, and emptying the partition's last key
-/// removes it from the side-table (reverting it to an empty sorted-array partition).
+/// operation: spilling is the rare, non-uniform key distribution case, so the extra `BTreeMap`
+/// descent is off the hot path. Deleting a key's last value drops its entry, and emptying the
+/// partition's last key removes it from the side-table (reverting it to an empty sorted-array
+/// partition).
 struct SpilledCursor<'a, K: Ord + Copy, V> {
     spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
     partition: usize,
@@ -278,9 +279,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SpilledCursor<
             State::Active { offset } => offset,
         };
 
-        // While Active the cursor's partition and key are both present, so both entries are
-        // occupied; holding them lets the de-spill path drop the key and check emptiness without
-        // re-looking-up.
+        // The cursor's partition and key must both be present when active.
         let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(self.partition) else {
             unreachable!()
         };
@@ -292,6 +291,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SpilledCursor<
         let key_emptied = vals.is_empty();
         self.items.dec();
         self.pruned.inc();
+
         if key_emptied {
             // Removed the key's last value; drop the key, and de-spill the partition (back to an
             // empty sorted array) if that was its last key.
@@ -358,9 +358,9 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
 }
 
 /// Sorted-array length at which a partition spills to a `BTreeMap`. Set well above any honest
-/// occupancy (even ~1B keys at P=3 averages ~60 entries per partition) so honest workloads never
-/// spill; it exists only to bound adversarial grinding that floods a partition with distinct
-/// translated keys (see the module docs for what the guard does and does not bound).
+/// occupancy (even ~1B keys at P=3 averages ~60 entries per partition) so uniformly distributed
+/// keys should never spill; it exists only to bound adversarial grinding that floods a partition
+/// with distinct translated keys (see the module docs for what the guard does and does not bound).
 const SPILL_THRESHOLD: usize = 512;
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
@@ -377,9 +377,7 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
 
     /// Partitions that have spilled out of their sorted arrays (over-full from grinding), keyed by
     /// partition index; each maps translated keys to their values newest-first. Typically empty
-    /// unless key distribution is non-uniform, e.g. due to grinding. A spilled partition's sorted
-    /// arrays are emptied, so an *empty* partition with an entry here is "spilled"; an empty
-    /// partition with no entry is genuinely empty.
+    /// unless key distribution is non-uniform, e.g. due to grinding.
     spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
 
     /// Sorted-array length at which a partition spills to `spilled`; [SPILL_THRESHOLD] in
@@ -427,8 +425,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         index
     }
 
-    /// Spill partition `i` to the side-table if its sorted array has reached the threshold. Pure
-    /// representation change: the key/item counts are unaffected, so the metrics are not touched.
+    /// Spill partition `i` to the side-table if its sorted array has reached the threshold.
     fn maybe_spill(&mut self, i: usize) {
         if self.partitions[i].len() < self.threshold {
             return;
@@ -575,8 +572,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                 &self.pruned,
             )));
         }
-        // Partition i is empty here; if it has spilled and holds `k`, hand out a spilled cursor.
-        // The `!is_empty()` short-circuit keeps this free (no hashing of `i`) until an attack.
+
+        // Hand out a spilled cursor if the partition has spilled and holds `k`.
         if !self.spilled.is_empty()
             && self
                 .spilled
@@ -592,6 +589,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                 &self.pruned,
             )));
         }
+
+        // Partition is genuinely empty.
         None
     }
 
@@ -620,9 +619,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             self.maybe_spill(i);
             return None;
         }
-        // Partition i is empty here; if it has spilled, serve or create the key in its `BTreeMap`.
-        // The `!is_empty()` short-circuit keeps this free (no hashing of `i`) until an attack
-        // occurs; `inner`'s borrow ends at `contains_key` so the re-borrow for the cursor is sound.
+
+        // Partition i is empty. If it's because it has spilled, serve or create the key in its
+        // `BTreeMap`.
         if !self.spilled.is_empty() {
             if let Some(inner) = self.spilled.get(&i) {
                 if inner.contains_key(&k) {
@@ -641,11 +640,13 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                 return None;
             }
         }
-        // Genuinely empty partition: start a fresh sorted array.
+
+        // Partition i is genuinely empty: start a fresh sorted array.
         self.partitions[i].insert_at(0, k, value);
         self.keys.inc();
         self.items.inc();
         self.maybe_spill(i);
+
         None
     }
 
@@ -663,8 +664,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             self.maybe_spill(i);
             return;
         }
-        // Partition i is empty here. If it has spilled, route into its `BTreeMap`; the
-        // `!is_empty()` short-circuit keeps this free (no hashing of `i`) until an attack occurs.
+
+        // Route into the spilled partition's `BTreeMap`.
         if !self.spilled.is_empty() {
             if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
                 match partition.get_mut().entry(k) {
@@ -678,6 +679,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                 return;
             }
         }
+
         // Genuinely empty partition: start a fresh sorted array.
         self.partitions[i].insert_at(0, k, value);
         self.items.inc();
