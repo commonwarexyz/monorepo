@@ -18,7 +18,16 @@ commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder)
 
 // Keep each stripe large enough to amortize extra encoder/decoder setup
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
-// Non-final stripe widths must be aligned with reed-solomon-simd's block layout
+// Non-final stripe widths must be a multiple of reed-solomon-simd's internal SIMD block
+// size. That crate stores every shard as a sequence of 64-byte blocks (`[u8; 64]`; see its
+// `engine/shards.rs` and `algorithm.md`): each block holds 32 GF(2^16) symbols and is
+// encoded independently, with only the final (possibly partial) block packed specially.
+// Splitting a shard on 64-byte boundaries, and letting the final stripe absorb the tail,
+// therefore yields byte-identical output to encoding the whole shard at once. This is
+// consensus-critical: a divergence between the striped and non-striped paths would produce
+// different commitments for the same data. This couples us to an internal detail of the
+// dependency, so its version is pinned exactly in Cargo.toml and `test_recovery_output_format_pinned`
+// guards the byte layout. Re-verify this value (and re-run that fixture) on any dependency bump.
 const STRIPE_ALIGNMENT_BYTES: usize = 64;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
@@ -427,6 +436,11 @@ fn striped_ranges(shard_len: usize, parallelism: usize) -> Option<Vec<Range<usiz
     // Non-final stripes must end on aligned boundaries because reed-solomon-simd
     // internally lays shards out in aligned symbol blocks with a special final tail
     let full_blocks = shard_len / STRIPE_ALIGNMENT_BYTES;
+    // Bound the stripe count by available parallelism, the number of MIN_STRIPE_BYTES
+    // chunks (so each stripe stays large enough to amortize encoder/decoder setup), and
+    // the number of 64-byte blocks (each non-final stripe needs at least one whole block).
+    // The block bound is implied by the MIN_STRIPE_BYTES bound today (MIN_STRIPE_BYTES is a
+    // multiple of STRIPE_ALIGNMENT_BYTES), but is kept to state the invariant explicitly.
     let stripe_count = parallelism
         .min(shard_len / MIN_STRIPE_BYTES)
         .min(full_blocks)
@@ -451,6 +465,26 @@ fn striped_ranges(shard_len: usize, parallelism: usize) -> Option<Vec<Range<usiz
         start = end;
     }
     Some(ranges)
+}
+
+/// Read-only parameters shared across the decode helpers.
+///
+/// Bundling these keeps the decode functions below the argument-count threshold and
+/// ensures the same `n`/`k`/`m`/`shard_len`/`root`/`strategy` are threaded consistently
+/// between the striped and sequential paths.
+struct DecodeCtx<'a, H: Hasher, S: Strategy> {
+    /// Total number of shards (`k + m`).
+    n: usize,
+    /// Minimum shards required to decode (the number of original shards).
+    k: usize,
+    /// Number of recovery shards (`n - k`).
+    m: usize,
+    /// Width of every shard, in bytes.
+    shard_len: usize,
+    /// Commitment that the reconstructed codeword must reproduce.
+    root: &'a H::Digest,
+    /// Parallelism strategy.
+    strategy: &'a S,
 }
 
 fn decode_missing_original_stripe(
@@ -521,19 +555,16 @@ fn encode_recovery_stripe(
     Ok((range, recoveries))
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_striped<'a, H: Hasher, S: Strategy>(
-    n: usize,
-    k: usize,
-    m: usize,
-    shard_len: usize,
+    ctx: &DecodeCtx<'_, H, S>,
     ranges: Vec<Range<usize>>,
-    root: &H::Digest,
     mut shard_digests: Vec<Option<H::Digest>>,
     provided_originals: Vec<(usize, &'a [u8])>,
     provided_recoveries: Vec<(usize, &'a [u8])>,
-    strategy: &S,
 ) -> Result<Vec<u8>, Error> {
+    let &DecodeCtx {
+        k, m, shard_len, strategy, ..
+    } = ctx;
     assert!(ranges.len() > 1);
 
     let mut originals = vec![0u8; k * shard_len];
@@ -618,26 +649,18 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
     }
     drop(recovery_stripes);
 
-    verify_striped_codeword::<H, S>(
-        n,
-        root,
-        &mut shard_digests,
-        originals,
-        shard_len,
-        data,
-        strategy,
-    )
+    verify_striped_codeword::<H, S>(ctx, &mut shard_digests, originals, data)
 }
 
 fn verify_striped_codeword<H: Hasher, S: Strategy>(
-    n: usize,
-    root: &H::Digest,
+    ctx: &DecodeCtx<'_, H, S>,
     shard_digests: &mut [Option<H::Digest>],
     originals: Vec<u8>,
-    shard_len: usize,
     data: Vec<u8>,
-    strategy: &S,
 ) -> Result<Vec<u8>, Error> {
+    let &DecodeCtx {
+        n, shard_len, root, strategy, ..
+    } = ctx;
     let missing_shards = originals
         .chunks(shard_len)
         .enumerate()
@@ -668,19 +691,15 @@ fn verify_striped_codeword<H: Hasher, S: Strategy>(
     Ok(data)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn verify_sequential_codeword<H: Hasher, S: Strategy>(
-    n: usize,
-    k: usize,
-    m: usize,
-    shard_len: usize,
-    root: &H::Digest,
+    ctx: &DecodeCtx<'_, H, S>,
     mut shard_digests: Vec<Option<H::Digest>>,
-    provided_originals: &[(usize, &[u8])],
     provided_recoveries: &[(usize, &[u8])],
     originals: &[&[u8]],
-    strategy: &S,
 ) -> Result<Vec<u8>, Error> {
+    let &DecodeCtx {
+        n, k, m, shard_len, root, strategy,
+    } = ctx;
     let data = extract_data(originals, k, shard_len)?;
 
     let mut encoder = Cached::take(
@@ -696,11 +715,10 @@ fn verify_sequential_codeword<H: Hasher, S: Strategy>(
     }
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
 
-    for (idx, shard) in provided_originals {
-        if *shard != originals[*idx] {
-            return Err(Error::Inconsistent);
-        }
-    }
+    // Provided original bytes are already bound to the commitment by their verified
+    // inclusion proofs (their checked digests are reused when the root is rebuilt
+    // below), so they need no separate comparison here. Provided recovery shards must
+    // match the canonical re-encode before their checked digests are trusted.
     for (idx, shard) in provided_recoveries {
         let canonical = encoding.recovery(*idx).ok_or(Error::Inconsistent)?;
         if *shard != canonical {
@@ -748,18 +766,15 @@ fn verify_sequential_codeword<H: Hasher, S: Strategy>(
     Ok(data)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn decode_sequential<'a, H: Hasher, S: Strategy>(
-    n: usize,
-    k: usize,
-    m: usize,
-    shard_len: usize,
-    root: &H::Digest,
+    ctx: &DecodeCtx<'_, H, S>,
     shard_digests: Vec<Option<H::Digest>>,
     provided_originals: Vec<(usize, &'a [u8])>,
     provided_recoveries: Vec<(usize, &'a [u8])>,
-    strategy: &S,
 ) -> Result<Vec<u8>, Error> {
+    let &DecodeCtx {
+        k, m, shard_len, ..
+    } = ctx;
     if provided_originals.len() == k {
         // All originals are present, so skip Reed-Solomon decode and still run
         // canonical re-encode/root verification below
@@ -768,16 +783,10 @@ fn decode_sequential<'a, H: Hasher, S: Strategy>(
             shards[idx] = shard;
         }
         return verify_sequential_codeword::<H, S>(
-            n,
-            k,
-            m,
-            shard_len,
-            root,
+            ctx,
             shard_digests,
-            &provided_originals,
             &provided_recoveries,
             &shards,
-            strategy,
         );
     }
 
@@ -806,18 +815,7 @@ fn decode_sequential<'a, H: Hasher, S: Strategy>(
     for (idx, shard) in decoding.restored_original_iter() {
         shards[idx] = shard;
     }
-    verify_sequential_codeword::<H, S>(
-        n,
-        k,
-        m,
-        shard_len,
-        root,
-        shard_digests,
-        &provided_originals,
-        &provided_recoveries,
-        &shards,
-        strategy,
-    )
+    verify_sequential_codeword::<H, S>(ctx, shard_digests, &provided_recoveries, &shards)
 }
 
 /// Decode data from a set of [`CheckedChunk`]s.
@@ -889,32 +887,25 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
-    if let Some(ranges) = stripes {
-        return decode_striped::<H, S>(
-            n,
-            k,
-            m,
-            shard_len,
-            ranges,
-            root,
-            shard_digests,
-            provided_originals,
-            provided_recoveries,
-            strategy,
-        );
-    }
-
-    decode_sequential::<H, S>(
+    let ctx = DecodeCtx {
         n,
         k,
         m,
         shard_len,
         root,
-        shard_digests,
-        provided_originals,
-        provided_recoveries,
         strategy,
-    )
+    };
+    if let Some(ranges) = stripes {
+        return decode_striped::<H, S>(
+            &ctx,
+            ranges,
+            shard_digests,
+            provided_originals,
+            provided_recoveries,
+        );
+    }
+
+    decode_sequential::<H, S>(&ctx, shard_digests, provided_originals, provided_recoveries)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
@@ -1429,6 +1420,169 @@ mod tests {
                 }
             }
         }
+    }
+
+    // Each tamper mutates a canonical codeword in place before a (malicious) commitment is
+    // rebuilt over the tampered shards. `k` is the original-shard count, `shard_len` the
+    // per-shard width.
+    fn tamper_flip_recovery(shards: &mut [Vec<u8>], k: usize, _shard_len: usize) {
+        shards[k][0] ^= 0xFF;
+    }
+
+    fn tamper_flip_original_data(shards: &mut [Vec<u8>], _k: usize, shard_len: usize) {
+        // First payload byte sits right after the 4-byte length prefix.
+        let offset = u32::SIZE;
+        shards[offset / shard_len][offset % shard_len] ^= 0xFF;
+    }
+
+    fn tamper_corrupt_padding(shards: &mut [Vec<u8>], k: usize, shard_len: usize) {
+        // Final byte of the last original shard is canonical zero padding for the data
+        // sizes used by the adversarial tests below.
+        shards[k - 1][shard_len - 1] = 0xAA;
+    }
+
+    /// Encode `data` canonically, apply `tamper`, rebuild a (malicious) commitment over the
+    /// tampered shards, and decode the `selected` shard indices with `strategy`. Generic over
+    /// [`Strategy`] so the same attack drives both the sequential and striped decode paths.
+    fn decode_tampered_codeword<S: Strategy>(
+        total: u16,
+        min: u16,
+        data: &[u8],
+        selected: &[u16],
+        tamper: fn(&mut [Vec<u8>], usize, usize),
+        strategy: &S,
+    ) -> Result<Vec<u8>, Error> {
+        let (_root, chunks) = encode::<Sha256, _>(total, min, data, &Sequential).unwrap();
+        let mut shards = chunks.iter().map(|c| c.shard.to_vec()).collect::<Vec<_>>();
+        let shard_len = shards[0].len();
+        tamper(&mut shards, min as usize, shard_len);
+        let (root, chunks) = build_chunks(&shards);
+        let pieces = selected
+            .iter()
+            .map(|&i| checked(root, chunks[i as usize].clone()))
+            .collect::<Vec<_>>();
+        decode::<Sha256, _>(total, min, &root, pieces.iter(), strategy)
+    }
+
+    // (name, selected shard indices, tamper). With total=12/min=4, indices 0..4 are
+    // originals and 4..12 are recoveries.
+    #[allow(clippy::type_complexity)]
+    const ADVERSARIAL_SCENARIOS: &[(&str, &[u16], fn(&mut [Vec<u8>], usize, usize))] = &[
+        // Tampered recovery that is NOT provided: caught when the root is rebuilt from the
+        // re-encoded recoveries.
+        (
+            "tampered_recovery_unprovided",
+            &[0, 1, 2, 3],
+            tamper_flip_recovery,
+        ),
+        // Tampered recovery that IS provided and forces RS reconstruction of a missing
+        // original (exercises decode_missing_original_stripe on the striped path).
+        (
+            "tampered_recovery_provided",
+            &[0, 1, 2, 4],
+            tamper_flip_recovery,
+        ),
+        // Non-canonical (non-zero) trailing padding in an original shard (extract_data).
+        (
+            "non_canonical_padding",
+            &[0, 1, 2, 3],
+            tamper_corrupt_padding,
+        ),
+        // Tampered original payload byte: detected by the rebuilt commitment.
+        (
+            "tampered_original_data",
+            &[0, 1, 2, 3],
+            tamper_flip_original_data,
+        ),
+        // Recovery-only decode where one provided recovery is tampered.
+        ("recovery_only_tampered", &[4, 5, 6, 7], tamper_flip_recovery),
+    ];
+
+    /// Every adversarial scenario must be rejected as [`Error::Inconsistent`] on whichever
+    /// decode path `strategy` + `data` selects.
+    fn assert_adversarial_rejected<S: Strategy>(total: u16, min: u16, data: &[u8], strategy: &S) {
+        for &(name, selected, tamper) in ADVERSARIAL_SCENARIOS {
+            let result = decode_tampered_codeword(total, min, data, selected, tamper, strategy);
+            assert!(
+                matches!(result, Err(Error::Inconsistent)),
+                "scenario {name} not rejected as Inconsistent: {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_adversarial_rejection_sequential_small() {
+        // Small payload: striping never engages, so this exercises the sequential path
+        // (matching the rest of the small-data adversarial tests).
+        assert_adversarial_rejected(12, 4, &[0xCDu8; 30], &Sequential);
+    }
+
+    /// The striped decode path re-implements every consensus-critical rejection check in a
+    /// separate code path from the sequential one. Drive each malicious scenario through both
+    /// paths on the same large payload and require identical (Inconsistent) verdicts.
+    #[test]
+    fn test_adversarial_rejection_striped_matches_sequential() {
+        let total = 12u16;
+        let min = 4u16;
+
+        // Large payload so the parallel strategy takes the striped path. Assert it actually
+        // splits into >= 2 stripes; otherwise this would silently degrade to the sequential
+        // path and give false confidence.
+        let data = vec![0xABu8; 64 * 1024];
+        let shard_len = canonical_shard_len(data.len(), min as usize);
+        let rayon = Rayon::new(NZUsize!(4)).unwrap();
+        assert!(
+            striped_ranges(shard_len, rayon.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            "test must exercise >= 2 stripes (shard_len={shard_len})"
+        );
+
+        // Same attacks, same data: the striped path must reject identically to sequential.
+        assert_adversarial_rejected(total, min, &data, &Sequential);
+        assert_adversarial_rejected(total, min, &data, &rayon);
+
+        // Sanity: an untampered mixed (some originals + a recovery) set still decodes via the
+        // striped path, forcing decode_missing_original_stripe to reconstruct an original.
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
+        let mixed = [0u16, 1, 2, 4]
+            .into_iter()
+            .map(|i| checked(root, chunks[i as usize].clone()))
+            .collect::<Vec<_>>();
+        let decoded = decode::<Sha256, _>(total, min, &root, mixed.iter(), &rayon).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    /// Pin the exact reed-solomon-simd recovery output for a fixed `(k, m, shard_len)` with a
+    /// partial final block (`shard_len % 64 != 0`). The striped coder assumes this crate's
+    /// internal 64-byte block layout and tail packing (see [`STRIPE_ALIGNMENT_BYTES`]); if a
+    /// dependency change alters the produced bytes this fixture trips, signalling that the
+    /// striping assumption must be re-verified before the new output is accepted.
+    #[test]
+    fn test_recovery_output_format_pinned() {
+        let k = 5usize;
+        let m = 3usize;
+        // Two full 64-byte blocks plus a 2-byte partial tail.
+        let shard_len = 2 * STRIPE_ALIGNMENT_BYTES + 2;
+
+        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        for i in 0..k {
+            let shard: Vec<u8> = (0..shard_len)
+                .map(|j| ((i * 31 + j * 7) & 0xFF) as u8)
+                .collect();
+            encoder.add_original_shard(&shard).unwrap();
+        }
+        let encoding = encoder.encode().unwrap();
+
+        let mut hasher = Sha256::new();
+        for shard in encoding.recovery_iter() {
+            hasher.update(shard);
+        }
+        let digest = hasher.finalize();
+        assert_eq!(
+            format!("{digest}"),
+            "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
+            "reed-solomon-simd recovery output changed; re-verify the 64-byte striping \
+             assumption (STRIPE_ALIGNMENT_BYTES) before updating this fixture"
+        );
     }
 
     #[test]

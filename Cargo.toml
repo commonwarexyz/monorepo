@@ -189,7 +189,11 @@ rand_core = "0.6.4"
 rand_distr = "0.4.3"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }
-reed-solomon-simd = "3.1.0"
+# Pinned exactly: the striped Reed-Solomon coder (coding/src/reed_solomon.rs) relies on this crate's
+# internal 64-byte SIMD block layout being byte-stable. A minor/patch bump could silently change that
+# layout and diverge the striped vs non-striped commitments. Re-verify the striping assumption (and the
+# `test_recovery_output_format_pinned` fixture) before relaxing this pin.
+reed-solomon-simd = "=3.1.0"
 reqwest = "0.12.12"
 rstest = "0.26.1"
 serde = "1.0.218"

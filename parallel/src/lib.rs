@@ -239,7 +239,10 @@ commonware_macros::stability_scope!(BETA {
         /// This is a convenience method that applies `map_op` to each element and
         /// collects the results into a single `Result`. Output ordering matches
         /// [`map_collect_vec`](Self::map_collect_vec). This is for ergonomic error
-        /// propagation, not early cancellation.
+        /// propagation, not early cancellation: `map_op` is applied to every element
+        /// regardless of failures, and when more than one element fails the returned
+        /// error is the one from the first failing element in input order. This holds
+        /// for every [`Strategy`], so callers can rely on a deterministic error.
         ///
         /// # Arguments
         ///
