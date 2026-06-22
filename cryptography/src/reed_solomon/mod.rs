@@ -11,7 +11,6 @@
 //! - Uses workspace dependencies and [`commonware_formatting`] in the test harness.
 //! - Uses [`thiserror`] for error display formatting.
 //! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`].
-//! - Added copy-into helpers for encoding and decoding results.
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd

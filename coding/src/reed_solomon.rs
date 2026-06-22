@@ -361,9 +361,8 @@ fn encode<H: Hasher, S: Strategy>(
             let mut buf = vec![0u8; m * shard_len];
             for i in 0..m {
                 let start = i * shard_len;
-                encoding
-                    .copy_recovery(i, &mut buf[start..start + shard_len])
-                    .map_err(Error::ReedSolomon)?;
+                let shard = encoding.recovery(i).ok_or(Error::Inconsistent)?;
+                buf[start..start + shard_len].copy_from_slice(shard);
             }
             buf
         }
@@ -503,16 +502,17 @@ fn decode_missing_original_stripe_into(
     }
 
     let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-    for idx in missing_originals {
-        let start = *idx * full_shard_len + range.start;
+    for (pos, idx) in missing_originals.iter().enumerate() {
+        let start = pos * full_shard_len + range.start;
         // SAFETY: each task writes only `range` for each missing original shard. Stripe
         // ranges are disjoint, and all target slices are within the preallocated
-        // `k * full_shard_len` originals buffer.
+        // missing-originals buffer.
         let dst =
             unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
-        decoding
-            .copy_restored_original(*idx, dst)
+        let shard = decoding
+            .restored_original(*idx)
             .ok_or(Error::Inconsistent)?;
+        dst.copy_from_slice(shard);
     }
 
     Ok(())
@@ -542,9 +542,8 @@ fn encode_recovery_stripe(
     let mut recoveries = vec![0u8; m * shard_len];
     for i in 0..m {
         let start = i * shard_len;
-        encoding
-            .copy_recovery(i, &mut recoveries[start..start + shard_len])
-            .map_err(Error::ReedSolomon)?;
+        let shard = encoding.recovery(i).ok_or(Error::Inconsistent)?;
+        recoveries[start..start + shard_len].copy_from_slice(shard);
     }
 
     Ok((range, recoveries))
@@ -580,7 +579,8 @@ fn encode_recovery_stripe_into(
         // `m * full_shard_len` recovery buffer.
         let dst =
             unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
-        encoding.copy_recovery(i, dst).map_err(Error::ReedSolomon)?;
+        let shard = encoding.recovery(i).ok_or(Error::Inconsistent)?;
+        dst.copy_from_slice(shard);
     }
 
     Ok(())
@@ -598,11 +598,6 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
     } = ctx;
     assert!(ranges.len() > 1);
 
-    let mut originals = vec![0u8; k * shard_len];
-    for (idx, shard) in &provided_originals {
-        originals[*idx * shard_len..(*idx + 1) * shard_len].copy_from_slice(shard);
-    }
-
     let missing_originals = shard_digests
         .iter()
         .take(k)
@@ -610,8 +605,9 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
         .filter_map(|(i, digest)| digest.is_none().then_some(i))
         .collect::<Vec<_>>();
 
+    let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
     if !missing_originals.is_empty() {
-        let dst = originals.as_mut_ptr() as usize;
+        let dst = restored_originals.as_mut_ptr() as usize;
         strategy.try_map_collect_vec(ranges.clone(), |range| {
             decode_missing_original_stripe_into(
                 k,
@@ -626,7 +622,15 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
         })?;
     }
 
-    let original_refs = originals.chunks(shard_len).collect::<Vec<_>>();
+    let mut original_refs: Vec<&[u8]> = vec![&[]; k];
+    for &(idx, shard) in &provided_originals {
+        original_refs[idx] = shard;
+    }
+    for (pos, idx) in missing_originals.iter().enumerate() {
+        let start = pos * shard_len;
+        original_refs[*idx] = &restored_originals[start..start + shard_len];
+    }
+
     let data = extract_data(&original_refs, k, shard_len)?;
 
     let recovery_stripes = strategy.try_map_collect_vec(ranges, |range| {
@@ -638,8 +642,9 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
         provided_recovery_by_idx[idx] = Some(shard);
     }
 
-    // Provided originals are already copied into `originals`; provided recoveries
-    // must match the canonical re-encode before reusing their checked digests
+    // Provided originals are already bound to the commitment by their checked
+    // digests. Provided recoveries must match the canonical re-encode before
+    // reusing their checked digests.
     for (range, recovery_stripe) in &recovery_stripes {
         let stripe_len = range.len();
         for i in 0..m {
@@ -673,22 +678,22 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
     }
     drop(recovery_stripes);
 
-    verify_striped_codeword::<H, S>(ctx, &mut shard_digests, originals, data)
+    verify_striped_codeword::<H, S>(ctx, &mut shard_digests, &original_refs, data)
 }
 
 fn verify_striped_codeword<H: Hasher, S: Strategy>(
     ctx: &DecodeCtx<'_, H, S>,
     shard_digests: &mut [Option<H::Digest>],
-    originals: Vec<u8>,
+    originals: &[&[u8]],
     data: Vec<u8>,
 ) -> Result<Vec<u8>, Error> {
     let &DecodeCtx {
-        n, shard_len, root, strategy, ..
+        n, root, strategy, ..
     } = ctx;
     let missing_shards = originals
-        .chunks(shard_len)
+        .iter()
         .enumerate()
-        .filter_map(|(i, shard)| shard_digests[i].is_none().then_some((i, shard)))
+        .filter_map(|(i, shard)| shard_digests[i].is_none().then_some((i, *shard)))
         .collect::<Vec<_>>();
 
     for (i, digest) in

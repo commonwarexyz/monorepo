@@ -1,4 +1,4 @@
-use crate::reed_solomon::{rate::EncoderWork, Error};
+use crate::reed_solomon::rate::EncoderWork;
 
 // ======================================================================
 // EncoderResult - PUBLIC
@@ -22,28 +22,6 @@ impl EncoderResult<'_> {
     /// and these same indexes must be used when decoding.
     pub fn recovery(&self, index: usize) -> Option<&[u8]> {
         self.work.recovery(index)
-    }
-
-    /// Copies recovery shard with given `index` into `dst`.
-    ///
-    /// Recovery shards have indexes `0..recovery_count` and `dst` must have the
-    /// configured shard length.
-    pub fn copy_recovery(&self, index: usize, dst: &mut [u8]) -> Result<(), Error> {
-        let shard = self
-            .work
-            .recovery(index)
-            .ok_or(Error::InvalidRecoveryShardIndex {
-                recovery_count: self.work.recovery_count(),
-                index,
-            })?;
-        if dst.len() != shard.len() {
-            return Err(Error::DifferentShardSize {
-                shard_bytes: shard.len(),
-                got: dst.len(),
-            });
-        }
-        dst.copy_from_slice(shard);
-        Ok(())
     }
 
     /// Returns iterator over all recovery shards ordered by their indexes.
@@ -157,19 +135,6 @@ mod tests {
         ];
         assert!(result.recovery(3).is_none());
         test_util::assert_hash(all, test_util::LOW_2_3);
-
-        let mut copied = vec![0u8; 1024];
-        result.copy_recovery(1, &mut copied).unwrap();
-        assert_eq!(copied.as_slice(), result.recovery(1).unwrap());
-        assert!(matches!(
-            result.copy_recovery(3, &mut copied),
-            Err(Error::InvalidRecoveryShardIndex { .. })
-        ));
-        let mut short = vec![0u8; 1023];
-        assert!(matches!(
-            result.copy_recovery(0, &mut short),
-            Err(Error::DifferentShardSize { .. })
-        ));
 
         let mut iter: Recovery<'_> = result.recovery_iter();
         let all = vec![

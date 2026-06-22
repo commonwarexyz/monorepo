@@ -22,19 +22,6 @@ impl DecoderResult<'_> {
         self.work.restored_original(index)
     }
 
-    /// Copies restored original shard with given `index` into `dst`.
-    ///
-    /// Returns `None` if `index` does not correspond to a restored original or
-    /// if `dst` does not have the configured shard length.
-    pub fn copy_restored_original(&self, index: usize, dst: &mut [u8]) -> Option<()> {
-        let shard = self.work.restored_original(index)?;
-        if dst.len() != shard.len() {
-            return None;
-        }
-        dst.copy_from_slice(shard);
-        Some(())
-    }
-
     /// Returns iterator over all restored original shards
     /// and their indexes, ordered by indexes.
     pub const fn restored_original_iter(&self) -> RestoredOriginal<'_> {
@@ -153,13 +140,6 @@ mod tests {
         assert!(result.restored_original(1).is_none());
         assert_eq!(result.restored_original(2).unwrap(), original[2]);
         assert!(result.restored_original(3).is_none());
-
-        let mut copied = vec![0u8; shard_size];
-        assert_eq!(result.copy_restored_original(0, &mut copied), Some(()));
-        assert_eq!(copied.as_slice(), original[0].as_slice());
-        assert!(result.copy_restored_original(1, &mut copied).is_none());
-        let mut short = vec![0u8; shard_size - 1];
-        assert!(result.copy_restored_original(2, &mut short).is_none());
 
         let mut iter: RestoredOriginal<'_> = result.restored_original_iter();
         assert_eq!(iter.next(), Some((0, original[0].as_slice())));
