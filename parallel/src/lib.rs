@@ -727,7 +727,7 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
                 let items: Vec<I::Item> = iter.into_iter().collect();
                 items
                     .into_par_iter()
-                    .try_fold(&identity, |acc, item| fold_op(acc, item))
+                    .try_fold(&identity, &fold_op)
                     .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
             })
         }

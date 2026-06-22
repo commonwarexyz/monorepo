@@ -333,13 +333,13 @@ fn encode<H: Hasher, S: Strategy>(
     let (padded, shard_len) = prepare_data(data, k);
 
     // Compute recovery shards, striping large shard widths across the strategy
-    let recovery_buf = match striped_ranges(shard_len, strategy.parallelism_hint()) {
+    let recovery_buf = match striped::ranges(shard_len, strategy.parallelism_hint()) {
         Some(ranges) => {
             let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
             let mut buf = vec![0u8; m * shard_len];
-            let dst = buf.as_mut_ptr() as usize;
+            let dst = striped::Dst::new(&mut buf, shard_len);
             strategy.try_map_collect_vec(ranges, |range| {
-                encode_recovery_stripe_into(k, m, range, &original_shards, dst, shard_len)
+                striped::encode_recovery_into(k, m, range, &original_shards, dst)
             })?;
             buf
         }
@@ -358,11 +358,9 @@ fn encode<H: Hasher, S: Strategy>(
 
             // Compute recovery shards and collect into a contiguous buffer
             let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-            let mut buf = vec![0u8; m * shard_len];
-            for i in 0..m {
-                let start = i * shard_len;
-                let shard = encoding.recovery(i).ok_or(Error::Inconsistent)?;
-                buf[start..start + shard_len].copy_from_slice(shard);
+            let mut buf = Vec::with_capacity(m * shard_len);
+            for shard in encoding.recovery_iter() {
+                buf.extend_from_slice(shard);
             }
             buf
         }
@@ -398,60 +396,6 @@ fn encode<H: Hasher, S: Strategy>(
     Ok((root, chunks))
 }
 
-// Striping splits every shard by byte range and runs independent
-// Reed-Solomon operations over those ranges
-//
-//   originals:
-//     O0: [ stripe 0 ][ stripe 1 ][ tail ]
-//     O1: [ stripe 0 ][ stripe 1 ][ tail ]
-//     O(k-1): [ stripe 0 ][ stripe 1 ][ tail ]
-//
-//   encode stripe 0 -> R0[0], R1[0], more recoveries
-//   encode stripe 1 -> R0[1], R1[1], more recoveries
-//   encode tail     -> R0[t], R1[t], more recoveries
-//
-//   recovery Ri = concat(Ri[0], Ri[1], Ri[t])
-//
-// Decode uses the same layout in reverse: recover only missing original
-// stripes, re-encode recovery stripes from the reconstructed originals,
-// compare provided recoveries against those stripes, and hash missing
-// recoveries without first materializing full recovery shards
-fn striped_ranges(shard_len: usize, parallelism: usize) -> Option<Vec<Range<usize>>> {
-    // Non-final stripes must end on aligned boundaries because the vendored encoder
-    // internally lays shards out in aligned symbol blocks with a special final tail.
-    let full_blocks = shard_len / SHARD_CHUNK_BYTES;
-    // Bound the stripe count by available parallelism, the number of MIN_STRIPE_BYTES
-    // chunks (so each stripe stays large enough to amortize encoder/decoder setup), and
-    // the number of `SHARD_CHUNK_BYTES` blocks (each non-final stripe needs at
-    // least one whole block).
-    // The block bound is implied by the MIN_STRIPE_BYTES bound today (MIN_STRIPE_BYTES is a
-    // multiple of SHARD_CHUNK_BYTES), but is kept to state the invariant explicitly.
-    let stripe_count = parallelism
-        .min(shard_len / MIN_STRIPE_BYTES)
-        .min(full_blocks)
-        .max(1);
-    if stripe_count <= 1 {
-        return None;
-    }
-
-    let mut ranges = Vec::with_capacity(stripe_count);
-    let mut start = 0usize;
-    for stripe in 0..stripe_count {
-        let remaining_stripes = stripe_count - stripe;
-        let remaining = shard_len - start;
-        let len = if remaining_stripes == 1 {
-            remaining
-        } else {
-            let remaining_full_blocks = remaining / SHARD_CHUNK_BYTES;
-            (remaining_full_blocks / remaining_stripes).max(1) * SHARD_CHUNK_BYTES
-        };
-        let end = start + len;
-        ranges.push(start..end);
-        start = end;
-    }
-    Some(ranges)
-}
-
 /// Read-only parameters shared across the decode helpers.
 ///
 /// Bundling these keeps the decode functions below the argument-count threshold and
@@ -472,384 +416,492 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     strategy: &'a S,
 }
 
-fn decode_missing_original_stripe_into(
-    k: usize,
-    m: usize,
-    range: Range<usize>,
-    provided_originals: &[(usize, &[u8])],
-    provided_recoveries: &[(usize, &[u8])],
-    missing_originals: &[usize],
-    dst: usize,
-    full_shard_len: usize,
-) -> Result<(), Error> {
-    let shard_len = range.len();
-    let mut decoder = Cached::take(
-        &CACHED_DECODER,
-        || Decoder::new(k, m, shard_len),
-        |dec| dec.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
+/// Striped Reed-Solomon: split every shard by byte range and run independent
+/// Reed-Solomon operations over those ranges.
+///
+/// ```text
+///   originals:
+///     O0: [ stripe 0 ][ stripe 1 ][ tail ]
+///     O1: [ stripe 0 ][ stripe 1 ][ tail ]
+///     O(k-1): [ stripe 0 ][ stripe 1 ][ tail ]
+///
+///   encode stripe 0 -> R0[0], R1[0], more recoveries
+///   encode stripe 1 -> R0[1], R1[1], more recoveries
+///   encode tail     -> R0[t], R1[t], more recoveries
+///
+///   recovery Ri = concat(Ri[0], Ri[1], Ri[t])
+/// ```
+///
+/// [`decode`](striped::decode) uses the same layout in reverse: recover only missing
+/// original stripes, re-encode recovery stripes from the reconstructed originals, compare
+/// provided recoveries against those stripes, and hash missing recoveries without first
+/// materializing full recovery shards.
+mod striped {
+    use super::*;
 
-    for (idx, shard) in provided_originals {
-        decoder
-            .add_original_shard(*idx, &shard[range.clone()])
-            .map_err(Error::ReedSolomon)?;
-    }
-    for (idx, shard) in provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, &shard[range.clone()])
-            .map_err(Error::ReedSolomon)?;
-    }
-
-    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-    for (pos, idx) in missing_originals.iter().enumerate() {
-        let start = pos * full_shard_len + range.start;
-        // SAFETY: each task writes only `range` for each missing original shard. Stripe
-        // ranges are disjoint, and all target slices are within the preallocated
-        // missing-originals buffer.
-        let dst = unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
-        let shard = decoding
-            .restored_original(*idx)
-            .ok_or(Error::Inconsistent)?;
-        dst.copy_from_slice(shard);
+    /// Target for writing stripes into a shared, strided output buffer in parallel.
+    ///
+    /// Holds the buffer's base address as a `usize` so disjoint stripe tasks can write the
+    /// same allocation concurrently (a `&mut` would not be `Send` across tasks). Shard `i`
+    /// occupies `[i * shard_len, (i + 1) * shard_len)`, and each task writes only its own
+    /// stripe `range` within each shard.
+    #[derive(Clone, Copy)]
+    pub(super) struct Dst {
+        ptr: usize,
+        shard_len: usize,
     }
 
-    Ok(())
-}
-
-fn encode_recovery_stripe(
-    k: usize,
-    m: usize,
-    range: Range<usize>,
-    originals: &[impl AsRef<[u8]>],
-) -> Result<(Range<usize>, Vec<u8>), Error> {
-    let shard_len = range.len();
-    let mut encoder = Cached::take(
-        &CACHED_ENCODER,
-        || Encoder::new(k, m, shard_len),
-        |enc| enc.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-
-    for shard in originals.iter().take(k) {
-        let shard = shard.as_ref();
-        encoder
-            .add_original_shard(&shard[range.clone()])
-            .map_err(Error::ReedSolomon)?;
-    }
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let mut recoveries = vec![0u8; m * shard_len];
-    for i in 0..m {
-        let start = i * shard_len;
-        let shard = encoding.recovery(i).ok_or(Error::Inconsistent)?;
-        recoveries[start..start + shard_len].copy_from_slice(shard);
-    }
-
-    Ok((range, recoveries))
-}
-
-fn encode_recovery_stripe_into(
-    k: usize,
-    m: usize,
-    range: Range<usize>,
-    originals: &[impl AsRef<[u8]>],
-    dst: usize,
-    full_shard_len: usize,
-) -> Result<(), Error> {
-    let shard_len = range.len();
-    let mut encoder = Cached::take(
-        &CACHED_ENCODER,
-        || Encoder::new(k, m, shard_len),
-        |enc| enc.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-
-    for shard in originals.iter().take(k) {
-        let shard = shard.as_ref();
-        encoder
-            .add_original_shard(&shard[range.clone()])
-            .map_err(Error::ReedSolomon)?;
-    }
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    for i in 0..m {
-        let start = i * full_shard_len + range.start;
-        // SAFETY: each task writes only `range` for each recovery shard. Stripe ranges
-        // are disjoint, and all target slices are within the preallocated
-        // `m * full_shard_len` recovery buffer.
-        let dst = unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
-        let shard = encoding.recovery(i).ok_or(Error::Inconsistent)?;
-        dst.copy_from_slice(shard);
-    }
-
-    Ok(())
-}
-
-fn decode_striped<'a, H: Hasher, S: Strategy>(
-    ctx: &DecodeCtx<'_, H, S>,
-    ranges: Vec<Range<usize>>,
-    mut shard_digests: Vec<Option<H::Digest>>,
-    provided_originals: Vec<(usize, &'a [u8])>,
-    provided_recoveries: Vec<(usize, &'a [u8])>,
-) -> Result<Vec<u8>, Error> {
-    let &DecodeCtx {
-        k,
-        m,
-        shard_len,
-        strategy,
-        ..
-    } = ctx;
-    assert!(ranges.len() > 1);
-
-    let missing_originals = shard_digests
-        .iter()
-        .take(k)
-        .enumerate()
-        .filter_map(|(i, digest)| digest.is_none().then_some(i))
-        .collect::<Vec<_>>();
-
-    let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
-    if !missing_originals.is_empty() {
-        let dst = restored_originals.as_mut_ptr() as usize;
-        strategy.try_map_collect_vec(ranges.clone(), |range| {
-            decode_missing_original_stripe_into(
-                k,
-                m,
-                range,
-                &provided_originals,
-                &provided_recoveries,
-                &missing_originals,
-                dst,
+    impl Dst {
+        pub(super) fn new(buf: &mut [u8], shard_len: usize) -> Self {
+            Self {
+                ptr: buf.as_mut_ptr() as usize,
                 shard_len,
-            )
-        })?;
+            }
+        }
+
+        /// Copies `src` into stripe `range` of shard `index`.
+        ///
+        /// # Safety
+        ///
+        /// Callers must ensure no two concurrent writes overlap. Stripe `range`s are disjoint
+        /// and shard slots are disjoint, so concurrent tasks never alias. `index` and `range`
+        /// must stay within the buffer the [`Dst`] was built from, and `src.len()` must
+        /// equal `range.len()`.
+        unsafe fn write(&self, index: usize, range: &Range<usize>, src: &[u8]) {
+            let start = index * self.shard_len + range.start;
+            let out = std::slice::from_raw_parts_mut((self.ptr as *mut u8).add(start), range.len());
+            out.copy_from_slice(src);
+        }
     }
 
-    let mut original_refs: Vec<&[u8]> = vec![&[]; k];
-    for &(idx, shard) in &provided_originals {
-        original_refs[idx] = shard;
+    /// Split a shard of `shard_len` bytes into disjoint stripe ranges, or return `None`
+    /// when striping would not help (too little parallelism or data).
+    ///
+    /// Every non-final stripe ends on a [`SHARD_CHUNK_BYTES`] boundary: the engine lays
+    /// shards out in symbol blocks of that width (a partial final block is padded
+    /// internally), so a boundary in the middle of a block would change the bytes each
+    /// sub-instance encodes.
+    pub(super) fn ranges(shard_len: usize, parallelism: usize) -> Option<Vec<Range<usize>>> {
+        let full_blocks = shard_len / SHARD_CHUNK_BYTES;
+
+        // Bound the stripe count by available parallelism, the number of MIN_STRIPE_BYTES
+        // chunks (so each stripe stays large enough to amortize encoder/decoder setup), and
+        // the number of `SHARD_CHUNK_BYTES` blocks (each non-final stripe needs at least one
+        // whole block). The block bound is implied by the MIN_STRIPE_BYTES bound today
+        // (MIN_STRIPE_BYTES is a multiple of SHARD_CHUNK_BYTES), but is kept to state the
+        // invariant explicitly.
+        let stripe_count = parallelism
+            .min(shard_len / MIN_STRIPE_BYTES)
+            .min(full_blocks)
+            .max(1);
+        if stripe_count <= 1 {
+            return None;
+        }
+
+        let mut ranges = Vec::with_capacity(stripe_count);
+        let mut start = 0usize;
+        for stripe in 0..stripe_count {
+            let remaining_stripes = stripe_count - stripe;
+            let remaining = shard_len - start;
+            let len = if remaining_stripes == 1 {
+                remaining
+            } else {
+                let remaining_full_blocks = remaining / SHARD_CHUNK_BYTES;
+                (remaining_full_blocks / remaining_stripes).max(1) * SHARD_CHUNK_BYTES
+            };
+            let end = start + len;
+            ranges.push(start..end);
+            start = end;
+        }
+        Some(ranges)
     }
-    for (pos, idx) in missing_originals.iter().enumerate() {
-        let start = pos * shard_len;
-        original_refs[*idx] = &restored_originals[start..start + shard_len];
+
+    /// Recover the missing original shards for a single stripe, writing each restored
+    /// shard's stripe into `dst` (one slot per entry of `missing_originals`).
+    fn decode_missing_original_into(
+        k: usize,
+        m: usize,
+        range: Range<usize>,
+        provided_originals: &[(usize, &[u8])],
+        provided_recoveries: &[(usize, &[u8])],
+        missing_originals: &[usize],
+        dst: Dst,
+    ) -> Result<(), Error> {
+        let shard_len = range.len();
+        let mut decoder = Cached::take(
+            &CACHED_DECODER,
+            || Decoder::new(k, m, shard_len),
+            |dec| dec.reset(k, m, shard_len),
+        )
+        .map_err(Error::ReedSolomon)?;
+
+        for (idx, shard) in provided_originals {
+            decoder
+                .add_original_shard(*idx, &shard[range.clone()])
+                .map_err(Error::ReedSolomon)?;
+        }
+        for (idx, shard) in provided_recoveries {
+            decoder
+                .add_recovery_shard(*idx, &shard[range.clone()])
+                .map_err(Error::ReedSolomon)?;
+        }
+
+        let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+        for (pos, idx) in missing_originals.iter().enumerate() {
+            let shard = decoding
+                .restored_original(*idx)
+                .ok_or(Error::Inconsistent)?;
+            // SAFETY: stripe `range`s and missing-original slots are disjoint, so concurrent
+            // tasks never alias; see [`Dst::write`].
+            unsafe { dst.write(pos, &range, shard) };
+        }
+
+        Ok(())
     }
 
-    let data = extract_data(&original_refs, k, shard_len)?;
+    /// Encode the recovery shards for a single stripe, returning the stripe's range and
+    /// the `m` recovery stripes concatenated into one buffer.
+    fn encode_recovery(
+        k: usize,
+        m: usize,
+        range: Range<usize>,
+        originals: &[impl AsRef<[u8]>],
+    ) -> Result<(Range<usize>, Vec<u8>), Error> {
+        let shard_len = range.len();
+        let mut encoder = Cached::take(
+            &CACHED_ENCODER,
+            || Encoder::new(k, m, shard_len),
+            |enc| enc.reset(k, m, shard_len),
+        )
+        .map_err(Error::ReedSolomon)?;
 
-    let recovery_stripes = strategy.try_map_collect_vec(ranges, |range| {
-        encode_recovery_stripe(k, m, range, &original_refs)
-    })?;
+        for shard in originals.iter().take(k) {
+            let shard = shard.as_ref();
+            encoder
+                .add_original_shard(&shard[range.clone()])
+                .map_err(Error::ReedSolomon)?;
+        }
+        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+        let mut recoveries = Vec::with_capacity(m * shard_len);
+        for shard in encoding.recovery_iter() {
+            recoveries.extend_from_slice(shard);
+        }
 
-    let mut provided_recovery_by_idx = vec![None; m];
-    for (idx, shard) in provided_recoveries {
-        provided_recovery_by_idx[idx] = Some(shard);
+        Ok((range, recoveries))
     }
 
-    // Provided originals are already bound to the commitment by their checked
-    // digests. Provided recoveries must match the canonical re-encode before
-    // reusing their checked digests.
-    for (range, recovery_stripe) in &recovery_stripes {
-        let stripe_len = range.len();
-        for i in 0..m {
-            let stripe = &recovery_stripe[i * stripe_len..(i + 1) * stripe_len];
-            if let Some(provided) = provided_recovery_by_idx[i] {
-                if &provided[range.clone()] != stripe {
-                    return Err(Error::Inconsistent);
+    /// Encode the recovery shards for a single stripe, writing each recovery shard's
+    /// stripe into `dst` (one slot per recovery shard).
+    pub(super) fn encode_recovery_into(
+        k: usize,
+        m: usize,
+        range: Range<usize>,
+        originals: &[impl AsRef<[u8]>],
+        dst: Dst,
+    ) -> Result<(), Error> {
+        let shard_len = range.len();
+        let mut encoder = Cached::take(
+            &CACHED_ENCODER,
+            || Encoder::new(k, m, shard_len),
+            |enc| enc.reset(k, m, shard_len),
+        )
+        .map_err(Error::ReedSolomon)?;
+
+        for shard in originals.iter().take(k) {
+            let shard = shard.as_ref();
+            encoder
+                .add_original_shard(&shard[range.clone()])
+                .map_err(Error::ReedSolomon)?;
+        }
+        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+        for (i, shard) in encoding.recovery_iter().enumerate() {
+            // SAFETY: stripe `range`s and recovery shard slots are disjoint, so concurrent
+            // tasks never alias; see [`Dst::write`].
+            unsafe { dst.write(i, &range, shard) };
+        }
+
+        Ok(())
+    }
+
+    /// Decode the codeword stripe by stripe, reconstructing the original data and
+    /// verifying the rebuilt commitment against `ctx.root`.
+    pub(super) fn decode<'a, H: Hasher, S: Strategy>(
+        ctx: &DecodeCtx<'_, H, S>,
+        ranges: Vec<Range<usize>>,
+        mut shard_digests: Vec<Option<H::Digest>>,
+        provided_originals: Vec<(usize, &'a [u8])>,
+        provided_recoveries: Vec<(usize, &'a [u8])>,
+    ) -> Result<Vec<u8>, Error> {
+        let &DecodeCtx {
+            k,
+            m,
+            shard_len,
+            strategy,
+            ..
+        } = ctx;
+        assert!(ranges.len() > 1);
+
+        // Recover any missing original shards, one stripe per task.
+        let missing_originals = shard_digests
+            .iter()
+            .take(k)
+            .enumerate()
+            .filter_map(|(i, digest)| digest.is_none().then_some(i))
+            .collect::<Vec<_>>();
+
+        let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
+        if !missing_originals.is_empty() {
+            let dst = Dst::new(&mut restored_originals, shard_len);
+            strategy.try_map_collect_vec(ranges.clone(), |range| {
+                decode_missing_original_into(
+                    k,
+                    m,
+                    range,
+                    &provided_originals,
+                    &provided_recoveries,
+                    &missing_originals,
+                    dst,
+                )
+            })?;
+        }
+
+        // Gather references to every original shard, provided or restored.
+        let mut original_refs: Vec<&[u8]> = vec![&[]; k];
+        for &(idx, shard) in &provided_originals {
+            original_refs[idx] = shard;
+        }
+        for (pos, idx) in missing_originals.iter().enumerate() {
+            let start = pos * shard_len;
+            original_refs[*idx] = &restored_originals[start..start + shard_len];
+        }
+
+        let data = extract_data(&original_refs, k, shard_len)?;
+
+        // Re-encode the recovery stripes from the reconstructed originals.
+        let recovery_stripes =
+            strategy.try_map_collect_vec(ranges, |range| encode_recovery(k, m, range, &original_refs))?;
+
+        let mut provided_recovery_by_idx = vec![None; m];
+        for (idx, shard) in provided_recoveries {
+            provided_recovery_by_idx[idx] = Some(shard);
+        }
+
+        // Provided originals are already bound to the commitment by their checked
+        // digests. Provided recoveries must match the canonical re-encode before
+        // reusing their checked digests.
+        for (range, recovery_stripe) in &recovery_stripes {
+            let stripe_len = range.len();
+            for i in 0..m {
+                let stripe = &recovery_stripe[i * stripe_len..(i + 1) * stripe_len];
+                if let Some(provided) = provided_recovery_by_idx[i] {
+                    if &provided[range.clone()] != stripe {
+                        return Err(Error::Inconsistent);
+                    }
                 }
             }
         }
+
+        // Hash missing recoveries directly from stripes instead of materializing
+        // full shard buffers that would only be used as Merkle leaves.
+        let missing_recovery_indices = provided_recovery_by_idx
+            .iter()
+            .enumerate()
+            .filter_map(|(i, shard)| shard.is_none().then_some(i));
+        for (i, digest) in
+            strategy.map_init_collect_vec(missing_recovery_indices, H::new, |hasher, i| {
+                for (range, recovery_stripe) in &recovery_stripes {
+                    let stripe_len = range.len();
+                    hasher.update(&recovery_stripe[i * stripe_len..(i + 1) * stripe_len]);
+                }
+                (k + i, hasher.finalize())
+            })
+        {
+            shard_digests[i] = Some(digest);
+        }
+        drop(recovery_stripes);
+
+        verify_codeword::<H, S>(ctx, &mut shard_digests, &original_refs, data)
     }
 
-    // Hash missing recoveries directly from stripes instead of materializing
-    // full shard buffers that would only be used as Merkle leaves
-    let missing_recovery_indices = provided_recovery_by_idx
-        .iter()
-        .enumerate()
-        .filter_map(|(i, shard)| shard.is_none().then_some(i));
-    for (i, digest) in
-        strategy.map_init_collect_vec(missing_recovery_indices, H::new, |hasher, i| {
-            for (range, recovery_stripe) in &recovery_stripes {
-                let stripe_len = range.len();
-                hasher.update(&recovery_stripe[i * stripe_len..(i + 1) * stripe_len]);
-            }
-            (k + i, hasher.finalize())
-        })
-    {
-        shard_digests[i] = Some(digest);
-    }
-    drop(recovery_stripes);
+    /// Hash any remaining missing shards, rebuild the Merkle tree, and confirm its root
+    /// matches the commitment.
+    fn verify_codeword<H: Hasher, S: Strategy>(
+        ctx: &DecodeCtx<'_, H, S>,
+        shard_digests: &mut [Option<H::Digest>],
+        originals: &[&[u8]],
+        data: Vec<u8>,
+    ) -> Result<Vec<u8>, Error> {
+        let &DecodeCtx {
+            n, root, strategy, ..
+        } = ctx;
+        let missing_shards = originals
+            .iter()
+            .enumerate()
+            .filter_map(|(i, shard)| shard_digests[i].is_none().then_some((i, *shard)))
+            .collect::<Vec<_>>();
 
-    verify_striped_codeword::<H, S>(ctx, &mut shard_digests, &original_refs, data)
-}
+        for (i, digest) in
+            strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
+                hasher.update(shard);
+                (i, hasher.finalize())
+            })
+        {
+            shard_digests[i] = Some(digest);
+        }
 
-fn verify_striped_codeword<H: Hasher, S: Strategy>(
-    ctx: &DecodeCtx<'_, H, S>,
-    shard_digests: &mut [Option<H::Digest>],
-    originals: &[&[u8]],
-    data: Vec<u8>,
-) -> Result<Vec<u8>, Error> {
-    let &DecodeCtx {
-        n, root, strategy, ..
-    } = ctx;
-    let missing_shards = originals
-        .iter()
-        .enumerate()
-        .filter_map(|(i, shard)| shard_digests[i].is_none().then_some((i, *shard)))
-        .collect::<Vec<_>>();
-
-    for (i, digest) in
-        strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
-            hasher.update(shard);
-            (i, hasher.finalize())
-        })
-    {
-        shard_digests[i] = Some(digest);
-    }
-
-    let mut builder = Builder::<H>::new(n);
-    shard_digests
-        .iter()
-        .map(|digest| digest.expect("digest must be present for every shard"))
-        .for_each(|digest| {
-            builder.add(&digest);
-        });
-    let tree = builder.build();
-    if tree.root() != *root {
-        return Err(Error::Inconsistent);
-    }
-
-    Ok(data)
-}
-
-fn verify_sequential_codeword<H: Hasher, S: Strategy>(
-    ctx: &DecodeCtx<'_, H, S>,
-    mut shard_digests: Vec<Option<H::Digest>>,
-    provided_recoveries: &[(usize, &[u8])],
-    originals: &[&[u8]],
-) -> Result<Vec<u8>, Error> {
-    let &DecodeCtx {
-        n,
-        k,
-        m,
-        shard_len,
-        root,
-        strategy,
-    } = ctx;
-    let data = extract_data(originals, k, shard_len)?;
-
-    let mut encoder = Cached::take(
-        &CACHED_ENCODER,
-        || Encoder::new(k, m, shard_len),
-        |enc| enc.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-    for shard in originals.iter().take(k) {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-
-    // Provided original bytes are already bound to the commitment by their verified
-    // inclusion proofs (their checked digests are reused when the root is rebuilt
-    // below), so they need no separate comparison here. Provided recovery shards must
-    // match the canonical re-encode before their checked digests are trusted.
-    for (idx, shard) in provided_recoveries {
-        let canonical = encoding.recovery(*idx).ok_or(Error::Inconsistent)?;
-        if *shard != canonical {
+        let mut builder = Builder::<H>::new(n);
+        shard_digests
+            .iter()
+            .map(|digest| digest.expect("digest must be present for every shard"))
+            .for_each(|digest| {
+                builder.add(&digest);
+            });
+        let tree = builder.build();
+        if tree.root() != *root {
             return Err(Error::Inconsistent);
         }
+
+        Ok(data)
     }
-
-    let missing_shards = shard_digests
-        .iter()
-        .enumerate()
-        .filter(|(_, digest)| digest.is_none())
-        .map(|(i, _)| {
-            let shard = if i < k {
-                originals[i]
-            } else {
-                encoding
-                    .recovery(i - k)
-                    .expect("missing recovery index must be in range")
-            };
-            (i, shard)
-        })
-        .collect::<Vec<_>>();
-
-    for (i, digest) in
-        strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
-            hasher.update(shard);
-            (i, hasher.finalize())
-        })
-    {
-        shard_digests[i] = Some(digest);
-    }
-
-    let mut builder = Builder::<H>::new(n);
-    shard_digests
-        .into_iter()
-        .map(|digest| digest.expect("digest must be present for every shard"))
-        .for_each(|digest| {
-            builder.add(&digest);
-        });
-    let tree = builder.build();
-    if tree.root() != *root {
-        return Err(Error::Inconsistent);
-    }
-
-    Ok(data)
 }
 
-fn decode_sequential<'a, H: Hasher, S: Strategy>(
-    ctx: &DecodeCtx<'_, H, S>,
-    shard_digests: Vec<Option<H::Digest>>,
-    provided_originals: Vec<(usize, &'a [u8])>,
-    provided_recoveries: Vec<(usize, &'a [u8])>,
-) -> Result<Vec<u8>, Error> {
-    let &DecodeCtx {
-        k, m, shard_len, ..
-    } = ctx;
-    if provided_originals.len() == k {
-        // All originals are present, so skip Reed-Solomon decode and still run
-        // canonical re-encode/root verification below
+/// Sequential Reed-Solomon: recover and re-encode the codeword as a single
+/// Reed-Solomon instance, used when striping would not help.
+mod sequential {
+    use super::*;
+
+    /// Decode the codeword as a single Reed-Solomon instance, reconstructing the
+    /// original data and verifying the rebuilt commitment against `ctx.root`.
+    pub(super) fn decode<'a, H: Hasher, S: Strategy>(
+        ctx: &DecodeCtx<'_, H, S>,
+        shard_digests: Vec<Option<H::Digest>>,
+        provided_originals: Vec<(usize, &'a [u8])>,
+        provided_recoveries: Vec<(usize, &'a [u8])>,
+    ) -> Result<Vec<u8>, Error> {
+        let &DecodeCtx {
+            k, m, shard_len, ..
+        } = ctx;
+        if provided_originals.len() == k {
+            // All originals are present, so skip Reed-Solomon decode and still run
+            // canonical re-encode/root verification below.
+            let mut shards: Vec<&[u8]> = vec![&[]; k];
+            for &(idx, shard) in &provided_originals {
+                shards[idx] = shard;
+            }
+            return verify_codeword::<H, S>(ctx, shard_digests, &provided_recoveries, &shards);
+        }
+
+        // Decode original data.
+        let mut decoder = Cached::take(
+            &CACHED_DECODER,
+            || Decoder::new(k, m, shard_len),
+            |dec| dec.reset(k, m, shard_len),
+        )
+        .map_err(Error::ReedSolomon)?;
+        for (idx, shard) in &provided_originals {
+            decoder
+                .add_original_shard(*idx, shard)
+                .map_err(Error::ReedSolomon)?;
+        }
+        for (idx, shard) in &provided_recoveries {
+            decoder
+                .add_recovery_shard(*idx, shard)
+                .map_err(Error::ReedSolomon)?;
+        }
+        let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+
         let mut shards: Vec<&[u8]> = vec![&[]; k];
         for &(idx, shard) in &provided_originals {
             shards[idx] = shard;
         }
-        return verify_sequential_codeword::<H, S>(
-            ctx,
-            shard_digests,
-            &provided_recoveries,
-            &shards,
-        );
+        for (idx, shard) in decoding.restored_original_iter() {
+            shards[idx] = shard;
+        }
+        verify_codeword::<H, S>(ctx, shard_digests, &provided_recoveries, &shards)
     }
 
-    let mut decoder = Cached::take(
-        &CACHED_DECODER,
-        || Decoder::new(k, m, shard_len),
-        |dec| dec.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-    for (idx, shard) in &provided_originals {
-        decoder
-            .add_original_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    for (idx, shard) in &provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+    /// Re-encode the recovery shards, confirm any provided recoveries match, hash the
+    /// remaining missing shards, rebuild the Merkle tree, and confirm its root matches
+    /// the commitment.
+    fn verify_codeword<H: Hasher, S: Strategy>(
+        ctx: &DecodeCtx<'_, H, S>,
+        mut shard_digests: Vec<Option<H::Digest>>,
+        provided_recoveries: &[(usize, &[u8])],
+        originals: &[&[u8]],
+    ) -> Result<Vec<u8>, Error> {
+        let &DecodeCtx {
+            n,
+            k,
+            m,
+            shard_len,
+            root,
+            strategy,
+        } = ctx;
+        let data = extract_data(originals, k, shard_len)?;
 
-    let mut shards: Vec<&[u8]> = vec![&[]; k];
-    for &(idx, shard) in &provided_originals {
-        shards[idx] = shard;
+        let mut encoder = Cached::take(
+            &CACHED_ENCODER,
+            || Encoder::new(k, m, shard_len),
+            |enc| enc.reset(k, m, shard_len),
+        )
+        .map_err(Error::ReedSolomon)?;
+        for shard in originals.iter().take(k) {
+            encoder
+                .add_original_shard(shard)
+                .map_err(Error::ReedSolomon)?;
+        }
+        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+
+        // Provided original bytes are already bound to the commitment by their verified
+        // inclusion proofs (their checked digests are reused when the root is rebuilt
+        // below), so they need no separate comparison here. Provided recovery shards must
+        // match the canonical re-encode before their checked digests are trusted.
+        for (idx, shard) in provided_recoveries {
+            let canonical = encoding.recovery(*idx).ok_or(Error::Inconsistent)?;
+            if *shard != canonical {
+                return Err(Error::Inconsistent);
+            }
+        }
+
+        let missing_shards = shard_digests
+            .iter()
+            .enumerate()
+            .filter(|(_, digest)| digest.is_none())
+            .map(|(i, _)| {
+                let shard = if i < k {
+                    originals[i]
+                } else {
+                    encoding
+                        .recovery(i - k)
+                        .expect("missing recovery index must be in range")
+                };
+                (i, shard)
+            })
+            .collect::<Vec<_>>();
+
+        for (i, digest) in
+            strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
+                hasher.update(shard);
+                (i, hasher.finalize())
+            })
+        {
+            shard_digests[i] = Some(digest);
+        }
+
+        let mut builder = Builder::<H>::new(n);
+        shard_digests
+            .into_iter()
+            .map(|digest| digest.expect("digest must be present for every shard"))
+            .for_each(|digest| {
+                builder.add(&digest);
+            });
+        let tree = builder.build();
+        if tree.root() != *root {
+            return Err(Error::Inconsistent);
+        }
+
+        Ok(data)
     }
-    for (idx, shard) in decoding.restored_original_iter() {
-        shards[idx] = shard;
-    }
-    verify_sequential_codeword::<H, S>(ctx, shard_digests, &provided_recoveries, &shards)
 }
 
 /// Decode data from a set of [`CheckedChunk`]s.
@@ -886,7 +938,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
 
     // Process checked chunks
     let shard_len = first.shard.len();
-    let stripes = striped_ranges(shard_len, strategy.parallelism_hint());
+    let stripes = striped::ranges(shard_len, strategy.parallelism_hint());
     let mut shard_digests: Vec<Option<H::Digest>> = vec![None; n];
     let mut provided_originals: Vec<(usize, &[u8])> = Vec::new();
     let mut provided_recoveries: Vec<(usize, &[u8])> = Vec::new();
@@ -896,9 +948,13 @@ fn decode<'a, H: Hasher, S: Strategy>(
         if &chunk.root != root {
             return Err(Error::CommitmentMismatch);
         }
+
+        // Every shard must share the first shard's width. The striped decode path slices
+        // each shard by stripe range, so a wrong-width shard would otherwise panic.
         if chunk.shard.len() != shard_len {
             return Err(Error::Inconsistent);
         }
+
         // Check for duplicate index
         let index = chunk.index;
         if index >= total {
@@ -930,7 +986,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         strategy,
     };
     if let Some(ranges) = stripes {
-        return decode_striped::<H, S>(
+        return striped::decode::<H, S>(
             &ctx,
             ranges,
             shard_digests,
@@ -938,8 +994,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
             provided_recoveries,
         );
     }
-
-    decode_sequential::<H, S>(&ctx, shard_digests, provided_originals, provided_recoveries)
+    sequential::decode::<H, S>(&ctx, shard_digests, provided_originals, provided_recoveries)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
@@ -1458,6 +1513,41 @@ mod tests {
         }
     }
 
+    /// Single-threaded exercise of the striped encode helper and its [`striped::Dst`]
+    /// raw-pointer writes, independent of any [`Strategy`]. The rayon-driven striped tests
+    /// cannot run under miri (crossbeam's work-stealing deque relies on integer-to-pointer
+    /// casts that abort miri during threadpool setup), so this drives the same `unsafe`
+    /// writes sequentially to keep them miri-checkable: splitting a shard into stripes and
+    /// encoding each must reproduce the single full-width encode byte-for-byte.
+    #[test]
+    fn test_striped_encode_into_matches_full_width() {
+        let k = 2usize;
+        let m = 2usize;
+        let shard_len = 2 * MIN_STRIPE_BYTES;
+        let ranges = striped::ranges(shard_len, 4).expect("must split into stripes");
+        assert!(ranges.len() >= 2);
+
+        let mut originals_buf = vec![0u8; k * shard_len];
+        for (i, byte) in originals_buf.iter_mut().enumerate() {
+            *byte = (i % 251) as u8;
+        }
+        let originals: Vec<&[u8]> = originals_buf.chunks(shard_len).collect();
+
+        // Encode each stripe into its slot via Dst (the `unsafe` path).
+        let mut striped_recovery = vec![0u8; m * shard_len];
+        let dst = striped::Dst::new(&mut striped_recovery, shard_len);
+        for range in &ranges {
+            striped::encode_recovery_into(k, m, range.clone(), &originals, dst).unwrap();
+        }
+
+        // A single full-width encode must produce the identical recovery buffer.
+        let mut full_recovery = vec![0u8; m * shard_len];
+        let dst_full = striped::Dst::new(&mut full_recovery, shard_len);
+        striped::encode_recovery_into(k, m, 0..shard_len, &originals, dst_full).unwrap();
+
+        assert_eq!(striped_recovery, full_recovery);
+    }
+
     // Each tamper mutates a canonical codeword in place before a (malicious) commitment is
     // rebuilt over the tampered shards. `k` is the original-shard count, `shard_len` the
     // per-shard width.
@@ -1512,7 +1602,7 @@ mod tests {
             tamper_flip_recovery,
         ),
         // Tampered recovery that IS provided and forces RS reconstruction of a missing
-        // original (exercises decode_missing_original_stripe on the striped path).
+        // original (exercises striped::decode_missing_original_into on the striped path).
         (
             "tampered_recovery_provided",
             &[0, 1, 2, 4],
@@ -1572,7 +1662,7 @@ mod tests {
         let shard_len = canonical_shard_len(data.len(), min as usize);
         let rayon = Rayon::new(NZUsize!(4)).unwrap();
         assert!(
-            striped_ranges(shard_len, rayon.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            striped::ranges(shard_len, rayon.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
             "test must exercise >= 2 stripes (shard_len={shard_len})"
         );
 
@@ -1581,7 +1671,7 @@ mod tests {
         assert_adversarial_rejected(total, min, &data, &rayon);
 
         // Sanity: an untampered mixed (some originals + a recovery) set still decodes via the
-        // striped path, forcing decode_missing_original_stripe to reconstruct an original.
+        // striped path, forcing striped::decode_missing_original_into to reconstruct an original.
         let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
         let mixed = [0u16, 1, 2, 4]
             .into_iter()
