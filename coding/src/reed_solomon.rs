@@ -18,16 +18,10 @@ commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder)
 
 // Keep each stripe large enough to amortize extra encoder/decoder setup
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
-// Non-final stripe widths must be a multiple of reed-solomon-simd's internal SIMD block
-// size. That crate stores every shard as a sequence of 64-byte blocks (`[u8; 64]`; see its
-// `engine/shards.rs` and `algorithm.md`): each block holds 32 GF(2^16) symbols and is
-// encoded independently, with only the final (possibly partial) block packed specially.
-// Splitting a shard on 64-byte boundaries, and letting the final stripe absorb the tail,
-// therefore yields byte-identical output to encoding the whole shard at once. This is
-// consensus-critical: a divergence between the striped and non-striped paths would produce
-// different commitments for the same data. This couples us to an internal detail of the
-// dependency, so its version is pinned exactly in Cargo.toml and `test_recovery_output_format_pinned`
-// guards the byte layout. Re-verify this value (and re-run that fixture) on any dependency bump.
+// Non-final stripe widths must be a multiple of reed-solomon-simd's internal 64-byte SIMD
+// block (`[u8; 64]`), so splitting a shard on these boundaries yields byte-identical output to
+// encoding it whole. A mismatch would diverge the striped and non-striped commitments;
+// `test_recovery_output_format_pinned` guards the layout against dependency changes.
 const STRIPE_ALIGNMENT_BYTES: usize = 64;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
