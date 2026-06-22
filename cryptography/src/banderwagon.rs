@@ -1,6 +1,6 @@
 use crate::{
     bls12381::primitives::group::{Scalar, DST},
-    zk::circuit::Var,
+    zk::circuit::{BoolVar, Context, Var},
 };
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -335,6 +335,12 @@ impl FixedSize for G {
 }
 
 impl G {
+    /// The affine coordinates `(x/z, y/z)` of this representative.
+    fn affine(&self) -> (Scalar, Scalar) {
+        let z_inv = self.z.inv();
+        (self.x.clone() * &z_inv, self.y.clone() * &z_inv)
+    }
+
     /// Recovers the group element whose serialization has abscissa `x`.
     ///
     /// Returns `None` if `x` is not the serialization of an element of the
@@ -437,10 +443,8 @@ pub struct GVar<'ctx> {
     y: Var<'ctx, Scalar>,
 }
 
-impl<'ctx> Add<&Self> for GVar<'ctx> {
-    type Output = Self;
-
-    fn add(self, rhs: &Self) -> Self::Output {
+impl<'ctx> AddAssign<&Self> for GVar<'ctx> {
+    fn add_assign(&mut self, rhs: &Self) {
         // Complete affine addition law for the twisted Edwards curve
         // `a*x^2 + y^2 = 1 + d*x^2*y^2` (the same formula as the projective
         // `AddAssign` for `G`, specialized to `z = 1`):
@@ -462,7 +466,7 @@ impl<'ctx> Add<&Self> for GVar<'ctx> {
         // The curve is complete (`a` is a square and `d` is not), so both
         // denominators are nonzero for every pair of subgroup points and the
         // divisions never add an unsatisfiable or underconstrained quotient.
-        let Self { x: x1, y: y1 } = self;
+        let Self { x: x1, y: y1 } = core::mem::replace(self, Self::identity());
         let Self { x: x2, y: y2 } = rhs;
 
         // Curve constants as native vars; they fold into the circuit as
@@ -482,16 +486,156 @@ impl<'ctx> Add<&Self> for GVar<'ctx> {
         let x_den = one.clone() + &c; // 1 + d*x1*x2*y1*y2
         let y_den = one - &c; // 1 - d*x1*x2*y1*y2
 
-        Self {
+        *self = Self {
             x: x_num / &x_den,
             y: y_num / &y_den,
-        }
+        };
     }
 }
 
-impl<'ctx> AddAssign<&Self> for GVar<'ctx> {
-    fn add_assign(&mut self, rhs: &Self) {
-        *self = self.clone() + rhs;
+impl<'ctx> Add<&Self> for GVar<'ctx> {
+    type Output = Self;
+
+    fn add(mut self, rhs: &Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+/// Bit-length of the circuit field modulus `p` (`ceil(log2 p) = 255`).
+const SCALAR_BITS: usize = 255;
+
+impl<'ctx> GVar<'ctx> {
+    /// The circuit representation of the group identity, the twisted Edwards
+    /// neutral element `(0, 1)`. The complete addition law treats it as the
+    /// identity, so it is a valid starting accumulator.
+    fn identity() -> Self {
+        Self {
+            x: Var::zero(),
+            y: Var::one(),
+        }
+    }
+
+    /// The in-circuit representation of an out-of-circuit point, as native
+    /// constants (its canonical affine coordinates `(X/Z, Y/Z)`). Folding the
+    /// point in as a constant pins its representative, which is what makes
+    /// reading a coordinate of a derived point well-defined.
+    fn constant(point: &G) -> Self {
+        let (x, y) = point.affine();
+        Self {
+            x: Var::native(x),
+            y: Var::native(y),
+        }
+    }
+
+    /// Select between two points based on `bit`: `on_true` when the bit is `1`,
+    /// `on_false` when it is `0`. Selecting each coordinate independently is
+    /// sound because `bit` is boolean, so the result is exactly one of the two
+    /// (already valid) input points.
+    fn select(bit: &BoolVar<'ctx, Scalar>, on_true: &Self, on_false: &Self) -> Self {
+        Self {
+            x: bit.select(&on_true.x, &on_false.x),
+            y: bit.select(&on_true.y, &on_false.y),
+        }
+    }
+
+    /// Multiply by a scalar given as its little-endian bits, via double-and-add.
+    ///
+    /// `cur` holds `[2^i] * self` and `acc` accumulates the conditionally-added
+    /// terms. The complete addition law makes the identity start and the
+    /// doublings (including over leading zero bits) need no special casing.
+    fn mul_bits(self, bits: &[BoolVar<'ctx, Scalar>]) -> Self {
+        let mut acc = Self::identity();
+        let mut cur = self;
+        for bit in bits {
+            let added = acc.clone() + &cur;
+            acc = Self::select(bit, &added, &acc);
+            cur = cur.clone() + &cur;
+        }
+        acc
+    }
+}
+
+/// Decompose `x` into its canonical little-endian bits (`SCALAR_BITS` of them).
+///
+/// The bits are fresh witnesses bound to `x` by two constraints:
+///
+///   1. *recomposition*, `sum_i b_i * 2^i == x`, computed in the field;
+///   2. *canonicity*, the integer `sum_i b_i * 2^i < p`.
+///
+/// Both are required. Recomposition alone holds only modulo the field modulus
+/// `p`, so without the range check a prover could supply the non-canonical
+/// alias `x + p`; because the Banderwagon group order does not divide `p`, that
+/// alias scales a point to a *different* result. The canonicity check pins the
+/// decomposition to the unique integer in `[0, p)`.
+fn to_canonical_bits_le<'ctx>(
+    ctx: Context<'ctx, Scalar>,
+    x: &Var<'ctx, Scalar>,
+) -> Vec<BoolVar<'ctx, Scalar>> {
+    // `as_blst_scalar` yields the canonical integer in `[0, p)` as little-endian
+    // bytes, so bit `i` is `(bytes[i / 8] >> (i % 8)) & 1`.
+    let bits: Vec<BoolVar<'ctx, Scalar>> = (0..SCALAR_BITS)
+        .map(|i| {
+            let x = x.clone();
+            BoolVar::witness(ctx, move |v| {
+                (x.value(v).as_blst_scalar().b[i / 8] >> (i % 8)) & 1 == 1
+            })
+        })
+        .collect();
+
+    // Constraint 1: recomposition `sum_i b_i * 2^i == x`. Each `b_i * 2^i` is a
+    // scaling by a constant, so this whole sum is linear (free in the backend).
+    let mut acc = Var::zero();
+    let mut pow = Scalar::one();
+    for bit in &bits {
+        acc += &(bit.var().clone() * &Var::native(pow.clone()));
+        pow.double();
+    }
+    acc.assert_eq(x);
+
+    // Constraint 2: canonicity, `value <= p - 1` (equivalently `value < p`).
+    //
+    // We walk the bits from most to least significant alongside the bits of the
+    // largest canonical value `c = p - 1` (its little-endian bytes, just like
+    // the witness bits above), maintaining `run = "every 1-bit of c so far was
+    // matched by a 1 in value"`. At a 1-bit of `c` the value bit is free, but it
+    // is folded into `run`; at a 0-bit of `c`, if `run` still holds the value
+    // bit must be 0 (otherwise value would exceed `c`). This is the standard
+    // run-folding field-membership check.
+    let c = (-Scalar::one()).as_blst_scalar().b;
+    let mut run = BoolVar::constant(true);
+    for i in (0..SCALAR_BITS).rev() {
+        if (c[i / 8] >> (i % 8)) & 1 == 1 {
+            run = run & bits[i].clone();
+        } else {
+            (run.clone() & bits[i].clone()).assert_eq(&BoolVar::constant(false));
+        }
+    }
+
+    bits
+}
+
+impl G {
+    /// In-circuit scalar multiplication, returning the affine x-coordinate of
+    /// `[scalar] * self`.
+    ///
+    /// `self` is an out-of-circuit (public) point. Taking it by value here, and
+    /// folding its canonical affine coordinates in as constants, pins its
+    /// representative; that is what makes the result's x-coordinate well-defined
+    /// (a Banderwagon element has two affine representatives `(x, y)` and
+    /// `(-x, -y)`, so a coordinate of a *witnessed* point would be ambiguous).
+    ///
+    /// `scalar` may be a witness; it is canonically decomposed (see
+    /// `to_canonical_bits_le`) and the bits drive a double-and-add. Soundness
+    /// additionally assumes `self` is a valid prime-order subgroup element, as
+    /// produced by this module's constructors.
+    pub fn scalar_mul_x<'ctx>(
+        &self,
+        ctx: Context<'ctx, Scalar>,
+        scalar: &Var<'ctx, Scalar>,
+    ) -> Var<'ctx, Scalar> {
+        let bits = to_canonical_bits_le(ctx, scalar);
+        GVar::constant(self).mul_bits(&bits).x
     }
 }
 
@@ -741,6 +885,78 @@ mod tests {
                 let bytes = x.encode_fixed::<32>();
                 assert!(G::decode(&bytes[..]).is_err());
             }
+            Ok(())
+        });
+    }
+
+    /// Build the circuit `x([scalar] * base)` and assert (in circuit) that it
+    /// equals the affine x-coordinate of `expected`, returning whether the
+    /// circuit is satisfied. `witness` chooses whether the scalar is a circuit
+    /// witness (exercising `to_canonical_bits_le`) or a public constant.
+    ///
+    /// Comparing x-coordinates directly is valid because `base` is folded in as
+    /// a constant (its representative is pinned), so the in-circuit affine
+    /// arithmetic and the native projective computation land on the same point.
+    fn run_scalar_mul(base: &G, scalar: &Scalar, expected: &G, witness: bool) -> bool {
+        use crate::zk::circuit::build_with_values;
+
+        let base = base.clone();
+        let ex = expected.affine().0;
+        let scalar = scalar.clone();
+        let valued = build_with_values(move |ctx| {
+            let s = if witness {
+                Var::witness(ctx, move |_| scalar)
+            } else {
+                Var::constant(ctx, scalar)
+            };
+            let result_x = base.scalar_mul_x(ctx, &s);
+            result_x.assert_eq(&Var::constant(ctx, ex.clone()));
+        });
+        valued.is_satisfied()
+    }
+
+    #[test]
+    fn test_scalar_mul_x_small() {
+        let base = G::generator();
+        for k in [0u64, 1, 2, 3, 4, 7, 8, 15, 16, 1_000_000, u64::MAX] {
+            let scalar = Scalar::from_u64(k);
+            let expected = base.scale(&[k, 0, 0, 0]);
+            assert!(
+                run_scalar_mul(&base, &scalar, &expected, false),
+                "constant scalar k={k}"
+            );
+            assert!(
+                run_scalar_mul(&base, &scalar, &expected, true),
+                "witness scalar k={k}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_scalar_mul_x_rejects_wrong_result() {
+        // Sanity: the in-circuit equality must actually constrain the result.
+        let base = G::generator();
+        let scalar = Scalar::from_u64(5);
+        let correct = base.scale(&[5, 0, 0, 0]);
+        let wrong = correct.clone() + &G::generator();
+        assert!(run_scalar_mul(&base, &scalar, &correct, true));
+        assert!(!run_scalar_mul(&base, &scalar, &wrong, true));
+    }
+
+    #[test]
+    fn test_scalar_mul_x_random() {
+        // Random base point and full-width random scalar, exercising the witness
+        // decomposition (recomposition + canonicity) over the whole bit range.
+        minifuzz::test(|u| {
+            let base = arbitrary_point(u)?;
+            let scalar: Scalar = u.arbitrary()?;
+            // Scale `base` by the scalar's canonical integer (little-endian
+            // limbs), matching the integer `scalar_mul_x` decomposes in circuit.
+            let bytes = scalar.as_blst_scalar().b;
+            let limbs: [u64; 4] =
+                array::from_fn(|i| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()));
+            let expected = base.scale(&limbs);
+            assert!(run_scalar_mul(&base, &scalar, &expected, true));
             Ok(())
         });
     }

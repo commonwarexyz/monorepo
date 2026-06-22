@@ -717,9 +717,8 @@ impl<'ctx, F: Ring> BoolVar<'ctx, F> {
     /// combined with a circuit-backed var. No constraint is added: the value
     /// is boolean by construction.
     pub fn constant(value: bool) -> Self {
-        {
-            let var = Var::native(if value { F::one() } else { F::zero() });
-            Self { var }
+        Self {
+            var: Var::native(if value { F::one() } else { F::zero() }),
         }
     }
 
