@@ -1,5 +1,5 @@
 //! A partitioned index that stores each partition as sorted struct-of-arrays (see the
-//! `super::partition` module).
+//! `self::partition` module).
 //!
 //! The first `P` bytes of the (untranslated) key select a partition; the translator maps the
 //! remaining bytes to the partition-local key. Because the partitions are ordered by prefix and each
@@ -7,10 +7,13 @@
 //! lookup/insert speed for memory density at scale; the unordered variant ([`super::unordered`])
 //! uses hash sub-indices instead and is faster when ordering is not required.
 
+mod partition;
+
+use self::partition::Partition;
 use crate::{
     index::{
-        partitioned::{partition::Partition, partition_index_and_sub_key},
-        Cursor as CursorTrait, Factory, Ordered, Unordered,
+        partitioned::partition_index_and_sub_key, Cursor as CursorTrait, Factory, Ordered,
+        Unordered,
     },
     translator::Translator,
 };
