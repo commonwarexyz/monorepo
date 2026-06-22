@@ -609,11 +609,13 @@ mod gf8 {
             for selection in selections {
                 let provided_originals = selection
                     .iter()
-                    .filter_map(|&i| (i < k).then(|| (i, all[i])))
+                    .filter(|&&i| i < k)
+                    .map(|&i| (i, all[i]))
                     .collect::<Vec<_>>();
                 let provided_recoveries = selection
                     .iter()
-                    .filter_map(|&i| (i >= k).then(|| (i - k, all[i])))
+                    .filter(|&&i| i >= k)
+                    .map(|&i| (i - k, all[i]))
                     .collect::<Vec<_>>();
                 let recovered =
                     reconstruct_originals(
