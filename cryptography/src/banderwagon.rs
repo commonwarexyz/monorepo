@@ -14,17 +14,37 @@ use commonware_parallel::Strategy;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::array;
 
-/// Represents the scalar field for the Banderwagon group [`G`].
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A scalar exponent for the Banderwagon group [`G`].
+///
+/// Stored as a little-endian 256-bit integer but constrained to `F::BITS`
+/// bits. That width is chosen below both the circuit field modulus `p`
+/// (`SCALAR_BITS = 255`) *and* the group order `r` (bit length 253), so every
+/// value is at once a canonical field element (`< p`) and a unique group scalar
+/// (`< r`). This is what lets the in-circuit secret be witnessed directly as
+/// `F::BITS` bits with no recomposition or canonicity constraint (see
+/// `G::scalar_mul_bits`): the bits simply *are* the exponent.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct F {
     limbs: [u64; 4],
 }
 
+impl F {
+    /// The fixed bit-width of an exponent; see [`F`].
+    const BITS: usize = 252;
+
+    /// The little-endian bits of the integer, exactly `F::BITS` of them.
+    pub fn bits(&self) -> Vec<bool> {
+        (0..Self::BITS)
+            .map(|i| (self.limbs[i / 64] >> (i % 64)) & 1 == 1)
+            .collect()
+    }
+}
+
 impl Random for F {
     fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
-        Self {
-            limbs: array::from_fn(|_| rng.next_u64()),
-        }
+        let mut limbs: [u64; 4] = array::from_fn(|_| rng.next_u64());
+        limbs[3] &= (1u64 << (Self::BITS % 64)) - 1;
+        Self { limbs }
     }
 }
 
@@ -341,6 +361,44 @@ impl G {
         (self.x.clone() * &z_inv, self.y.clone() * &z_inv)
     }
 
+    /// Out-of-circuit squared affine x-coordinate of `[scalar] * self`.
+    ///
+    /// We expose the *squared* abscissa rather than the bare one because the
+    /// quotient identifies `(x, y)` with `(-x, -y)`: a plain x-coordinate flips
+    /// sign between the two representatives, whereas its square is a well-defined
+    /// function of the group element (no representative to agree on, no
+    /// [`canonicalize`](Self::canonicalize) needed). The native counterpart of
+    /// the in-circuit [`scalar_mul_x_squared`](Self::scalar_mul_x_squared).
+    pub fn scalar_mul_x_squared_base(&self, scalar: &Scalar) -> Scalar {
+        let (mut x, _) = self.scale(&scalar_limbs(scalar)).affine();
+        x.square();
+        x
+    }
+
+    /// Out-of-circuit squared affine x-coordinate of `[x] * self` for an [`F`]
+    /// exponent — the native counterpart of
+    /// [`scalar_mul_x_squared_bits`](Self::scalar_mul_x_squared_bits). Like
+    /// [`scalar_mul_x_squared_native`](Self::scalar_mul_x_squared_native), the
+    /// square is representative-independent.
+    pub fn scalar_mul_x_squared_f(&self, x: &F) -> Scalar {
+        let (mut a, _) = (self.clone() * x).affine();
+        a.square();
+        a
+    }
+
+    /// Return the canonical representative of this group element.
+    ///
+    /// A Banderwagon element has two affine representatives `(x, y)` and
+    /// `(-x, -y)`; this picks the one with positive `y` (the same choice
+    /// [`G::from_x`] makes when decoding), so that two in-memory values for the
+    /// same element become bit-identical. Used by [`GVar::constant`] so that a
+    /// point folded into a circuit yields representative-independent constants.
+    fn canonicalize(&self) -> Self {
+        let (x, y) = self.affine();
+        let u = if y.is_positive() { x } else { -x };
+        Self::from_x(u).expect("a valid subgroup element re-derives from its abscissa")
+    }
+
     /// Recovers the group element whose serialization has abscissa `x`.
     ///
     /// Returns `None` if `x` is not the serialization of an element of the
@@ -520,8 +578,14 @@ impl<'ctx> GVar<'ctx> {
     /// constants (its canonical affine coordinates `(X/Z, Y/Z)`). Folding the
     /// point in as a constant pins its representative, which is what makes
     /// reading a coordinate of a derived point well-defined.
-    fn constant(point: &G) -> Self {
-        let (x, y) = point.affine();
+    ///
+    /// The point is `canonicalize`d first, so the embedded
+    /// constants are a function of the *group element*, not of whichever of its
+    /// two affine representatives the caller happens to hold. Two parties folding
+    /// in the same element therefore build byte-identical circuits without having
+    /// to canonicalize their public inputs themselves.
+    pub fn constant(point: &G) -> Self {
+        let (x, y) = point.canonicalize().affine();
         Self {
             x: Var::native(x),
             y: Var::native(y),
@@ -537,6 +601,16 @@ impl<'ctx> GVar<'ctx> {
             x: bit.select(&on_true.x, &on_false.x),
             y: bit.select(&on_true.y, &on_false.y),
         }
+    }
+
+    /// Assert (in circuit) that `self` and `other` are the same group element.
+    ///
+    /// Mirrors the out-of-circuit [`PartialEq`] for [`G`]: two representatives
+    /// denote the same quotient element iff `x1 * y2 == x2 * y1`. Constraining
+    /// the affine coordinates directly would be unsound here, because it would
+    /// reject the equally-valid twin representative `(-x, -y)`.
+    pub fn assert_eq(&self, other: &Self) {
+        (self.x.clone() * &other.y).assert_eq(&(other.x.clone() * &self.y));
     }
 
     /// Multiply by a scalar given as its little-endian bits, via double-and-add.
@@ -556,6 +630,16 @@ impl<'ctx> GVar<'ctx> {
     }
 }
 
+/// The canonical little-endian 64-bit limbs of `x`'s integer value in `[0, r)`.
+///
+/// This is the integer [`Additive::scale`] multiplies a point by, and matches
+/// the canonical bit decomposition `to_canonical_bits_le` performs in circuit,
+/// so the out-of-circuit and in-circuit scalar muls agree.
+fn scalar_limbs(x: &Scalar) -> [u64; 4] {
+    let bytes = x.as_blst_scalar().b;
+    array::from_fn(|i| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()))
+}
+
 /// Decompose `x` into its canonical little-endian bits (`SCALAR_BITS` of them).
 ///
 /// The bits are fresh witnesses bound to `x` by two constraints:
@@ -568,7 +652,7 @@ impl<'ctx> GVar<'ctx> {
 /// alias `x + p`; because the Banderwagon group order does not divide `p`, that
 /// alias scales a point to a *different* result. The canonicity check pins the
 /// decomposition to the unique integer in `[0, p)`.
-fn to_canonical_bits_le<'ctx>(
+fn scalar_bits_le<'ctx>(
     ctx: Context<'ctx, Scalar>,
     x: &Var<'ctx, Scalar>,
 ) -> Vec<BoolVar<'ctx, Scalar>> {
@@ -616,12 +700,11 @@ fn to_canonical_bits_le<'ctx>(
 }
 
 impl G {
-    /// In-circuit scalar multiplication, returning the affine x-coordinate of
-    /// `[scalar] * self`.
+    /// In-circuit scalar multiplication, returning the point `[scalar] * self`.
     ///
     /// `self` is an out-of-circuit (public) point. Taking it by value here, and
     /// folding its canonical affine coordinates in as constants, pins its
-    /// representative; that is what makes the result's x-coordinate well-defined
+    /// representative; that is what makes a coordinate of the result well-defined
     /// (a Banderwagon element has two affine representatives `(x, y)` and
     /// `(-x, -y)`, so a coordinate of a *witnessed* point would be ambiguous).
     ///
@@ -629,13 +712,58 @@ impl G {
     /// `to_canonical_bits_le`) and the bits drive a double-and-add. Soundness
     /// additionally assumes `self` is a valid prime-order subgroup element, as
     /// produced by this module's constructors.
-    pub fn scalar_mul_x<'ctx>(
+    ///
+    /// Use [`GVar::assert_eq`] to bind the result against a known point (e.g. a
+    /// public key); use [`scalar_mul_x_squared`](Self::scalar_mul_x_squared) when
+    /// only a (representative-independent) abscissa is needed.
+    pub(crate) fn scalar_mul<'ctx>(
+        &self,
+        ctx: Context<'ctx, Scalar>,
+        scalar: &Var<'ctx, Scalar>,
+    ) -> GVar<'ctx> {
+        let bits = scalar_bits_le(ctx, scalar);
+        GVar::constant(self).mul_bits(&bits)
+    }
+
+    /// In-circuit squared affine x-coordinate of `[scalar] * self`.
+    ///
+    /// We expose the *squared* abscissa rather than the bare one because the
+    /// quotient identifies `(x, y)` with `(-x, -y)`: a plain x-coordinate flips
+    /// sign between the two representatives, whereas its square is a well-defined
+    /// function of the group element, so the read agrees regardless of which
+    /// representative a point happens to hold. The in-circuit counterpart of
+    /// [`scalar_mul_x_squared_native`](Self::scalar_mul_x_squared_native).
+    pub fn scalar_mul_x_squared<'ctx>(
         &self,
         ctx: Context<'ctx, Scalar>,
         scalar: &Var<'ctx, Scalar>,
     ) -> Var<'ctx, Scalar> {
-        let bits = to_canonical_bits_le(ctx, scalar);
-        GVar::constant(self).mul_bits(&bits).x
+        let x = self.scalar_mul(ctx, scalar).x;
+        x.clone() * &x
+    }
+
+    /// In-circuit `[scalar] * self` where the scalar is given *directly* as its
+    /// little-endian bits, rather than as a [`Var`] to be decomposed.
+    ///
+    /// This is the path for an [`F`] exponent (e.g. the eVRF secret): the bits
+    /// are the witness, so unlike [`scalar_mul`](Self::scalar_mul) there is no
+    /// recomposition or canonicity constraint — see [`F`] for why that is sound
+    /// at `F::BITS` width. The caller must allocate the bits once and reuse the
+    /// same slice across operations, so a single exponent is bound everywhere.
+    pub fn scalar_mul_bits<'ctx>(&self, bits: &[BoolVar<'ctx, Scalar>]) -> GVar<'ctx> {
+        GVar::constant(self).mul_bits(bits)
+    }
+
+    /// In-circuit squared affine x-coordinate of `[scalar] * self` for a
+    /// bit-given scalar; combines [`scalar_mul_bits`](Self::scalar_mul_bits) with
+    /// the representative-independent squaring of
+    /// [`scalar_mul_x_squared`](Self::scalar_mul_x_squared).
+    pub fn scalar_mul_x_squared_bits<'ctx>(
+        &self,
+        bits: &[BoolVar<'ctx, Scalar>],
+    ) -> Var<'ctx, Scalar> {
+        let x = self.scalar_mul_bits(bits).x;
+        x.clone() * &x
     }
 }
 
@@ -889,19 +1017,18 @@ mod tests {
         });
     }
 
-    /// Build the circuit `x([scalar] * base)` and assert (in circuit) that it
-    /// equals the affine x-coordinate of `expected`, returning whether the
-    /// circuit is satisfied. `witness` chooses whether the scalar is a circuit
-    /// witness (exercising `to_canonical_bits_le`) or a public constant.
+    /// Build the circuit `[scalar] * base` and assert (in circuit) that it equals
+    /// `expected`, returning whether the circuit is satisfied. `witness` chooses
+    /// whether the scalar is a circuit witness (exercising `to_canonical_bits_le`)
+    /// or a public constant.
     ///
-    /// Comparing x-coordinates directly is valid because `base` is folded in as
-    /// a constant (its representative is pinned), so the in-circuit affine
-    /// arithmetic and the native projective computation land on the same point.
+    /// The check uses the quotient-aware [`GVar::assert_eq`], so `base` and
+    /// `expected` need not be canonical: either affine representative is accepted.
     fn run_scalar_mul(base: &G, scalar: &Scalar, expected: &G, witness: bool) -> bool {
         use crate::zk::circuit::build_with_values;
 
         let base = base.clone();
-        let ex = expected.affine().0;
+        let expected = expected.clone();
         let scalar = scalar.clone();
         let valued = build_with_values(move |ctx| {
             let s = if witness {
@@ -909,14 +1036,14 @@ mod tests {
             } else {
                 Var::constant(ctx, scalar)
             };
-            let result_x = base.scalar_mul_x(ctx, &s);
-            result_x.assert_eq(&Var::constant(ctx, ex.clone()));
+            base.scalar_mul(ctx, &s)
+                .assert_eq(&GVar::constant(&expected));
         });
         valued.is_satisfied()
     }
 
     #[test]
-    fn test_scalar_mul_x_small() {
+    fn test_scalar_mul_small() {
         let base = G::generator();
         for k in [0u64, 1, 2, 3, 4, 7, 8, 15, 16, 1_000_000, u64::MAX] {
             let scalar = Scalar::from_u64(k);
@@ -933,7 +1060,7 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_mul_x_rejects_wrong_result() {
+    fn test_scalar_mul_rejects_wrong_result() {
         // Sanity: the in-circuit equality must actually constrain the result.
         let base = G::generator();
         let scalar = Scalar::from_u64(5);
@@ -944,14 +1071,14 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_mul_x_random() {
+    fn test_scalar_mul_random() {
         // Random base point and full-width random scalar, exercising the witness
         // decomposition (recomposition + canonicity) over the whole bit range.
         minifuzz::test(|u| {
             let base = arbitrary_point(u)?;
             let scalar: Scalar = u.arbitrary()?;
             // Scale `base` by the scalar's canonical integer (little-endian
-            // limbs), matching the integer `scalar_mul_x` decomposes in circuit.
+            // limbs), matching the integer `scalar_mul` decomposes in circuit.
             let bytes = scalar.as_blst_scalar().b;
             let limbs: [u64; 4] =
                 array::from_fn(|i| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()));

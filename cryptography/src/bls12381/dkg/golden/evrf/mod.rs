@@ -1,4 +1,7 @@
 mod bandersnatch;
+// Not yet wired into the protocol; exercised by its own tests for now.
+#[allow(dead_code)]
+mod banderwagon;
 
 use crate::{
     bls12381::primitives::group::{Scalar, G1},
