@@ -4,14 +4,25 @@ use alloc::vec::Vec;
 use blst::blst_fr;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
-use commonware_math::algebra::{msm_naive, Additive, Field, Multiplicative, Object, Ring, Space};
+use commonware_math::algebra::{
+    msm_naive, Additive, Field, Multiplicative, Object, Random, Ring, Space,
+};
 use commonware_parallel::Strategy;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use std::array;
 
 /// Represents the scalar field for the Banderwagon group [`G`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct F {
     limbs: [u64; 4],
+}
+
+impl Random for F {
+    fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
+        Self {
+            limbs: array::from_fn(|_| rng.next_u64()),
+        }
+    }
 }
 
 /// The Bandersnatch twisted Edwards `a` coefficient, `-5`, in Montgomery form.
