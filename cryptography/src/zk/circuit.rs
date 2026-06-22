@@ -55,7 +55,10 @@ use commonware_utils::sync::Mutex;
 use std::{
     fmt,
     marker::PhantomData,
-    ops::{Add, AddAssign, Div, DivAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
+    ops::{
+        Add, AddAssign, BitAnd, BitOr, Div, DivAssign, Index, Mul, MulAssign, Neg, Not, Sub,
+        SubAssign,
+    },
 };
 
 /// Identifies a value in a [`Circuit`]: a constant, a witness, or the
@@ -647,6 +650,180 @@ impl<'ctx, F: Field> Field for Var<'ctx, F> {
     }
 }
 
+/// A circuit value constrained to be `0` or `1`.
+///
+/// A `BoolVar` wraps a [`Var`] together with a guarantee that it holds a
+/// boolean: every constructor either produces a value that is boolean by
+/// construction, or adds the constraint `b * (1 - b) == 0` enforcing it.
+/// Holding that guarantee in the type lets later operations skip
+/// re-checking: [`Self::select`] and the boolean combinators below are sound
+/// precisely because their inputs are already known to be boolean.
+///
+/// The motivating use is scalar multiplication in a circuit, where a scalar
+/// is decomposed into bits (each a `BoolVar`) and a point is accumulated by
+/// conditionally adding with [`Self::select`].
+///
+/// # Native Vars
+///
+/// Like [`Var`], a `BoolVar` built from a native value (see
+/// [`Self::constant`]) lives outside the circuit until combined with a
+/// circuit-backed value. [`Self::assert`] on a native, non-boolean var
+/// therefore panics rather than recording an unsatisfiable constraint, in
+/// keeping with the native-var semantics described on [`Var`].
+///
+/// # Example
+///
+/// ```
+/// use commonware_cryptography::zk::circuit::{build_with_values, BoolVar, Var};
+/// use commonware_math::test::F;
+///
+/// // Use a bit to choose between two values, then check the choice.
+/// let valued = build_with_values(|ctx| {
+///     let bit = BoolVar::witness(ctx, |_| true);
+///     let a = Var::constant(ctx, F::from(7u64));
+///     let b = Var::constant(ctx, F::from(9u64));
+///     bit.select(&a, &b).assert_eq(&Var::constant(ctx, F::from(7u64)));
+/// });
+/// assert!(valued.is_satisfied());
+/// ```
+#[derive(Clone)]
+pub struct BoolVar<'ctx, F> {
+    var: Var<'ctx, F>,
+}
+
+impl<F: fmt::Debug> fmt::Debug for BoolVar<'_, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BoolVar").field(&self.var).finish()
+    }
+}
+
+impl<'ctx, F> BoolVar<'ctx, F> {
+    /// The underlying [`Var`], whose value is `0` or `1`.
+    pub const fn var(&self) -> &Var<'ctx, F> {
+        &self.var
+    }
+
+    /// Consume this `BoolVar`, returning the underlying [`Var`].
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn into_var(self) -> Var<'ctx, F> {
+        self.var
+    }
+}
+
+impl<'ctx, F: Ring> BoolVar<'ctx, F> {
+    /// Create a boolean constant with a fixed, public value.
+    ///
+    /// Like [`Var::native`], the value lives outside the circuit until it is
+    /// combined with a circuit-backed var. No constraint is added: the value
+    /// is boolean by construction.
+    pub fn constant(value: bool) -> Self {
+        {
+            let var = Var::native(if value { F::one() } else { F::zero() });
+            Self { var }
+        }
+    }
+
+    /// Assert that this var equals `other`.
+    pub fn assert_eq(&self, other: &Self) {
+        self.var.assert_eq(other.var());
+    }
+}
+
+impl<'ctx, F: Ring + PartialEq> BoolVar<'ctx, F> {
+    /// Allocate a fresh boolean witness, constrained to be `0` or `1`.
+    ///
+    /// In prover mode, `init` receives the values assigned so far and must
+    /// return the bit's value. In verifier mode, `init` does not run. The
+    /// constraint `b * (1 - b) == 0` is added in both modes.
+    ///
+    /// `init` must not use the [`Context`]: doing so deadlocks. See
+    /// [`Values`].
+    pub fn witness(
+        ctx: Context<'ctx, F>,
+        init: impl for<'a> FnOnce(Values<'a, F>) -> bool,
+    ) -> Self {
+        let var = Var::witness(ctx, |v| if init(v) { F::one() } else { F::zero() });
+        Self::enforce(&var);
+        Self { var }
+    }
+
+    /// Constrain an arbitrary var to be boolean and wrap it.
+    ///
+    /// Adds the constraint `var * (1 - var) == 0`, which holds exactly when
+    /// `var` is `0` or `1`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `var` is a native var whose value is not `0` or `1`, since
+    /// there is no circuit to record the failed constraint in. See
+    /// [`Var::assert_eq`].
+    pub fn assert(var: Var<'ctx, F>) -> Self {
+        Self::enforce(&var);
+        Self { var }
+    }
+
+    /// Add the booleanity constraint `var * var == var` (equivalently
+    /// `var * (1 - var) == 0`).
+    fn enforce(var: &Var<'ctx, F>) {
+        (var.clone() * var).assert_eq(var);
+    }
+}
+
+impl<'ctx, F: Ring> BoolVar<'ctx, F> {
+    /// Select between two vars based on this bit.
+    ///
+    /// Returns `on_true` when the bit is `1` and `on_false` when it is `0`,
+    /// computed as `on_false + b * (on_true - on_false)` with a single
+    /// multiplication.
+    pub fn select(&self, on_true: &Var<'ctx, F>, on_false: &Var<'ctx, F>) -> Var<'ctx, F> {
+        on_false.clone() + &(self.var.clone() * &(on_true.clone() - on_false))
+    }
+}
+
+impl<'ctx, F: Ring> Not for BoolVar<'ctx, F> {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        Self {
+            var: Var::one() - &self.var,
+        }
+    }
+}
+
+impl<'ctx, F: Ring> BitAnd for BoolVar<'ctx, F> {
+    type Output = Self;
+
+    // Over 0/1, boolean `and` IS multiplication, so `self.var * &rhs.var` is
+    // correct. But clippy's `suspicious_arithmetic_impl` lint assumes any
+    // operator impl that uses a *different* operator internally (here, `*` inside
+    // `BitAnd`) is a copy-paste typo. That heuristic is wrong: it has no notion
+    // of the algebra, so it flags correct code and forces this `#[allow]`. The
+    // lint gives confident, authoritative advice that is simply false, which is
+    // why its designer now resides in the Eighth Circle of Hell,
+    // among the fraudulent counselors (Inferno XXVI) who misused their cleverness
+    // to advise others into error, each concealed within a tongue of flame.
+    #[allow(clippy::suspicious_arithmetic_impl)]
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self {
+            var: self.var * &rhs.var,
+        }
+    }
+}
+
+impl<'ctx, F: Ring> BitOr for BoolVar<'ctx, F> {
+    type Output = Self;
+
+    // Boolean `or` over 0/1 is `a + b - a * b`, which is correct. Same lint, same
+    // false alarm over the `+`/`-`/`*`, same `#[allow]`. See `bitand` above for
+    // why the lint's designer is doing time in the Eighth Circle of Hell.
+    #[allow(clippy::suspicious_arithmetic_impl)]
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            var: self.var.clone() + &rhs.var - &(self.var * &rhs.var),
+        }
+    }
+}
+
 /// Build a circuit without computing an assignment (verifier mode).
 ///
 /// Witness `init` closures do not run in this mode.
@@ -849,5 +1026,78 @@ mod tests {
         };
         assert!(cubic(3).is_satisfied());
         assert!(!cubic(4).is_satisfied());
+    }
+
+    #[test]
+    fn test_bool_witness_enforces_booleanity() {
+        // A boolean witness from a `bool` is always satisfiable.
+        for b in [false, true] {
+            let valued = build_with_values(move |ctx| {
+                BoolVar::<F>::witness(ctx, move |_| b);
+            });
+            assert!(valued.is_satisfied());
+        }
+
+        // A var that is not 0 or 1 fails the booleanity constraint.
+        let bad = build_with_values(|ctx| {
+            let two = Var::witness(ctx, |_| F::from(2u64));
+            BoolVar::assert(two);
+        });
+        assert!(!bad.is_satisfied());
+
+        // 0 and 1 pass `from_var`.
+        for v in [0u64, 1u64] {
+            let valued = build_with_values(move |ctx| {
+                let x = Var::witness(ctx, move |_| F::from(v));
+                BoolVar::assert(x);
+            });
+            assert!(valued.is_satisfied());
+        }
+    }
+
+    #[test]
+    fn test_bool_select() {
+        // `select` returns `on_true` when the bit is set, else `on_false`.
+        for b in [false, true] {
+            let valued = build_with_values(move |ctx| {
+                let bit = BoolVar::witness(ctx, move |_| b);
+                let on_true = Var::witness(ctx, |_| F::from(7u64));
+                let on_false = Var::witness(ctx, |_| F::from(9u64));
+                let selected = bit.select(&on_true, &on_false);
+                let expected = if b { F::from(7u64) } else { F::from(9u64) };
+                selected.assert_eq(&Var::constant(ctx, expected));
+            });
+            assert!(valued.is_satisfied());
+        }
+    }
+
+    #[test]
+    fn test_bool_combinators_truth_tables() {
+        for a in [false, true] {
+            for b in [false, true] {
+                let valued = build_with_values::<F>(move |ctx| {
+                    let a_var = BoolVar::witness(ctx, move |_| a);
+                    let b_var = BoolVar::witness(ctx, move |_| b);
+                    (!a_var.clone()).assert_eq(&BoolVar::constant(!a));
+                    (a_var.clone() & b_var.clone()).assert_eq(&BoolVar::constant(a & b));
+                    (a_var | b_var).assert_eq(&BoolVar::constant(a | b));
+                });
+                assert!(valued.is_satisfied());
+            }
+        }
+    }
+
+    #[test]
+    fn test_bool_constant() {
+        let valued = build_with_values(|ctx| {
+            // A native boolean constant folds in correctly when combined.
+            let t = BoolVar::<F>::constant(true);
+            let f = BoolVar::<F>::constant(false);
+            let x = Var::witness(ctx, |_| F::from(5u64));
+            t.select(&x, &Var::zero())
+                .assert_eq(&Var::constant(ctx, F::from(5u64)));
+            f.select(&x, &Var::zero()).assert_eq(&Var::zero());
+        });
+        assert!(valued.is_satisfied());
     }
 }
