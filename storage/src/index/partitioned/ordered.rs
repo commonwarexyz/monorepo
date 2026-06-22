@@ -1,4 +1,5 @@
-//! A partitioned index that stores each partition as sorted struct-of-arrays (see [`super::partition`]).
+//! A partitioned index that stores each partition as sorted struct-of-arrays (see the
+//! `super::partition` module).
 //!
 //! The first `P` bytes of the (untranslated) key select a partition; the translator maps the
 //! remaining bytes to the partition-local key. Because the partitions are ordered by prefix and each
@@ -595,6 +596,61 @@ mod tests {
             assert_eq!(it.next(), Some(&22));
             assert_eq!(it.next(), Some(&21));
             assert_eq!(it.next(), None);
+        });
+    }
+
+    #[test_traced]
+    fn test_soa_ordered_exhaustive_traversal() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index(context);
+
+            // A grid of (prefix, sub-key) keys spanning several partitions, including the edge
+            // bytes 0x00/0xFF, each a distinct translated key (OneCap + P=1 orders by
+            // (prefix, first sub-key byte)). `keys` is built in ascending order.
+            let prefixes = [0x00u8, 0x05, 0xAA, 0xFF];
+            let subkeys = [0x00u8, 0x80, 0xFF];
+            let mut keys: Vec<[u8; 2]> = Vec::new();
+            for &p in &prefixes {
+                for &s in &subkeys {
+                    keys.push([p, s]);
+                }
+            }
+            let value_of = |k: &[u8; 2]| ((k[0] as u64) << 8) | k[1] as u64;
+            let n = keys.len();
+
+            // Insert scrambled to exercise sorted-array maintenance regardless of insertion order.
+            let mut scrambled = keys.clone();
+            scrambled.reverse();
+            scrambled.rotate_left(5);
+            for k in &scrambled {
+                index.insert(k, value_of(k));
+            }
+            assert_eq!(index.keys(), n);
+
+            assert_eq!(
+                index.first_translated_key().unwrap().next(),
+                Some(&value_of(&keys[0]))
+            );
+            assert_eq!(
+                index.last_translated_key().unwrap().next(),
+                Some(&value_of(&keys[n - 1]))
+            );
+
+            // For every key, `next` is its successor and `prev` its predecessor, wrapping at the
+            // ends. This walks run_starting_at / run_ending_at across every partition boundary.
+            for i in 0..n {
+                let next = value_of(&keys[(i + 1) % n]);
+                let (mut it, wrapped) = index.next_translated_key(&keys[i]).unwrap();
+                assert_eq!(wrapped, i + 1 == n, "next wrap at index {i}");
+                assert_eq!(it.next(), Some(&next), "next at {i}");
+                assert_eq!(it.next(), None);
+
+                let prev = value_of(&keys[(i + n - 1) % n]);
+                let (mut it, wrapped) = index.prev_translated_key(&keys[i]).unwrap();
+                assert_eq!(wrapped, i == 0, "prev wrap at index {i}");
+                assert_eq!(it.next(), Some(&prev), "prev at {i}");
+                assert_eq!(it.next(), None);
+            }
         });
     }
 }

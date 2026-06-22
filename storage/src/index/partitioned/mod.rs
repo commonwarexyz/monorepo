@@ -1,18 +1,23 @@
-//! Index implementations that partition the key space across multiple sub-indices based on a
-//! fixed-size prefix of the key to reduce the average number of bytes required per key/value
-//! stored.
+//! Index implementations that partition the key space across `2^(8*P)` independent partitions
+//! selected by a fixed-size `P`-byte prefix of the key.
+//!
+//! Two variants share this partitioning:
+//! - [`ordered`] keeps each partition as sorted struct-of-arrays. Eliding the shared prefix from
+//!   the stored keys makes it dense per key, so partitioning lowers the average bytes/key (by the
+//!   prefix length) once the fixed per-partition overhead is amortized over enough keys.
+//! - [`unordered`] keeps each partition as a hash sub-index. Here partitioning buys prefix sharding
+//!   and parallel loading, not a per-key memory saving: a hashmap pads the elided prefix back up to
+//!   the value's alignment.
 //!
 //! # Example
 //!
-//! A 2-byte key prefix results in 2^16 = 64K partitions, each independently indexed using the
-//! remaining bytes of the key. This reduces the average number of bytes required per key/value
-//! stored by the size of the prefix, or 2 bytes in this example.
+//! A 2-byte prefix results in 2^16 = 64K partitions, each independently indexed using the remaining
+//! bytes of the key.
 //!
-//! Partitioning introduces an up-front fixed RAM cost to pre-allocate the sub-indices corresponding
-//! to each partition. This makes a 2-byte prefix efficient only when indexing a large number (>>
-//! 2^16) of values, whereas a 1-byte prefix (involving pre-allocation of only 256 sub-indices)
-//! could be useful for smaller datasets. Larger prefix lengths are unlikely to be practical, and
-//! values larger than 3 will fail to compile.
+//! Partitioning introduces an up-front fixed RAM cost to pre-allocate the per-partition state. This
+//! makes a 2-byte prefix efficient only when indexing a large number (>> 2^16) of values, whereas a
+//! 1-byte prefix (256 partitions) can suit smaller datasets. Prefixes larger than 3 bytes are
+//! impractical and fail to compile.
 
 pub mod ordered;
 mod partition;
