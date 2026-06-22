@@ -1,4 +1,4 @@
-//! Parallelize fold operations with pluggable execution strategies..
+//! Parallelize fold operations with pluggable execution strategies.
 //!
 //! This crate provides the [`Strategy`] trait, which abstracts over sequential and parallel
 //! execution of fold operations. This allows algorithms to be written once and executed either
@@ -15,6 +15,8 @@
 //!
 //! **Convenience Methods:**
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
+//! - [`try_map_collect_vec`](Strategy::try_map_collect_vec): Maps fallible operations and
+//!   collects into a `Result<Vec<_>, _>`
 //! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
 //!   per-partition initialization
 //! - [`map_partition_collect_vec`](Strategy::map_partition_collect_vec): Maps elements, collecting
@@ -230,6 +232,42 @@ commonware_macros::stability_scope!(BETA {
                     a
                 },
             )
+        }
+
+        /// Maps each element with a fallible operation and collects results into a `Vec`.
+        ///
+        /// This is a convenience method that applies `map_op` to each element and
+        /// collects the results into a single `Result`. Output ordering matches
+        /// [`map_collect_vec`](Self::map_collect_vec). This is for ergonomic error
+        /// propagation, not early cancellation.
+        ///
+        /// # Arguments
+        ///
+        /// - `iter`: The collection to map over
+        /// - `map_op`: The fallible mapping function to apply to each element
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Strategy, Sequential};
+        ///
+        /// let strategy = Sequential;
+        /// let data = vec![1, 2, 3, 4, 5];
+        ///
+        /// let squared: Result<Vec<i32>, ()> = strategy.try_map_collect_vec(
+        ///     &data,
+        ///     |&x| Ok(x * x),
+        /// );
+        /// assert_eq!(squared, Ok(vec![1, 4, 9, 16, 25]));
+        /// ```
+        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            self.map_collect_vec(iter, map_op).into_iter().collect()
         }
 
         /// Maps each element with per-partition state and collects results into a `Vec`.
@@ -686,6 +724,37 @@ mod test {
             );
 
             prop_assert_eq!(via_map, via_fold);
+        }
+
+        #[test]
+        fn try_map_collect_vec_collects_successes(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let expected: Vec<i32> = data.iter().map(|x| x.wrapping_mul(5)).collect();
+
+            let sequential: Result<Vec<i32>, ()> =
+                Sequential.try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
+            prop_assert_eq!(sequential, Ok(expected.clone()));
+
+            let parallel: Result<Vec<i32>, ()> =
+                parallel_strategy().try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
+            prop_assert_eq!(parallel, Ok(expected));
+        }
+
+        #[test]
+        fn try_map_collect_vec_returns_first_error(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let expected_error = data.iter().position(|x| x % 7 == 0);
+            let result: Result<Vec<i32>, usize> =
+                Sequential.try_map_collect_vec(data.iter().enumerate(), |(i, &x)| {
+                    if x % 7 == 0 {
+                        Err(i)
+                    } else {
+                        Ok(x)
+                    }
+                });
+
+            match expected_error {
+                Some(i) => prop_assert_eq!(result, Err(i)),
+                None => prop_assert_eq!(result, Ok(data)),
+            }
         }
 
         #[test]
