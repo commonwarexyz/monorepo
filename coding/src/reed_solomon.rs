@@ -337,9 +337,10 @@ fn encode<H: Hasher, S: Strategy>(
         Some(ranges) => {
             let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
             let mut buf = vec![0u8; m * shard_len];
-            let dst = striped::Dst::new(&mut buf, shard_len);
-            strategy.try_map_collect_vec(ranges, |range| {
-                striped::encode_recovery_into(k, m, range, &original_shards, dst)
+            let groups = striped::stripe_columns(&mut buf, shard_len, &ranges);
+            let stripes: Vec<_> = ranges.into_iter().zip(groups).collect();
+            strategy.try_map_collect_vec(stripes, |(range, out)| {
+                striped::encode_recovery_into(k, m, range, &original_shards, out)
             })?;
             buf
         }
@@ -396,7 +397,7 @@ fn encode<H: Hasher, S: Strategy>(
     Ok((root, chunks))
 }
 
-/// Read-only parameters threaded through the striped and sequential decode paths.
+/// Inputs shared by the decode helpers.
 struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     /// Total number of shards (`k + m`).
     n: usize,
@@ -436,47 +437,35 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 mod striped {
     use super::*;
 
-    /// Target for writing stripes into a shared, strided output buffer in parallel.
-    ///
-    /// The base address is held as a `usize` so disjoint stripe tasks can write the same
-    /// allocation concurrently (a `&mut` would not be `Send` across tasks).
-    #[derive(Clone, Copy)]
-    pub(super) struct Dst {
-        ptr: usize,
+    /// Split a shard-major buffer (`num_shards * shard_len`) into one group of mutable column
+    /// slices per stripe range: `groups[s][shard]` is bytes `ranges[s]` of shard `shard`. Using
+    /// `chunks_mut` + `split_at_mut` hands each parallel stripe task genuine, provably-disjoint
+    /// `&mut [u8]` slices, so the tasks fill the shared buffer without `unsafe`.
+    pub(super) fn stripe_columns<'a>(
+        buf: &'a mut [u8],
         shard_len: usize,
-    }
-
-    impl Dst {
-        pub(super) fn new(buf: &mut [u8], shard_len: usize) -> Self {
-            Self {
-                ptr: buf.as_mut_ptr() as usize,
-                shard_len,
+        ranges: &[Range<usize>],
+    ) -> Vec<Vec<&'a mut [u8]>> {
+        let mut groups: Vec<Vec<&'a mut [u8]>> = ranges.iter().map(|_| Vec::new()).collect();
+        for shard in buf.chunks_mut(shard_len) {
+            let mut rest = shard;
+            for (group, range) in groups.iter_mut().zip(ranges) {
+                let (head, tail) = rest.split_at_mut(range.len());
+                group.push(head);
+                rest = tail;
             }
         }
-
-        /// Copies `src` into stripe `range` of shard `index`.
-        ///
-        /// # Safety
-        ///
-        /// Callers must ensure no two concurrent writes overlap. Stripe `range`s are disjoint
-        /// and shard slots are disjoint, so concurrent tasks never alias. `index` and `range`
-        /// must stay within the buffer the [`Dst`] was built from, and `src.len()` must
-        /// equal `range.len()`.
-        unsafe fn write(&self, index: usize, range: &Range<usize>, src: &[u8]) {
-            let start = index * self.shard_len + range.start;
-            let out = std::slice::from_raw_parts_mut((self.ptr as *mut u8).add(start), range.len());
-            out.copy_from_slice(src);
-        }
+        groups
     }
 
-    /// The two output buffers a stripe task writes recovered originals and recovery shards into.
-    #[derive(Clone, Copy)]
-    struct StripeOut {
-        originals: Dst,
-        recoveries: Dst,
+    /// The output column slices a recover-all stripe task writes into: one mutable slice per
+    /// missing original and per missing recovery (paired by position with [`Missing`]).
+    struct StripeOut<'a> {
+        originals: Vec<&'a mut [u8]>,
+        recoveries: Vec<&'a mut [u8]>,
     }
 
-    /// The shard indices a stripe task must reconstruct (one slot per index in each buffer).
+    /// The shard indices a stripe task must reconstruct (paired by position with [`StripeOut`]).
     #[derive(Clone, Copy)]
     struct Missing<'a> {
         originals: &'a [usize],
@@ -526,9 +515,8 @@ mod striped {
 
     /// Reconstruct a single stripe's missing shards from exactly `k` provided shards, reading
     /// both missing originals and missing recoveries straight out of the decoder (the decode
-    /// reveals all positions), so no separate re-encode is needed. Writes recovered originals
-    /// to `out.originals` and recovered recoveries to `out.recoveries` (one slot per entry of
-    /// `missing.originals` / `missing.recoveries`).
+    /// reveals all positions), so no separate re-encode is needed. Writes each restored shard's
+    /// stripe into the matching `out.originals` / `out.recoveries` column slice.
     fn recover_all_into(
         k: usize,
         m: usize,
@@ -536,7 +524,7 @@ mod striped {
         provided_originals: &[(usize, &[u8])],
         provided_recoveries: &[(usize, &[u8])],
         missing: Missing<'_>,
-        out: StripeOut,
+        mut out: StripeOut<'_>,
     ) -> Result<(), Error> {
         let shard_len = range.len();
         let mut decoder = Cached::take(
@@ -558,34 +546,30 @@ mod striped {
         }
         let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
 
-        for (pos, idx) in missing.originals.iter().enumerate() {
+        for (slot, &idx) in out.originals.iter_mut().zip(missing.originals) {
             let shard = decoding
-                .restored_original(*idx)
+                .restored_original(idx)
                 .ok_or(Error::Inconsistent)?;
-            // SAFETY: stripe `range`s and missing-original slots are disjoint, so concurrent
-            // tasks never alias; see [`Dst::write`].
-            unsafe { out.originals.write(pos, &range, shard) };
+            slot.copy_from_slice(shard);
         }
-        for (pos, idx) in missing.recoveries.iter().enumerate() {
+        for (slot, &idx) in out.recoveries.iter_mut().zip(missing.recoveries) {
             let shard = decoding
-                .restored_recovery(*idx)
+                .restored_recovery(idx)
                 .ok_or(Error::Inconsistent)?;
-            // SAFETY: stripe `range`s and missing-recovery slots are disjoint, so concurrent
-            // tasks never alias; see [`Dst::write`].
-            unsafe { out.recoveries.write(pos, &range, shard) };
+            slot.copy_from_slice(shard);
         }
 
         Ok(())
     }
 
-    /// Encode the recovery shards for a single stripe, writing each recovery shard's
-    /// stripe into `dst` (one slot per recovery shard).
+    /// Encode the recovery shards for a single stripe, writing each recovery shard's stripe
+    /// into the matching `out` column slice (one slot per recovery shard, in index order).
     pub(super) fn encode_recovery_into(
         k: usize,
         m: usize,
         range: Range<usize>,
         originals: &[impl AsRef<[u8]>],
-        dst: Dst,
+        mut out: Vec<&mut [u8]>,
     ) -> Result<(), Error> {
         let shard_len = range.len();
         let mut encoder = Cached::take(
@@ -602,10 +586,8 @@ mod striped {
                 .map_err(Error::ReedSolomon)?;
         }
         let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-        for (i, shard) in encoding.recovery_iter().enumerate() {
-            // SAFETY: stripe `range`s and recovery shard slots are disjoint, so concurrent
-            // tasks never alias; see [`Dst::write`].
-            unsafe { dst.write(i, &range, shard) };
+        for (slot, shard) in out.iter_mut().zip(encoding.recovery_iter()) {
+            slot.copy_from_slice(shard);
         }
 
         Ok(())
@@ -639,9 +621,10 @@ mod striped {
 
         // Re-encode all recovery shards from the originals, one stripe per task.
         let mut recovery_buf = vec![0u8; m * shard_len];
-        let dst = Dst::new(&mut recovery_buf, shard_len);
-        strategy.try_map_collect_vec(ranges, |range| {
-            encode_recovery_into(k, m, range, &original_refs, dst)
+        let groups = stripe_columns(&mut recovery_buf, shard_len, &ranges);
+        let stripes: Vec<_> = ranges.into_iter().zip(groups).collect();
+        strategy.try_map_collect_vec(stripes, |(range, out)| {
+            encode_recovery_into(k, m, range, &original_refs, out)
         })?;
         let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
 
@@ -696,15 +679,20 @@ mod striped {
 
         let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
         let mut restored_recoveries = vec![0u8; missing_recoveries.len() * shard_len];
-        let out = StripeOut {
-            originals: Dst::new(&mut restored_originals, shard_len),
-            recoveries: Dst::new(&mut restored_recoveries, shard_len),
-        };
         let missing = Missing {
             originals: &missing_originals,
             recoveries: &missing_recoveries,
         };
-        strategy.try_map_collect_vec(ranges, |range| {
+        let original_groups = stripe_columns(&mut restored_originals, shard_len, &ranges);
+        let recovery_groups = stripe_columns(&mut restored_recoveries, shard_len, &ranges);
+        let stripes: Vec<_> = ranges
+            .into_iter()
+            .zip(original_groups.into_iter().zip(recovery_groups))
+            .map(|(range, (originals, recoveries))| {
+                (range, StripeOut { originals, recoveries })
+            })
+            .collect();
+        strategy.try_map_collect_vec(stripes, |(range, out)| {
             recover_all_into(
                 k,
                 m,
@@ -1018,7 +1006,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         provided_recoveries.truncate(keep);
     }
 
-    // Decode the data, striping the work across the strategy when shards are large enough.
+    // Decode the data, striping the work across the strategy when shards are large enough
     let ctx = DecodeCtx {
         n,
         k,
@@ -1571,10 +1559,8 @@ mod tests {
         }
     }
 
-    /// Single-threaded exercise of the striped encode helper and its [`striped::Dst`]
-    /// raw-pointer writes (kept miri-checkable, independent of any [`Strategy`]): splitting a
-    /// shard into stripes and encoding each must reproduce the single full-width encode
-    /// byte-for-byte.
+    /// Splitting a shard into stripes and encoding each must reproduce the single full-width
+    /// encode byte-for-byte.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
         let k = 2usize;
@@ -1589,17 +1575,17 @@ mod tests {
         }
         let originals: Vec<&[u8]> = originals_buf.chunks(shard_len).collect();
 
-        // Encode each stripe into its slot via Dst (the `unsafe` path).
+        // Encode each stripe into its column slices of the shared buffer.
         let mut striped_recovery = vec![0u8; m * shard_len];
-        let dst = striped::Dst::new(&mut striped_recovery, shard_len);
-        for range in &ranges {
-            striped::encode_recovery_into(k, m, range.clone(), &originals, dst).unwrap();
+        let groups = striped::stripe_columns(&mut striped_recovery, shard_len, &ranges);
+        for (range, out) in ranges.iter().cloned().zip(groups) {
+            striped::encode_recovery_into(k, m, range, &originals, out).unwrap();
         }
 
         // A single full-width encode must produce the identical recovery buffer.
         let mut full_recovery = vec![0u8; m * shard_len];
-        let dst_full = striped::Dst::new(&mut full_recovery, shard_len);
-        striped::encode_recovery_into(k, m, 0..shard_len, &originals, dst_full).unwrap();
+        let full_out: Vec<&mut [u8]> = full_recovery.chunks_mut(shard_len).collect();
+        striped::encode_recovery_into(k, m, 0..shard_len, &originals, full_out).unwrap();
 
         assert_eq!(striped_recovery, full_recovery);
     }
