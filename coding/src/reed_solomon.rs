@@ -507,8 +507,7 @@ fn decode_missing_original_stripe_into(
         // SAFETY: each task writes only `range` for each missing original shard. Stripe
         // ranges are disjoint, and all target slices are within the preallocated
         // missing-originals buffer.
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
+        let dst = unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
         let shard = decoding
             .restored_original(*idx)
             .ok_or(Error::Inconsistent)?;
@@ -577,8 +576,7 @@ fn encode_recovery_stripe_into(
         // SAFETY: each task writes only `range` for each recovery shard. Stripe ranges
         // are disjoint, and all target slices are within the preallocated
         // `m * full_shard_len` recovery buffer.
-        let dst =
-            unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
+        let dst = unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
         let shard = encoding.recovery(i).ok_or(Error::Inconsistent)?;
         dst.copy_from_slice(shard);
     }
@@ -594,7 +592,11 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
     provided_recoveries: Vec<(usize, &'a [u8])>,
 ) -> Result<Vec<u8>, Error> {
     let &DecodeCtx {
-        k, m, shard_len, strategy, ..
+        k,
+        m,
+        shard_len,
+        strategy,
+        ..
     } = ctx;
     assert!(ranges.len() > 1);
 
@@ -663,17 +665,15 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
         .iter()
         .enumerate()
         .filter_map(|(i, shard)| shard.is_none().then_some(i));
-    for (i, digest) in strategy.map_init_collect_vec(
-        missing_recovery_indices,
-        H::new,
-        |hasher, i| {
+    for (i, digest) in
+        strategy.map_init_collect_vec(missing_recovery_indices, H::new, |hasher, i| {
             for (range, recovery_stripe) in &recovery_stripes {
                 let stripe_len = range.len();
                 hasher.update(&recovery_stripe[i * stripe_len..(i + 1) * stripe_len]);
             }
             (k + i, hasher.finalize())
-        },
-    ) {
+        })
+    {
         shard_digests[i] = Some(digest);
     }
     drop(recovery_stripes);
@@ -727,7 +727,12 @@ fn verify_sequential_codeword<H: Hasher, S: Strategy>(
     originals: &[&[u8]],
 ) -> Result<Vec<u8>, Error> {
     let &DecodeCtx {
-        n, k, m, shard_len, root, strategy,
+        n,
+        k,
+        m,
+        shard_len,
+        root,
+        strategy,
     } = ctx;
     let data = extract_data(originals, k, shard_len)?;
 
@@ -1424,7 +1429,9 @@ mod tests {
     fn test_striped_recovery_matches_sequential() {
         for &data_len in &[128 * 1024usize, 257 * 1024, 512 * 1024, 1024 * 1024] {
             for &(total, min) in &[(12u16, 4u16), (24, 8), (33, 11)] {
-                let data: Vec<u8> = (0..data_len).map(|i| (i as u8) ^ ((i >> 7) as u8)).collect();
+                let data: Vec<u8> = (0..data_len)
+                    .map(|i| (i as u8) ^ ((i >> 7) as u8))
+                    .collect();
                 let (root, chunks) =
                     encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
                 let recovery_only = chunks
@@ -1524,7 +1531,11 @@ mod tests {
             tamper_flip_original_data,
         ),
         // Recovery-only decode where one provided recovery is tampered.
-        ("recovery_only_tampered", &[4, 5, 6, 7], tamper_flip_recovery),
+        (
+            "recovery_only_tampered",
+            &[4, 5, 6, 7],
+            tamper_flip_recovery,
+        ),
     ];
 
     /// Every adversarial scenario must be rejected as [`Error::Inconsistent`] on whichever
