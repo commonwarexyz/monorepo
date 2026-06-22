@@ -747,11 +747,7 @@ commonware_macros::stability_scope!(ALPHA {
         /// successfully decoded [`Commitment`] never fail.
         #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, FixedArray)]
         #[fixed_array(bytes([u8; COMMITMENT_SIZE]))]
-        pub struct Commitment<
-            B = commonware_cryptography::sha256::Digest,
-            R = commonware_cryptography::sha256::Digest,
-            C = commonware_cryptography::sha256::Digest,
-        >([u8; COMMITMENT_SIZE], PhantomData<fn() -> (B, R, C)>);
+        pub struct Commitment<B, R, C>([u8; COMMITMENT_SIZE], PhantomData<(B, R, C)>);
 
         impl<B: Digest, R: Digest, C: Digest> Commitment<B, R, C> {
             const BLOCK_DIGEST_OFFSET: usize = 0;
@@ -1862,13 +1858,14 @@ mod tests {
     mod conformance {
         use super::{coding::Commitment, *};
         use commonware_codec::conformance::CodecConformance;
+        use commonware_cryptography::sha256::Digest as Sha256Digest;
 
         commonware_conformance::conformance_tests! {
             CodecConformance<Epoch>,
             CodecConformance<Height>,
             CodecConformance<View>,
             CodecConformance<Round>,
-            CodecConformance<Commitment>,
+            CodecConformance<Commitment<Sha256Digest, Sha256Digest, Sha256Digest>>,
         }
     }
 }

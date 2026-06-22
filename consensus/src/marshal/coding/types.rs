@@ -29,11 +29,7 @@ pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
-    pub const fn new(
-        commitment: CodingCommitment<B, C, H>,
-        index: u16,
-        inner: C::Shard,
-    ) -> Self {
+    pub const fn new(commitment: CodingCommitment<B, C, H>, index: u16, inner: C::Shard) -> Self {
         Self {
             commitment,
             index,

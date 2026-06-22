@@ -75,7 +75,8 @@ pub type S = bls12381_threshold_vrf::Scheme<K, V>;
 pub type P = ConstantProvider<S, Epoch>;
 
 // Coding variant type aliases (uses Commitment in context)
-pub type CodingCtx = Context<Commitment, K>;
+type TestCommitment = Commitment<Sha256Digest, Sha256Digest, Sha256Digest>;
+pub type CodingCtx = Context<TestCommitment, K>;
 pub type CodingB = Block<D, CodingCtx>;
 
 // Common test constants
@@ -2390,7 +2391,7 @@ pub const GENESIS_CODING_CONFIG: commonware_coding::Config = commonware_coding::
 };
 
 /// Create a genesis Commitment (all zeros for digests, genesis config).
-pub fn genesis_commitment() -> Commitment {
+pub fn genesis_commitment() -> TestCommitment {
     Commitment::from((
         D::EMPTY,
         D::EMPTY,
@@ -2419,7 +2420,7 @@ impl TestHarness for CodingHarness {
     type Variant = CodingVariant;
     type TestBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type ValidatorExtra = ShardsMailbox;
-    type Commitment = Commitment;
+    type Commitment = TestCommitment;
 
     async fn setup_validator(
         context: deterministic::Context,
@@ -2598,7 +2599,7 @@ impl TestHarness for CodingHarness {
 
     fn make_test_block(
         parent: D,
-        parent_commitment: Commitment,
+        parent_commitment: TestCommitment,
         height: Height,
         timestamp: u64,
         num_participants: u16,
@@ -2617,7 +2618,7 @@ impl TestHarness for CodingHarness {
         CodedBlock::new(raw, coding_config, &Sequential)
     }
 
-    fn genesis_parent_commitment(_num_participants: u16) -> Commitment {
+    fn genesis_parent_commitment(_num_participants: u16) -> TestCommitment {
         genesis_commitment()
     }
 
@@ -2632,7 +2633,7 @@ impl TestHarness for CodingHarness {
         CodedBlock::new_trusted(inner, commitment)
     }
 
-    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> Commitment {
+    fn commitment(block: &CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>) -> TestCommitment {
         block.commitment()
     }
 
@@ -2670,10 +2671,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_finalization(
-        proposal: Proposal<Commitment>,
+        proposal: Proposal<TestCommitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Finalization<S, Commitment> {
+    ) -> Finalization<S, TestCommitment> {
         let finalizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -2683,10 +2684,10 @@ impl TestHarness for CodingHarness {
     }
 
     fn make_notarization(
-        proposal: Proposal<Commitment>,
+        proposal: Proposal<TestCommitment>,
         schemes: &[S],
         quorum: u32,
-    ) -> Notarization<S, Commitment> {
+    ) -> Notarization<S, TestCommitment> {
         let notarizes: Vec<_> = schemes
             .iter()
             .take(quorum as usize)
@@ -2697,14 +2698,14 @@ impl TestHarness for CodingHarness {
 
     async fn report_finalization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        finalization: Finalization<S, Commitment>,
+        finalization: Finalization<S, TestCommitment>,
     ) {
         mailbox.report(Activity::Finalization(finalization));
     }
 
     async fn report_notarization(
         mailbox: &mut Mailbox<S, Self::Variant>,
-        notarization: Notarization<S, Commitment>,
+        notarization: Notarization<S, TestCommitment>,
     ) {
         mailbox.report(Activity::Notarization(notarization));
     }

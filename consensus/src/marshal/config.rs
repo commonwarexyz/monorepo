@@ -121,12 +121,13 @@ mod tests {
 
     #[test]
     fn config_compiles_with_distinct_application_and_start_blocks() {
-        type AB = MockBlock<Sha256Digest, Context<Commitment, PublicKey>>;
+        type TestCommitment = Commitment<Sha256Digest, Sha256Digest, Sha256Digest>;
+        type AB = MockBlock<Sha256Digest, Context<TestCommitment, PublicKey>>;
         type B = CodedBlock<AB, ReedSolomon<Sha256>, Sha256>;
         type Provider = ConstantProvider<ed25519::Scheme, Epoch>;
 
         fn assert_well_formed<T>() {}
 
-        assert_well_formed::<Config<Provider, FixedEpocher, Sequential, AB, B, Commitment>>();
+        assert_well_formed::<Config<Provider, FixedEpocher, Sequential, AB, B, TestCommitment>>();
     }
 }

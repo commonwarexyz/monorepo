@@ -144,13 +144,15 @@ mod tests {
     };
     use commonware_utils::NZU64;
 
+    type TestCommitment = Commitment<Sha256Digest, Sha256Digest, Sha256Digest>;
+
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestBlock {
         digest: Sha256Digest,
         parent: Sha256Digest,
         height: Height,
         context: Round,
-        commitment: Commitment,
+        commitment: TestCommitment,
     }
 
     impl Write for TestBlock {
@@ -181,7 +183,7 @@ mod tests {
             let parent = Sha256Digest::read(buf)?;
             let height = Height::read(buf)?;
             let context = Round::read(buf)?;
-            let commitment = Commitment::read(buf)?;
+            let commitment = TestCommitment::read(buf)?;
             Ok(Self {
                 digest,
                 parent,
@@ -221,7 +223,7 @@ mod tests {
     }
 
     impl Committable for TestBlock {
-        type Commitment = Commitment;
+        type Commitment = TestCommitment;
 
         fn commitment(&self) -> Self::Commitment {
             self.commitment
@@ -233,8 +235,8 @@ mod tests {
         block: TestBlock,
         parent: TestBlock,
         context: Round,
-        commitment: Commitment,
-        parent_commitment: Commitment,
+        commitment: TestCommitment,
+        parent_commitment: TestCommitment,
         config: CodingConfig,
     }
 
@@ -243,8 +245,8 @@ mod tests {
         context: Round,
         config: CodingConfig,
         root_label: &[u8],
-    ) -> Commitment {
-        Commitment::from((
+    ) -> TestCommitment {
+        TestCommitment::from((
             digest,
             Sha256::hash(root_label),
             hash_context::<Sha256, _>(&context),

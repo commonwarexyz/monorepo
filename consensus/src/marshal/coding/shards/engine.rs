@@ -210,6 +210,7 @@ enum BlockSubscriptionKey<D: Digest, R: Digest, H: Digest> {
     Commitment(Commitment<D, R, H>),
     Digest(D),
 }
+
 /// Configuration for the [`Engine`].
 pub struct Config<P, S, X, D, C, H, B, T>
 where
@@ -278,6 +279,9 @@ where
     block: CodedBlock<B, C, H>,
 }
 
+type ReconstructionStates<P, B, C, H> =
+    BTreeMap<CodingCommitment<B, C, H>, ReconstructionState<P, B, C, H>>;
+
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
 ///
 /// When enough [`Shard`]s are present in the mailbox, the [`Engine`] may facilitate
@@ -317,7 +321,7 @@ where
     strategy: T,
 
     /// A map of [`Commitment`]s to [`ReconstructionState`]s.
-    state: BTreeMap<CodingCommitment<B, C, H>, ReconstructionState<P, B, C, H>>,
+    state: ReconstructionStates<P, B, C, H>,
 
     /// Per-peer ring buffers for shards received before leader announcement.
     ///
@@ -1102,7 +1106,10 @@ where
 
     /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// verification.
-    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: CodingCommitment<B, C, H>) {
+    fn notify_assigned_shard_verified_subscribers(
+        &mut self,
+        commitment: CodingCommitment<B, C, H>,
+    ) {
         if let Some(mut subscribers) = self
             .assigned_shard_verified_subscriptions
             .remove(&commitment)
@@ -1384,8 +1391,12 @@ where
         let pending = std::mem::take(&mut self.pending_shards);
         let (new_checked, to_block) =
             strategy.map_partition_collect_vec(pending, |(peer, shard)| {
-                let checked =
-                    C::check(&commitment.config(), &commitment.root(), shard.index, &shard.data);
+                let checked = C::check(
+                    &commitment.config(),
+                    &commitment.root(),
+                    shard.index,
+                    &shard.data,
+                );
                 (peer, checked.ok())
             });
 

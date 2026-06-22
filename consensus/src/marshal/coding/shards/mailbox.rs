@@ -28,29 +28,29 @@ where
         /// The round in which the block was proposed.
         round: Round,
     },
-    /// A notification from consensus that a [`Commitment`] has been discovered.
+    /// A notification from consensus that a [`CodingCommitment`] has been discovered.
     Discovered {
-        /// The [`Commitment`] of the proposed block.
+        /// The [`CodingCommitment`] of the proposed block.
         commitment: CodingCommitment<B, C, H>,
         /// The leader's public key.
         leader: P,
         /// The round in which the commitment was proposed.
         round: Round,
     },
-    /// A notification from consensus that a [`Commitment`] has been notarized.
+    /// A notification from consensus that a [`CodingCommitment`] has been notarized.
     ///
     /// This may arrive before the engine knows the round leader. It allows the
     /// engine to reconstruct from sender-indexed gossip shards already buffered
     /// for the commitment, but it does not satisfy assigned shard verification.
     Notarized {
-        /// The [`Commitment`] of the notarized block.
+        /// The [`CodingCommitment`] of the notarized block.
         commitment: CodingCommitment<B, C, H>,
         /// The round in which the commitment was notarized.
         round: Round,
     },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
-        /// The [`Commitment`] of the block to get.
+        /// The [`CodingCommitment`] of the block to get.
         commitment: CodingCommitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<Option<CodedBlock<B, C, H>>>,
@@ -79,7 +79,7 @@ where
         response: oneshot::Sender<()>,
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
-    /// by its [`Commitment`].
+    /// by its [`CodingCommitment`].
     SubscribeByCommitment {
         /// The block's digest.
         commitment: CodingCommitment<B, C, H>,
@@ -96,7 +96,7 @@ where
     },
     /// A request to prune all caches at and below the given commitment.
     Prune {
-        /// Inclusive prune target [`Commitment`].
+        /// Inclusive prune target [`CodingCommitment`].
         through: CodingCommitment<B, C, H>,
     },
 }
@@ -220,7 +220,7 @@ where
         let _ = self.sender.enqueue(Message::Proposed { block, round });
     }
 
-    /// Inform the engine of an externally proposed [`Commitment`].
+    /// Inform the engine of an externally proposed [`CodingCommitment`].
     pub fn discovered(&self, commitment: CodingCommitment<B, C, H>, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
@@ -229,7 +229,7 @@ where
         });
     }
 
-    /// Inform the engine that a [`Commitment`] was notarized.
+    /// Inform the engine that a [`CodingCommitment`] was notarized.
     ///
     /// This is the leaderless reconstruction signal used by certification. It
     /// lets the engine drain sender-indexed gossip shards from its peer buffers
@@ -241,7 +241,7 @@ where
             .enqueue(Message::Notarized { commitment, round });
     }
 
-    /// Request a reconstructed block by its [`Commitment`].
+    /// Request a reconstructed block by its [`CodingCommitment`].
     pub async fn get(&self, commitment: CodingCommitment<B, C, H>) -> Option<CodedBlock<B, C, H>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetByCommitment {
@@ -284,8 +284,11 @@ where
         receiver
     }
 
-    /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
-    pub fn subscribe(&self, commitment: CodingCommitment<B, C, H>) -> oneshot::Receiver<CodedBlock<B, C, H>> {
+    /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`CodingCommitment`].
+    pub fn subscribe(
+        &self,
+        commitment: CodingCommitment<B, C, H>,
+    ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
             commitment,

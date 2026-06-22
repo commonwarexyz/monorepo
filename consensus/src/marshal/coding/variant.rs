@@ -193,7 +193,8 @@ mod tests {
     use commonware_parallel::Sequential;
     use commonware_utils::{test_rng, NZU16};
 
-    type TestContext = Context<Commitment, PublicKey>;
+    type TestCommitment = Commitment<Sha256Digest, Sha256Digest, Sha256Digest>;
+    type TestContext = Context<TestCommitment, PublicKey>;
     type InnerBlock = MockBlock<Sha256Digest, TestContext>;
 
     struct NoCloneBlock {

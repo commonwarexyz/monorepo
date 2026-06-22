@@ -128,7 +128,9 @@ use tracing::{debug, info_span, warn, Instrument as _};
 #[allow(clippy::type_complexity)]
 pub struct MarshaledConfig<A, B, C, H, Z, S, ES>
 where
-    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<
+        Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+    >,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
@@ -159,7 +161,9 @@ pub struct Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<
+        Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+    >,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
@@ -186,7 +190,9 @@ impl<E, A, B, C, H, Z, S, ES> Clone for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
     A: Application<E>,
-    B: CertifiableBlock<Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
+    B: CertifiableBlock<
+        Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+    >,
     C: CodingScheme,
     H: Hasher,
     Z: Provider<Scope = Epoch, Scheme: Scheme<CodingCommitment<B, C, H>>>,
@@ -1119,7 +1125,11 @@ where
 impl<E, A, B, C, H, Z, S, ES> Relay for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<E, Block = B, Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>,
+    A: Application<
+        E,
+        Block = B,
+        Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+    >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,
@@ -1146,8 +1156,11 @@ where
 impl<E, A, B, C, H, Z, S, ES> Reporter for Marshaled<E, A, B, C, H, Z, S, ES>
 where
     E: Rng + Storage + Spawner + Metrics + Clock,
-    A: Application<E, Block = B, Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>>
-        + Reporter<Activity = Update<B>>,
+    A: Application<
+            E,
+            Block = B,
+            Context = Context<CodingCommitment<B, C, H>, <Z::Scheme as Verifier>::PublicKey>,
+        > + Reporter<Activity = Update<B>>,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
     H: Hasher,

@@ -154,7 +154,7 @@ hash = "b9fbf2cfcbc37c87cb7aa8ede95c4ddf93c8bbd9f1a01e86ed72ba14bed920fa"
 n_cases = 65536
 hash = "01cc3b0d41d0ef29f02de2729d51b1b31bb96f00c6390e56aadd0fb5117cc7b1"
 
-["commonware_consensus::types::tests::conformance::CodecConformance<Commitment>"]
+["commonware_consensus::types::tests::conformance::CodecConformance<Commitment<Sha256Digest,Sha256Digest,Sha256Digest>>"]
 n_cases = 65536
 hash = "2ce8beed4a11c22fcb65c614f250f5758d71229a729a2fef13faf765b2d9a5ea"
 
