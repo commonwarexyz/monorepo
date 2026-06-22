@@ -302,7 +302,11 @@ fn work_ranges(len: usize, workers: usize) -> Vec<std::ops::Range<usize>> {
 mod gf8 {
     use super::{work_ranges, Error};
     use commonware_parallel::Strategy;
-    use std::sync::OnceLock;
+    use commonware_utils::sync::Mutex;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, OnceLock},
+    };
 
     #[cfg(target_arch = "x86")]
     use std::arch::x86::{
@@ -328,6 +332,26 @@ mod gf8 {
     struct Tables {
         exp: [u8; FIELD_ORDER * 2],
         log: [u8; FIELD_SIZE],
+    }
+
+    type CoefficientCache = Mutex<HashMap<(usize, usize), Arc<Vec<u8>>>>;
+
+    fn coefficients(k: usize, m: usize) -> Result<Arc<Vec<u8>>, Error> {
+        static COEFFICIENTS: OnceLock<CoefficientCache> = OnceLock::new();
+        let cache = COEFFICIENTS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(coefficients) = cache.lock().get(&(k, m)) {
+            return Ok(coefficients.clone());
+        }
+
+        let mut coefficients = Vec::with_capacity(k * m);
+        for row in 0..m {
+            for col in 0..k {
+                coefficients.push(cauchy(row, col, m)?);
+            }
+        }
+        let coefficients = Arc::new(coefficients);
+        cache.lock().insert((k, m), coefficients.clone());
+        Ok(coefficients)
     }
 
     fn tables() -> &'static Tables {
@@ -513,17 +537,14 @@ mod gf8 {
         inv(x ^ y)
     }
 
-    fn matrix_row(index: usize, k: usize, m: usize, out: &mut [u8]) -> Result<(), Error> {
+    fn matrix_row(index: usize, k: usize, coefficients: &[u8], out: &mut [u8]) {
         out.fill(0);
         if index < k {
             out[index] = 1;
-            return Ok(());
+            return;
         }
         let row = index - k;
-        for (col, coeff) in out.iter_mut().enumerate() {
-            *coeff = cauchy(row, col, m)?;
-        }
-        Ok(())
+        out.copy_from_slice(&coefficients[row * k..(row + 1) * k]);
     }
 
     fn invert(matrix: &[u8], k: usize) -> Result<Vec<u8>, Error> {
@@ -576,22 +597,24 @@ mod gf8 {
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Error> {
         debug_assert_eq!(originals.len(), k);
+        let coefficients = coefficients(k, m)?;
         let ranges = work_ranges(m, strategy.parallelism_hint());
         let partitions = strategy.map_collect_vec(ranges, |range| {
             let start = range.start;
             let mut partition = vec![0u8; range.len() * shard_len];
             for (offset, row) in range.enumerate() {
                 let recovery = &mut partition[offset * shard_len..(offset + 1) * shard_len];
+                let coeffs = &coefficients[row * k..(row + 1) * k];
                 for (col, original) in originals.iter().enumerate() {
                     debug_assert_eq!(original.len(), shard_len);
-                    add_mul(recovery, original, cauchy(row, col, m)?);
+                    add_mul(recovery, original, coeffs[col]);
                 }
             }
-            Ok((start, partition))
+            (start, partition)
         });
         let mut recoveries = Vec::with_capacity(m * shard_len);
         for partition in partitions {
-            let (_start, partition) = partition?;
+            let (_start, partition) = partition;
             recoveries.extend(partition);
         }
         Ok(recoveries)
@@ -620,13 +643,14 @@ mod gf8 {
             return Err(Error::NotEnoughChunks);
         }
 
+        let coefficients = coefficients(k, m)?;
         let mut matrix = vec![0u8; k * k];
         let mut row = vec![0u8; k];
         for (selected_row, (index, shard)) in selected.iter().enumerate() {
             if shard.len() != shard_len {
                 return Err(Error::Inconsistent);
             }
-            matrix_row(*index, k, m, &mut row)?;
+            matrix_row(*index, k, &coefficients, &mut row);
             matrix[selected_row * k..(selected_row + 1) * k].copy_from_slice(&row);
         }
         let inverse = invert(&matrix, k)?;
@@ -762,16 +786,58 @@ mod gf8 {
 mod gf16 {
     use super::{work_ranges, Error};
     use commonware_parallel::Strategy;
-    use std::sync::OnceLock;
+    use commonware_utils::sync::Mutex;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, OnceLock},
+    };
 
     pub(super) const FIELD_SIZE: usize = 1 << 16;
     const FIELD_ORDER: usize = FIELD_SIZE - 1;
     const GENERATOR: u32 = 2;
     const POLYNOMIAL: u32 = 0x1_100b;
+    const MAX_CACHED_COEFFICIENTS: usize = 1 << 20;
 
     struct Tables {
         exp: Box<[u16]>,
         log: Box<[u16]>,
+    }
+
+    type CoefficientCache = Mutex<HashMap<(usize, usize), Arc<Vec<u16>>>>;
+
+    fn coefficients(k: usize, m: usize) -> Result<Option<Arc<Vec<u16>>>, Error> {
+        let Some(count) = k.checked_mul(m) else {
+            return Ok(None);
+        };
+        if count > MAX_CACHED_COEFFICIENTS {
+            return Ok(None);
+        }
+
+        static COEFFICIENTS: OnceLock<CoefficientCache> = OnceLock::new();
+        let cache = COEFFICIENTS.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(coefficients) = cache.lock().get(&(k, m)) {
+            return Ok(Some(coefficients.clone()));
+        }
+
+        let mut coefficients = Vec::with_capacity(count);
+        for row in 0..m {
+            for col in 0..k {
+                coefficients.push(cauchy(row, col, m)?);
+            }
+        }
+        let coefficients = Arc::new(coefficients);
+        cache.lock().insert((k, m), coefficients.clone());
+        Ok(Some(coefficients))
+    }
+
+    fn coefficient(
+        coefficients: Option<&[u16]>,
+        k: usize,
+        m: usize,
+        row: usize,
+        col: usize,
+    ) -> Result<u16, Error> {
+        coefficients.map_or_else(|| cauchy(row, col, m), |coefficients| Ok(coefficients[row * k + col]))
     }
 
     fn tables() -> &'static Tables {
@@ -920,6 +986,8 @@ mod gf16 {
         if active.is_empty() {
             return Ok(vec![0u8; m * shard_len]);
         }
+        let coefficients = coefficients(k, m)?;
+        let coefficients = coefficients.as_ref().map(|coefficients| coefficients.as_slice());
         let ranges = work_ranges(m, strategy.parallelism_hint());
         let partitions = strategy.map_collect_vec(ranges, |range| {
             let start = range.start;
@@ -928,7 +996,7 @@ mod gf16 {
                 let recovery = &mut partition[offset * shard_len..(offset + 1) * shard_len];
                 for (col, original) in &active {
                     debug_assert_eq!(original.len(), shard_len);
-                    add_mul(recovery, original, cauchy(row, *col, m)?)?;
+                    add_mul(recovery, original, coefficient(coefficients, k, m, row, *col)?)?;
                 }
             }
             Ok((start, partition))
@@ -985,18 +1053,29 @@ mod gf16 {
 
         let mut rhs = Vec::with_capacity(missing.len());
         let mut matrix = vec![0u16; missing.len() * missing.len()];
+        let coefficients = coefficients(k, m)?;
+        let coefficients = coefficients.as_ref().map(|coefficients| coefficients.as_slice());
         for (row_idx, (recovery_idx, recovery)) in selected_recoveries.iter().enumerate() {
             if recovery.len() != shard_len {
                 return Err(Error::Inconsistent);
             }
             let mut value = recovery.to_vec();
             for (known_idx, known_shard) in &known {
-                add_mul(&mut value, known_shard, cauchy(*recovery_idx, *known_idx, m)?)?;
+                add_mul(
+                    &mut value,
+                    known_shard,
+                    coefficient(coefficients, k, m, *recovery_idx, *known_idx)?,
+                )?;
             }
             rhs.push(value);
             for (col_idx, missing_idx) in missing.iter().enumerate() {
-                matrix[row_idx * missing.len() + col_idx] =
-                    cauchy(*recovery_idx, *missing_idx, m)?;
+                matrix[row_idx * missing.len() + col_idx] = coefficient(
+                    coefficients,
+                    k,
+                    m,
+                    *recovery_idx,
+                    *missing_idx,
+                )?;
             }
         }
         let inverse = invert(&matrix, missing.len())?;
