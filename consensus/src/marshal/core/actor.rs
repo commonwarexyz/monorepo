@@ -420,7 +420,9 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
-            // Drive durability syncs to completion (fan-out happens inside).
+            // Drive durability syncs to completion: each observes one started sync,
+            // fans its result out to awaiters, and panics (aborting the actor) if
+            // the sync failed.
             _ = syncs.next_completed() => {},
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {

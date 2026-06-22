@@ -37,11 +37,17 @@ pub(crate) fn observe_sync(result: SyncResult, round: Round, name: &str) {
 }
 
 /// Completion state shared between the driver future and every awaiter.
-struct State {
-    /// Set once the sync completes successfully; later awaiters then resolve immediately.
-    durable: bool,
-    /// Awaiters signaled when the sync completes.
-    waiters: Vec<oneshot::Sender<SyncResult>>,
+///
+/// Terminal once the driver finishes, so [`SharedSync::wait`] always resolves
+/// (immediately, after completion) and never hangs, regardless of outcome.
+enum State {
+    /// The driver has not finished; these awaiters are signaled when it does.
+    Pending(Vec<oneshot::Sender<SyncResult>>),
+    /// The sync completed durably; later awaiters resolve `Ok` immediately.
+    Durable,
+    /// The sync failed; later awaiters resolve as failed immediately. The failure
+    /// itself is observed by the driver's owner (in marshal, a fatal panic).
+    Failed,
 }
 
 /// A started durable sync whose completion can be awaited by many parties.
@@ -50,10 +56,10 @@ struct State {
 /// returns the shared handle together with a driver future the caller must run to
 /// completion (by pushing it into a pool or spawning it). The driver awaits the
 /// underlying [`Handle`] and yields its [`SyncResult`] to that single owner, while
-/// [`SharedSync::wait`] hands out [`Handle`]s that resolve once the sync is
-/// durable (callable any number of times). The owner decides what a failure
-/// means; in marshal that is [`observe_sync`] (a fatal panic). Cloning is cheap
-/// (it shares completion state).
+/// [`SharedSync::wait`] hands out [`Handle`]s that resolve once the sync settles
+/// (callable any number of times, before or after completion). The owner decides
+/// what a failure means; in marshal that is [`observe_sync`] (a fatal panic).
+/// Cloning is cheap (it shares completion state).
 #[derive(Clone)]
 pub(crate) struct SharedSync {
     state: Arc<Mutex<State>>,
@@ -65,42 +71,53 @@ impl SharedSync {
     ///
     /// The caller must run the returned future to completion (push it into a pool
     /// or spawn it); it yields the sync's [`SyncResult`] to that single owner. On
-    /// success every awaiter is signaled; on failure the error is handed only to
-    /// the driver's owner (it is never cloned across awaiters), and pending
-    /// awaiters resolve as closed.
+    /// success every awaiter resolves `Ok`; on failure every awaiter (current and
+    /// future) resolves as failed rather than hanging, while the error itself is
+    /// handed only to the driver's owner (it is never cloned across awaiters).
     pub(crate) fn observe(sync: Handle<()>) -> (Self, impl Future<Output = SyncResult>) {
-        let state = Arc::new(Mutex::new(State {
-            durable: false,
-            waiters: Vec::new(),
-        }));
+        let state = Arc::new(Mutex::new(State::Pending(Vec::new())));
         let shared = state.clone();
         let drive = async move {
             let result = sync.await;
-            let waiters = {
-                let mut shared = shared.lock();
-                shared.durable = result.is_ok();
-                std::mem::take(&mut shared.waiters)
+            let next = if result.is_ok() {
+                State::Durable
+            } else {
+                State::Failed
+            };
+            let waiters = match std::mem::replace(&mut *shared.lock(), next) {
+                State::Pending(waiters) => waiters,
+                // The driver runs exactly once, so the prior state is always `Pending`.
+                State::Durable | State::Failed => Vec::new(),
             };
             if result.is_ok() {
                 for waiter in waiters {
                     waiter.send_lossy(Ok(()));
                 }
             }
-            // On failure, `waiters` drop here and their receivers observe closure.
+            // On failure the waiters drop here and their receivers resolve as failed.
             result
         };
         (Self { state }, drive)
     }
 
-    /// A handle that resolves once the sync is durable.
+    /// A handle that resolves once the sync settles: `Ok` on success, an error on
+    /// failure. Never hangs, whether called before or after the driver finishes.
+    ///
+    /// The handle is completed by the driver returned from [`Self::observe`], so it
+    /// must not be awaited from the task that drives that future. In the marshal
+    /// actor the driver runs in the `select_loop!` pool; `wait` handles are handed
+    /// to consensus (off the actor task) and never awaited inside the loop.
     pub(crate) fn wait(&self) -> Handle<()> {
         let mut state = self.state.lock();
-        if state.durable {
-            return Handle::ready(Ok(()));
+        match &mut *state {
+            State::Durable => Handle::ready(Ok(())),
+            State::Failed => Handle::ready(Err(commonware_runtime::Error::Closed)),
+            State::Pending(waiters) => {
+                let (waiter, receiver) = oneshot::channel();
+                waiters.push(waiter);
+                Handle::from_receiver(receiver)
+            }
         }
-        let (waiter, receiver) = oneshot::channel();
-        state.waiters.push(waiter);
-        Handle::from_receiver(receiver)
     }
 }
 
@@ -228,6 +245,30 @@ mod tests {
             // policy via `observe_sync`.
             context.spawn(move |_| async move { observe_sync(drive.await, round(1), "test") });
             let _ = shared.wait().await;
+        });
+    }
+
+    #[test]
+    fn test_shared_sync_failure_resolves_waiters_without_hanging() {
+        let runner = deterministic::Runner::default();
+        runner.start(|_| async move {
+            let (shared, drive) =
+                SharedSync::observe(Handle::ready(Err(commonware_runtime::Error::Closed)));
+
+            // Drive the sync to failure directly (without `observe_sync`, so no
+            // panic) to model any owner that handles the result instead of
+            // panicking. The shared state must become terminal so awaiters resolve.
+            let before = shared.wait();
+            assert!(
+                drive.await.is_err(),
+                "driver yields the failure to its owner"
+            );
+
+            // A waiter registered before completion resolves (as failed), not hangs.
+            assert!(before.await.is_err());
+
+            // A waiter registered after completion resolves immediately, not hangs.
+            assert!(shared.wait().await.is_err());
         });
     }
 
