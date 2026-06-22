@@ -36,11 +36,36 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         self.keys.partition_point(|k| k < key)
     }
 
+    /// The half-open `[idx, end)` index range of the run of entries equal to `keys[idx]`, given
+    /// that `idx` is known to be the run's start (scans forward only).
+    fn run_starting_at(&self, idx: usize) -> Range<usize> {
+        let key = self.keys[idx];
+        let mut end = idx + 1;
+        while end < self.keys.len() && self.keys[end] == key {
+            end += 1;
+        }
+        idx..end
+    }
+
+    /// The half-open `[start, idx + 1)` index range of the run of entries equal to `keys[idx]`,
+    /// given that `idx` is known to be the run's end (scans backward only).
+    fn run_ending_at(&self, idx: usize) -> Range<usize> {
+        let key = self.keys[idx];
+        let mut start = idx;
+        while start > 0 && self.keys[start - 1] == key {
+            start -= 1;
+        }
+        start..idx + 1
+    }
+
     /// The half-open `[start, end)` index range of the run of entries equal to `key` (empty if the
     /// key is absent).
     pub(super) fn run_range(&self, key: &K) -> Range<usize> {
         let start = self.lower_bound(key);
-        let mut end = start;
+        if self.keys.get(start) != Some(key) {
+            return start..start;
+        }
+        let mut end = start + 1;
         while end < self.keys.len() && self.keys[end] == *key {
             end += 1;
         }
@@ -55,11 +80,6 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     /// The value at array index `idx`.
     pub(super) fn value_at(&self, idx: usize) -> &V {
         &self.vals[idx]
-    }
-
-    /// Insert `value` as the newest value for `key`, keeping the arrays sorted by key.
-    pub(super) fn insert(&mut self, key: K, value: V) {
-        self.insert_at(self.lower_bound(&key), key, value);
     }
 
     /// Insert `(key, value)` at array index `idx`. The caller must pass an `idx` that keeps `keys`
@@ -88,39 +108,49 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// The values of the lexicographically smallest key, newest first (None if the partition is
-    /// empty).
+    /// empty). The smallest key's run starts at index 0, so we only need to scan forward.
     pub(super) fn first_values(&self) -> Option<&[V]> {
-        let first = *self.keys.first()?;
-        Some(&self.vals[self.run_range(&first)])
+        if self.keys.is_empty() {
+            return None;
+        }
+        Some(&self.vals[self.run_starting_at(0)])
     }
 
     /// The values of the lexicographically largest key, newest first (None if the partition is
-    /// empty).
+    /// empty). The largest key's run ends at the last index, so we only need to scan backward.
     pub(super) fn last_values(&self) -> Option<&[V]> {
-        let last = *self.keys.last()?;
-        Some(&self.vals[self.run_range(&last)])
+        let last = self.keys.len().checked_sub(1)?;
+        Some(&self.vals[self.run_ending_at(last)])
     }
 
     /// The values of the smallest key strictly greater than `key`, newest first (None if no such
-    /// key exists).
+    /// key exists). The next key's run starts at `idx`, so we only need to scan forward.
     pub(super) fn next_values_after(&self, key: &K) -> Option<&[V]> {
         let idx = self.keys.partition_point(|k| *k <= *key);
-        let next = *self.keys.get(idx)?;
-        Some(&self.vals[self.run_range(&next)])
+        if idx >= self.keys.len() {
+            return None;
+        }
+        Some(&self.vals[self.run_starting_at(idx)])
     }
 
     /// The values of the largest key strictly less than `key`, newest first (None if no such key
-    /// exists).
+    /// exists). The prev key's run ends at `prev`, so we only need to scan backward.
     pub(super) fn prev_values_before(&self, key: &K) -> Option<&[V]> {
-        let prev_idx = self.lower_bound(key).checked_sub(1)?;
-        let prev = self.keys[prev_idx];
-        Some(&self.vals[self.run_range(&prev)])
+        let prev = self.lower_bound(key).checked_sub(1)?;
+        Some(&self.vals[self.run_ending_at(prev)])
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Insert `value` as the newest value for `key`, keeping the arrays sorted. The production hot
+    /// path instead reuses the run it already computed (`insert_at(run.start, ..)`) to avoid a
+    /// second `lower_bound`; this helper keeps the tests concise.
+    fn insert<K: Ord + Copy, V>(p: &mut Partition<K, V>, key: K, value: V) {
+        p.insert_at(p.lower_bound(&key), key, value);
+    }
 
     #[test]
     fn test_partition_empty() {
@@ -138,7 +168,7 @@ mod tests {
         let mut p = Partition::<u16, u64>::default();
         // Insert out of order; the arrays stay sorted by key.
         for (k, v) in [(30u16, 300u64), (10, 100), (20, 200)] {
-            p.insert(k, v);
+            insert(&mut p, k, v);
         }
         assert_eq!(p.keys, vec![10, 20, 30]);
         assert_eq!(p.vals, vec![100, 200, 300]);
@@ -152,7 +182,7 @@ mod tests {
     fn test_partition_navigation() {
         let mut p = Partition::<u16, u64>::default();
         for (k, v) in [(10u16, 100u64), (20, 200), (20, 222), (30, 300)] {
-            p.insert(k, v);
+            insert(&mut p, k, v);
         }
         // next strictly-greater key.
         assert_eq!(p.next_values_after(&5), Some(&[100u64] as &[u64]));
@@ -169,11 +199,11 @@ mod tests {
     #[test]
     fn test_partition_collision_run_newest_first() {
         let mut p = Partition::<u16, u64>::default();
-        p.insert(10, 1);
-        p.insert(20, 2);
+        insert(&mut p, 10, 1);
+        insert(&mut p, 20, 2);
         // Three values collide on key 10; newest is first within the run.
-        p.insert(10, 11);
-        p.insert(10, 111);
+        insert(&mut p, 10, 11);
+        insert(&mut p, 10, 111);
         assert_eq!(p.values(&10), &[111, 11, 1]);
         assert_eq!(p.values(&20), &[2]);
         // Keys remain sorted with the run adjacent.
@@ -186,7 +216,7 @@ mod tests {
     fn test_partition_remove_keeps_alignment() {
         let mut p = Partition::<u16, u64>::default();
         for (k, v) in [(10u16, 1u64), (10, 11), (20, 2)] {
-            p.insert(k, v);
+            insert(&mut p, k, v);
         }
         // keys=[10,10,20] vals=[11,1,2]; remove the older value of key 10 (index 1).
         let removed = p.remove(1);
@@ -199,7 +229,7 @@ mod tests {
     #[test]
     fn test_partition_set() {
         let mut p = Partition::<u16, u64>::default();
-        p.insert(10, 1);
+        insert(&mut p, 10, 1);
         p.set(0, 99);
         assert_eq!(p.values(&10), &[99]);
     }

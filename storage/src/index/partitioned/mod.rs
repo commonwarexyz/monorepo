@@ -30,12 +30,18 @@ fn partition_index_and_sub_key<const P: usize>(key: &[u8]) -> (usize, &[u8]) {
         assert!(P > 0, "P must be greater than 0");
         assert!(P <= 3, "P must be 3 or less");
     }
-    let copy_len = P.min(key.len());
-
-    let mut bytes = [0u8; INDEX_INT_SIZE];
-    bytes[INDEX_INT_SIZE - copy_len..].copy_from_slice(&key[..copy_len]);
-
-    (u32::from_be_bytes(bytes) as usize, &key[copy_len..])
+    // The common path strips exactly `P` (a const) bytes, so the copy is fixed-size and its bounds
+    // checks fold away; the `else` only handles keys shorter than the prefix.
+    if key.len() >= P {
+        let mut bytes = [0u8; INDEX_INT_SIZE];
+        bytes[INDEX_INT_SIZE - P..].copy_from_slice(&key[..P]);
+        (u32::from_be_bytes(bytes) as usize, &key[P..])
+    } else {
+        let copy_len = key.len();
+        let mut bytes = [0u8; INDEX_INT_SIZE];
+        bytes[INDEX_INT_SIZE - copy_len..].copy_from_slice(&key[..copy_len]);
+        (u32::from_be_bytes(bytes) as usize, &key[copy_len..])
+    }
 }
 
 #[cfg(test)]

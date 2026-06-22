@@ -17,6 +17,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Metrics,
 };
+use std::ops::Range;
 
 const MUST_CALL_NEXT: &str = "must call Cursor::next()";
 const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
@@ -34,12 +35,15 @@ enum State {
 
 /// A [crate::index::Cursor] over the values of a single translated key within a partition.
 ///
-/// The key's values occupy a contiguous run in the partition's sorted arrays. The run's start is
-/// re-derived from the key on each operation (a cheap binary search over a small partition), so
-/// the cursor stays correct across the in-array shifts that insert/delete cause.
+/// The key's values occupy a contiguous `run` of indices in the partition's sorted arrays, cached
+/// here (resolved once when the cursor is created) so each operation avoids re-searching for it.
+/// The cursor borrows the partition exclusively, so it is the only writer: `run.start` never moves,
+/// and `insert`/`delete` adjust `run.end` by one in lockstep with the array, keeping the cached run
+/// exact without another `lower_bound`.
 pub struct Cursor<'a, K: Ord + Copy, V> {
     partition: &'a mut Partition<K, V>,
     key: K,
+    run: Range<usize>,
     state: State,
     keys: &'a Gauge,
     items: &'a Gauge,
@@ -50,6 +54,7 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
     const fn new(
         partition: &'a mut Partition<K, V>,
         key: K,
+        run: Range<usize>,
         keys: &'a Gauge,
         items: &'a Gauge,
         pruned: &'a Counter,
@@ -57,6 +62,7 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
         Self {
             partition,
             key,
+            run,
             state: State::NeedNext { from: 0 },
             keys,
             items,
@@ -69,69 +75,67 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {
-        let run = self.partition.run_range(&self.key);
         let off = match self.state {
             State::Done => return None,
             State::NeedNext { from } => from,
             State::Active { offset } => offset + 1,
         };
-        if off >= run.len() {
+        if off >= self.run.len() {
             self.state = State::Done;
             return None;
         }
         self.state = State::Active { offset: off };
-        Some(self.partition.value_at(run.start + off))
+        Some(self.partition.value_at(self.run.start + off))
     }
 
     fn update(&mut self, value: V) {
-        let run = self.partition.run_range(&self.key);
         match self.state {
             State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
             State::Done => panic!("{NO_ACTIVE_ITEM}"),
-            State::Active { offset } => self.partition.set(run.start + offset, value),
+            State::Active { offset } => self.partition.set(self.run.start + offset, value),
         }
     }
 
     fn insert(&mut self, value: V) {
-        let run = self.partition.run_range(&self.key);
         match self.state {
             State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
             State::Active { offset } => {
                 // Place immediately after the current value; `next()` then returns the value after
                 // the inserted one (skipping both the current and the inserted).
                 self.partition
-                    .insert_at(run.start + offset + 1, self.key, value);
+                    .insert_at(self.run.start + offset + 1, self.key, value);
+                self.run.end += 1;
                 self.items.inc();
                 self.state = State::NeedNext { from: offset + 2 };
             }
             State::Done => {
                 // Append at the oldest position (run end), re-creating the key if it was emptied.
-                if run.is_empty() {
+                if self.run.is_empty() {
                     self.keys.inc();
                 }
-                self.partition.insert_at(run.end, self.key, value);
+                self.partition.insert_at(self.run.end, self.key, value);
+                self.run.end += 1;
                 self.items.inc();
             }
         }
     }
 
     fn delete(&mut self) {
-        let run = self.partition.run_range(&self.key);
-        match self.state {
+        let offset = match self.state {
             State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
             State::Done => panic!("{NO_ACTIVE_ITEM}"),
-            State::Active { offset } => {
-                self.partition.remove(run.start + offset);
-                self.items.dec();
-                self.pruned.inc();
-                if run.len() == 1 {
-                    // Removed the key's last value; the key is gone.
-                    self.keys.dec();
-                }
-                // The value after the deleted one shifted into `offset`.
-                self.state = State::NeedNext { from: offset };
-            }
+            State::Active { offset } => offset,
+        };
+        self.partition.remove(self.run.start + offset);
+        self.run.end -= 1;
+        self.items.dec();
+        self.pruned.inc();
+        if self.run.is_empty() {
+            // Removed the key's last value; the key is gone.
+            self.keys.dec();
         }
+        // The value after the deleted one shifted into `offset`.
+        self.state = State::NeedNext { from: offset };
     }
 }
 
@@ -214,12 +218,14 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         let partition = &mut self.partitions[i];
-        if partition.run_range(&k).is_empty() {
+        let run = partition.run_range(&k);
+        if run.is_empty() {
             return None;
         }
         Some(Cursor::new(
             partition,
             k,
+            run,
             &self.keys,
             &self.items,
             &self.pruned,
@@ -234,8 +240,9 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         let partition = &mut self.partitions[i];
-        if partition.run_range(&k).is_empty() {
-            partition.insert(k, value);
+        let run = partition.run_range(&k);
+        if run.is_empty() {
+            partition.insert_at(run.start, k, value);
             self.keys.inc();
             self.items.inc();
             return None;
@@ -243,6 +250,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         Some(Cursor::new(
             partition,
             k,
+            run,
             &self.keys,
             &self.items,
             &self.pruned,
@@ -253,10 +261,10 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
         let partition = &mut self.partitions[i];
-        let new_key = partition.run_range(&k).is_empty();
-        partition.insert(k, value);
+        let run = partition.run_range(&k);
+        partition.insert_at(run.start, k, value);
         self.items.inc();
-        if new_key {
+        if run.is_empty() {
             self.keys.inc();
         }
     }
