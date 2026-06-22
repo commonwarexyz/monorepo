@@ -47,7 +47,7 @@ pub struct PlanResult<D: EngineDefinition> {
     /// Number of scheduled actions that were applied.
     pub scheduled_actions: u64,
 
-    /// Whether delayed validators were started (if Delay was configured).
+    /// Whether delayed validators were started.
     pub delayed_started: bool,
 }
 
@@ -186,12 +186,12 @@ impl<D: EngineDefinition> PlanBuilder<D> {
 
     pub fn crash(mut self, crash: Crash<D::PublicKey>) -> Self {
         match crash {
-            Crash::Delay { .. } => assert!(
+            Crash::DelayRound { .. } => assert!(
                 !self
                     .crashes
                     .iter()
-                    .any(|crash| matches!(crash, Crash::Delay { .. })),
-                "only one Crash::Delay strategy may be configured"
+                    .any(|crash| matches!(crash, Crash::DelayRound { .. })),
+                "only one delay strategy may be configured"
             ),
             Crash::Random { .. } => assert!(
                 !self
@@ -309,11 +309,17 @@ impl<D: EngineDefinition> Plan<D> {
             })
     }
 
-    fn delay_crash(&self) -> Option<(usize, u64)> {
-        self.crashes.iter().find_map(|crash| match crash {
-            Crash::Delay { count, after } => Some((*count, *after)),
-            _ => None,
+    fn delay_reached(&self, tracker: &ProgressTracker<D::PublicKey>) -> bool {
+        self.crashes.iter().any(|crash| match crash {
+            Crash::DelayRound { round, .. } => tracker.max_round().is_some_and(|max| max >= *round),
+            _ => false,
         })
+    }
+
+    fn has_delay(&self) -> bool {
+        self.crashes
+            .iter()
+            .any(|crash| matches!(crash, Crash::DelayRound { .. }))
     }
 
     fn random_crash(&self) -> Option<(Duration, Duration, usize)> {
@@ -336,11 +342,15 @@ impl<D: EngineDefinition> Plan<D> {
 
     /// Determine which participants should be delayed at startup.
     fn delayed_participants(&self) -> HashSet<D::PublicKey> {
-        if let Some((count, _)) = self.delay_crash() {
-            self.participants.iter().take(count).cloned().collect()
-        } else {
-            HashSet::new()
-        }
+        self.crashes
+            .iter()
+            .find_map(|crash| match crash {
+                Crash::DelayRound { participants, .. } => {
+                    Some(participants.iter().cloned().collect())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     /// Check post-run properties, log completion, and build the result.
@@ -403,7 +413,7 @@ impl<D: EngineDefinition> Plan<D> {
             simulated::Config {
                 max_size: self.max_message_size,
                 disconnect_on_block: true,
-                tracked_peer_sets: NZUsize!(3),
+                tracked_peer_sets: NZUsize!(1),
             },
         );
         network.start();
@@ -553,17 +563,13 @@ impl<D: EngineDefinition> Plan<D> {
                 }
 
                 // Start delayed validators after enough progress
-                if !delayed_started {
-                    if let Some((_, after)) = self.delay_crash() {
-                        if tracker.min_view() >= after {
-                            info!(target: "simulator", "starting delayed participants");
-                            for pk in &delayed {
-                                team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
-                                    .await;
-                            }
-                            delayed_started = true;
-                        }
+                if !delayed_started && !delayed.is_empty() && self.delay_reached(&tracker) {
+                    info!(target: "simulator", "starting delayed participants");
+                    for pk in &delayed {
+                        team.start_one(&ctx, &oracle, pk.clone(), monitor_tx.clone(), true)
+                            .await;
                     }
+                    delayed_started = true;
                 }
             },
             _ = ctx.sleep(EXIT_POLL) => {
@@ -662,11 +668,11 @@ impl<D: EngineDefinition> Plan<D> {
                 );
             }
 
-            if self.delay_crash().is_some() {
+            if self.has_delay() {
                 assert!(
                     r.delayed_started,
-                    "Crash::Delay configured but delayed validators were never started. \
-                     Increase required_finalizations or decrease the `after` threshold."
+                    "delay configured but delayed validators were never started. \
+                     Increase required_finalizations or decrease the delay threshold."
                 );
             }
         }
@@ -765,7 +771,7 @@ impl<D: EngineDefinition> Plan<D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use commonware_consensus::types::View;
+    use commonware_consensus::types::{Epoch, Round, View};
     use commonware_cryptography::{ed25519, Signer as _};
     use commonware_runtime::{Clock, Handle, Quota, Spawner};
     use std::{
@@ -871,7 +877,7 @@ mod tests {
                     let _ = monitor
                         .send(FinalizationUpdate {
                             pk: pk.clone(),
-                            view: View::new(view),
+                            round: Round::new(Epoch::zero(), View::new(view)),
                             block_digest: vec![view as u8],
                         })
                         .await;
@@ -918,7 +924,7 @@ mod tests {
                 let _ = monitor
                     .send(FinalizationUpdate {
                         pk,
-                        view: View::new(1),
+                        round: Round::new(Epoch::zero(), View::new(1)),
                         block_digest: vec![1],
                     })
                     .await;
@@ -1033,10 +1039,15 @@ mod tests {
             jitter: Duration::from_millis(0),
             success_rate: 1.0,
         };
-        let result = PlanBuilder::new(FinalizingEngine::new(2, Duration::from_millis(100), 2))
+        let engine = FinalizingEngine::new(2, Duration::from_millis(100), 2);
+        let delayed = engine.participants[0].clone();
+        let result = PlanBuilder::new(engine)
             .required_finalizations(2)
             .timeout(Duration::from_secs(2))
-            .crash(Crash::Delay { count: 1, after: 1 })
+            .crash(Crash::DelayRound {
+                participants: vec![delayed],
+                round: Round::new(Epoch::zero(), View::new(1)),
+            })
             .crash(Crash::Schedule(
                 Schedule::new().at(Duration::from_millis(1), Action::Heal(link)),
             ))

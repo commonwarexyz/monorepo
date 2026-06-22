@@ -1,3 +1,35 @@
+["commonware_glue::dkg::anchor::wire::tests::CodecConformance<Message<mocks::TestScheme,mocks::TestMarshalVariant\n>>"]
+n_cases = 65536
+hash = "0d6e85f0938ce300477cf7c675431f01528666eea8cb6d93efc48d70f3b803ea"
+
+["commonware_glue::dkg::anchor::wire::tests::CodecConformance<Tag>"]
+n_cases = 65536
+hash = "7cf90e43e614a55614d95269547add3d92c25b31040e8f3cce3761bd74986458"
+
+["commonware_glue::dkg::reshare::store::conformance::CodecConformance<Event<MinSig,ed25519::PublicKey>>"]
+n_cases = 65536
+hash = "9e5d122980ec0436a7d77de1342381879d52fa796eaedfd8eba08117420ab691"
+
+["commonware_glue::dkg::types::conformance::CodecConformance<EpochInfo<MinSig,ed25519::PublicKey>>"]
+n_cases = 8192
+hash = "68e22077598497e15ca097e9e9809d175f2c6de90ea8b59336a4da46c90a0992"
+
+["commonware_glue::dkg::types::conformance::CodecConformance<EpochOutcome>"]
+n_cases = 65536
+hash = "7cf90e43e614a55614d95269547add3d92c25b31040e8f3cce3761bd74986458"
+
+["commonware_glue::dkg::types::conformance::CodecConformance<Message<MinSig,ed25519::PublicKey>>"]
+n_cases = 65536
+hash = "c928d571587fc43b99ebab969720228ce11becca411dc36908c979fe07ab359e"
+
+["commonware_glue::dkg::types::conformance::CodecConformance<Participants<ed25519::PublicKey>>"]
+n_cases = 65536
+hash = "240c5ef5d2a29ad2f22678bbe5f8360ae0ab628b68e792573a16dcd0d0f09c4d"
+
+["commonware_glue::dkg::types::conformance::CodecConformance<Payload<MinSig,ed25519::PrivateKey>>"]
+n_cases = 8192
+hash = "192f2a16a379559a0e873680dc328b08ea406508aade2c8d7cbba663e1f6d0d9"
+
 ["commonware_glue::stateful::db::p2p::compact::handler::tests::conformance::CodecConformance<Request<mmr::Family,sha256::Digest>>"]
 n_cases = 65536
 hash = "290187801284530d0d7e82c33bb6ce975a5f4daa4b104230291cea9cffcd7686"
