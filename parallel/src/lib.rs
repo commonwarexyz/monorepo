@@ -708,6 +708,38 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             })
         }
 
+        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            // A direct parallel map collecting into `Result` short-circuits on error and
+            // avoids the per-partition `Vec` accumulation of the `try_fold` default.
+            self.thread_pool.install(|| {
+                let items: Vec<I::Item> = iter.into_iter().collect();
+                items.into_par_iter().map(map_op).collect()
+            })
+        }
+
+        fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            // rayon's `map_init` reuses the per-job init value (e.g. a hasher) like
+            // `fold_init`, but collects directly into a `Vec` instead of folding into and
+            // reducing per-partition `Vec`s.
+            self.thread_pool.install(|| {
+                let items: Vec<I::Item> = iter.into_iter().collect();
+                items.into_par_iter().map_init(init, map_op).collect()
+            })
+        }
+
         fn try_fold<I, R, E, ID, F, RD>(
             &self,
             iter: I,
