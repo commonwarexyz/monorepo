@@ -396,11 +396,7 @@ fn encode<H: Hasher, S: Strategy>(
     Ok((root, chunks))
 }
 
-/// Read-only parameters shared across the decode helpers.
-///
-/// Bundling these keeps the decode functions below the argument-count threshold and
-/// ensures the same `n`/`k`/`m`/`shard_len`/`root`/`strategy` are threaded consistently
-/// between the striped and sequential paths.
+/// Read-only parameters threaded through the striped and sequential decode paths.
 struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     /// Total number of shards (`k + m`).
     n: usize,
@@ -441,10 +437,8 @@ mod striped {
 
     /// Target for writing stripes into a shared, strided output buffer in parallel.
     ///
-    /// Holds the buffer's base address as a `usize` so disjoint stripe tasks can write the
-    /// same allocation concurrently (a `&mut` would not be `Send` across tasks). Shard `i`
-    /// occupies `[i * shard_len, (i + 1) * shard_len)`, and each task writes only its own
-    /// stripe `range` within each shard.
+    /// The base address is held as a `usize` so disjoint stripe tasks can write the same
+    /// allocation concurrently (a `&mut` would not be `Send` across tasks).
     #[derive(Clone, Copy)]
     pub(super) struct Dst {
         ptr: usize,
@@ -482,14 +476,13 @@ mod striped {
     /// internally), so a boundary in the middle of a block would change the bytes each
     /// sub-instance encodes.
     pub(super) fn ranges(shard_len: usize, parallelism: usize) -> Option<Vec<Range<usize>>> {
-        let full_blocks = shard_len / SHARD_CHUNK_BYTES;
-
         // Bound the stripe count by available parallelism, the number of MIN_STRIPE_BYTES
         // chunks (so each stripe stays large enough to amortize encoder/decoder setup), and
         // the number of `SHARD_CHUNK_BYTES` blocks (each non-final stripe needs at least one
         // whole block). The block bound is implied by the MIN_STRIPE_BYTES bound today
         // (MIN_STRIPE_BYTES is a multiple of SHARD_CHUNK_BYTES), but is kept to state the
         // invariant explicitly.
+        let full_blocks = shard_len / SHARD_CHUNK_BYTES;
         let stripe_count = parallelism
             .min(shard_len / MIN_STRIPE_BYTES)
             .min(full_blocks)
@@ -557,37 +550,6 @@ mod striped {
         }
 
         Ok(())
-    }
-
-    /// Encode the recovery shards for a single stripe, returning the stripe's range and
-    /// the `m` recovery stripes concatenated into one buffer.
-    fn encode_recovery(
-        k: usize,
-        m: usize,
-        range: Range<usize>,
-        originals: &[impl AsRef<[u8]>],
-    ) -> Result<(Range<usize>, Vec<u8>), Error> {
-        let shard_len = range.len();
-        let mut encoder = Cached::take(
-            &CACHED_ENCODER,
-            || Encoder::new(k, m, shard_len),
-            |enc| enc.reset(k, m, shard_len),
-        )
-        .map_err(Error::ReedSolomon)?;
-
-        for shard in originals.iter().take(k) {
-            let shard = shard.as_ref();
-            encoder
-                .add_original_shard(&shard[range.clone()])
-                .map_err(Error::ReedSolomon)?;
-        }
-        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-        let mut recoveries = Vec::with_capacity(m * shard_len);
-        for shard in encoding.recovery_iter() {
-            recoveries.extend_from_slice(shard);
-        }
-
-        Ok((range, recoveries))
     }
 
     /// Encode the recovery shards for a single stripe, writing each recovery shard's
@@ -677,48 +639,36 @@ mod striped {
 
         let data = extract_data(&original_refs, k, shard_len)?;
 
-        // Re-encode the recovery stripes from the reconstructed originals.
-        let recovery_stripes =
-            strategy.try_map_collect_vec(ranges, |range| encode_recovery(k, m, range, &original_refs))?;
+        // Re-encode all recovery shards from the reconstructed originals, one stripe per task.
+        let mut recovery_buf = vec![0u8; m * shard_len];
+        let dst = Dst::new(&mut recovery_buf, shard_len);
+        strategy
+            .try_map_collect_vec(ranges, |range| encode_recovery_into(k, m, range, &original_refs, dst))?;
+        let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
 
-        let mut provided_recovery_by_idx = vec![None; m];
-        for (idx, shard) in provided_recoveries {
-            provided_recovery_by_idx[idx] = Some(shard);
-        }
-
-        // Provided originals are already bound to the commitment by their checked
-        // digests. Provided recoveries must match the canonical re-encode before
-        // reusing their checked digests.
-        for (range, recovery_stripe) in &recovery_stripes {
-            let stripe_len = range.len();
-            for i in 0..m {
-                let stripe = &recovery_stripe[i * stripe_len..(i + 1) * stripe_len];
-                if let Some(provided) = provided_recovery_by_idx[i] {
-                    if &provided[range.clone()] != stripe {
-                        return Err(Error::Inconsistent);
-                    }
-                }
+        // Provided originals are already bound to the commitment by their checked digests.
+        // Provided recoveries must match the canonical re-encode before reusing theirs.
+        for &(idx, shard) in &provided_recoveries {
+            if shard != recovery_refs[idx] {
+                return Err(Error::Inconsistent);
             }
         }
 
-        // Hash missing recoveries directly from stripes instead of materializing
-        // full shard buffers that would only be used as Merkle leaves.
-        let missing_recovery_indices = provided_recovery_by_idx
+        // Hash the recovery shards that were not provided.
+        let missing_recoveries = shard_digests
             .iter()
             .enumerate()
-            .filter_map(|(i, shard)| shard.is_none().then_some(i));
+            .skip(k)
+            .filter_map(|(i, digest)| digest.is_none().then_some((i, recovery_refs[i - k])))
+            .collect::<Vec<_>>();
         for (i, digest) in
-            strategy.map_init_collect_vec(missing_recovery_indices, H::new, |hasher, i| {
-                for (range, recovery_stripe) in &recovery_stripes {
-                    let stripe_len = range.len();
-                    hasher.update(&recovery_stripe[i * stripe_len..(i + 1) * stripe_len]);
-                }
-                (k + i, hasher.finalize())
+            strategy.map_init_collect_vec(missing_recoveries, H::new, |hasher, (i, shard)| {
+                hasher.update(shard);
+                (i, hasher.finalize())
             })
         {
             shard_digests[i] = Some(digest);
         }
-        drop(recovery_stripes);
 
         verify_codeword::<H, S>(ctx, &mut shard_digests, &original_refs, data)
     }
@@ -977,6 +927,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
+    // Decode the data, striping the work across the strategy when shards are large enough.
     let ctx = DecodeCtx {
         n,
         k,
@@ -1514,11 +1465,9 @@ mod tests {
     }
 
     /// Single-threaded exercise of the striped encode helper and its [`striped::Dst`]
-    /// raw-pointer writes, independent of any [`Strategy`]. The rayon-driven striped tests
-    /// cannot run under miri (crossbeam's work-stealing deque relies on integer-to-pointer
-    /// casts that abort miri during threadpool setup), so this drives the same `unsafe`
-    /// writes sequentially to keep them miri-checkable: splitting a shard into stripes and
-    /// encoding each must reproduce the single full-width encode byte-for-byte.
+    /// raw-pointer writes (kept miri-checkable, independent of any [`Strategy`]): splitting a
+    /// shard into stripes and encoding each must reproduce the single full-width encode
+    /// byte-for-byte.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
         let k = 2usize;
