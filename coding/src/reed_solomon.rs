@@ -280,8 +280,27 @@ fn read_data_len(shards: &[&[u8]]) -> Result<usize, Error> {
     Ok(data_len)
 }
 
+fn work_ranges(len: usize, workers: usize) -> Vec<std::ops::Range<usize>> {
+    if len == 0 {
+        return Vec::new();
+    }
+    let workers = workers.clamp(1, len);
+    let base = len / workers;
+    let extra = len % workers;
+    let mut start = 0usize;
+    (0..workers)
+        .map(|i| {
+            let width = base + usize::from(i < extra);
+            let end = start + width;
+            let range = start..end;
+            start = end;
+            range
+        })
+        .collect()
+}
+
 mod gf8 {
-    use super::Error;
+    use super::{work_ranges, Error};
     use commonware_parallel::Strategy;
     use std::sync::OnceLock;
 
@@ -501,17 +520,23 @@ mod gf8 {
         strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Error> {
         debug_assert_eq!(originals.len(), k);
-        let rows = strategy.map_collect_vec(0..m, |row| {
-            let mut recovery = vec![0u8; shard_len];
-            for (col, original) in originals.iter().enumerate() {
-                debug_assert_eq!(original.len(), shard_len);
-                add_mul(&mut recovery, original, cauchy(row, col, m)?);
+        let ranges = work_ranges(m, strategy.parallelism_hint());
+        let partitions = strategy.map_collect_vec(ranges, |range| {
+            let start = range.start;
+            let mut partition = vec![0u8; range.len() * shard_len];
+            for (offset, row) in range.enumerate() {
+                let recovery = &mut partition[offset * shard_len..(offset + 1) * shard_len];
+                for (col, original) in originals.iter().enumerate() {
+                    debug_assert_eq!(original.len(), shard_len);
+                    add_mul(recovery, original, cauchy(row, col, m)?);
+                }
             }
-            Ok(recovery)
+            Ok((start, partition))
         });
         let mut recoveries = Vec::with_capacity(m * shard_len);
-        for row in rows {
-            recoveries.extend(row?);
+        for partition in partitions {
+            let (_start, partition) = partition?;
+            recoveries.extend(partition);
         }
         Ok(recoveries)
     }
@@ -660,7 +685,7 @@ mod gf8 {
 }
 
 mod gf16 {
-    use super::Error;
+    use super::{work_ranges, Error};
     use commonware_parallel::Strategy;
     use std::sync::OnceLock;
 
@@ -821,17 +846,23 @@ mod gf16 {
         if active.is_empty() {
             return Ok(recoveries);
         }
-        let rows = strategy.map_collect_vec(0..m, |row| {
-            let mut recovery = vec![0u8; shard_len];
-            for (col, original) in &active {
-                debug_assert_eq!(original.len(), shard_len);
-                add_mul(&mut recovery, original, cauchy(row, *col, m)?)?;
+        let ranges = work_ranges(m, strategy.parallelism_hint());
+        let partitions = strategy.map_collect_vec(ranges, |range| {
+            let start = range.start;
+            let mut partition = vec![0u8; range.len() * shard_len];
+            for (offset, row) in range.enumerate() {
+                let recovery = &mut partition[offset * shard_len..(offset + 1) * shard_len];
+                for (col, original) in &active {
+                    debug_assert_eq!(original.len(), shard_len);
+                    add_mul(recovery, original, cauchy(row, *col, m)?)?;
+                }
             }
-            Ok(recovery)
+            Ok((start, partition))
         });
         recoveries.clear();
-        for row in rows {
-            recoveries.extend(row?);
+        for partition in partitions {
+            let (_start, partition) = partition?;
+            recoveries.extend(partition);
         }
         Ok(recoveries)
     }
