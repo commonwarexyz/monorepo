@@ -428,10 +428,11 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 ///   recovery Ri = concat(Ri[0], Ri[1], Ri[t])
 /// ```
 ///
-/// [`decode`](striped::decode) uses the same layout in reverse: recover only missing
-/// original stripes, re-encode recovery stripes from the reconstructed originals, compare
-/// provided recoveries against those stripes, and hash missing recoveries without first
-/// materializing full recovery shards.
+/// Both decode paths reuse this per-stripe layout. With all originals present,
+/// [`decode`](striped::decode) re-encodes the recovery stripes and verifies them against the
+/// commitment. With an original missing, [`decode_restored_only`](striped::decode_restored_only)
+/// feeds exactly `k` shards and recovers the missing original and recovery stripes from a single
+/// Reed-Solomon decode (no re-encode).
 mod striped {
     use super::*;
 
@@ -523,75 +524,6 @@ mod striped {
         Some(ranges)
     }
 
-    /// Recover the missing original shards for a single stripe and re-encode that stripe's
-    /// recovery shards in one pass, writing recovered originals to `orig_dst` (one slot per
-    /// entry of `missing_originals`) and recovery shards to `rec_dst` (one slot per recovery
-    /// shard). Stripes are column-independent, so the recovered columns feed the re-encode
-    /// directly without a second pass over memory.
-    fn recover_and_encode_into(
-        k: usize,
-        m: usize,
-        range: Range<usize>,
-        provided_originals: &[(usize, &[u8])],
-        provided_recoveries: &[(usize, &[u8])],
-        missing_originals: &[usize],
-        out: StripeOut,
-    ) -> Result<(), Error> {
-        let shard_len = range.len();
-        let mut decoder = Cached::take(
-            &CACHED_DECODER,
-            || Decoder::new(k, m, shard_len),
-            |dec| dec.reset(k, m, shard_len),
-        )
-        .map_err(Error::ReedSolomon)?;
-
-        for (idx, shard) in provided_originals {
-            decoder
-                .add_original_shard(*idx, &shard[range.clone()])
-                .map_err(Error::ReedSolomon)?;
-        }
-        for (idx, shard) in provided_recoveries {
-            decoder
-                .add_recovery_shard(*idx, &shard[range.clone()])
-                .map_err(Error::ReedSolomon)?;
-        }
-        let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-
-        // Assemble this stripe's original columns: provided slices plus freshly recovered ones.
-        let mut original_cols: Vec<&[u8]> = vec![&[]; k];
-        for (idx, shard) in provided_originals {
-            original_cols[*idx] = &shard[range.clone()];
-        }
-        for (pos, idx) in missing_originals.iter().enumerate() {
-            let shard = decoding
-                .restored_original(*idx)
-                .ok_or(Error::Inconsistent)?;
-            // SAFETY: stripe `range`s and missing-original slots are disjoint, so concurrent
-            // tasks never alias; see [`Dst::write`].
-            unsafe { out.originals.write(pos, &range, shard) };
-            original_cols[*idx] = shard;
-        }
-
-        // Re-encode this stripe's recovery columns from the assembled originals.
-        let mut encoder = Cached::take(
-            &CACHED_ENCODER,
-            || Encoder::new(k, m, shard_len),
-            |enc| enc.reset(k, m, shard_len),
-        )
-        .map_err(Error::ReedSolomon)?;
-        for col in &original_cols {
-            encoder.add_original_shard(col).map_err(Error::ReedSolomon)?;
-        }
-        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-        for (i, shard) in encoding.recovery_iter().enumerate() {
-            // SAFETY: stripe `range`s and recovery shard slots are disjoint, so concurrent
-            // tasks never alias; see [`Dst::write`].
-            unsafe { out.recoveries.write(i, &range, shard) };
-        }
-
-        Ok(())
-    }
-
     /// Reconstruct a single stripe's missing shards from exactly `k` provided shards, reading
     /// both missing originals and missing recoveries straight out of the decoder (the decode
     /// reveals all positions), so no separate re-encode is needed. Writes recovered originals
@@ -681,6 +613,9 @@ mod striped {
 
     /// Decode the codeword stripe by stripe, reconstructing the original data and
     /// verifying the rebuilt commitment against `ctx.root`.
+    /// Decode when all `k` originals are present: re-encode the recovery shards (recovery with
+    /// missing originals uses [`decode_restored_only`]), confirm any provided recovery shards
+    /// match the canonical re-encode, and verify the rebuilt commitment against `ctx.root`.
     pub(super) fn decode<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
         ranges: Vec<Range<usize>>,
@@ -697,50 +632,20 @@ mod striped {
         } = ctx;
         assert!(ranges.len() > 1);
 
-        let missing_originals = shard_digests
-            .iter()
-            .take(k)
-            .enumerate()
-            .filter_map(|(i, digest)| digest.is_none().then_some(i))
-            .collect::<Vec<_>>();
-
-        // Reconstruct the codeword one stripe per task. When originals are missing, recover
-        // them and re-encode the recoveries in a single fused pass; otherwise just re-encode.
         let mut original_refs: Vec<&[u8]> = vec![&[]; k];
         for &(idx, shard) in &provided_originals {
             original_refs[idx] = shard;
         }
-        let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
+
+        // Re-encode all recovery shards from the originals, one stripe per task.
         let mut recovery_buf = vec![0u8; m * shard_len];
-        let rec_dst = Dst::new(&mut recovery_buf, shard_len);
-        if missing_originals.is_empty() {
-            strategy.try_map_collect_vec(ranges, |range| {
-                encode_recovery_into(k, m, range, &original_refs, rec_dst)
-            })?;
-        } else {
-            let out = StripeOut {
-                originals: Dst::new(&mut restored_originals, shard_len),
-                recoveries: rec_dst,
-            };
-            strategy.try_map_collect_vec(ranges, |range| {
-                recover_and_encode_into(
-                    k,
-                    m,
-                    range,
-                    &provided_originals,
-                    &provided_recoveries,
-                    &missing_originals,
-                    out,
-                )
-            })?;
-            for (pos, idx) in missing_originals.iter().enumerate() {
-                let start = pos * shard_len;
-                original_refs[*idx] = &restored_originals[start..start + shard_len];
-            }
-        }
+        let dst = Dst::new(&mut recovery_buf, shard_len);
+        strategy.try_map_collect_vec(ranges, |range| {
+            encode_recovery_into(k, m, range, &original_refs, dst)
+        })?;
+        let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
 
         let data = extract_data(&original_refs, k, shard_len)?;
-        let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
 
         // Provided originals are already bound to the commitment by their checked digests.
         // Provided recoveries must match the canonical re-encode before reusing theirs.
@@ -753,12 +658,13 @@ mod striped {
         verify_codeword::<H, S>(ctx, shard_digests, &original_refs, &recovery_refs, data)
     }
 
-    /// Fast path for exactly `k` provided shards with at least one original missing: recover
-    /// the missing originals AND read the missing recoveries straight out of the decode (no
-    /// re-encode). Safe without the provided-recovery comparison because there are no extra
-    /// shards: every provided shard's digest is needed to rebuild the root, and every
-    /// reconstructed shard is the unique RS output, so the commitment root check alone binds
-    /// the result.
+    /// Decode when an original is missing: recover the missing originals AND read the missing
+    /// recoveries straight out of one decode (the decode reveals every position), so no
+    /// separate re-encode is needed. The caller feeds exactly `k` shards (surplus recoveries
+    /// were trimmed and their digests cleared), so the trimmed positions are reconstructed
+    /// here and bound by the commitment root check like any other missing shard. No
+    /// provided-recovery comparison is needed: every reconstructed shard is the unique RS
+    /// output for the `k` inputs, and the root check alone binds it to the commitment.
     pub(super) fn decode_restored_only<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
         ranges: Vec<Range<usize>>,
@@ -1076,6 +982,21 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
+    // Feed the Reed-Solomon decoder exactly `k` shards. Only `k` original positions exist, so
+    // originals are never redundant; when an original is missing, trim surplus recovery shards
+    // beyond the `k - originals` needed to decode. Their checked digests are dropped and their
+    // bytes forgotten, so the reconstruction rebuilds those positions and the commitment root
+    // check binds them. This verifies extra shards without over-feeding the decoder or a
+    // separate canonical re-encode/compare.
+    let recovery_needed = provided_originals.len() < k;
+    if recovery_needed {
+        let keep = k - provided_originals.len();
+        for &(idx, _) in &provided_recoveries[keep..] {
+            shard_digests[k + idx] = None;
+        }
+        provided_recoveries.truncate(keep);
+    }
+
     // Decode the data, striping the work across the strategy when shards are large enough.
     let ctx = DecodeCtx {
         n,
@@ -1085,13 +1006,10 @@ fn decode<'a, H: Hasher, S: Strategy>(
         root,
         strategy,
     };
-    // When exactly `k` shards are provided and at least one original is missing, the decode
-    // reconstructs every missing shard (originals and recoveries) directly, so the striped
-    // path can skip the re-encode. With no extra shards there is nothing to compare against
-    // the canonical re-encode; the commitment root check alone binds the reconstruction.
-    let restored_only = provided == k && provided_originals.len() < k;
     if let Some(ranges) = stripes {
-        if restored_only {
+        // Recovery reads the missing originals and recoveries straight out of one decode;
+        // with all originals present there is nothing to decode, so re-encode instead.
+        if recovery_needed {
             return striped::decode_restored_only::<H, S>(
                 &ctx,
                 ranges,
@@ -1188,10 +1106,15 @@ fn decode<'a, H: Hasher, S: Strategy>(
 ///
 /// The decoder requires any `k` chunks to reconstruct the original data.
 /// 1. Each chunk's Merkle multi-proof is verified against the [`bmt`] root.
-/// 2. The shards from the valid chunks are used to reconstruct the original `k` data shards.
-/// 3. To ensure consistency, the recovered data shards are re-encoded, and a new [`bmt`] root is
-///    generated. This new root MUST match the original [`bmt`] root. This prevents attacks where
-///    an adversary provides a valid set of chunks that decode to different data.
+/// 2. Exactly `k` shards are fed to the Reed-Solomon decoder (any surplus chunks are
+///    redundant), which reconstructs the full codeword: the missing data shards and the
+///    missing recovery shards both come out of the same decode. When all `k` data shards are
+///    already present there is nothing to decode, so the recovery shards are re-encoded
+///    instead.
+/// 3. To ensure consistency, a new [`bmt`] root is generated over the full reconstructed
+///    codeword. This new root MUST match the original [`bmt`] root. This prevents attacks
+///    where an adversary provides a valid set of chunks that decode to different data, and
+///    binds any surplus chunks (which are rebuilt from the reconstruction, not trusted).
 /// 4. If the roots match, the original data is extracted from the reconstructed data shards.
 #[derive(Clone, Copy)]
 pub struct ReedSolomon<H> {
@@ -2189,6 +2112,30 @@ mod tests {
             .collect::<Vec<_>>();
 
         let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &STRATEGY);
+        assert!(matches!(result, Err(Error::Inconsistent)));
+    }
+
+    #[test]
+    fn test_striped_surplus_recovery_tampered_rejected() {
+        // Striped decode-reveal with more than `k` shards provided and an original missing,
+        // where a surplus recovery shard is committed but non-canonical. The decoder is fed
+        // exactly `k`; the trimmed surplus is reconstructed and rejected by the root check
+        // (there is no separate provided-recovery comparison on this path).
+        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let data = vec![0xABu8; 64 * 1024];
+        let total = 12u16;
+        let min = 4u16;
+        let shard_len = canonical_shard_len(data.len(), min as usize);
+        assert!(
+            striped::ranges(shard_len, strategy.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            "test must exercise the striped path (shard_len={shard_len})"
+        );
+
+        // Provide originals 0,1 and recoveries 4,5,6 (5 > k=4, originals 2,3 missing). The
+        // decoder is fed originals 0,1 + recoveries 4,5; recovery 6 is the trimmed surplus.
+        let selected = [0u16, 1, 4, 5, 6];
+        let tamper: fn(&mut [Vec<u8>], usize, usize) = |shards, _, _| shards[6][0] ^= 0xFF;
+        let result = decode_tampered_codeword(total, min, &data, &selected, tamper, &strategy);
         assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
