@@ -1,7 +1,8 @@
 //! Benchmarks for applying already-merkleized QMDB batches.
 
 use crate::common::{
-    any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyUFixDb, ImmFixDb, CHUNK_SIZE,
+    any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyOFixP256Db, AnyUFixDb,
+    ImmFixDb, CHUNK_SIZE,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
@@ -25,6 +26,10 @@ const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 
 type Db = AnyUFixDb<Mmb>;
 type ImmDb = ImmFixDb<Mmb>;
+// Ordered "any" DB with a partitioned snapshot index. The direct-apply path updates existing
+// seeded keys, so it drives the index cursor's get_mut/find/update -- where the cached-run
+// optimization pays off.
+type ODb = AnyOFixP256Db<Mmb>;
 
 fn write_updates(
     mut batch: <Db as BatchableDb>::Batch,
@@ -52,6 +57,36 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
 
     let mut rng = StdRng::seed_from_u64(7);
     let batch = write_updates(db.new_batch(), updates, &mut rng);
+    let batch = batch.merkleize(&db, None).await.unwrap();
+
+    let start = Instant::now();
+    db.apply_batch(batch).await.unwrap();
+    let elapsed = start.elapsed();
+
+    db.destroy().await.unwrap();
+    elapsed
+}
+
+async fn open_ord_db(ctx: &Context) -> ODb {
+    ODb::init(ctx.child("storage"), any_fix_cfg_with(ctx, ITEMS_PER_BLOB))
+        .await
+        .unwrap()
+}
+
+#[boxed]
+async fn bench_ord_direct_apply(ctx: &Context, updates: u64) -> Duration {
+    let mut db = open_ord_db(ctx).await;
+    seed_db(&mut db, NUM_KEYS).await;
+
+    // Inlined rather than sharing `write_updates`, whose `<Db as BatchableDb>::Batch` return type
+    // is pinned to the unordered DB; the loop body is identical.
+    let mut rng = StdRng::seed_from_u64(7);
+    let mut batch = db.new_batch();
+    for _ in 0..updates {
+        let idx = rng.next_u64() % NUM_KEYS;
+        let key = Sha256::hash(&idx.to_be_bytes());
+        batch = batch.write(key, Some(make_fixed_value(&mut rng)));
+    }
     let batch = batch.merkleize(&db, None).await.unwrap();
 
     let start = Instant::now();
@@ -248,6 +283,23 @@ fn bench_apply_batch(c: &mut Criterion) {
                     let mut total = Duration::ZERO;
                     for _ in 0..iters {
                         total += bench_direct_apply(&ctx, updates).await;
+                    }
+                    total
+                });
+            },
+        );
+
+        c.bench_function(
+            &format!(
+                "{}/case=direct variant=any::ordered::p256::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
+                module_path!(),
+            ),
+            |b| {
+                b.to_async(&runner).iter_custom(|iters| async move {
+                    let ctx = context::get::<Context>();
+                    let mut total = Duration::ZERO;
+                    for _ in 0..iters {
+                        total += bench_ord_direct_apply(&ctx, updates).await;
                     }
                     total
                 });
