@@ -334,7 +334,29 @@ mod gf8 {
         log: [u8; FIELD_SIZE],
     }
 
+    struct ShuffleTables {
+        low: [[u8; 32]; FIELD_SIZE],
+        high: [[u8; 32]; FIELD_SIZE],
+    }
+
     type CoefficientCache = Mutex<HashMap<(usize, usize), Arc<Vec<u8>>>>;
+
+    fn shuffle_tables() -> &'static ShuffleTables {
+        static TABLES: OnceLock<ShuffleTables> = OnceLock::new();
+        TABLES.get_or_init(|| {
+            let mut low = [[0u8; 32]; FIELD_SIZE];
+            let mut high = [[0u8; 32]; FIELD_SIZE];
+            for coeff in 0u8..=u8::MAX {
+                for i in 0u8..16 {
+                    low[coeff as usize][i as usize] = mul(coeff, i);
+                    high[coeff as usize][i as usize] = mul(coeff, i << 4);
+                    low[coeff as usize][i as usize + 16] = low[coeff as usize][i as usize];
+                    high[coeff as usize][i as usize + 16] = high[coeff as usize][i as usize];
+                }
+            }
+            ShuffleTables { low, high }
+        })
+    }
 
     fn coefficients(k: usize, m: usize) -> Result<Arc<Vec<u8>>, Error> {
         static COEFFICIENTS: OnceLock<CoefficientCache> = OnceLock::new();
@@ -437,20 +459,14 @@ mod gf8 {
             return;
         }
 
-        let mut low = [0u8; 32];
-        let mut high = [0u8; 32];
-        for i in 0u8..16 {
-            low[i as usize] = mul(coeff, i);
-            high[i as usize] = mul(coeff, i << 4);
-            low[i as usize + 16] = low[i as usize];
-            high[i as usize + 16] = high[i as usize];
-        }
-
+        let tables = shuffle_tables();
         let chunks = input.len() / 32;
-        // SAFETY: `low` and `high` are 32-byte local arrays. Unaligned loads are valid.
-        let low = unsafe { _mm256_loadu_si256(low.as_ptr().cast::<__m256i>()) };
-        // SAFETY: `low` and `high` are 32-byte local arrays. Unaligned loads are valid.
-        let high = unsafe { _mm256_loadu_si256(high.as_ptr().cast::<__m256i>()) };
+        // SAFETY: table rows are 32 bytes. Unaligned loads are valid.
+        let low =
+            unsafe { _mm256_loadu_si256(tables.low[coeff as usize].as_ptr().cast::<__m256i>()) };
+        // SAFETY: table rows are 32 bytes. Unaligned loads are valid.
+        let high =
+            unsafe { _mm256_loadu_si256(tables.high[coeff as usize].as_ptr().cast::<__m256i>()) };
         let mask = _mm256_set1_epi8(0x0f);
 
         for i in 0..chunks {
@@ -482,18 +498,14 @@ mod gf8 {
             return;
         }
 
-        let mut low = [0u8; 16];
-        let mut high = [0u8; 16];
-        for i in 0u8..16 {
-            low[i as usize] = mul(coeff, i);
-            high[i as usize] = mul(coeff, i << 4);
-        }
-
+        let tables = shuffle_tables();
         let chunks = input.len() / 16;
-        // SAFETY: `low` and `high` are 16-byte local arrays. Unaligned loads are valid.
-        let low = unsafe { _mm_loadu_si128(low.as_ptr().cast::<__m128i>()) };
-        // SAFETY: `low` and `high` are 16-byte local arrays. Unaligned loads are valid.
-        let high = unsafe { _mm_loadu_si128(high.as_ptr().cast::<__m128i>()) };
+        // SAFETY: table rows are at least 16 bytes. Unaligned loads are valid.
+        let low =
+            unsafe { _mm_loadu_si128(tables.low[coeff as usize].as_ptr().cast::<__m128i>()) };
+        // SAFETY: table rows are at least 16 bytes. Unaligned loads are valid.
+        let high =
+            unsafe { _mm_loadu_si128(tables.high[coeff as usize].as_ptr().cast::<__m128i>()) };
         let mask = _mm_set1_epi8(0x0f);
 
         for i in 0..chunks {
