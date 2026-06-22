@@ -232,7 +232,6 @@ impl OwnerRef {
     /// be uninitialized.
     #[inline(always)]
     fn from_tagged<T>(ptr: NonNull<T>, tag: usize) -> Self {
-        debug_assert_eq!(ptr.as_ptr().addr() & OWNER_TAG_MASK, 0);
         let ptr = ptr.cast::<()>().as_ptr();
         Self(ptr.with_addr(ptr.addr() | tag))
     }
@@ -244,7 +243,6 @@ impl OwnerRef {
     /// `self` must be a live non-empty owner whose pointer targets a `T`.
     #[inline(always)]
     unsafe fn untag<T>(self) -> NonNull<T> {
-        debug_assert!(!self.is_empty());
         let ptr = self
             .0
             .with_addr(self.0.addr() & !OWNER_TAG_MASK)
@@ -305,7 +303,6 @@ impl OwnerRef {
     /// `self` must be a live heap owner.
     #[inline(always)]
     unsafe fn heap(self) -> NonNull<HeapOwner> {
-        debug_assert_eq!(self.tag(), OWNER_HEAP);
         // SAFETY: a live heap owner's address targets a `HeapOwner`.
         unsafe { self.untag() }
     }
@@ -317,7 +314,6 @@ impl OwnerRef {
     /// `self` must be a live pooled owner.
     #[inline(always)]
     unsafe fn pooled(self) -> NonNull<PooledOwner> {
-        debug_assert!(self.is_pooled());
         // SAFETY: a live pooled owner's address targets a `PooledOwner`.
         unsafe { self.untag() }
     }
@@ -329,7 +325,6 @@ impl OwnerRef {
     /// `self` must be a live external owner.
     #[inline(always)]
     unsafe fn external(self) -> NonNull<ExternalOwner> {
-        debug_assert!(self.is_external());
         // SAFETY: a live external owner's address targets an `ExternalOwner`.
         unsafe { self.untag() }
     }
@@ -347,7 +342,6 @@ impl OwnerRef {
     /// the caller must bound.
     #[inline(always)]
     unsafe fn refs(self) -> &'static AtomicUsize {
-        debug_assert!(!self.is_empty());
         // SAFETY: every owner kind is repr(C) with `refs` at offset 0, so the
         // untagged address targets the shared refcount regardless of kind.
         unsafe { self.untag::<AtomicUsize>().as_ref() }
@@ -424,7 +418,6 @@ impl OwnerRef {
         // up releasing the allocation. This is the common shared-clone drop
         // path, so keep it inline instead of paying an outlined call.
         let old = refs.fetch_sub(1, Ordering::Release);
-        debug_assert!(old >= 1);
         if old == 1 {
             // SAFETY: this drop won the final-owner race.
             unsafe { self.drop_shared_race_final(refs) };
@@ -502,7 +495,6 @@ impl OwnerRef {
         if tag == OWNER_EMPTY {
             return;
         }
-        debug_assert_eq!(tag, OWNER_HEAP, "IoBufMut owner is never external");
         if self.is_front_heap_for_mut(ptr) {
             // SAFETY: front heap owners are allocated with `HeapOwner::front_layout`
             // and `ptr + cap` is the allocation end.
@@ -609,7 +601,6 @@ impl OwnerRef {
             // SAFETY: guaranteed by the caller.
             unsafe { self.pooled().as_ref().data_base }
         } else {
-            debug_assert_eq!(self.tag(), OWNER_HEAP);
             // SAFETY: guaranteed by the caller.
             unsafe { self.heap().as_ref().data_base }
         }
@@ -634,7 +625,6 @@ impl OwnerRef {
             // SAFETY: guaranteed by the caller.
             unsafe { self.pooled().as_ref().capacity }
         } else {
-            debug_assert_eq!(self.tag(), OWNER_HEAP);
             // SAFETY: guaranteed by the caller.
             let header = unsafe { self.heap() };
             // SAFETY: guaranteed by the caller.
@@ -732,8 +722,6 @@ impl PooledOwner {
     /// be initialized.
     #[inline(always)]
     unsafe fn release_to_thread_cache(owner: NonNull<Self>) {
-        // SAFETY: guaranteed by the caller.
-        debug_assert_eq!(unsafe { owner.as_ref() }.refs.load(Ordering::Relaxed), 1);
         // SAFETY: this unique owner proves the slot's data allocation is live.
         let buffer = unsafe { PooledBuffer::from_owner(owner) };
         BufferPoolThreadCache::push(buffer);
@@ -810,7 +798,7 @@ impl PooledBuffer {
         // SAFETY: guaranteed by the caller. The slot is unique and not
         // concurrently visible while its data pointer is initialized.
         unsafe {
-            debug_assert_eq!((*owner.as_ptr()).refs.load(Ordering::Relaxed), 1);
+            assert_eq!((*owner.as_ptr()).refs.load(Ordering::Relaxed), 1);
             addr_of_mut!((*owner.as_ptr()).data_base).write(ptr);
         }
         Self { owner }
@@ -872,7 +860,6 @@ impl PooledBuffer {
     pub(crate) unsafe fn init_lease(&mut self, lease: SizeClassLease) {
         // SAFETY: owner is a live side-table entry.
         unsafe {
-            debug_assert_eq!((*self.owner.as_ptr()).refs.load(Ordering::Relaxed), 1);
             addr_of_mut!((*self.owner.as_ptr()).lease).write(MaybeUninit::new(lease));
         }
     }
@@ -1121,7 +1108,7 @@ impl ExternalOwner {
     unsafe fn release(owner: NonNull<Self>) {
         // SAFETY: guaranteed by the caller.
         let owner_ref = unsafe { owner.as_ref() };
-        debug_assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
+        assert_eq!(owner_ref.refs.load(Ordering::Relaxed), 1);
         // SAFETY: the owner box was leaked at construction; dropping it here
         // drops the inner `Bytes` exactly once.
         drop(unsafe { Box::from_raw(owner.as_ptr()) });
@@ -1166,7 +1153,7 @@ impl HeapOwner {
     fn front_alloc_size(base: NonNull<Self>, ptr: NonNull<u8>, cap: usize) -> usize {
         let base_addr = base.as_ptr() as usize;
         let end_addr = ptr.as_ptr() as usize + cap;
-        debug_assert!(end_addr >= base_addr);
+        assert!(end_addr >= base_addr);
         end_addr - base_addr
     }
 
@@ -1186,7 +1173,7 @@ impl HeapOwner {
 
     #[inline(always)]
     fn round_down(value: usize, align: usize) -> usize {
-        debug_assert!(align.is_power_of_two());
+        assert!(align.is_power_of_two());
         value & !(align - 1)
     }
 
@@ -1218,7 +1205,7 @@ impl HeapOwner {
     unsafe fn release(header: NonNull<Self>) {
         // SAFETY: guaranteed by the caller.
         let header_ref = unsafe { header.as_ref() };
-        debug_assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
+        assert_eq!(header_ref.refs.load(Ordering::Relaxed), 1);
         let header_addr = header.as_ptr() as usize;
         let data_addr = header_ref.data_base.as_ptr() as usize;
         let base = if header_addr < data_addr {

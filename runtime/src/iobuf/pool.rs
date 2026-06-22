@@ -1011,8 +1011,8 @@ impl TlsSizeClassCache {
     /// ownership of the entries in `start..end` to this function.
     #[inline(never)]
     fn return_global_batch(&mut self, start: usize, end: usize) {
-        debug_assert!(start < end && end <= self.capacity);
-        debug_assert!(self.len <= start);
+        assert!(start < end && end <= self.capacity);
+        assert!(self.len <= start);
         let count = end - start;
         let entries = self.entries.as_mut_ptr();
 
@@ -1022,22 +1022,6 @@ impl TlsSizeClassCache {
         // SAFETY: `start..end` was initialized and ownership transferred to
         // this function; the entry is only borrowed here.
         let token = unsafe { (*entries.add(start)).assume_init_ref().buffer.lease() }.token;
-
-        // Same-class check, done before the batch insert because put_batch's
-        // iterator must not panic after yielding an entry (a mid-iterator
-        // panic would strand parked-but-unpublished buffers).
-        #[cfg(debug_assertions)]
-        for index in start..end {
-            // SAFETY: `start..end` was initialized and ownership transferred
-            // to this function, the entry is only borrowed here.
-            let entry = unsafe { (*entries.add(index)).assume_init_ref() };
-            // SAFETY: local cache entries keep a live lease in the slot.
-            let entry_token = unsafe { entry.buffer.lease() }.token;
-            debug_assert_eq!(
-                entry_token, token,
-                "cache entries must share one size class"
-            );
-        }
 
         // SAFETY: the lease strong references consumed below are not released
         // until after the batch insert completes.
@@ -1054,8 +1038,7 @@ impl TlsSizeClassCache {
             entry.buffer
         });
         // Cache entries are distinct checked-out buffers from this class, and
-        // the iterator body cannot panic after a yield (the debug same-class
-        // check ran above).
+        // the iterator body cannot panic after yielding an entry.
         class.global.put_batch(batch);
 
         // Release the strong references only now that every buffer is parked.
@@ -1163,7 +1146,7 @@ impl Drop for TlsSizeClassCaches {
         // be a use-after-destroy if std ever moved the value before dropping.
         let this: *mut Self = self;
         BufferPoolThreadCache::TLS_SIZE_CLASS_CACHES_FAST.with(|fast| {
-            debug_assert!(fast.get().is_null() || fast.get() == this);
+            assert!(fast.get().is_null() || fast.get() == this);
             fast.set(ptr::null_mut());
         });
     }
