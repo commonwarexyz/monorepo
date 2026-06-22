@@ -692,8 +692,8 @@ where
                         .cache
                         .put_notarization(round, digest, notarization)
                         .await;
-                    let (shared, drive) = SharedSync::observe(sync);
-                    syncs.push(async move { observe_sync(drive.await, round, "notarization") });
+                    let (shared, drive) = SharedSync::observe(sync, round, "notarization");
+                    syncs.push(drive);
                     self.notarization_syncs.register(round, digest, shared);
                 }
 
@@ -1735,8 +1735,8 @@ where
         if let Some(handle) = self.verified_syncs.wait(round, digest) {
             return handle;
         }
-        let (shared, drive) = SharedSync::observe(sync);
-        syncs.push(async move { observe_sync(drive.await, round, "verified") });
+        let (shared, drive) = SharedSync::observe(sync, round, "verified");
+        syncs.push(drive);
         let handle = shared.wait();
         self.verified_syncs.register(round, digest, shared);
         handle
@@ -1811,15 +1811,15 @@ where
             return block_sync;
         }
 
-        // Wait for the notarization-certificate sync alongside the block sync and
-        // fail the barrier unless both are durable. (The notarization sync is also
-        // observed by its own pool driver, which panics on failure; propagating the
-        // result here makes the barrier obviously correct without relying on that
-        // panic to win a race against the finalize vote.)
+        // Hold the certify barrier until both the notarization certificate and the
+        // block are durable. A failed sync is fatal at its source (the notarization
+        // sync panics via its own driver; a failed block sync surfaces as
+        // `block_result`, which the caller treats as fatal), so neither can resolve
+        // the barrier with a recoverable error.
         let notarization_wait = notarization_sync.wait();
         Handle::from_future(async move {
-            let (notarization_result, block_result) = join(notarization_wait, block_sync).await;
-            notarization_result.and(block_result)
+            let (_, block_result) = join(notarization_wait, block_sync).await;
+            block_result
         })
     }
 

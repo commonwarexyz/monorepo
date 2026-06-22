@@ -1,12 +1,12 @@
 //! Helpers for overlapping durable syncs with consensus progress.
 //!
 //! A marshal write starts its fsync eagerly: the archive spawns the sync and
-//! returns a [`Handle`] that only *observes* completion. [`SharedSync`] is the
-//! generic piece: a policy-free fan-out that lets a single started [`Handle`] be
-//! awaited by many parties. [`SyncRegistry`] indexes those shared syncs by round
-//! (tagged with the block digest) for reuse and pruning. [`observe_sync`] is the
-//! marshal *policy* applied to a sync's result: a failure is fatal, so it panics
-//! rather than yielding a recoverable error.
+//! returns a [`Handle`] that only *observes* completion. [`SharedSync`] fans a
+//! single started [`Handle`] out to many awaiters and makes a failed sync fatal
+//! (it panics rather than yielding a recoverable error). [`SyncRegistry`] indexes
+//! those shared syncs by round (tagged with the block digest) for reuse and
+//! pruning. [`observe_sync`] applies the same fatal policy to inline (non-fanned-
+//! out) sync awaits.
 
 use crate::types::Round;
 use commonware_runtime::Handle;
@@ -38,28 +38,26 @@ pub(crate) fn observe_sync(result: SyncResult, round: Round, name: &str) {
 
 /// Completion state shared between the driver future and every awaiter.
 ///
-/// Terminal once the driver finishes, so [`SharedSync::wait`] always resolves
-/// (immediately, after completion) and never hangs, regardless of outcome.
+/// A failed sync is fatal: the driver panics, so this never reaches a "failed"
+/// state. [`SharedSync::wait`] therefore only ever resolves `Ok` (or the process
+/// has aborted); it never yields an error and never hangs.
 enum State {
-    /// The driver has not finished; these awaiters are signaled when it does.
+    /// The driver has not finished; these awaiters are signaled on success.
     Pending(Vec<oneshot::Sender<SyncResult>>),
     /// The sync completed durably; later awaiters resolve `Ok` immediately.
     Durable,
-    /// The sync failed; later awaiters resolve as failed immediately. The failure
-    /// itself is observed by the driver's owner (in marshal, a fatal panic).
-    Failed,
 }
 
 /// A started durable sync whose completion can be awaited by many parties.
 ///
-/// This is a policy-free fan-out over a single [`Handle`]. [`SharedSync::observe`]
-/// returns the shared handle together with a driver future the caller must run to
-/// completion (by pushing it into a pool or spawning it). The driver awaits the
-/// underlying [`Handle`] and yields its [`SyncResult`] to that single owner, while
-/// [`SharedSync::wait`] hands out [`Handle`]s that resolve once the sync settles
-/// (callable any number of times, before or after completion). The owner decides
-/// what a failure means; in marshal that is [`observe_sync`] (a fatal panic).
-/// Cloning is cheap (it shares completion state).
+/// [`SharedSync::observe`] returns the shared handle together with a driver future
+/// the caller must run to completion (by pushing it into a pool or spawning it).
+/// The driver awaits the underlying [`Handle`] and applies the fatal policy: a
+/// failed sync panics; on success every awaiter resolves `Ok`. [`SharedSync::wait`]
+/// hands out [`Handle`]s that resolve `Ok` once the sync is durable, callable any
+/// number of times before or after completion. Because a failure is fatal, `wait`
+/// never yields an error that could become a recoverable verdict. Cloning is cheap
+/// (it shares completion state).
 #[derive(Clone)]
 pub(crate) struct SharedSync {
     state: Arc<Mutex<State>>,
@@ -67,41 +65,38 @@ pub(crate) struct SharedSync {
 
 impl SharedSync {
     /// Builds a shared sync over a freshly started `sync`, returning the shared
-    /// handle plus the driver future that observes it.
+    /// handle plus the driver future that observes it to completion.
     ///
     /// The caller must run the returned future to completion (push it into a pool
-    /// or spawn it); it yields the sync's [`SyncResult`] to that single owner. On
-    /// success every awaiter resolves `Ok`; on failure every awaiter (current and
-    /// future) resolves as failed rather than hanging, while the error itself is
-    /// handed only to the driver's owner (it is never cloned across awaiters).
-    pub(crate) fn observe(sync: Handle<()>) -> (Self, impl Future<Output = SyncResult>) {
+    /// or spawn it). The driver awaits `sync` and applies the fatal policy via
+    /// [`observe_sync`]: a failed sync panics (annotated with `round`/`name`); on
+    /// success every awaiter (current and future) resolves `Ok`. Because failure
+    /// is fatal, no awaiter ever observes a failure as a recoverable error.
+    pub(crate) fn observe(
+        sync: Handle<()>,
+        round: Round,
+        name: &'static str,
+    ) -> (Self, impl Future<Output = ()>) {
         let state = Arc::new(Mutex::new(State::Pending(Vec::new())));
         let shared = state.clone();
         let drive = async move {
-            let result = sync.await;
-            let next = if result.is_ok() {
-                State::Durable
-            } else {
-                State::Failed
-            };
-            let waiters = match std::mem::replace(&mut *shared.lock(), next) {
+            // Panics on failure; only a durable sync proceeds to signal awaiters.
+            observe_sync(sync.await, round, name);
+            let waiters = match std::mem::replace(&mut *shared.lock(), State::Durable) {
                 State::Pending(waiters) => waiters,
                 // The driver runs exactly once, so the prior state is always `Pending`.
-                State::Durable | State::Failed => Vec::new(),
+                State::Durable => Vec::new(),
             };
-            if result.is_ok() {
-                for waiter in waiters {
-                    waiter.send_lossy(Ok(()));
-                }
+            for waiter in waiters {
+                waiter.send_lossy(Ok(()));
             }
-            // On failure the waiters drop here and their receivers resolve as failed.
-            result
         };
         (Self { state }, drive)
     }
 
-    /// A handle that resolves once the sync settles: `Ok` on success, an error on
-    /// failure. Never hangs, whether called before or after the driver finishes.
+    /// A handle that resolves `Ok` once the sync is durable. Never yields an error
+    /// and never hangs: a failed sync is fatal (the driver panics), so the only
+    /// outcomes are durable success or process abort.
     ///
     /// The handle is completed by the driver returned from [`Self::observe`], so it
     /// must not be awaited from the task that drives that future. In the marshal
@@ -111,7 +106,6 @@ impl SharedSync {
         let mut state = self.state.lock();
         match &mut *state {
             State::Durable => Handle::ready(Ok(())),
-            State::Failed => Handle::ready(Err(commonware_runtime::Error::Closed)),
             State::Pending(waiters) => {
                 let (waiter, receiver) = oneshot::channel();
                 waiters.push(waiter);
@@ -208,17 +202,15 @@ mod tests {
     /// A `SharedSync` whose driver is intentionally not run; the registry tests
     /// exercise only the map semantics, never a sync's completion.
     fn pending_sync() -> SharedSync {
-        SharedSync::observe(Handle::ready(Ok(()))).0
+        SharedSync::observe(Handle::ready(Ok(())), round(0), "test").0
     }
 
     #[test]
     fn test_shared_sync_fans_out_to_all_waiters() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let (shared, drive) = SharedSync::observe(Handle::ready(Ok(())));
-            context.spawn(move |_| async move {
-                let _ = drive.await;
-            });
+            let (shared, drive) = SharedSync::observe(Handle::ready(Ok(())), round(1), "test");
+            context.spawn(move |_| drive);
 
             // Two awaiters registered before completion both resolve.
             let a = shared.wait();
@@ -236,39 +228,18 @@ mod tests {
 
     #[test]
     #[should_panic(expected = "failed to sync test")]
-    fn test_observe_sync_panics_on_failure() {
+    fn test_shared_sync_failure_is_fatal() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
-            let (shared, drive) =
-                SharedSync::observe(Handle::ready(Err(commonware_runtime::Error::Closed)));
-            // The driver yields the failure to its owner, which applies the fatal
-            // policy via `observe_sync`.
-            context.spawn(move |_| async move { observe_sync(drive.await, round(1), "test") });
-            let _ = shared.wait().await;
-        });
-    }
-
-    #[test]
-    fn test_shared_sync_failure_resolves_waiters_without_hanging() {
-        let runner = deterministic::Runner::default();
-        runner.start(|_| async move {
-            let (shared, drive) =
-                SharedSync::observe(Handle::ready(Err(commonware_runtime::Error::Closed)));
-
-            // Drive the sync to failure directly (without `observe_sync`, so no
-            // panic) to model any owner that handles the result instead of
-            // panicking. The shared state must become terminal so awaiters resolve.
-            let before = shared.wait();
-            assert!(
-                drive.await.is_err(),
-                "driver yields the failure to its owner"
+            // A failed sync must panic at the source: the driver applies the fatal
+            // policy, so awaiters never observe failure as a recoverable error.
+            let (shared, drive) = SharedSync::observe(
+                Handle::ready(Err(commonware_runtime::Error::Closed)),
+                round(1),
+                "test",
             );
-
-            // A waiter registered before completion resolves (as failed), not hangs.
-            assert!(before.await.is_err());
-
-            // A waiter registered after completion resolves immediately, not hangs.
-            assert!(shared.wait().await.is_err());
+            context.spawn(move |_| drive);
+            let _ = shared.wait().await;
         });
     }
 
