@@ -1,11 +1,13 @@
 use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{
+    reed_solomon::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder},
+    Digest, Hasher,
+};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use commonware_utils::Cached;
-use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::marker::PhantomData;
 use thiserror::Error;
 
@@ -1351,12 +1353,10 @@ mod tests {
         let result = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY);
         assert!(matches!(
             result,
-            Err(Error::ReedSolomon(
-                reed_solomon_simd::Error::UnsupportedShardCount {
-                    original_count: _,
-                    recovery_count: _,
-                }
-            ))
+            Err(Error::ReedSolomon(RsError::UnsupportedShardCount {
+                original_count: _,
+                recovery_count: _,
+            }))
         ));
     }
 

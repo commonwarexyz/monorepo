@@ -36,8 +36,10 @@ crc-fast = { workspace = true, features = ["std"], optional = true }
 ctutils.workspace = true
 curve25519-dalek = { workspace = true, features = ["digest"] }
 ecdsa.workspace = true
+fixedbitset.workspace = true
 num-rational = { workspace = true, optional = true }
 num-traits = { workspace = true, optional = true }
+once_cell = { workspace = true, features = ["alloc", "race"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 rand.workspace = true
 rand_chacha.workspace = true
@@ -50,6 +52,9 @@ zeroize = { workspace = true, features = ["zeroize_derive"] }
 [target.'cfg(any(target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
 # aws-lc-rs provides optimized P-256 verification and handshake cipher on x86_64 and aarch64.
 aws-lc-rs.workspace = true
+
+[target.'cfg(any(target_arch = "x86", target_arch = "x86_64", target_arch = "aarch64"))'.dependencies]
+cpufeatures.workspace = true
 
 [target.'cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))'.dependencies.chacha20poly1305]
 workspace = true
@@ -110,6 +115,7 @@ std = [
 	"crc-fast",
 	"crc-fast?/std",
 	"ecdsa/std",
+	"fixedbitset/std",
 	"getrandom/std",
 	"num-rational",
 	"num-traits",
@@ -153,6 +159,11 @@ path = "src/blake3/benches/bench.rs"
 name = "lthash"
 harness = false
 path = "src/lthash/benches/bench.rs"
+
+[[bench]]
+name = "reed_solomon"
+harness = false
+path = "src/reed_solomon/benches/bench.rs"
 
 [[bench]]
 name = "handshake"
