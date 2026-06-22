@@ -1,5 +1,6 @@
 use super::Error;
 use crate::Config;
+use commonware_codec::{EncodeSize, RangeCfg, Read, Write};
 use commonware_math::fields::goldilocks::F;
 use commonware_utils::BigRationalExt as _;
 use num_rational::BigRational;
@@ -9,6 +10,123 @@ const SECURITY_BITS: usize = 126;
 // We use the next power of 2 above SECURITY_BITS (128 = 2^7), which provides
 // 1/128 fractional precision, sufficient for these security calculations.
 const LOG2_PRECISION: usize = SECURITY_BITS.next_power_of_two().trailing_zeros() as usize;
+
+/// Expensive-to-search portion of a ZODA topology.
+///
+/// A hint carries the structural choices that determine the full topology, but
+/// it does not itself prove that those choices meet ZODA's sampling-security
+/// bound. Call [`Topology::reckon`] to derive and validate a full topology.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopologyHint {
+    pub(crate) data_cols: usize,
+}
+
+impl TopologyHint {
+    const fn new(data_cols: usize) -> Self {
+        Self { data_cols }
+    }
+
+    /// Search for an efficient topology shape for this configuration and data size.
+    pub fn search(config: &Config, data_bytes: usize) -> Self {
+        let min_shards = usize::from(config.minimum_shards.get());
+        let total_shards = config.total_shards() as usize;
+        let data_els = Topology::effective_data_elements(data_bytes);
+
+        // The goal here is to try and maximize the number of columns in the
+        // data. ZODA is more efficient the more columns there are. However,
+        // we need to make sure that every shard has enough samples to guarantee
+        // correct encoding, and that the number of encoded rows can contain
+        // all of the samples in each shard, without overlap.
+        //
+        // To determine if a column configuration is good, we need to choose
+        // the number of encoded rows. To do this, we pick a number of samples
+        // `S` such that `S * n >= data_rows`. Then, our encoded rows will
+        // equal `(N * S).next_power_of_two()`. If the number of required
+        // samples `R` for this configuration satisfies `N * R <= encoded_rows`,
+        // then this configuration is valid, using `R` as the necessary number
+        // of samples.
+        //
+        // We cannot stop at the first invalid column count.
+        //
+        // `data_rows = ceil(data_els / cols)` is a staircase: many adjacent
+        // `cols` values map to the same row count. Everything that matters for
+        // the row-sampling security check depends only on that row count:
+        //
+        // - `samples = ceil(data_rows / n)`
+        // - `encoded_rows = next_power_of_two(N * samples)`
+        // - `required_samples(...)`
+        //
+        // so every `cols` in the same staircase interval has the same validity.
+        //
+        // Write `q = ceil(data_els / cols)`. The interval of column counts that
+        // produce exactly this `q` is:
+        //
+        //   ceil(data_els / q) <= cols <= floor((data_els - 1) / (q - 1))
+        //
+        // for `q > 1`. We are already inside such an interval at the current
+        // `cols`, so we only need its right endpoint:
+        //
+        //   interval_end = floor((data_els - 1) / (q - 1))
+        //
+        // This lets us jump directly from one distinct `data_rows` value to the
+        // next, yielding an exact search over all candidates in about
+        // `O(sqrt(data_els))` intervals instead of `O(data_els)` individual
+        // column counts.
+        //
+        // We cap the search at `data_els`. Beyond that, `data_rows = 1`
+        // forever, meaning we would only be adding guaranteed zero padding to a
+        // single row. That region can never satisfy the 126-bit row-sampling
+        // bound, so it is never an optimal choice.
+        let mut out = Self::new(1);
+        let mut cols = 1usize;
+        while cols <= data_els {
+            let attempt = Topology::with_cols(data_bytes, min_shards, total_shards, cols);
+            let interval_end = if attempt.data_rows == 1 {
+                data_els
+            } else {
+                (data_els - 1) / (attempt.data_rows - 1)
+            };
+            let required_samples = attempt.required_samples();
+            if required_samples.saturating_mul(total_shards) <= attempt.encoded_rows {
+                out = Self::new(interval_end);
+            }
+            cols = interval_end + 1;
+        }
+        out
+    }
+}
+
+impl EncodeSize for TopologyHint {
+    fn encode_size(&self) -> usize {
+        self.data_cols.encode_size()
+    }
+}
+
+impl Write for TopologyHint {
+    fn write(&self, buf: &mut impl bytes::BufMut) {
+        self.data_cols.write(buf);
+    }
+}
+
+impl Read for TopologyHint {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl bytes::Buf, _: &Self::Cfg) -> Result<Self, commonware_codec::Error> {
+        let range = RangeCfg::from(..);
+        Ok(Self {
+            data_cols: usize::read_cfg(buf, &range)?,
+        })
+    }
+}
+
+#[cfg(feature = "arbitrary")]
+impl arbitrary::Arbitrary<'_> for TopologyHint {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        Ok(Self {
+            data_cols: u.arbitrary::<u32>()? as usize,
+        })
+    }
+}
 
 /// Contains the sizes of various objects in the protocol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,19 +150,31 @@ pub struct Topology {
 }
 
 impl Topology {
-    const fn with_cols(data_bytes: usize, n: usize, k: usize, cols: usize) -> Self {
-        let data_els = F::bits_to_elements(8 * data_bytes);
-        let data_rows = data_els.div_ceil(cols);
-        let samples = data_rows.div_ceil(n);
+    const fn effective_data_elements(data_bytes: usize) -> usize {
+        // Model empty input as a single zero-padded row so the sampling and
+        // security calculations still have a non-empty domain.
+        let effective_data_bytes = if data_bytes == 0 { 1 } else { data_bytes };
+        F::bits_to_elements(8 * effective_data_bytes)
+    }
+
+    const fn with_cols(
+        data_bytes: usize,
+        min_shards: usize,
+        total_shards: usize,
+        data_cols: usize,
+    ) -> Self {
+        let data_els = Self::effective_data_elements(data_bytes);
+        let data_rows = data_els.div_ceil(data_cols);
+        let samples = data_rows.div_ceil(min_shards);
         Self {
             data_bytes,
-            data_cols: cols,
+            data_cols,
             data_rows,
-            encoded_rows: ((n + k) * samples).next_power_of_two(),
+            encoded_rows: (total_shards * samples).next_power_of_two(),
             samples,
             column_samples: 0,
-            min_shards: n,
-            total_shards: n + k,
+            min_shards,
+            total_shards,
         }
     }
 
@@ -76,48 +206,35 @@ impl Topology {
             F::bits_to_elements(SECURITY_BITS) * self.required_samples().div_ceil(self.samples);
     }
 
-    /// Figure out what size different values will have, based on the config and the data.
-    pub fn reckon(config: &Config, data_bytes: usize) -> Self {
-        let n = config.minimum_shards.get() as usize;
-        let k = config.extra_shards.get() as usize;
-        // The following calculations don't tolerate data_bytes = 0, so we
-        // temporarily correct that to be at least 1, then make sure to adjust
-        // it back again to 0.
-        let corrected_data_bytes = data_bytes.max(1);
-        // The goal here is to try and maximize the number of columns in the
-        // data. ZODA is more efficient the more columns there are. However,
-        // we need to make sure that every shard has enough samples to guarantee
-        // correct encoding, and that the number of encoded rows can contain
-        // all of the samples in each shard, without overlap.
-        //
-        // To determine if a column configuration is good, we need to choose
-        // the number of encoded rows. To do this, we pick a number of samples
-        // `S` such that `S * n >= data_rows`. Then, our encoded rows will
-        // equal `((n + k) * S).next_power_of_two()`. If the number of required
-        // samples `R` for this configuration satisfies `(n + k) * R <= encoded_rows`,
-        // then this configuration is valid, using `R` as the necessary number
-        // of samples.
-        //
-        // We try increasing column counts, picking the configuration that's good.
-        // It's possible that the first configuration, with one column, is not good.
-        // To correct for that, we need to add extra checksum columns to guarantee
-        // security.
-        let mut out = Self::with_cols(corrected_data_bytes, n, k, 1);
-        loop {
-            let attempt = Self::with_cols(corrected_data_bytes, n, k, out.data_cols + 1);
-            let required_samples = attempt.required_samples();
-            if required_samples.saturating_mul(n + k) <= attempt.encoded_rows {
-                out = Self {
-                    samples: required_samples.max(attempt.samples),
-                    ..attempt
-                };
-            } else {
-                break;
-            }
+    pub const fn hint(&self) -> TopologyHint {
+        TopologyHint::new(self.data_cols)
+    }
+
+    /// Figure out what size different values will have, based on a searched hint
+    /// and the data size. The hint does not need to be optimal, but it must
+    /// still satisfy ZODA's sampling-security bound.
+    pub fn reckon(hint: TopologyHint, config: &Config, data_bytes: usize) -> Option<Self> {
+        if hint.data_cols == 0 || hint.data_cols > Self::effective_data_elements(data_bytes) {
+            return None;
         }
-        out.correct_column_samples();
-        out.data_bytes = data_bytes;
-        out
+
+        let mut topology = Self::with_cols(
+            data_bytes,
+            usize::from(config.minimum_shards.get()),
+            config.total_shards() as usize,
+            hint.data_cols,
+        );
+
+        let required_samples = topology.required_samples();
+        if required_samples.saturating_mul(topology.total_shards) <= topology.encoded_rows {
+            // We might need more samples than required for being able to recover the data,
+            // but if we can fit the required samples, we might as well do that.
+            topology.samples = required_samples.max(topology.samples);
+        }
+
+        // Now we make sure we have enough columns to get the desired security.
+        topology.correct_column_samples();
+        Some(topology)
     }
 
     pub fn check_index(&self, i: u16) -> Result<(), Error> {
@@ -134,17 +251,45 @@ mod tests {
     use commonware_utils::NZU16;
 
     #[test]
+    fn reckon_handles_empty_input() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let data_bytes = 0;
+        let hint = TopologyHint::search(&config, data_bytes);
+        let topology = Topology::reckon(hint, &config, data_bytes)
+            .expect("searched topology hint must be valid");
+        assert_eq!(hint.data_cols, 1);
+        assert_eq!(topology.data_bytes, 0);
+        assert_eq!(topology.data_cols, 1);
+        assert_eq!(topology.data_rows, 1);
+        assert_eq!(topology.samples, 1);
+        assert_eq!(topology.encoded_rows, 4);
+
+        let required = topology.required_samples();
+        let provided = topology.samples * (topology.column_samples / 2);
+        assert!(
+            provided >= required,
+            "security invariant violated: provided {provided} < required {required}"
+        );
+    }
+
+    #[test]
     fn reckon_handles_small_extra_shards() {
         let config = Config {
             minimum_shards: NZU16!(3),
             extra_shards: NZU16!(1),
         };
-        let topology = Topology::reckon(&config, 16);
+        let data_bytes = 16;
+        let hint = TopologyHint::search(&config, data_bytes);
+        let topology = Topology::reckon(hint, &config, data_bytes)
+            .expect("searched topology hint must be valid");
         assert_eq!(topology.min_shards, 3);
         assert_eq!(topology.total_shards, 4);
 
         // Verify we hit the 1-column fallback and the security invariant holds.
-        // When the loop in reckon() exits without finding a multi-column config,
+        // When the search finds no better multi-column configuration,
         // correct_column_samples() must compensate by adding column samples.
         assert_eq!(topology.data_cols, 1);
         let required = topology.required_samples();
@@ -153,5 +298,47 @@ mod tests {
             provided >= required,
             "security invariant violated: provided {provided} < required {required}"
         );
+    }
+
+    #[test]
+    fn reckon_searches_past_invalid_intervals() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let hint = TopologyHint::search(&config, 65_536);
+        let topology =
+            Topology::reckon(hint, &config, 65_536).expect("searched topology hint must be valid");
+
+        // For this payload size, cols=13 and cols=14 are invalid, but
+        // cols=15..24 are valid again. A "stop at first invalid candidate"
+        // search would therefore get stuck at 12, while the exact interval
+        // search should recover the true optimum at 24.
+        assert_eq!(topology.data_cols, 24);
+        assert_eq!(hint.data_cols, 24);
+    }
+
+    #[test]
+    fn reckon_accepts_hints_that_need_extra_column_samples() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        let hint = TopologyHint::new(13);
+        let topology =
+            Topology::reckon(hint, &config, 65_536).expect("hint should still be secure");
+        assert_eq!(topology.data_cols, 13);
+        assert!(topology.column_samples > 2);
+    }
+
+    #[test]
+    fn reckon_rejects_malformed_hints() {
+        let config = Config {
+            minimum_shards: NZU16!(2),
+            extra_shards: NZU16!(1),
+        };
+        assert!(Topology::reckon(TopologyHint::new(0), &config, 65_536).is_none());
+        let too_many_cols = Topology::effective_data_elements(65_536) + 1;
+        assert!(Topology::reckon(TopologyHint::new(too_many_cols), &config, 65_536).is_none());
     }
 }
