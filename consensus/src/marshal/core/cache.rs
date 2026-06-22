@@ -344,17 +344,6 @@ where
         }
     }
 
-    /// Add a notarized block to the prunable archive.
-    pub(crate) async fn put_block(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        block: V::StoredBlock,
-    ) {
-        let handle = self.put_block_start_sync(round, digest, block).await;
-        Self::handle_sync_result(handle.await, round, "notarized");
-    }
-
     /// Add a notarized block to the prunable archive and start syncing it.
     pub(crate) async fn put_block_start_sync(
         &mut self,
@@ -365,6 +354,7 @@ where
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
             return Handle::ready(Ok(()));
         };
+
         let result = cache
             .notarized_blocks
             .put_start_sync(round.view().get(), digest, block)
@@ -379,14 +369,27 @@ where
         digest: <V::Block as Digestible>::Digest,
         notarization: Notarization<S, V::Commitment>,
     ) {
+        let handle = self
+            .put_notarization_start_sync(round, digest, notarization)
+            .await;
+        Self::handle_sync_result(handle.await, round, "notarization");
+    }
+
+    /// Add a notarization to the prunable archive and start syncing it.
+    pub(crate) async fn put_notarization_start_sync(
+        &mut self,
+        round: Round,
+        digest: <V::Block as Digestible>::Digest,
+        notarization: Notarization<S, V::Commitment>,
+    ) -> Handle<()> {
         let Some(cache) = self.get_or_init_epoch(round.epoch()).await else {
-            return;
+            return Handle::ready(Ok(()));
         };
         let result = cache
             .notarizations
-            .put_sync(round.view().get(), digest, notarization)
+            .put_start_sync(round.view().get(), digest, notarization)
             .await;
-        Self::handle_result(result, round, "notarization");
+        Self::handle_start_result(result, round, "notarization")
     }
 
     /// Add a finalization to the prunable archive.
@@ -443,7 +446,11 @@ where
     }
 
     /// Helper to debug cache sync completion results.
-    fn handle_sync_result(result: Result<(), commonware_runtime::Error>, round: Round, name: &str) {
+    pub(crate) fn handle_sync_result(
+        result: Result<(), commonware_runtime::Error>,
+        round: Round,
+        name: &str,
+    ) {
         match result {
             Ok(_) => {
                 debug!(?round, name, "cached");

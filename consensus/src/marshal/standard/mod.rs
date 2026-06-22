@@ -1244,7 +1244,8 @@ mod tests {
                     (),
                 )
                 .await;
-                mgr.put_block(round, digest, block.clone()).await;
+                let sync = mgr.put_block_start_sync(round, digest, block.clone()).await;
+                sync.await.expect("failed to sync block");
             }
 
             // Re-init the cache (simulating restart). find_block should fail
