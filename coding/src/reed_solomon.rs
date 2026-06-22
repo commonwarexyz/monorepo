@@ -917,9 +917,8 @@ mod gf16 {
             .filter(|(_, shard)| is_non_zero(shard))
             .map(|(idx, shard)| (idx, *shard))
             .collect::<Vec<_>>();
-        let mut recoveries = vec![0u8; m * shard_len];
         if active.is_empty() {
-            return Ok(recoveries);
+            return Ok(vec![0u8; m * shard_len]);
         }
         let ranges = work_ranges(m, strategy.parallelism_hint());
         let partitions = strategy.map_collect_vec(ranges, |range| {
@@ -934,7 +933,7 @@ mod gf16 {
             }
             Ok((start, partition))
         });
-        recoveries.clear();
+        let mut recoveries = Vec::with_capacity(m * shard_len);
         for partition in partitions {
             let (_start, partition) = partition?;
             recoveries.extend(partition);
@@ -1057,6 +1056,62 @@ mod gf16 {
             let recovered =
                 reconstruct_originals(k, m, shard_len, &provided_originals, &provided_recoveries)
                     .unwrap();
+            assert_eq!(recovered, originals);
+        }
+
+        #[test]
+        fn recovers_dense_across_boundary() {
+            let k = 260usize;
+            let m = 5usize;
+            let shard_len = 8usize;
+            let originals = (0..k)
+                .map(|i| {
+                    (0..shard_len)
+                        .map(|j| (i * 11 + j * 29 + 1) as u8)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let original_refs = originals.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let recoveries =
+                encode_recoveries(k, m, shard_len, &original_refs, &Sequential).unwrap();
+            let missing = [0usize, 7, 259];
+            let provided_originals = (0..k)
+                .filter(|i| !missing.contains(i))
+                .map(|i| (i, originals[i].as_slice()))
+                .collect::<Vec<_>>();
+            let provided_recoveries = recoveries
+                .chunks(shard_len)
+                .take(missing.len())
+                .enumerate()
+                .collect::<Vec<_>>();
+            let recovered =
+                reconstruct_originals(k, m, shard_len, &provided_originals, &provided_recoveries)
+                    .unwrap();
+            assert_eq!(recovered, originals);
+        }
+
+        #[test]
+        fn recovers_from_all_recoveries_across_boundary() {
+            let k = 4usize;
+            let m = 260usize;
+            let shard_len = 8usize;
+            let originals = (0..k)
+                .map(|i| {
+                    (0..shard_len)
+                        .map(|j| (i * 47 + j * 13 + 3) as u8)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let original_refs = originals.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let recoveries =
+                encode_recoveries(k, m, shard_len, &original_refs, &Sequential).unwrap();
+            let provided_recoveries = recoveries
+                .chunks(shard_len)
+                .take(k)
+                .enumerate()
+                .collect::<Vec<_>>();
+            let recovered =
+                reconstruct_originals(k, m, shard_len, &[], &provided_recoveries).unwrap();
             assert_eq!(recovered, originals);
         }
     }

@@ -95,6 +95,13 @@ fn bench_klauspost_encode(c: &mut Criterion) {
             sparse_data_len: None,
         },
         EncodeCase {
+            field: "gf16",
+            data_shards: 1024,
+            parity_shards: 1024,
+            shard_size: 64,
+            sparse_data_len: None,
+        },
+        EncodeCase {
             field: "gf16_sparse",
             data_shards: 4096,
             parity_shards: 4096,
@@ -152,6 +159,13 @@ fn bench_klauspost_decode(c: &mut Criterion) {
             field: "gf16",
             data_shards: 256,
             parity_shards: 256,
+            shard_size: 64,
+            sparse_data_len: None,
+        },
+        EncodeCase {
+            field: "gf16",
+            data_shards: 1024,
+            parity_shards: 1024,
             shard_size: 64,
             sparse_data_len: None,
         },
