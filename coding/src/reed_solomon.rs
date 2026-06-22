@@ -6,7 +6,7 @@ use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use commonware_utils::Cached;
 use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
-use std::marker::PhantomData;
+use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
 // Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
@@ -15,6 +15,8 @@ use thiserror::Error;
 // reconfigures the work buffers without rebuilding those tables.
 commonware_utils::thread_local_cache!(static CACHED_ENCODER: ReedSolomonEncoder);
 commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder);
+
+const MIN_STRIPE_BYTES: usize = 8 * 1024;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
@@ -380,6 +382,319 @@ fn encode<H: Hasher, S: Strategy>(
     Ok((root, chunks))
 }
 
+fn stripe_ranges(shard_len: usize, parallelism: usize) -> Vec<Range<usize>> {
+    // reed-solomon-simd canonicalizes shards in 64-byte chunks with a final tail, so non-final
+    // stripes must end on 64-byte boundaries or recovery bytes no longer match a full-shard encode.
+    let full_chunks = shard_len / 64;
+    let stripe_count = parallelism
+        .min(shard_len / MIN_STRIPE_BYTES)
+        .min(full_chunks)
+        .max(1);
+    if stripe_count <= 1 {
+        return core::iter::once(0..shard_len).collect();
+    }
+
+    let mut ranges = Vec::with_capacity(stripe_count);
+    let mut start = 0usize;
+    for stripe in 0..stripe_count {
+        let remaining_stripes = stripe_count - stripe;
+        let remaining = shard_len - start;
+        let len = if remaining_stripes == 1 {
+            remaining
+        } else {
+            let remaining_full_chunks = remaining / 64;
+            (remaining_full_chunks / remaining_stripes).max(1) * 64
+        };
+        let end = start + len;
+        ranges.push(start..end);
+        start = end;
+    }
+    ranges
+}
+
+fn decode_original_stripe(
+    k: usize,
+    m: usize,
+    range: Range<usize>,
+    provided_originals: &[(usize, &[u8])],
+    provided_recoveries: &[(usize, &[u8])],
+) -> Result<(Range<usize>, Vec<Vec<u8>>), Error> {
+    let shard_len = range.len();
+    let mut decoder = Cached::take(
+        &CACHED_DECODER,
+        || ReedSolomonDecoder::new(k, m, shard_len),
+        |dec| dec.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+
+    for (idx, shard) in provided_originals {
+        decoder
+            .add_original_shard(*idx, &shard[range.clone()])
+            .map_err(Error::ReedSolomon)?;
+    }
+    for (idx, shard) in provided_recoveries {
+        decoder
+            .add_recovery_shard(*idx, &shard[range.clone()])
+            .map_err(Error::ReedSolomon)?;
+    }
+
+    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+    let mut originals = vec![vec![0u8; shard_len]; k];
+    for (idx, shard) in provided_originals {
+        originals[*idx].copy_from_slice(&shard[range.clone()]);
+    }
+    for (idx, shard) in decoding.restored_original_iter() {
+        originals[idx].copy_from_slice(shard);
+    }
+
+    Ok((range, originals))
+}
+
+fn encode_recovery_stripe(
+    k: usize,
+    m: usize,
+    range: Range<usize>,
+    originals: &[Vec<u8>],
+) -> Result<(Range<usize>, Vec<Vec<u8>>), Error> {
+    let shard_len = range.len();
+    let mut encoder = Cached::take(
+        &CACHED_ENCODER,
+        || ReedSolomonEncoder::new(k, m, shard_len),
+        |enc| enc.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+
+    for shard in originals.iter().take(k) {
+        encoder
+            .add_original_shard(&shard[range.clone()])
+            .map_err(Error::ReedSolomon)?;
+    }
+    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+    let recoveries = encoding
+        .recovery_iter()
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+
+    Ok((range, recoveries))
+}
+
+struct CanonicalCodeword {
+    data: Vec<u8>,
+    originals: Vec<Vec<u8>>,
+    recoveries: Vec<Vec<u8>>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_striped<'a, H: Hasher, S: Strategy>(
+    n: usize,
+    k: usize,
+    m: usize,
+    shard_len: usize,
+    root: &H::Digest,
+    mut shard_digests: Vec<Option<H::Digest>>,
+    provided_shards: Vec<(usize, &'a [u8])>,
+    provided_originals: Vec<(usize, &'a [u8])>,
+    provided_recoveries: Vec<(usize, &'a [u8])>,
+    strategy: &S,
+) -> Result<Vec<u8>, Error> {
+    let ranges = stripe_ranges(shard_len, strategy.parallelism_hint());
+    if ranges.len() <= 1 {
+        return decode_sequential::<H, S>(
+            n,
+            k,
+            m,
+            shard_len,
+            root,
+            shard_digests,
+            provided_shards,
+            provided_originals,
+            provided_recoveries,
+            strategy,
+        );
+    }
+
+    let decoded = strategy.map_collect_vec(ranges.clone(), |range| {
+        decode_original_stripe(k, m, range, &provided_originals, &provided_recoveries)
+    });
+
+    let mut originals = vec![vec![0u8; shard_len]; k];
+    for decoded in decoded {
+        let (range, stripe_originals) = decoded?;
+        for (dst, stripe) in originals.iter_mut().zip(stripe_originals) {
+            dst[range.clone()].copy_from_slice(&stripe);
+        }
+    }
+
+    let original_refs = originals.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let data = extract_data(&original_refs, k, shard_len)?;
+
+    let encoded = strategy.map_collect_vec(ranges, |range| {
+        encode_recovery_stripe(k, m, range, &originals)
+    });
+
+    let mut recoveries = vec![vec![0u8; shard_len]; m];
+    for encoded in encoded {
+        let (range, stripe_recoveries) = encoded?;
+        for (dst, stripe) in recoveries.iter_mut().zip(stripe_recoveries) {
+            dst[range.clone()].copy_from_slice(&stripe);
+        }
+    }
+
+    let codeword = CanonicalCodeword {
+        data,
+        originals,
+        recoveries,
+    };
+    verify_canonical_codeword::<H, S>(
+        n,
+        root,
+        &mut shard_digests,
+        provided_shards,
+        codeword,
+        strategy,
+    )
+}
+
+fn verify_canonical_codeword<H: Hasher, S: Strategy>(
+    n: usize,
+    root: &H::Digest,
+    shard_digests: &mut [Option<H::Digest>],
+    provided_shards: Vec<(usize, &[u8])>,
+    codeword: CanonicalCodeword,
+    strategy: &S,
+) -> Result<Vec<u8>, Error> {
+    let shards = codeword
+        .originals
+        .iter()
+        .map(Vec::as_slice)
+        .chain(codeword.recoveries.iter().map(Vec::as_slice))
+        .collect::<Vec<_>>();
+
+    for (idx, shard) in provided_shards {
+        if shard != shards[idx] {
+            return Err(Error::Inconsistent);
+        }
+    }
+
+    for (i, digest) in strategy.map_init_collect_vec(
+        shard_digests
+            .iter()
+            .enumerate()
+            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
+        H::new,
+        |hasher, i| {
+            hasher.update(shards[i]);
+            (i, hasher.finalize())
+        },
+    ) {
+        shard_digests[i] = Some(digest);
+    }
+
+    let mut builder = Builder::<H>::new(n);
+    shard_digests
+        .iter()
+        .map(|digest| digest.expect("digest must be present for every shard"))
+        .for_each(|digest| {
+            builder.add(&digest);
+        });
+    let tree = builder.build();
+    if tree.root() != *root {
+        return Err(Error::Inconsistent);
+    }
+
+    drop(shards);
+    Ok(codeword.data)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_sequential<'a, H: Hasher, S: Strategy>(
+    n: usize,
+    k: usize,
+    m: usize,
+    shard_len: usize,
+    root: &H::Digest,
+    mut shard_digests: Vec<Option<H::Digest>>,
+    provided_shards: Vec<(usize, &'a [u8])>,
+    provided_originals: Vec<(usize, &'a [u8])>,
+    provided_recoveries: Vec<(usize, &'a [u8])>,
+    strategy: &S,
+) -> Result<Vec<u8>, Error> {
+    let mut decoder = Cached::take(
+        &CACHED_DECODER,
+        || ReedSolomonDecoder::new(k, m, shard_len),
+        |dec| dec.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+    for (idx, shard) in &provided_originals {
+        decoder
+            .add_original_shard(*idx, shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+    for (idx, shard) in &provided_recoveries {
+        decoder
+            .add_recovery_shard(*idx, shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+
+    let mut shards = vec![Default::default(); k];
+    for (idx, shard) in provided_originals
+        .into_iter()
+        .chain(decoding.restored_original_iter())
+    {
+        shards[idx] = shard;
+    }
+    let data = extract_data(&shards, k, shard_len)?;
+
+    let mut encoder = Cached::take(
+        &CACHED_ENCODER,
+        || ReedSolomonEncoder::new(k, m, shard_len),
+        |enc| enc.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+    for shard in shards.iter().take(k) {
+        encoder
+            .add_original_shard(shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+    shards.extend(encoding.recovery_iter());
+
+    for (idx, shard) in provided_shards {
+        if shard != shards[idx] {
+            return Err(Error::Inconsistent);
+        }
+    }
+
+    for (i, digest) in strategy.map_init_collect_vec(
+        shard_digests
+            .iter()
+            .enumerate()
+            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
+        H::new,
+        |hasher, i| {
+            hasher.update(shards[i]);
+            (i, hasher.finalize())
+        },
+    ) {
+        shard_digests[i] = Some(digest);
+    }
+
+    let mut builder = Builder::<H>::new(n);
+    shard_digests
+        .into_iter()
+        .map(|digest| digest.expect("digest must be present for every shard"))
+        .for_each(|digest| {
+            builder.add(&digest);
+        });
+    let tree = builder.build();
+    if tree.root() != *root {
+        return Err(Error::Inconsistent);
+    }
+
+    Ok(data)
+}
+
 /// Decode data from a set of [`CheckedChunk`]s.
 ///
 /// It is assumed that all chunks have already been verified against the given root using [`Chunk::verify`].
@@ -424,6 +739,9 @@ fn decode<'a, H: Hasher, S: Strategy>(
         if &chunk.root != root {
             return Err(Error::CommitmentMismatch);
         }
+        if chunk.shard.len() != shard_len {
+            return Err(Error::Inconsistent);
+        }
         // Check for duplicate index
         let index = chunk.index;
         if index >= total {
@@ -447,87 +765,33 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
-    // Decode original data
-    let mut decoder = Cached::take(
-        &CACHED_DECODER,
-        || ReedSolomonDecoder::new(k, m, shard_len),
-        |dec| dec.reset(k, m, shard_len),
+    if stripe_ranges(shard_len, strategy.parallelism_hint()).len() > 1 {
+        return decode_striped::<H, S>(
+            n,
+            k,
+            m,
+            shard_len,
+            root,
+            shard_digests,
+            provided_shards,
+            provided_originals,
+            provided_recoveries,
+            strategy,
+        );
+    }
+
+    decode_sequential::<H, S>(
+        n,
+        k,
+        m,
+        shard_len,
+        root,
+        shard_digests,
+        provided_shards,
+        provided_originals,
+        provided_recoveries,
+        strategy,
     )
-    .map_err(Error::ReedSolomon)?;
-    for (idx, shard) in &provided_originals {
-        decoder
-            .add_original_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    for (idx, shard) in &provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-
-    // Reconstruct all original shards
-    let mut shards = vec![Default::default(); k];
-    for (idx, shard) in provided_originals
-        .into_iter()
-        .chain(decoding.restored_original_iter())
-    {
-        shards[idx] = shard;
-    }
-    let data = extract_data(&shards, k, shard_len)?;
-
-    // Re-encode recovered data to get recovery shards
-    let mut encoder = Cached::take(
-        &CACHED_ENCODER,
-        || ReedSolomonEncoder::new(k, m, shard_len),
-        |enc| enc.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-    for shard in shards.iter().take(k) {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    shards.extend(encoding.recovery_iter());
-
-    // Confirm all checked shards match the canonical codeword before reusing their digests.
-    for (idx, shard) in provided_shards {
-        if shard != shards[idx] {
-            return Err(Error::Inconsistent);
-        }
-    }
-
-    // Build Merkle tree from the canonical codeword.
-    for (i, digest) in strategy.map_init_collect_vec(
-        shard_digests
-            .iter()
-            .enumerate()
-            .filter_map(|(i, digest)| digest.is_none().then_some(i)),
-        H::new,
-        |hasher, i| {
-            hasher.update(shards[i]);
-            (i, hasher.finalize())
-        },
-    ) {
-        shard_digests[i] = Some(digest);
-    }
-
-    let mut builder = Builder::<H>::new(n);
-    shard_digests
-        .into_iter()
-        .map(|digest| digest.expect("digest must be present for every shard"))
-        .for_each(|digest| {
-            builder.add(&digest);
-        });
-    let tree = builder.build();
-
-    // Confirm root is consistent
-    if tree.root() != *root {
-        return Err(Error::Inconsistent);
-    }
-
-    Ok(data)
 }
 
 /// A SIMD-optimized Reed-Solomon coder that emits chunks that can be proven against a [`bmt`].
@@ -685,9 +949,9 @@ mod tests {
     use commonware_codec::Encode;
     use commonware_cryptography::Sha256;
     use commonware_invariants::minifuzz;
-    use commonware_parallel::Sequential;
+    use commonware_parallel::{Rayon, Sequential};
     use commonware_runtime::{deterministic, iobuf::EncodeExt, BufferPooler, Runner};
-    use commonware_utils::NZU16;
+    use commonware_utils::{NZUsize, NZU16};
 
     type RS = ReedSolomon<Sha256>;
     const STRATEGY: Sequential = Sequential;
@@ -970,6 +1234,100 @@ mod tests {
             .collect::<Vec<_>>();
         let decoded = decode::<Sha256, _>(total, min, &root, minimal.iter(), &STRATEGY).unwrap();
         assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_parallel_recovery_decode() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let data = vec![42u8; 256 * 1024];
+        let total = 24u16;
+        let min = 8u16;
+
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &strategy).unwrap();
+
+        let minimal = chunks
+            .into_iter()
+            .skip(min as usize)
+            .take(min as usize)
+            .map(|c| checked(root, c))
+            .collect::<Vec<_>>();
+        let decoded = decode::<Sha256, _>(total, min, &root, minimal.iter(), &strategy).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    /// Striped recovery decode must be byte-identical to the sequential (full-shard)
+    /// path. The striped path only activates for shards of at least
+    /// `MIN_STRIPE_BYTES`, so this sweeps payload sizes and shard counts that land on
+    /// several stripe-count boundaries under a parallel `Strategy`, decoding from a
+    /// recovery-only set (which forces Reed-Solomon recovery) and checking the result
+    /// against the original data on both the sequential and parallel paths.
+    #[test]
+    fn test_striped_recovery_matches_sequential() {
+        for &data_len in &[128 * 1024usize, 257 * 1024, 512 * 1024, 1024 * 1024] {
+            for &(total, min) in &[(12u16, 4u16), (24, 8), (33, 11)] {
+                let data: Vec<u8> = (0..data_len).map(|i| (i as u8) ^ ((i >> 7) as u8)).collect();
+                let (root, chunks) =
+                    encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
+                let recovery_only = chunks
+                    .into_iter()
+                    .skip(min as usize)
+                    .take(min as usize)
+                    .map(|c| checked(root, c))
+                    .collect::<Vec<_>>();
+                let sequential =
+                    decode::<Sha256, _>(total, min, &root, recovery_only.iter(), &Sequential)
+                        .unwrap();
+                assert_eq!(sequential, data);
+                for &parallelism in &[2usize, 8] {
+                    let strategy = Rayon::new(NZUsize!(parallelism)).unwrap();
+                    let striped =
+                        decode::<Sha256, _>(total, min, &root, recovery_only.iter(), &strategy)
+                            .unwrap();
+                    assert_eq!(
+                        striped, data,
+                        "striped decode mismatch (len={data_len} total={total} min={min} parallelism={parallelism})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_parallel_decode_rejects_mismatched_shard_lengths() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let data = vec![42u8; 256 * 1024];
+        let total = 24u16;
+        let min = 8u16;
+
+        let (_root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &strategy).unwrap();
+        let mut shards = chunks
+            .iter()
+            .map(|chunk| chunk.shard.to_vec())
+            .collect::<Vec<_>>();
+        shards[min as usize].pop();
+
+        let mut builder = Builder::<Sha256>::new(total as usize);
+        for shard in &shards {
+            let mut hasher = Sha256::new();
+            hasher.update(shard);
+            builder.add(&hasher.finalize());
+        }
+        let tree = builder.build();
+        let root = tree.root();
+
+        let pieces = [9u16, 8, 10, 11, 12, 13, 14, 15]
+            .into_iter()
+            .map(|i| {
+                let proof = tree.proof(i as u32).unwrap();
+                checked(
+                    root,
+                    Chunk::new(shards[i as usize].clone().into(), i, proof),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let result = decode::<Sha256, _>(total, min, &root, pieces.iter(), &strategy);
+        assert!(matches!(result, Err(Error::Inconsistent)));
     }
 
     #[test]
