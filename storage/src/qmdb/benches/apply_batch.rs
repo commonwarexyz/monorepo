@@ -27,11 +27,13 @@ const NUM_KEYS: u64 = 65_536;
 const UPDATES: [u64; 1] = [16_384];
 const ITEMS_PER_BLOB: NonZeroU64 = NZU64!(10_000_000);
 
+// Unordered "any" DB with a fixed-size value.
 type Db = AnyUFixDb<Mmb>;
+
+// Immutable "any" DB with a fixed-size value.
 type ImmDb = ImmFixDb<Mmb>;
-// Ordered "any" DB with a partitioned snapshot index. The direct-apply path updates existing
-// seeded keys, so it drives the index cursor's get_mut/find/update -- where the cached-run
-// optimization pays off.
+
+// Ordered "any" DB with a partitioned snapshot index.
 type ODb = AnyOFixP256Db<Mmb>;
 
 fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
@@ -268,140 +270,60 @@ fn bench_apply_batch(c: &mut Criterion) {
     let runner = tokio::Runner::new(Config::default());
 
     for updates in UPDATES {
-        c.bench_function(
-            &format!(
-                "{}/case=direct variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_direct_apply(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
-        );
+        macro_rules! apply_case {
+            ($label:literal, $bench:ident) => {
+                c.bench_function(
+                    &format!(
+                        "{}/{} chunk={CHUNK_SIZE} updates={updates}",
+                        module_path!(),
+                        $label
+                    ),
+                    |b| {
+                        b.to_async(&runner).iter_custom(|iters| async move {
+                            let ctx = context::get::<Context>();
+                            let mut total = Duration::ZERO;
+                            for _ in 0..iters {
+                                total += $bench(&ctx, updates).await;
+                            }
+                            total
+                        });
+                    },
+                );
+            };
+        }
 
-        c.bench_function(
-            &format!(
-                "{}/case=direct variant=any::ordered::p256::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_ord_direct_apply(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
+        // One criterion benchmark per (case, variant) pair.
+        apply_case!(
+            "case=direct variant=any::unordered::fixed::mmb",
+            bench_direct_apply
         );
-
-        c.bench_function(
-            &format!(
-                "{}/case=uncomm_ancestor variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_apply_with_uncommitted_ancestor(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
+        apply_case!(
+            "case=direct variant=any::ordered::p256::fixed::mmb",
+            bench_ord_direct_apply
         );
-
-        c.bench_function(
-            &format!(
-                "{}/case=comm_ancestor variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_apply_with_committed_ancestor(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
+        apply_case!(
+            "case=uncomm_ancestor variant=any::unordered::fixed::mmb",
+            bench_apply_with_uncommitted_ancestor
         );
-
-        c.bench_function(
-            &format!(
-                "{}/case=comm_uncomm_chain variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_apply_committed_uncommitted_chain(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
+        apply_case!(
+            "case=comm_ancestor variant=any::unordered::fixed::mmb",
+            bench_apply_with_committed_ancestor
         );
-
-        c.bench_function(
-            &format!(
-                "{}/case=multi_uncomm variant=any::unordered::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_apply_multi_uncommitted(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
+        apply_case!(
+            "case=comm_uncomm_chain variant=any::unordered::fixed::mmb",
+            bench_apply_committed_uncommitted_chain
         );
-
-        c.bench_function(
-            &format!(
-                "{}/case=direct variant=immutable::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_imm_direct_apply(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
+        apply_case!(
+            "case=multi_uncomm variant=any::unordered::fixed::mmb",
+            bench_apply_multi_uncommitted
         );
-
-        c.bench_function(
-            &format!(
-                "{}/case=uncomm_ancestor variant=immutable::fixed::mmb chunk={CHUNK_SIZE} updates={updates}",
-                module_path!(),
-            ),
-            |b| {
-                b.to_async(&runner).iter_custom(|iters| async move {
-                    let ctx = context::get::<Context>();
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        total += bench_imm_apply_with_uncommitted_ancestor(&ctx, updates).await;
-                    }
-                    total
-                });
-            },
+        apply_case!(
+            "case=direct variant=immutable::fixed::mmb",
+            bench_imm_direct_apply
+        );
+        apply_case!(
+            "case=uncomm_ancestor variant=immutable::fixed::mmb",
+            bench_imm_apply_with_uncommitted_ancestor
         );
     }
 }
