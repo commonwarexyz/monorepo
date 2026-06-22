@@ -829,8 +829,44 @@ mod gf16 {
         log: Box<[u16]>,
     }
 
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    struct Avx2Tables {
+        hi: Box<[[[u8; 32]; 4]]>,
+        lo: Box<[[[u8; 32]; 4]]>,
+    }
+
     type MulNibbles = [[[u16; 16]; 4]];
     type CoefficientCache = Mutex<HashMap<(usize, usize), Arc<Vec<u16>>>>;
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn avx2_tables() -> &'static Avx2Tables {
+        static TABLES: OnceLock<Avx2Tables> = OnceLock::new();
+        TABLES.get_or_init(|| {
+            let nibbles = mul_nibbles();
+            let mut hi = Vec::with_capacity(FIELD_SIZE);
+            let mut lo = Vec::with_capacity(FIELD_SIZE);
+            for coeff in 0..FIELD_SIZE {
+                let nibbles = &nibbles[coeff];
+                let mut hi_tables = [[0u8; 32]; 4];
+                let mut lo_tables = [[0u8; 32]; 4];
+                for shift in 0..4 {
+                    for nibble in 0..16 {
+                        let product = nibbles[shift][nibble].to_be_bytes();
+                        hi_tables[shift][nibble] = product[0];
+                        hi_tables[shift][nibble + 16] = product[0];
+                        lo_tables[shift][nibble] = product[1];
+                        lo_tables[shift][nibble + 16] = product[1];
+                    }
+                }
+                hi.push(hi_tables);
+                lo.push(lo_tables);
+            }
+            Avx2Tables {
+                hi: hi.into_boxed_slice(),
+                lo: lo.into_boxed_slice(),
+            }
+        })
+    }
 
     fn mul_nibbles() -> &'static MulNibbles {
         static MUL_NIBBLES: OnceLock<Box<MulNibbles>> = OnceLock::new();
@@ -997,18 +1033,9 @@ mod gf16 {
             return Ok(());
         }
 
-        let nibbles = &mul_nibbles()[coeff as usize];
-        let mut hi_tables = [[0u8; 32]; 4];
-        let mut lo_tables = [[0u8; 32]; 4];
-        for shift in 0..4 {
-            for nibble in 0..16 {
-                let product = nibbles[shift][nibble].to_be_bytes();
-                hi_tables[shift][nibble] = product[0];
-                hi_tables[shift][nibble + 16] = product[0];
-                lo_tables[shift][nibble] = product[1];
-                lo_tables[shift][nibble + 16] = product[1];
-            }
-        }
+        let tables = avx2_tables();
+        let hi_tables = &tables.hi[coeff as usize];
+        let lo_tables = &tables.lo[coeff as usize];
 
         let dup_even = [
             0u8, 0, 2, 2, 4, 4, 6, 6, 8, 8, 10, 10, 12, 12, 14, 14, 0, 0, 2, 2, 4, 4, 6, 6, 8,
