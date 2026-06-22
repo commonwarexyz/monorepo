@@ -815,7 +815,28 @@ mod gf16 {
         log: Box<[u16]>,
     }
 
+    type MulNibbles = [[[u16; 16]; 4]];
     type CoefficientCache = Mutex<HashMap<(usize, usize), Arc<Vec<u16>>>>;
+
+    fn mul_nibbles() -> &'static MulNibbles {
+        static MUL_NIBBLES: OnceLock<Box<MulNibbles>> = OnceLock::new();
+        MUL_NIBBLES.get_or_init(|| {
+            (0..FIELD_SIZE)
+                .map(|coeff| {
+                    let coeff = coeff as u16;
+                    let mut nibbles = [[0u16; 16]; 4];
+                    for nibble in 0..16u16 {
+                        nibbles[0][nibble as usize] = mul(coeff, nibble);
+                        nibbles[1][nibble as usize] = mul(coeff, nibble << 4);
+                        nibbles[2][nibble as usize] = mul(coeff, nibble << 8);
+                        nibbles[3][nibble as usize] = mul(coeff, nibble << 12);
+                    }
+                    nibbles
+                })
+                .collect::<Vec<_>>()
+                .into_boxed_slice()
+        })
+    }
 
     fn coefficients(k: usize, m: usize) -> Result<Option<Arc<Vec<u16>>>, Error> {
         let Some(count) = k.checked_mul(m) else {
@@ -920,12 +941,13 @@ mod gf16 {
             }
             return Ok(());
         }
+        let table = &mul_nibbles()[coeff as usize];
         for (out, input) in out.chunks_exact_mut(2).zip(input.chunks_exact(2)) {
-            let symbol = u16::from_be_bytes([input[0], input[1]]);
-            if symbol == 0 {
-                continue;
-            }
-            let product = mul(coeff, symbol).to_be_bytes();
+            let product = table[0][(input[1] & 0x0f) as usize]
+                ^ table[1][(input[1] >> 4) as usize]
+                ^ table[2][(input[0] & 0x0f) as usize]
+                ^ table[3][(input[0] >> 4) as usize];
+            let product = product.to_be_bytes();
             out[0] ^= product[0];
             out[1] ^= product[1];
         }
