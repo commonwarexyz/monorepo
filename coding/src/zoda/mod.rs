@@ -537,7 +537,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let encoded_data = data
             .as_polynomials(topology.encoded_rows)
             .expect("data has too many rows")
-            .evaluate()
+            .evaluate_with(strategy)
             .data();
 
         // Step 3: Commit to the rows of the data using a Binary Merkle Tree.
@@ -561,7 +561,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         // Step 5: Generate a checking matrix and checksum with the commitment.
         let mut transcript = Transcript::resume(commitment);
         let checking_matrix = checking_matrix(&transcript, &topology);
-        let checksum = Arc::new(data.mul(&checking_matrix));
+        let checksum = Arc::new(data.mul_with(&checking_matrix, strategy));
         // Bind index sampling to this checksum to prevent follower-specific malleability.
         // It's important to commit to the checksum itself, rather than its encoding,
         // because followers have to encode the checksum itself to prevent the leader from
@@ -636,7 +636,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         commitment: &Self::Commitment,
         checking_data: Self::CheckingData,
         shards: impl Iterator<Item = &'a Self::CheckedShard>,
-        _strategy: &impl Strategy,
+        strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Self::Error> {
         if checking_data.commitment != *commitment {
             return Err(Error::InvalidShard);
@@ -677,7 +677,7 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
             data_bytes,
             F::stream_to_u64s(
                 evaluation
-                    .recover()
+                    .recover_with(strategy)
                     .coefficients_up_to(data_rows)
                     .flatten()
                     .copied(),
@@ -697,10 +697,60 @@ mod tests {
         algebra::{FieldNTT as _, Ring as _},
         ntt::PolynomialVector,
     };
-    use commonware_parallel::Sequential;
-    use commonware_utils::NZU16;
+    use commonware_parallel::{Rayon, Sequential};
+    use commonware_utils::{NZUsize, NZU16};
 
     const STRATEGY: Sequential = Sequential;
+
+    #[test]
+    fn rayon_matches_sequential() {
+        let rayon = Rayon::new(NZUsize!(13)).unwrap();
+        let config = Config {
+            minimum_shards: NZU16!(8),
+            extra_shards: NZU16!(4),
+        };
+        let data = vec![0xA5u8; 256 * 1024];
+
+        let (sequential_commitment, sequential_shards) =
+            Zoda::<Sha256>::encode(b"", &config, data.as_slice(), &STRATEGY).unwrap();
+        let (rayon_commitment, rayon_shards) =
+            Zoda::<Sha256>::encode(b"", &config, data.as_slice(), &rayon).unwrap();
+
+        assert_eq!(rayon_commitment, sequential_commitment);
+        assert_eq!(rayon_shards, sequential_shards);
+
+        let checked = rayon_shards
+            .iter()
+            .take(config.minimum_shards.get() as usize)
+            .enumerate()
+            .map(|(index, shard)| {
+                let (checking_data, checked, _) = Zoda::<Sha256>::weaken(
+                    b"",
+                    &config,
+                    &rayon_commitment,
+                    index as u16,
+                    shard.clone(),
+                )
+                .unwrap();
+                (checking_data, checked)
+            })
+            .collect::<Vec<_>>();
+        let checking_data = checked[0].0.clone();
+        let checked = checked
+            .iter()
+            .map(|(_, checked)| checked)
+            .collect::<Vec<_>>();
+
+        let decoded = Zoda::<Sha256>::decode(
+            &config,
+            &rayon_commitment,
+            checking_data,
+            checked.into_iter(),
+            &rayon,
+        )
+        .unwrap();
+        assert_eq!(decoded, data);
+    }
 
     #[test]
     fn decode_rejects_duplicate_indices() {
