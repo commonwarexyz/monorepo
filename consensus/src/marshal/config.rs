@@ -121,8 +121,8 @@ mod tests {
 
     #[test]
     fn config_compiles_with_distinct_application_and_start_blocks() {
-        type TestCommitment = Commitment<Sha256Digest, Sha256Digest, Sha256Digest>;
-        type AB = MockBlock<Sha256Digest, Context<TestCommitment, PublicKey>>;
+        type AB = MockBlock<Sha256Digest, Context<Sha256Digest, PublicKey>>;
+        type TestCommitment = Commitment<AB, ReedSolomon<Sha256>, Sha256>;
         type B = CodedBlock<AB, ReedSolomon<Sha256>, Sha256>;
         type Provider = ConstantProvider<ed25519::Scheme, Epoch>;
 

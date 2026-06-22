@@ -1,8 +1,8 @@
 //! Mailbox for the shard buffer engine.
 
 use crate::{
-    marshal::coding::types::{CodedBlock, CodingCommitment},
-    types::Round,
+    marshal::coding::types::CodedBlock,
+    types::{coding::Commitment, Round},
     CertifiableBlock,
 };
 use commonware_actor::mailbox::{Overflow, Policy, Sender};
@@ -28,30 +28,30 @@ where
         /// The round in which the block was proposed.
         round: Round,
     },
-    /// A notification from consensus that a [`CodingCommitment`] has been discovered.
+    /// A notification from consensus that a [`Commitment`] has been discovered.
     Discovered {
-        /// The [`CodingCommitment`] of the proposed block.
-        commitment: CodingCommitment<B, C, H>,
+        /// The [`Commitment`] of the proposed block.
+        commitment: Commitment<B, C, H>,
         /// The leader's public key.
         leader: P,
         /// The round in which the commitment was proposed.
         round: Round,
     },
-    /// A notification from consensus that a [`CodingCommitment`] has been notarized.
+    /// A notification from consensus that a [`Commitment`] has been notarized.
     ///
     /// This may arrive before the engine knows the round leader. It allows the
     /// engine to reconstruct from sender-indexed gossip shards already buffered
     /// for the commitment, but it does not satisfy assigned shard verification.
     Notarized {
-        /// The [`CodingCommitment`] of the notarized block.
-        commitment: CodingCommitment<B, C, H>,
+        /// The [`Commitment`] of the notarized block.
+        commitment: Commitment<B, C, H>,
         /// The round in which the commitment was notarized.
         round: Round,
     },
     /// A request to get a reconstructed block, if available.
     GetByCommitment {
-        /// The [`CodingCommitment`] of the block to get.
-        commitment: CodingCommitment<B, C, H>,
+        /// The [`Commitment`] of the block to get.
+        commitment: Commitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<Option<CodedBlock<B, C, H>>>,
     },
@@ -74,15 +74,15 @@ where
     /// is cached because they trivially have all shards.
     SubscribeAssignedShardVerified {
         /// The block's commitment.
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<()>,
     },
     /// A request to open a subscription for the reconstruction of a [`CodedBlock`]
-    /// by its [`CodingCommitment`].
+    /// by its [`Commitment`].
     SubscribeByCommitment {
         /// The block's digest.
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
         /// The response channel.
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     },
@@ -96,8 +96,8 @@ where
     },
     /// A request to prune all caches at and below the given commitment.
     Prune {
-        /// Inclusive prune target [`CodingCommitment`].
-        through: CodingCommitment<B, C, H>,
+        /// Inclusive prune target [`Commitment`].
+        through: Commitment<B, C, H>,
     },
 }
 
@@ -220,8 +220,8 @@ where
         let _ = self.sender.enqueue(Message::Proposed { block, round });
     }
 
-    /// Inform the engine of an externally proposed [`CodingCommitment`].
-    pub fn discovered(&self, commitment: CodingCommitment<B, C, H>, leader: P, round: Round) {
+    /// Inform the engine of an externally proposed [`Commitment`].
+    pub fn discovered(&self, commitment: Commitment<B, C, H>, leader: P, round: Round) {
         let _ = self.sender.enqueue(Message::Discovered {
             commitment,
             leader,
@@ -229,20 +229,20 @@ where
         });
     }
 
-    /// Inform the engine that a [`CodingCommitment`] was notarized.
+    /// Inform the engine that a [`Commitment`] was notarized.
     ///
     /// This is the leaderless reconstruction signal used by certification. It
     /// lets the engine drain sender-indexed gossip shards from its peer buffers
     /// for the commitment. Leader-specific validation and assigned shard
     /// verification still require a later [`Self::discovered`] call.
-    pub fn notarized(&self, commitment: CodingCommitment<B, C, H>, round: Round) {
+    pub fn notarized(&self, commitment: Commitment<B, C, H>, round: Round) {
         let _ = self
             .sender
             .enqueue(Message::Notarized { commitment, round });
     }
 
-    /// Request a reconstructed block by its [`CodingCommitment`].
-    pub async fn get(&self, commitment: CodingCommitment<B, C, H>) -> Option<CodedBlock<B, C, H>> {
+    /// Request a reconstructed block by its [`Commitment`].
+    pub async fn get(&self, commitment: Commitment<B, C, H>) -> Option<CodedBlock<B, C, H>> {
         let (response, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::GetByCommitment {
             commitment,
@@ -272,7 +272,7 @@ where
     /// is cached because they trivially have all shards.
     pub fn subscribe_assigned_shard_verified(
         &self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
     ) -> oneshot::Receiver<()> {
         let (responder, receiver) = oneshot::channel();
         let _ = self
@@ -284,10 +284,10 @@ where
         receiver
     }
 
-    /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`CodingCommitment`].
+    /// Subscribe to the reconstruction of a [`CodedBlock`] by its [`Commitment`].
     pub fn subscribe(
         &self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
     ) -> oneshot::Receiver<CodedBlock<B, C, H>> {
         let (responder, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::SubscribeByCommitment {
@@ -308,7 +308,7 @@ where
     }
 
     /// Request to prune all caches at and below the given commitment.
-    pub fn prune(&self, through: CodingCommitment<B, C, H>) {
+    pub fn prune(&self, through: Commitment<B, C, H>) {
         let _ = self.sender.enqueue(Message::Prune { through });
     }
 }

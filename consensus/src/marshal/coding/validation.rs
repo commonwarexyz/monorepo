@@ -8,8 +8,8 @@ use crate::{
     types::{coding::Commitment, Epocher},
     CertifiableBlock, Epochable,
 };
-use commonware_coding::Config as CodingConfig;
-use commonware_cryptography::{Committable, Digest, Digestible};
+use commonware_coding::{Config as CodingConfig, Scheme};
+use commonware_cryptography::{Committable, Digest, Digestible, Hasher};
 
 /// Validation failures for coding proposal verification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -41,15 +41,15 @@ pub(crate) enum ReconstructionError<D: Digest> {
 /// Consolidated validation for coding proposal checks.
 ///
 /// If `context_digest` is `None`, only coding-config validation is applied.
-pub(crate) fn validate_proposal<B, R, C>(
-    payload: Commitment<B, R, C>,
+pub(crate) fn validate_proposal<B, C, H>(
+    payload: Commitment<B, C, H>,
     expected_config: CodingConfig,
-    context_digest: Option<C>,
+    context_digest: Option<H::Digest>,
 ) -> Result<(), ProposalError>
 where
-    B: Digest,
-    R: Digest,
-    C: Digest,
+    B: Digestible,
+    C: Scheme,
+    H: Hasher,
 {
     if payload.config() != expected_config {
         return Err(ProposalError::CodingConfig);
@@ -61,20 +61,21 @@ where
 }
 
 /// Consolidated validation for coding block verification.
-pub(crate) fn validate_block<ES, B, R, C>(
+pub(crate) fn validate_block<ES, B, CB, C, H>(
     epocher: &ES,
     block: &B,
     parent: &B,
     context: &B::Context,
-    context_digest: C,
-    commitment: Commitment<<B as Digestible>::Digest, R, C>,
-    parent_commitment: Commitment<<B as Digestible>::Digest, R, C>,
+    context_digest: H::Digest,
+    commitment: Commitment<CB, C, H>,
+    parent_commitment: Commitment<CB, C, H>,
 ) -> Result<(), BlockError>
 where
     ES: Epocher,
-    B: CertifiableBlock + Committable<Commitment = Commitment<<B as Digestible>::Digest, R, C>>,
-    R: Digest,
-    C: Digest,
+    B: CertifiableBlock + Committable<Commitment = Commitment<CB, C, H>>,
+    CB: Digestible<Digest = B::Digest>,
+    C: Scheme,
+    H: Hasher,
     B::Context: Epochable + PartialEq,
 {
     if block.commitment() != commitment {
@@ -103,16 +104,16 @@ where
 }
 
 /// Consolidated validation for reconstructed coded blocks.
-pub(crate) fn validate_reconstruction<B, R, C>(
+pub(crate) fn validate_reconstruction<B, C, H>(
     block: &B,
     config: CodingConfig,
-    context_digest: C,
-    commitment: Commitment<<B as Digestible>::Digest, R, C>,
-) -> Result<(), ReconstructionError<C>>
+    context_digest: H::Digest,
+    commitment: Commitment<B, C, H>,
+) -> Result<(), ReconstructionError<H::Digest>>
 where
     B: CertifiableBlock,
-    R: Digest,
-    C: Digest,
+    C: Scheme,
+    H: Hasher,
 {
     if block.digest() != commitment.block() {
         return Err(ReconstructionError::BlockDigest);
@@ -139,12 +140,13 @@ mod tests {
     };
     use bytes::{Buf, BufMut};
     use commonware_codec::{EncodeSize, Error as CodecError, Read, ReadExt, Write};
+    use commonware_coding::ReedSolomon;
     use commonware_cryptography::{
         sha256::Digest as Sha256Digest, Committable, Digestible, Hasher, Sha256,
     };
     use commonware_utils::NZU64;
 
-    type TestCommitment = Commitment<Sha256Digest, Sha256Digest, Sha256Digest>;
+    type TestCommitment = Commitment<TestBlock, ReedSolomon<Sha256>, Sha256>;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct TestBlock {

@@ -114,7 +114,7 @@ mod tests {
     type TestCodingVariant = Coding<CodingB, ReedSolomon<Sha256>, Sha256, K>;
     type TestCodedBlock = CodedBlock<CodingB, ReedSolomon<Sha256>, Sha256>;
     type CodingSendRecord = (Round, TestCodedBlock, Recipients<K>);
-    type TestCommitment = Commitment<Sha256Digest, Sha256Digest, Sha256Digest>;
+    type TestCommitment = Commitment<CodingB, ReedSolomon<Sha256>, Sha256>;
 
     // Smallest valid coding config used to build trusted genesis commitments.
     const GENESIS_CODING_CONFIG: CodingConfig = CodingConfig {

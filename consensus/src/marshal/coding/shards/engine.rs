@@ -144,7 +144,7 @@ use super::{
 };
 use crate::{
     marshal::coding::{
-        types::{hash_context, CodedBlock, CodingCommitment, Shard},
+        types::{hash_context, CodedBlock, Shard},
         validation::{validate_reconstruction, ReconstructionError as InvariantError},
     },
     types::{coding::Commitment, Epoch, Round},
@@ -155,7 +155,7 @@ use commonware_codec::{Decode, Error as CodecError, Read};
 use commonware_coding::{Config as CodingConfig, Scheme as CodingScheme};
 use commonware_cryptography::{
     certificate::{Provider, Scheme as CertificateScheme},
-    Committable, Digest, Digestible, Hasher, PublicKey,
+    Committable, Digestible, Hasher, PublicKey,
 };
 use commonware_macros::select_loop;
 use commonware_p2p::{
@@ -203,12 +203,6 @@ pub enum Error<C: CodingScheme> {
     /// The reconstructed block's embedded context does not match the commitment context digest
     #[error("block context mismatch: reconstructed context does not match commitment context")]
     ContextMismatch,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum BlockSubscriptionKey<D: Digest, R: Digest, H: Digest> {
-    Commitment(Commitment<D, R, H>),
-    Digest(D),
 }
 
 /// Configuration for the [`Engine`].
@@ -280,7 +274,8 @@ where
 }
 
 type ReconstructionStates<P, B, C, H> =
-    BTreeMap<CodingCommitment<B, C, H>, ReconstructionState<P, B, C, H>>;
+    BTreeMap<Commitment<B, C, H>, ReconstructionState<P, B, C, H>>;
+type BlockSubscribers<B, C, H> = Vec<oneshot::Sender<CodedBlock<B, C, H>>>;
 
 /// A network layer for broadcasting and receiving [`CodedBlock`]s as [`Shard`]s.
 ///
@@ -348,7 +343,7 @@ where
     /// An ephemeral cache of reconstructed blocks, keyed by commitment.
     ///
     /// These blocks are evicted after a durability signal from the marshal.
-    reconstructed_blocks: BTreeMap<CodingCommitment<B, C, H>, ReconstructedBlock<B, C, H>>,
+    reconstructed_blocks: BTreeMap<Commitment<B, C, H>, ReconstructedBlock<B, C, H>>,
 
     /// Open subscriptions for assigned shard verification for the keyed
     /// [`Commitment`].
@@ -360,16 +355,13 @@ where
     ///
     /// Proposers are a special case: they satisfy readiness once their local
     /// proposal is cached because they already hold all shards.
-    assigned_shard_verified_subscriptions:
-        BTreeMap<CodingCommitment<B, C, H>, Vec<oneshot::Sender<()>>>,
+    assigned_shard_verified_subscriptions: BTreeMap<Commitment<B, C, H>, Vec<oneshot::Sender<()>>>,
 
-    /// Open subscriptions for the reconstruction of a [`CodedBlock`] with
-    /// the keyed [`Commitment`].
-    #[allow(clippy::type_complexity)]
-    block_subscriptions: BTreeMap<
-        BlockSubscriptionKey<B::Digest, C::Commitment, H::Digest>,
-        Vec<oneshot::Sender<CodedBlock<B, C, H>>>,
-    >,
+    /// Open subscriptions for reconstruction by [`Commitment`].
+    commitment_subscriptions: BTreeMap<Commitment<B, C, H>, BlockSubscribers<B, C, H>>,
+
+    /// Open subscriptions for reconstruction by block digest.
+    digest_subscriptions: BTreeMap<B::Digest, BlockSubscribers<B, C, H>>,
 
     /// Metrics for the shard engine.
     metrics: ShardMetrics<P>,
@@ -410,7 +402,8 @@ where
                 background_channel_capacity: config.background_channel_capacity,
                 reconstructed_blocks: BTreeMap::new(),
                 assigned_shard_verified_subscriptions: BTreeMap::new(),
-                block_subscriptions: BTreeMap::new(),
+                commitment_subscriptions: BTreeMap::new(),
+                digest_subscriptions: BTreeMap::new(),
                 metrics,
             },
             Mailbox::new(sender),
@@ -460,7 +453,11 @@ where
                     .try_set(self.reconstructed_blocks.len());
 
                 // Clean up closed subscriptions.
-                self.block_subscriptions.retain(|_, subscribers| {
+                self.commitment_subscriptions.retain(|_, subscribers| {
+                    subscribers.retain(|tx| !tx.is_closed());
+                    !subscribers.is_empty()
+                });
+                self.digest_subscriptions.retain(|_, subscribers| {
                     subscribers.retain(|tx| !tx.is_closed());
                     !subscribers.is_empty()
                 });
@@ -529,16 +526,10 @@ where
                         commitment,
                         response,
                     } => {
-                        self.handle_block_subscription(
-                            BlockSubscriptionKey::Commitment(commitment),
-                            response,
-                        );
+                        self.handle_commitment_subscription(commitment, response);
                     }
                     Message::SubscribeByDigest { digest, response } => {
-                        self.handle_block_subscription(
-                            BlockSubscriptionKey::Digest(digest),
-                            response,
-                        );
+                        self.handle_digest_subscription(digest, response);
                     }
                     Message::Prune { through } => {
                         self.prune(through);
@@ -618,7 +609,7 @@ where
     /// exception is the late leader-delivered shard for the assigned index,
     /// which we still accept so we can notify readiness and gossip it to
     /// slower peers.
-    fn should_handle_network_shard(&self, commitment: CodingCommitment<B, C, H>) -> bool {
+    fn should_handle_network_shard(&self, commitment: Commitment<B, C, H>) -> bool {
         if self.reconstructed_blocks.contains_key(&commitment) {
             // State can be populated without a leader when a notarization arrives
             // before the leader announcement, or when our assigned shard was not
@@ -642,7 +633,7 @@ where
     #[allow(clippy::type_complexity)]
     fn try_reconstruct(
         &mut self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
     ) -> Result<Option<CodedBlock<B, C, H>>, Error<C>> {
         if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
             return Ok(Some(entry.block.clone()));
@@ -710,7 +701,7 @@ where
     fn handle_external_proposal<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
         leader: P,
         round: Round,
     ) {
@@ -772,7 +763,7 @@ where
     fn handle_notarized_commitment<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
         round: Round,
     ) {
         if self.reconstructed_blocks.contains_key(&commitment) {
@@ -832,7 +823,7 @@ where
     /// reconstruct from many peer-gossiped shards. The local assigned shard is
     /// different: it is only valid when it came from the leader, and the leader's
     /// identity is needed before it can be accepted as assigned-shard evidence.
-    fn ingest_buffered_shards(&mut self, commitment: CodingCommitment<B, C, H>) -> bool {
+    fn ingest_buffered_shards(&mut self, commitment: Commitment<B, C, H>) -> bool {
         let state = self
             .state
             .get(&commitment)
@@ -999,7 +990,7 @@ where
     fn try_advance<Sr: Sender<PublicKey = P>>(
         &mut self,
         sender: &mut WrappedSender<Sr, Shard<B, C, H>>,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
     ) {
         if let Some(state) = self.state.get_mut(&commitment) {
             match state.take_pending_action() {
@@ -1046,7 +1037,7 @@ where
     /// shard for the local index, not to generic block reconstruction.
     fn handle_assigned_shard_verified_subscription(
         &mut self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
         response: oneshot::Sender<()>,
     ) {
         // Answer immediately if our own shard has been verified.
@@ -1075,41 +1066,47 @@ where
             .push(response);
     }
 
-    /// Handles the registry of a block subscription.
-    fn handle_block_subscription(
+    /// Handles the registry of a block subscription by commitment.
+    fn handle_commitment_subscription(
         &mut self,
-        key: BlockSubscriptionKey<B::Digest, C::Commitment, H::Digest>,
+        commitment: Commitment<B, C, H>,
         response: oneshot::Sender<CodedBlock<B, C, H>>,
     ) {
-        let block = match key {
-            BlockSubscriptionKey::Commitment(commitment) => self
-                .reconstructed_blocks
-                .get(&commitment)
-                .map(|entry| &entry.block),
-            BlockSubscriptionKey::Digest(digest) => self
-                .reconstructed_blocks
-                .values()
-                .find_map(|entry| (entry.block.digest() == digest).then_some(&entry.block)),
-        };
+        if let Some(entry) = self.reconstructed_blocks.get(&commitment) {
+            response.send_lossy(entry.block.clone());
+            return;
+        }
 
-        // Answer immediately if we have the block cached.
-        if let Some(block) = block {
+        self.commitment_subscriptions
+            .entry(commitment)
+            .or_default()
+            .push(response);
+    }
+
+    /// Handles the registry of a block subscription by digest.
+    fn handle_digest_subscription(
+        &mut self,
+        digest: B::Digest,
+        response: oneshot::Sender<CodedBlock<B, C, H>>,
+    ) {
+        if let Some(block) = self
+            .reconstructed_blocks
+            .values()
+            .find_map(|entry| (entry.block.digest() == digest).then_some(&entry.block))
+        {
             response.send_lossy(block.clone());
             return;
         }
 
-        self.block_subscriptions
-            .entry(key)
+        self.digest_subscriptions
+            .entry(digest)
             .or_default()
             .push(response);
     }
 
     /// Notifies and cleans up any subscriptions waiting for assigned shard
     /// verification.
-    fn notify_assigned_shard_verified_subscribers(
-        &mut self,
-        commitment: CodingCommitment<B, C, H>,
-    ) {
+    fn notify_assigned_shard_verified_subscribers(&mut self, commitment: Commitment<B, C, H>) {
         if let Some(mut subscribers) = self
             .assigned_shard_verified_subscriptions
             .remove(&commitment)
@@ -1126,20 +1123,14 @@ where
         let digest = block.digest();
 
         // Notify by-commitment subscribers.
-        if let Some(mut subscribers) = self
-            .block_subscriptions
-            .remove(&BlockSubscriptionKey::Commitment(commitment))
-        {
+        if let Some(mut subscribers) = self.commitment_subscriptions.remove(&commitment) {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
             }
         }
 
         // Notify by-digest subscribers.
-        if let Some(mut subscribers) = self
-            .block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(digest))
-        {
+        if let Some(mut subscribers) = self.digest_subscriptions.remove(&digest) {
             for subscriber in subscribers.drain(..) {
                 subscriber.send_lossy(block.clone());
             }
@@ -1150,13 +1141,11 @@ where
     ///
     /// Removing these entries drops all senders, causing receivers to resolve
     /// with cancellation (`RecvError`) instead of hanging indefinitely.
-    fn drop_subscriptions(&mut self, commitment: CodingCommitment<B, C, H>) {
+    fn drop_subscriptions(&mut self, commitment: Commitment<B, C, H>) {
         self.assigned_shard_verified_subscriptions
             .remove(&commitment);
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Commitment(commitment));
-        self.block_subscriptions
-            .remove(&BlockSubscriptionKey::Digest(commitment.block()));
+        self.commitment_subscriptions.remove(&commitment);
+        self.digest_subscriptions.remove(&commitment.block());
     }
 
     /// Prunes all blocks in the reconstructed block cache that are older than the block
@@ -1168,7 +1157,7 @@ where
     /// Byzantine leader can equivocate, producing multiple valid commitments
     /// in the same round. Both must remain recoverable until finalization
     /// determines which one is canonical.
-    fn prune(&mut self, through: CodingCommitment<B, C, H>) {
+    fn prune(&mut self, through: Commitment<B, C, H>) {
         let cached = self
             .reconstructed_blocks
             .get(&through)
@@ -1333,7 +1322,7 @@ where
     fn verify_assigned_shard(
         &mut self,
         sender: P,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
         shard: IndexedShard<C>,
         is_participant: bool,
         blocker: &mut impl Blocker<PublicKey = P>,
@@ -1377,7 +1366,7 @@ where
     /// shards in parallel. Returns `Some(ReadyState)` on successful transition.
     fn try_transition(
         &mut self,
-        commitment: CodingCommitment<B, C, H>,
+        commitment: Commitment<B, C, H>,
         participants_len: u64,
         strategy: &impl Strategy,
         blocker: &mut impl Blocker<PublicKey = P>,

@@ -11,30 +11,23 @@ use commonware_parallel::{Sequential, Strategy};
 use commonware_utils::{Faults, N3f1, NZU16};
 use std::{marker::PhantomData, sync::Arc};
 
-/// The typed coding commitment for an application block, coding scheme, and context hasher.
-pub type CodingCommitment<B, C, H> =
-    Commitment<<B as Digestible>::Digest, <C as Scheme>::Commitment, <H as Hasher>::Digest>;
-
 /// A broadcastable shard of erasure coded data, including the coding commitment and
 /// the configuration used to code the data.
 pub struct Shard<B: Digestible, C: Scheme, H: Hasher> {
     /// The coding commitment
-    pub(crate) commitment: CodingCommitment<B, C, H>,
+    pub(crate) commitment: Commitment<B, C, H>,
     /// The index of this shard within the commitment.
     pub(crate) index: u16,
     /// An individual shard within the commitment.
     pub(crate) inner: C::Shard,
-    /// Phantom data for the hasher.
-    _hasher: PhantomData<H>,
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
-    pub const fn new(commitment: CodingCommitment<B, C, H>, index: u16, inner: C::Shard) -> Self {
+    pub const fn new(commitment: Commitment<B, C, H>, index: u16, inner: C::Shard) -> Self {
         Self {
             commitment,
             index,
             inner,
-            _hasher: PhantomData,
         }
     }
 
@@ -44,7 +37,7 @@ impl<B: Digestible, C: Scheme, H: Hasher> Shard<B, C, H> {
     }
 
     /// Returns the [`Commitment`] for this shard.
-    pub const fn commitment(&self) -> CodingCommitment<B, C, H> {
+    pub const fn commitment(&self) -> Commitment<B, C, H> {
         self.commitment
     }
 
@@ -60,13 +53,12 @@ impl<B: Digestible, C: Scheme, H: Hasher> Clone for Shard<B, C, H> {
             commitment: self.commitment,
             index: self.index,
             inner: self.inner.clone(),
-            _hasher: PhantomData,
         }
     }
 }
 
 impl<B: Digestible, C: Scheme, H: Hasher> Committable for Shard<B, C, H> {
-    type Commitment = CodingCommitment<B, C, H>;
+    type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
@@ -112,7 +104,6 @@ impl<B: Digestible, C: Scheme, H: Hasher> Read for Shard<B, C, H> {
             commitment,
             index,
             inner,
-            _hasher: PhantomData,
         })
     }
 }
@@ -140,7 +131,6 @@ where
             commitment: u.arbitrary()?,
             index: u.arbitrary()?,
             inner: u.arbitrary()?,
-            _hasher: PhantomData,
         })
     }
 }
@@ -192,7 +182,7 @@ impl<B: Block, C: Scheme, H: Hasher> CodedBlock<B, C, H> {
 
     /// Create a new [`CodedBlock`] from an owned or shared [`Block`] and
     /// trusted [`Commitment`].
-    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: CodingCommitment<B, C, H>) -> Self {
+    pub fn new_trusted(inner: impl Into<Arc<B>>, commitment: Commitment<B, C, H>) -> Self {
         Self {
             inner: inner.into(),
             config: commitment.config(),
@@ -271,7 +261,7 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlock<B, C, H> {
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> Committable for CodedBlock<B, C, H> {
-    type Commitment = CodingCommitment<B, C, H>;
+    type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         Commitment::from((
@@ -314,7 +304,7 @@ pub struct CodedBlockCfg<B: Block, C: Scheme, H: Hasher> {
     /// Codec configuration for the inner application block.
     pub inner: <B as Read>::Cfg,
     /// The commitment the decoded block must match.
-    pub expected: CodingCommitment<B, C, H>,
+    pub expected: Commitment<B, C, H>,
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Clone for CodedBlockCfg<B, C, H> {
@@ -425,8 +415,7 @@ impl<B: Block + Eq, C: Scheme, H: Hasher> Eq for CodedBlock<B, C, H> {}
 /// to detect storage corruption, but does not re-encode the block.
 pub struct StoredCodedBlock<B: Block, C: Scheme, H: Hasher> {
     inner: Arc<B>,
-    commitment: CodingCommitment<B, C, H>,
-    _scheme: PhantomData<(C, H)>,
+    commitment: Commitment<B, C, H>,
 }
 
 impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
@@ -438,7 +427,6 @@ impl<B: CertifiableBlock, C: Scheme, H: Hasher> StoredCodedBlock<B, C, H> {
         Self {
             commitment: block.commitment(),
             inner: block.inner,
-            _scheme: PhantomData,
         }
     }
 
@@ -468,13 +456,12 @@ impl<B: Block, C: Scheme, H: Hasher> Clone for StoredCodedBlock<B, C, H> {
         Self {
             commitment: self.commitment,
             inner: Arc::clone(&self.inner),
-            _scheme: PhantomData,
         }
     }
 }
 
 impl<B: Block, C: Scheme, H: Hasher> Committable for StoredCodedBlock<B, C, H> {
-    type Commitment = CodingCommitment<B, C, H>;
+    type Commitment = Commitment<B, C, H>;
 
     fn commitment(&self) -> Self::Commitment {
         self.commitment
@@ -524,7 +511,6 @@ impl<B: Block, C: Scheme, H: Hasher> Read for StoredCodedBlock<B, C, H> {
         Ok(Self {
             commitment,
             inner: Arc::new(inner),
-            _scheme: PhantomData,
         })
     }
 }
