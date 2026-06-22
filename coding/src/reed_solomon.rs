@@ -804,6 +804,20 @@ mod gf16 {
         sync::{Arc, OnceLock},
     };
 
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi8,
+        _mm256_set1_epi16, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+        _mm256_xor_si256,
+    };
+
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::{
+        __m256i, _mm256_and_si256, _mm256_loadu_si256, _mm256_or_si256, _mm256_set1_epi8,
+        _mm256_set1_epi16, _mm256_shuffle_epi8, _mm256_srli_epi16, _mm256_storeu_si256,
+        _mm256_xor_si256,
+    };
+
     pub(super) const FIELD_SIZE: usize = 1 << 16;
     const FIELD_ORDER: usize = FIELD_SIZE - 1;
     const GENERATOR: u32 = 2;
@@ -929,6 +943,19 @@ mod gf16 {
     }
 
     fn add_mul(out: &mut [u8], input: &[u8], coeff: u16) -> Result<(), Error> {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::arch::is_x86_feature_detected!("avx2") {
+                // SAFETY: Runtime feature detection above guarantees AVX2 is available.
+                unsafe {
+                    return add_mul_avx2(out, input, coeff);
+                }
+            }
+        }
+        add_mul_portable(out, input, coeff)
+    }
+
+    fn add_mul_portable(out: &mut [u8], input: &[u8], coeff: u16) -> Result<(), Error> {
         if out.len() != input.len() || !out.len().is_multiple_of(2) {
             return Err(Error::Inconsistent);
         }
@@ -952,6 +979,113 @@ mod gf16 {
             out[1] ^= product[1];
         }
         Ok(())
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "avx2")]
+    unsafe fn add_mul_avx2(out: &mut [u8], input: &[u8], coeff: u16) -> Result<(), Error> {
+        if out.len() != input.len() || !out.len().is_multiple_of(2) {
+            return Err(Error::Inconsistent);
+        }
+        if coeff == 0 || input.len() < 32 {
+            return add_mul_portable(out, input, coeff);
+        }
+        if coeff == 1 {
+            for (o, i) in out.iter_mut().zip(input) {
+                *o ^= *i;
+            }
+            return Ok(());
+        }
+
+        let nibbles = &mul_nibbles()[coeff as usize];
+        let mut hi_tables = [[0u8; 32]; 4];
+        let mut lo_tables = [[0u8; 32]; 4];
+        for shift in 0..4 {
+            for nibble in 0..16 {
+                let product = nibbles[shift][nibble].to_be_bytes();
+                hi_tables[shift][nibble] = product[0];
+                hi_tables[shift][nibble + 16] = product[0];
+                lo_tables[shift][nibble] = product[1];
+                lo_tables[shift][nibble + 16] = product[1];
+            }
+        }
+
+        let dup_even = [
+            0u8, 0, 2, 2, 4, 4, 6, 6, 8, 8, 10, 10, 12, 12, 14, 14, 0, 0, 2, 2, 4, 4, 6, 6, 8,
+            8, 10, 10, 12, 12, 14, 14,
+        ];
+        let dup_odd = [
+            1u8, 1, 3, 3, 5, 5, 7, 7, 9, 9, 11, 11, 13, 13, 15, 15, 1, 1, 3, 3, 5, 5, 7, 7, 9,
+            9, 11, 11, 13, 13, 15, 15,
+        ];
+        // SAFETY: local arrays are 32 bytes. Unaligned loads are valid.
+        let dup_even = unsafe { _mm256_loadu_si256(dup_even.as_ptr().cast::<__m256i>()) };
+        // SAFETY: local arrays are 32 bytes. Unaligned loads are valid.
+        let dup_odd = unsafe { _mm256_loadu_si256(dup_odd.as_ptr().cast::<__m256i>()) };
+        let low_mask = _mm256_set1_epi8(0x0f);
+        let even_mask = _mm256_set1_epi16(0x00ffu16 as i16);
+        let odd_mask = _mm256_set1_epi16(0xff00u16 as i16);
+        let chunks = input.len() / 32;
+
+        // SAFETY: table rows are 32 bytes. Unaligned loads are valid.
+        let load =
+            |table: &[u8; 32]| unsafe { _mm256_loadu_si256(table.as_ptr().cast::<__m256i>()) };
+        let hi0 = load(&hi_tables[0]);
+        let lo0 = load(&lo_tables[0]);
+        let hi1 = load(&hi_tables[1]);
+        let lo1 = load(&lo_tables[1]);
+        let hi2 = load(&hi_tables[2]);
+        let lo2 = load(&lo_tables[2]);
+        let hi3 = load(&hi_tables[3]);
+        let lo3 = load(&lo_tables[3]);
+
+        for i in 0..chunks {
+            let offset = i * 32;
+            // SAFETY: `offset` is within the chunked prefix of `input` and has at least 32 bytes.
+            let value = unsafe { _mm256_loadu_si256(input.as_ptr().add(offset).cast::<__m256i>()) };
+            let low = _mm256_and_si256(value, low_mask);
+            let high = _mm256_and_si256(_mm256_srli_epi16(value, 4), low_mask);
+
+            let low_even = _mm256_shuffle_epi8(low, dup_even);
+            let high_even = _mm256_shuffle_epi8(high, dup_even);
+            let low_odd = _mm256_shuffle_epi8(low, dup_odd);
+            let high_odd = _mm256_shuffle_epi8(high, dup_odd);
+
+            let product = _mm256_xor_si256(
+                _mm256_xor_si256(
+                    interleave_product_bytes(low_odd, hi0, lo0, even_mask, odd_mask),
+                    interleave_product_bytes(high_odd, hi1, lo1, even_mask, odd_mask),
+                ),
+                _mm256_xor_si256(
+                    interleave_product_bytes(low_even, hi2, lo2, even_mask, odd_mask),
+                    interleave_product_bytes(high_even, hi3, lo3, even_mask, odd_mask),
+                ),
+            );
+            // SAFETY: `offset` is within the chunked prefix of `out` and has at least 32 bytes.
+            let previous =
+                unsafe { _mm256_loadu_si256(out.as_ptr().add(offset).cast::<__m256i>()) };
+            let result = _mm256_xor_si256(previous, product);
+            // SAFETY: `offset` is within the chunked prefix of `out` and has at least 32 bytes.
+            unsafe {
+                _mm256_storeu_si256(out.as_mut_ptr().add(offset).cast::<__m256i>(), result);
+            }
+        }
+
+        add_mul_portable(&mut out[chunks * 32..], &input[chunks * 32..], coeff)
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "avx2")]
+    fn interleave_product_bytes(
+        nibbles: __m256i,
+        hi_table: __m256i,
+        lo_table: __m256i,
+        even_mask: __m256i,
+        odd_mask: __m256i,
+    ) -> __m256i {
+        let hi = _mm256_and_si256(_mm256_shuffle_epi8(hi_table, nibbles), even_mask);
+        let lo = _mm256_and_si256(_mm256_shuffle_epi8(lo_table, nibbles), odd_mask);
+        _mm256_or_si256(hi, lo)
     }
 
     fn is_non_zero(shard: &[u8]) -> bool {
@@ -1226,6 +1360,25 @@ mod gf16 {
             let recovered =
                 reconstruct_originals(k, m, shard_len, &[], &provided_recoveries).unwrap();
             assert_eq!(recovered, originals);
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[test]
+        fn avx2_matches_portable_add_mul() {
+            if !std::arch::is_x86_feature_detected!("avx2") {
+                return;
+            }
+            let input = (0..514).map(|i| (i * 37) as u8).collect::<Vec<_>>();
+            for coeff in [0u16, 1, 2, 3, 17, 255, 256, 4099, u16::MAX] {
+                let mut portable = (0..514).map(|i| (i * 53) as u8).collect::<Vec<_>>();
+                let mut simd = portable.clone();
+                add_mul_portable(&mut portable, &input, coeff).unwrap();
+                // SAFETY: Runtime feature detection above guarantees AVX2 is available.
+                unsafe {
+                    add_mul_avx2(&mut simd, &input, coeff).unwrap();
+                }
+                assert_eq!(simd, portable);
+            }
         }
     }
 }
