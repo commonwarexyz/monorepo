@@ -472,7 +472,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
 
     /// Number of partitions currently spilled to the side-table.
     #[cfg(test)]
-    fn spilled_count(&self) -> usize {
+    pub(crate) fn spilled_count(&self) -> usize {
         self.spilled.len()
     }
 }

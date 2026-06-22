@@ -389,9 +389,15 @@ mod tests {
                 run_index_entry_replacement_not_a_collision,
                 run_index_large_collision_chain,
             );
-            run_index_many_keys(
-                &mut new_partitioned_ordered_spilling(context.child("spill_many_keys")),
-                |bytes| context.fill(bytes),
+            // Guard against this test silently going vacuous: `run_index_many_keys` clusters keys
+            // across partitions, so with threshold 2 it must drive at least one partition into the
+            // spilled representation. If a future key-pattern or threshold change stopped spilling,
+            // the battery above would only ever exercise the inline path.
+            let mut index = new_partitioned_ordered_spilling(context.child("spill_many_keys"));
+            run_index_many_keys(&mut index, |bytes| context.fill(bytes));
+            assert!(
+                index.spilled_count() > 0,
+                "routing battery should exercise the spilled representation"
             );
         });
     }
