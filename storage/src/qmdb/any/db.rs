@@ -28,6 +28,10 @@ use commonware_utils::bitmap;
 use core::num::NonZeroU64;
 use std::{collections::HashMap, sync::Arc};
 
+/// Estimate of the number of keys per shard at which parallelizing [`Db::get_many_map`]'s
+/// index probe is faster than probing serially.
+const MIN_PROBES_PER_SHARD: usize = 8;
+
 /// Metrics for Any QMDBs.
 pub(crate) struct Metrics<E: Context> {
     /// State gauges.
@@ -246,14 +250,39 @@ where
         self.metrics.reads.get_many_calls.inc();
         self.metrics.reads.keys_requested.inc_by(keys.len() as u64);
 
-        // Phase 1: Collect candidate locations from the in-memory index.
-        // Each key may map to multiple locations due to hash collisions.
-        let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
+        // Phase 1: Collect candidate locations from the in-memory index. Each key may map to
+        // multiple locations due to hash collisions. The index is read-only and Send+Sync, so
+        // for large batches the probe is sharded across the strategy pool; each candidate carries
+        // its global key index, so partition order does not matter.
+        let strategy = self.strategy();
+        let parallelism = strategy.parallelism_hint().max(1);
+        let mut candidates: Vec<(usize, u64)> =
+            if parallelism == 1 || keys.len() < MIN_PROBES_PER_SHARD.saturating_mul(parallelism) {
+                let mut candidates = Vec::with_capacity(keys.len());
+                self.snapshot
+                    .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
+                candidates
+            } else {
+                let chunk = keys.len().div_ceil(parallelism);
+                let snapshot = &self.snapshot;
+                strategy
+                    .map_collect_vec(
+                        keys.chunks(chunk).enumerate().collect::<Vec<_>>(),
+                        |(ci, chunk_keys)| {
+                            let base = ci * chunk;
+                            let mut local: Vec<(usize, u64)> = Vec::with_capacity(chunk_keys.len());
+                            snapshot.get_many(chunk_keys, |key_idx, &loc| {
+                                local.push((base + key_idx, *loc))
+                            });
+                            local
+                        },
+                    )
+                    .into_iter()
+                    .flatten()
+                    .collect()
+            };
+
         let mut results: Vec<Option<T>> = (0..keys.len()).map(|_| None).collect();
-
-        self.snapshot
-            .get_many(keys, |key_idx, &loc| candidates.push((key_idx, *loc)));
-
         if candidates.is_empty() {
             return Ok(results);
         }
