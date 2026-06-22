@@ -4,6 +4,7 @@
 //!
 //! - Moved the crate into `commonware_cryptography::reed_solomon` and rewrote internal
 //!   `crate::` paths accordingly.
+//! - Retained the upstream `LICENSE` file, including the BSD-3-Clause notice for Leopard-RS.
 //! - Removed the build script and README rustdoc generation.
 //! - Removed upstream examples. Kept upstream-style benchmarks under Commonware's benchmark layout
 //!   and naming rules.
