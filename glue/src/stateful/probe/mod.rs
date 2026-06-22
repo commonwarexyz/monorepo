@@ -9,8 +9,8 @@
 //!
 //! ## Solicit
 //!
-//! Once a floor subscriber appears, [`Probe`] broadcasts a `Request` to every
-//! connected peer:
+//! Once a floor subscriber appears, [`Probe`] sends a `Request` to each participant in the
+//! configured minimum epoch's committee:
 //!
 //! ```text
 //!                    +-- Request --> peer 1
@@ -29,10 +29,11 @@
 //!
 //! ## Collect and select
 //!
-//! Each peer answers with its own latest finalization (or nothing, if it has none). Every
-//! response is verified against the certificate scheme for its epoch. At most one finalization is
-//! counted per peer, so no single peer can inflate the sample on its own. Once `f + 1`
-//! distinct peers have replied, the highest finalized round becomes the floor:
+//! Each peer answers with its own latest finalization (or nothing, if it has none). Every response
+//! is verified against the certificate scheme for its epoch, and its sender must be a participant
+//! in that scheme. At most one finalization is counted per peer, so no single peer can inflate the
+//! sample on its own. Once `f + 1` distinct peers have replied, the highest finalized round becomes
+//! the floor:
 //!
 //! ```text
 //!   peer 1 --Response(view 10)-->\                 replies
@@ -42,9 +43,9 @@
 //!                                      sample reached, highest view becomes the floor: 13
 //! ```
 //!
-//! A peer that sends an undecodable or unverifiable first finalization in a request round is
-//! blocked. After a peer has already contributed a verified response for that round, later
-//! messages from that peer are ignored before validation.
+//! A non-participant or a peer that sends an undecodable or unverifiable first finalization in a
+//! request round is blocked. After a peer has already contributed a verified response for that
+//! round, later messages from that peer are ignored before validation.
 //!
 //! ## Retry
 //!
@@ -1049,6 +1050,89 @@ mod test {
                     harness.participants[1].clone(),
                 )),
                 "node 0 should have blocked node 1"
+            );
+        });
+    }
+
+    #[test]
+    fn test_blocks_non_participant_sending_finalization() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut rng = test_rng();
+            let Fixture {
+                participants: committee,
+                schemes,
+                ..
+            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_PARTICIPANTS", 4);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let mut harness = Harness::setup_with(
+                &context,
+                7,
+                NZDuration!(Duration::from_secs(3600)),
+                Epoch::zero(),
+                move |_scheme| provider.clone(),
+            )
+            .await;
+            harness.start_probes();
+
+            let (sender, peer) = harness
+                .participants
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, peer)| !committee.contains(peer))
+                .expect("network should contain a non-participant sender");
+            let (_, finalization) = build_finalization(&schemes, 1, 1);
+            harness.send_raw(sender, 0, finalization_bytes(finalization));
+
+            context.sleep(Duration::from_millis(100)).await;
+
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                blocked.contains(&(harness.participants[0].clone(), peer.clone())),
+                "node 0 should have blocked the non-participant sender"
+            );
+        });
+    }
+
+    #[test]
+    fn test_requests_finalizations_only_from_current_participants() {
+        let runner = deterministic::Runner::timed(Duration::from_secs(30));
+        runner.start(|context| async move {
+            let mut rng = test_rng();
+            let Fixture {
+                participants: committee,
+                schemes,
+                ..
+            } = scheme_mocks::fixture(&mut rng, b"_COMMONWARE_GLUE_PROBE_PARTICIPANTS", 4);
+            let provider = ConstantProvider::new(schemes[0].clone());
+            let mut harness = Harness::setup_with(
+                &context,
+                7,
+                NZDuration!(Duration::from_secs(3600)),
+                Epoch::zero(),
+                move |_scheme| provider.clone(),
+            )
+            .await;
+            let (sender, peer) = harness
+                .participants
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, peer)| !committee.contains(peer))
+                .map(|(index, peer)| (index, peer.clone()))
+                .expect("network should contain a non-participant sender");
+            let (block, finalization) = build_finalization(&schemes, 1, 1);
+            harness.inject(sender, block, finalization).await;
+            harness.start_probes();
+
+            let _subscription = harness.nodes[0].probe.subscribe();
+            context.sleep(Duration::from_millis(100)).await;
+
+            let blocked = harness.oracle.blocked().await.unwrap();
+            assert!(
+                !blocked.contains(&(harness.participants[0].clone(), peer)),
+                "a non-participant should not receive a discovery request"
             );
         });
     }

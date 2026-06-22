@@ -220,6 +220,7 @@ where
             Block = B,
             SigningScheme = Z::Scheme,
             Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+            Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
@@ -645,6 +646,7 @@ where
             Block = B,
             SigningScheme = Z::Scheme,
             Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+            Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,
@@ -821,6 +823,7 @@ where
                             consensus_context.clone(),
                         ),
                         ancestor_stream,
+                        (),
                     )
                     .instrument(info_span!(
                         "marshal.coding.application.propose",
@@ -1088,6 +1091,7 @@ where
             Block = B,
             SigningScheme = Z::Scheme,
             Context = Context<Commitment, <Z::Scheme as Verifier>::PublicKey>,
+            Input = (),
         >,
     B: CertifiableBlock<Context = <A as Application<E>>::Context>,
     C: CodingScheme,

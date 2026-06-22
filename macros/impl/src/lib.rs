@@ -321,7 +321,6 @@ pub fn test_traced(attr: TokenStream, item: TokenStream) -> TokenStream {
                     tracing_subscriber::fmt::layer()
                         .with_test_writer()
                         .with_line_number(true)
-                        .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
                 )
                 .with(filter);
             let dispatcher = tracing::Dispatch::new(subscriber);

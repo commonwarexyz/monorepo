@@ -30,9 +30,10 @@ where
     pub strategy: T,
     /// The mailbox capacity.
     pub capacity: NonZeroUsize,
-    /// Blocker used to block peers that send invalid finalizations.
+    /// Blocker used to block malicious peers.
     pub blocker: B,
-    /// Finalizations below this epoch are ignored when discovering a floor.
+    /// Finalizations below this epoch are ignored when discovering a floor. Discovery requests are
+    /// sent to this epoch's participants.
     pub minimum_epoch: Epoch,
     /// How long to wait for enough finalization replies before clearing the pending
     /// responses and re-requesting.
@@ -49,7 +50,7 @@ where
 pub struct Probe<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,
@@ -68,7 +69,7 @@ where
 impl<E, S, D, V, T, P, B> Probe<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,

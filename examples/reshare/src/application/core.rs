@@ -65,11 +65,13 @@ where
     type Context = Context<H::Digest, C::PublicKey>;
     type SigningScheme = S;
     type Block = Block<H, C, V>;
+    type Input = ();
 
     async fn propose(
         &mut self,
         (_, context): (E, Self::Context),
         mut ancestry: impl Ancestry<Self::Block>,
+        _: Self::Input,
     ) -> Option<Self::Block> {
         // Fetch the parent block from the ancestry stream.
         let parent_block = ancestry.next().await?;

@@ -37,7 +37,7 @@ use tracing::debug;
 pub(super) struct Discovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,
@@ -58,7 +58,7 @@ where
 impl<E, S, D, V, T, P, B> Discovery<E, S, D, V, T, P, B>
 where
     E: Spawner + CryptoRng + Clock + Metrics,
-    S: Scheme<V::Commitment>,
+    S: Scheme<V::Commitment, PublicKey = P>,
     D: Provider<Scope = Epoch, Scheme = S>,
     V: Variant,
     T: Strategy,
@@ -112,7 +112,7 @@ where
                         let should_request = self.floor_subscribers.is_empty();
                         self.floor_subscribers.push(response);
                         if should_request {
-                            Self::request_latest(sender, &mut finalizations);
+                            self.request_latest(sender, &mut finalizations);
                             deadline = self.context.current() + self.retry_timeout.get();
                         }
                     }
@@ -163,7 +163,7 @@ where
             },
             _ = retry => {
                 debug!(reason = "deadline elapsed", "re-requesting finalizations");
-                Self::request_latest(sender, &mut finalizations);
+                self.request_latest(sender, &mut finalizations);
                 deadline = self.context.current() + self.retry_timeout.get();
             },
         }
@@ -207,16 +207,24 @@ where
 
     /// Verifies a [`Finalization`] from `peer`.
     ///
-    /// Peers that send invalid finalizations are blocked. If no scheme is available for the
-    /// finalization's epoch, the payload is ignored without blocking because it cannot be judged.
+    /// Peers outside the epoch's participant set or sending invalid finalizations are blocked. If
+    /// no scheme is available for the finalization's epoch, the payload is ignored without blocking
+    /// because it cannot be judged.
     fn verify_finalization(
         &mut self,
         peer: P,
         finalization: Finalization<S, V::Commitment>,
     ) -> Option<(P, Finalization<S, V::Commitment>)> {
-        // Verify against the certificate scheme for the finalization's epoch. If no scheme is
+        let epoch = finalization.epoch();
+        let scheme = self.provider.scheme(epoch)?;
+        if scheme.participants().position(&peer).is_none() {
+            commonware_p2p::block!(self.blocker, peer, "finalization sent by non-participant");
+            return None;
+        }
+
+        // Verify against the certificate scheme for the finalization's epoch. If no verifier is
         // available for that epoch, we cannot judge the payload, so ignore it without blocking.
-        let scoped = self.provider.scoped(finalization.epoch())?;
+        let scoped = self.provider.scoped(epoch)?;
         if !finalization.verify(self.context.as_present_mut(), &scoped, &self.strategy) {
             commonware_p2p::block!(self.blocker, peer, "invalid finalization");
             return None;
@@ -264,14 +272,18 @@ where
         self.floor = Some(floor.clone());
     }
 
-    /// Clears any pending responses and re-requests peers' latest [`Finalization`].
+    /// Clears any pending responses and requests the current committee's latest [`Finalization`].
     fn request_latest(
+        &self,
         sender: &mut impl Sender<PublicKey = P>,
         finalizations: &mut BTreeMap<P, Finalization<S, V::Commitment>>,
     ) {
         finalizations.clear();
+        let Some(scheme) = self.provider.scheme(self.minimum_epoch) else {
+            return;
+        };
         sender.send(
-            Recipients::All,
+            Recipients::Some(scheme.participants().iter().cloned().collect()),
             wire::Message::<S, V>::Request.encode(),
             false,
         );
