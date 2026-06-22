@@ -705,7 +705,15 @@ mod striped {
             recoveries: &missing_recoveries,
         };
         strategy.try_map_collect_vec(ranges, |range| {
-            recover_all_into(k, m, range, &provided_originals, &provided_recoveries, missing, out)
+            recover_all_into(
+                k,
+                m,
+                range,
+                &provided_originals,
+                &provided_recoveries,
+                missing,
+                out,
+            )
         })?;
 
         let mut original_refs: Vec<&[u8]> = vec![&[]; k];
@@ -736,13 +744,26 @@ mod striped {
         data: Vec<u8>,
     ) -> Result<Vec<u8>, Error> {
         let &DecodeCtx {
-            n, k, root, strategy, ..
+            n,
+            k,
+            root,
+            strategy,
+            ..
         } = ctx;
         let missing_shards = shard_digests
             .iter()
             .enumerate()
             .filter(|(_, digest)| digest.is_none())
-            .map(|(i, _)| (i, if i < k { originals[i] } else { recoveries[i - k] }))
+            .map(|(i, _)| {
+                (
+                    i,
+                    if i < k {
+                        originals[i]
+                    } else {
+                        recoveries[i - k]
+                    },
+                )
+            })
             .collect::<Vec<_>>();
 
         for (i, digest) in

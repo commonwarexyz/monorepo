@@ -306,11 +306,17 @@ mod tests {
         decoder.add_recovery_shard(1, &recovery[1]).unwrap();
         let decoding = decoder.decode().unwrap();
 
-        assert_eq!(decoding.restored_original(0).unwrap(), original[0].as_slice());
+        assert_eq!(
+            decoding.restored_original(0).unwrap(),
+            original[0].as_slice()
+        );
         for (i, recovery) in recovery.iter().enumerate() {
             let label = format!("oc={original_count} rc={recovery_count} ss={shard_size} rec={i}");
             if i == 1 {
-                assert!(decoding.restored_recovery(i).is_none(), "provided recovery: {label}");
+                assert!(
+                    decoding.restored_recovery(i).is_none(),
+                    "provided recovery: {label}"
+                );
             } else {
                 assert_eq!(
                     decoding.restored_recovery(i).unwrap(),
