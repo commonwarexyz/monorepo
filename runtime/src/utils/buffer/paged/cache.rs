@@ -495,8 +495,8 @@ mod tests {
     use super::{super::Checksum, *};
     use crate::{
         buffer::paged::CHECKSUM_SIZE, deterministic, telemetry::metrics::Registry, Buf, BufferPool,
-        BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufsMut, Runner as _, Spawner as _, Storage as _,
-        Supervisor as _,
+        BufferPoolConfig, Clock as _, Handle, IoBufMut, IoBufsMut, Runner as _, Spawner as _,
+        Storage as _, Supervisor as _,
     };
     use commonware_cryptography::Crc32;
     use commonware_macros::test_traced;
