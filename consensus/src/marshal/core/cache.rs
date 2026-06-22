@@ -1,5 +1,5 @@
 use crate::{
-    marshal::core::Variant,
+    marshal::core::{durability::observe_sync, Variant},
     simplex::types::{Finalization, Notarization},
     types::{Epoch, Height, Round, View},
 };
@@ -292,12 +292,12 @@ where
         archive
     }
 
-    /// Add a verify-stage candidate block to the prunable archive.
+    /// Add a verify-stage candidate block to the prunable archive and start syncing it.
     ///
     /// The archive name is historical: callers may start this durability work
     /// after structural validation and before the application verdict is known.
     /// Consensus must not treat presence in this cache as application validity.
-    pub(crate) async fn put_verified(
+    pub(crate) async fn put_verified_start_sync(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
@@ -372,7 +372,7 @@ where
         let handle = self
             .put_notarization_start_sync(round, digest, notarization)
             .await;
-        Self::handle_sync_result(handle.await, round, "notarization");
+        observe_sync(handle.await, round, "notarization");
     }
 
     /// Add a notarization to the prunable archive and start syncing it.
@@ -441,22 +441,6 @@ where
             }
             Err(e) => {
                 panic!("failed to insert {name}: {e}");
-            }
-        }
-    }
-
-    /// Helper to debug cache sync completion results.
-    pub(crate) fn handle_sync_result(
-        result: Result<(), commonware_runtime::Error>,
-        round: Round,
-        name: &str,
-    ) {
-        match result {
-            Ok(_) => {
-                debug!(?round, name, "cached");
-            }
-            Err(e) => {
-                panic!("failed to sync {name}: {e}");
             }
         }
     }

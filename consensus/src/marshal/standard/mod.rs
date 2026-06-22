@@ -2860,7 +2860,7 @@ mod tests {
     }
 
     #[test_traced("WARN")]
-    #[should_panic(expected = "failed to sync verified block")]
+    #[should_panic(expected = "failed to sync verified")]
     fn test_mailbox_verified_sync_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

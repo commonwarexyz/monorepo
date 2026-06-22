@@ -2,6 +2,7 @@ use super::{
     acks::{PendingAck, PendingAcks},
     cache,
     delivery::PendingVerification,
+    durability::{observe_sync, SharedSync, SyncRegistry},
     floor::Floor,
     mailbox::{CommitmentFallback, Mailbox, Message},
     stream::Stream,
@@ -45,8 +46,7 @@ use commonware_storage::archive::Identifier as ArchiveID;
 use commonware_utils::{
     acknowledgement::Exact,
     channel::{fallible::OneshotExt, oneshot},
-    futures::AbortablePool,
-    sync::Mutex,
+    futures::{AbortablePool, Pool},
     Acknowledgement, BoxedError,
 };
 use futures::{
@@ -54,103 +54,17 @@ use futures::{
     try_join,
 };
 use rand_core::CryptoRngCore;
-use std::{collections::BTreeMap, future::Future, num::NonZeroUsize, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    num::NonZeroUsize,
+};
 use tracing::{debug, info_span, warn, Instrument as _, Span};
 
 // Resolver request keys are expressed in the variant commitment type, which
 // may differ from the block digest for coded variants.
 type ResolverRequestFor<V> = Key<<V as Variant>::Commitment>;
 type BlockDigestFor<V> = <<V as Variant>::Block as Digestible>::Digest;
-type PendingNotarizationSyncs<V> = BTreeMap<Round, (BlockDigestFor<V>, Handle<()>)>;
-type SyncResult = Result<(), commonware_runtime::Error>;
-type SyncWaiter = oneshot::Sender<SyncResult>;
-
-struct VerifiedBlock<D> {
-    digest: D,
-    durable: bool,
-    waiters: Vec<SyncWaiter>,
-}
-
-struct VerifiedCoverage<V: Variant> {
-    prune_round: Round,
-    blocks: BTreeMap<Round, VerifiedBlock<BlockDigestFor<V>>>,
-}
-
-impl<V: Variant> VerifiedCoverage<V> {
-    const fn new() -> Self {
-        Self {
-            prune_round: Round::zero(),
-            blocks: BTreeMap::new(),
-        }
-    }
-
-    fn enqueue(&mut self, round: Round, digest: BlockDigestFor<V>) -> Option<Handle<()>> {
-        if round < self.prune_round {
-            return None;
-        }
-        match self.blocks.entry(round) {
-            std::collections::btree_map::Entry::Vacant(entry) => {
-                entry.insert(VerifiedBlock {
-                    digest,
-                    durable: false,
-                    waiters: Vec::new(),
-                });
-                None
-            }
-            std::collections::btree_map::Entry::Occupied(mut entry) => {
-                let stored = entry.get_mut();
-                if stored.digest != digest {
-                    return None;
-                }
-                if stored.durable {
-                    return Some(Handle::ready(Ok(())));
-                }
-                let (waiter, receiver) = oneshot::channel();
-                stored.waiters.push(waiter);
-                Some(Handle::from_receiver(receiver))
-            }
-        }
-    }
-
-    fn covers_enqueued(&self, round: Round, digest: BlockDigestFor<V>) -> bool {
-        round >= self.prune_round
-            && self
-                .blocks
-                .get(&round)
-                .is_some_and(|stored| stored.digest == digest)
-    }
-
-    fn sync_handle(&mut self, round: Round, digest: BlockDigestFor<V>) -> Option<Handle<()>> {
-        let stored = self.blocks.get_mut(&round)?;
-        if stored.digest != digest {
-            return None;
-        }
-        if stored.durable {
-            return Some(Handle::ready(Ok(())));
-        }
-        let (waiter, receiver) = oneshot::channel();
-        stored.waiters.push(waiter);
-        Some(Handle::from_receiver(receiver))
-    }
-
-    fn complete(&mut self, round: Round, digest: BlockDigestFor<V>) -> Vec<SyncWaiter> {
-        let Some(stored) = self.blocks.get_mut(&round) else {
-            return Vec::new();
-        };
-        if stored.digest != digest {
-            return Vec::new();
-        }
-        stored.durable = true;
-        std::mem::take(&mut stored.waiters)
-    }
-
-    fn prune(&mut self, round: Round) {
-        if round > self.prune_round {
-            self.prune_round = round;
-        }
-        self.blocks = self.blocks.split_off(&self.prune_round);
-    }
-}
 
 // A resolver delivery plus the peer-validity response channel. Local
 // annotations on the delivery decide how accepted data is used.
@@ -211,10 +125,10 @@ where
     // ---------- State ----------
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
-    // Verified blocks whose sync handles have completed durably.
-    verified_coverage: Arc<Mutex<VerifiedCoverage<V>>>,
-    // Notarization certificate syncs that must complete before certifying the matching block.
-    notarization_syncs: Mutex<PendingNotarizationSyncs<V>>,
+    // Verified-block syncs reused by the matching notarized/certified write.
+    verified_coverage: SyncRegistry<BlockDigestFor<V>>,
+    // Notarization-certificate syncs joined by the matching certified block's barrier.
+    notarization_syncs: SyncRegistry<BlockDigestFor<V>>,
     // Current processed floor and any pending floor update
     floor: Floor<P::Scheme, V::Commitment>,
     // Application delivery cursor
@@ -330,8 +244,8 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                verified_coverage: Arc::new(Mutex::new(VerifiedCoverage::new())),
-                notarization_syncs: Mutex::new(BTreeMap::new()),
+                verified_coverage: SyncRegistry::new(),
+                notarization_syncs: SyncRegistry::new(),
                 floor,
                 stream,
                 pending_acks: PendingAcks::new(config.max_pending_acks.get()),
@@ -452,6 +366,11 @@ where
         // Create a local pool for waiter futures.
         let mut waiters = AbortablePool::<Result<V::Block, SubscriptionKeyFor<V>>>::default();
 
+        // Drive verified/notarization durability syncs to completion. Each pooled
+        // future observes one started sync (panicking on failure) and fans its
+        // result out to awaiters; running them here avoids a task per sync.
+        let mut syncs = Pool::<()>::default();
+
         // Anchor all startup work under a single root span. Tip recovery, floor
         // installation, gap repair, and the initial dispatch all run before any
         // mailbox message arrives, so without this root their work would emit as
@@ -505,6 +424,8 @@ where
             on_stopped => {
                 debug!("context shutdown, stopping marshal");
             },
+            // Drive durability syncs to completion (fan-out happens inside).
+            _ = syncs.next_completed() => {},
             // Handle waiter completions first
             Ok(completion) = waiters.next_completed() else continue => match completion {
                 Ok(block) => {
@@ -548,6 +469,7 @@ where
                     message,
                     &mut resolver,
                     &mut waiters,
+                    &mut syncs,
                     &mut buffer,
                     &mut application,
                 )
@@ -628,6 +550,7 @@ where
         message: Message<P::Scheme, V>,
         resolver: &mut R,
         waiters: &mut AbortablePool<Result<V::Block, SubscriptionKeyFor<V>>>,
+        syncs: &mut Pool<()>,
         buffer: &mut Buf,
         application: &mut impl Reporter<Activity = Update<V::ApplicationBlock, A>>,
     ) where
@@ -699,14 +622,14 @@ where
                 let digest = block.digest();
 
                 // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
+                // `put_verified_start_sync` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
                 let handle = self
                     .cache
-                    .put_verified(round, digest, block.clone().into())
+                    .put_verified_start_sync(round, digest, block.clone().into())
                     .await;
-                let handle = self.track_verified_sync(round, digest, handle);
+                let handle = self.track_verified_sync(syncs, round, digest, handle);
 
                 // Retain the block in memory so the subsequent `Forward` can
                 // broadcast it without reloading from storage. An older retained
@@ -722,11 +645,14 @@ where
                 let digest = block.digest();
 
                 // If the round has already been pruned by tip advancement,
-                // `put_verified` is a no-op because the round is below
+                // `put_verified_start_sync` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                let handle = self.cache.put_verified(round, digest, block.into()).await;
-                let handle = self.track_verified_sync(round, digest, handle);
+                let handle = self
+                    .cache
+                    .put_verified_start_sync(round, digest, block.into())
+                    .await;
+                let handle = self.track_verified_sync(syncs, round, digest, handle);
                 ack.expect("durable ack present").send_lossy(handle);
             }
             Message::Certified {
@@ -736,8 +662,8 @@ where
                 let digest = block.digest();
 
                 // If the round has already been pruned by tip advancement,
-                // `put_block` is a no-op because the round is below
-                // the retention floor (and no longer is required by consensus
+                // `put_notarized_block_start_sync` is a no-op because the round is
+                // below the retention floor (and no longer is required by consensus
                 // to make progress).
                 let handle = self
                     .put_notarized_block_start_sync(round, digest, block.into())
@@ -750,27 +676,25 @@ where
                 let commitment = notarization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
 
-                // Cache notarization by round. The sync is started now but
-                // joined by the matching certified block's durability handle.
-                let pending_digest = {
-                    let syncs = self.notarization_syncs.lock();
-                    syncs.get(&round).map(|(digest, _)| *digest)
-                };
-                if let Some(pending_digest) = pending_digest {
-                    if pending_digest != digest {
-                        warn!(
-                            ?round,
-                            ?pending_digest,
-                            ?digest,
-                            "notarization sync already pending for different digest"
-                        );
+                // Cache the notarization once per round. Its sync is observed by
+                // its own driver and later joined into the certify barrier.
+                match self.notarization_syncs.digest(round) {
+                    Some(pending) if pending != digest => warn!(
+                        ?round,
+                        ?pending,
+                        ?digest,
+                        "notarization sync already pending for different digest"
+                    ),
+                    Some(_) => {}
+                    None => {
+                        let sync = self
+                            .cache
+                            .put_notarization_start_sync(round, digest, notarization)
+                            .await;
+                        let (shared, drive) = SharedSync::observe(sync);
+                        syncs.push(async move { observe_sync(drive.await, round, "notarization") });
+                        self.notarization_syncs.register(round, digest, shared);
                     }
-                } else {
-                    let sync = self
-                        .cache
-                        .put_notarization_start_sync(round, digest, notarization)
-                        .await;
-                    self.notarization_syncs.lock().insert(round, (digest, sync));
                 }
 
                 // A notarization alone is not enough to fetch missing proposal
@@ -1791,108 +1715,73 @@ where
         self.last_proposed_block.take().map(|(_, _, block)| block)
     }
 
+    /// Tracks a freshly started verified-block sync and returns a handle that
+    /// resolves once it is durable, so a later notarized/certified write for the
+    /// same `(round, digest)` can reuse it. The observation future is driven by
+    /// `syncs`.
     fn track_verified_sync(
-        &self,
+        &mut self,
+        syncs: &mut Pool<()>,
         round: Round,
         digest: BlockDigestFor<V>,
         sync: Handle<()>,
     ) -> Handle<()> {
-        let (waiter, receiver) = oneshot::channel();
-        let verified_coverage = self.verified_coverage.clone();
-        if let Some(sync) = verified_coverage.lock().enqueue(round, digest) {
-            return sync;
+        // Reuse the in-flight sync if this (round, digest) is already tracked.
+        if let Some(handle) = self.verified_coverage.wait(round, digest) {
+            return handle;
         }
-        drop(
-            self.context
-                .child("sync_verified")
-                .spawn(move |_| async move {
-                    cache::Manager::<E, V, P::Scheme>::handle_sync_result(
-                        sync.await,
-                        round,
-                        "verified",
-                    );
-                    let waiters = verified_coverage.lock().complete(round, digest);
-                    waiter.send_lossy(Ok(()));
-                    for waiter in waiters {
-                        waiter.send_lossy(Ok(()));
-                    }
-                }),
-        );
-        Handle::from_receiver(receiver)
+        let (shared, drive) = SharedSync::observe(sync);
+        syncs.push(async move { observe_sync(drive.await, round, "verified") });
+        let handle = shared.wait();
+        self.verified_coverage.register(round, digest, shared);
+        handle
     }
 
-    fn verified_sync_handle(&self, round: Round, digest: BlockDigestFor<V>) -> Option<Handle<()>> {
-        self.verified_coverage.lock().sync_handle(round, digest)
-    }
-
-    fn verified_covers_enqueued(&self, round: Round, digest: BlockDigestFor<V>) -> bool {
-        self.verified_coverage.lock().covers_enqueued(round, digest)
-    }
-
-    fn log_verified_coverage(&self, round: Round) {
-        debug!(
-            ?round,
-            name = "notarized",
-            "cache covered by verified block"
-        );
-    }
-
-    fn verified_coverage_sync(
-        &self,
-        round: Round,
-        digest: BlockDigestFor<V>,
-    ) -> Option<Handle<()>> {
-        let sync = self.verified_sync_handle(round, digest);
-        if sync.is_some() {
-            self.log_verified_coverage(round);
-        }
-        sync
-    }
-
-    fn verified_coverage_enqueued(&self, round: Round, digest: BlockDigestFor<V>) -> bool {
-        if self.verified_covers_enqueued(round, digest) {
-            self.log_verified_coverage(round);
-            true
-        } else {
-            false
-        }
-    }
-
+    /// Persists a notarized block, blocking until it is durable.
+    ///
+    /// When a verified sync already covers this `(round, digest)`, its driver
+    /// guarantees durability, so we skip both the redundant write and the
+    /// blocking wait.
     async fn put_notarized_block(
         &mut self,
         round: Round,
         digest: BlockDigestFor<V>,
         block: V::StoredBlock,
     ) {
-        if self.verified_coverage_enqueued(round, digest) {
+        if self.verified_coverage.covers(round, digest) {
+            debug!(?round, name = "notarized", "cache covered by verified block");
             return;
         }
 
         let handle = self.cache.put_block_start_sync(round, digest, block).await;
-        cache::Manager::<E, V, P::Scheme>::handle_sync_result(handle.await, round, "notarized");
+        observe_sync(handle.await, round, "notarized");
     }
 
+    /// Persists a notarized block and returns a handle that resolves once it is
+    /// durable, reusing the verified sync when it already covers this block.
     async fn put_notarized_block_start_sync(
         &mut self,
         round: Round,
         digest: BlockDigestFor<V>,
         block: V::StoredBlock,
     ) -> Handle<()> {
-        if let Some(sync) = self.verified_coverage_sync(round, digest) {
-            return sync;
+        if let Some(handle) = self.verified_coverage.wait(round, digest) {
+            debug!(?round, name = "notarized", "cache covered by verified block");
+            return handle;
         }
 
         self.cache.put_block_start_sync(round, digest, block).await
     }
 
+    /// Folds any pending notarization-certificate sync for `round` into the
+    /// certified block's durability barrier.
     fn certified_sync_handle(
         &mut self,
         round: Round,
         digest: BlockDigestFor<V>,
         block_sync: Handle<()>,
     ) -> Handle<()> {
-        let pending = self.notarization_syncs.lock().remove(&round);
-        let Some((pending_digest, notarization_sync)) = pending else {
+        let Some((pending_digest, notarization_sync)) = self.notarization_syncs.take(round) else {
             return block_sync;
         };
         if pending_digest != digest {
@@ -1903,18 +1792,15 @@ where
                 "notarization sync does not match certified block"
             );
             self.notarization_syncs
-                .lock()
-                .insert(round, (pending_digest, notarization_sync));
+                .register(round, pending_digest, notarization_sync);
             return block_sync;
         }
 
+        // The notarization sync is observed (and panics on failure) by its own
+        // driver; here we only fold its completion into the certified barrier.
+        let notarization_wait = notarization_sync.wait();
         Handle::from_future(async move {
-            let (notarization_result, block_result) = join(notarization_sync, block_sync).await;
-            cache::Manager::<E, V, P::Scheme>::handle_sync_result(
-                notarization_result,
-                round,
-                "notarization",
-            );
+            let (_, block_result) = join(notarization_wait, block_sync).await;
             block_result
         })
     }
@@ -2370,12 +2256,8 @@ where
             previous.view().saturating_sub(self.view_retention_timeout),
         );
         self.cache.prune_by_view(prune_round).await;
-        self.verified_coverage.lock().prune(prune_round);
-        {
-            let mut syncs = self.notarization_syncs.lock();
-            let retained = syncs.split_off(&prune_round);
-            *syncs = retained;
-        }
+        self.verified_coverage.prune(prune_round);
+        self.notarization_syncs.prune(prune_round);
 
         // Prune round-bound requests at or below the processed round.
         resolver.retain(handler::above_round_floor::<V::Commitment>(
