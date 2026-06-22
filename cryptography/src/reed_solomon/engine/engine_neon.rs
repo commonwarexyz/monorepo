@@ -91,8 +91,6 @@ impl Default for Neon {
 
 // ======================================================================
 // Neon - PRIVATE
-//
-//
 
 impl Neon {
     #[target_feature(enable = "neon")]
@@ -119,7 +117,7 @@ impl Neon {
         }
     }
 
-    // Impelemntation of LEO_MUL_128
+    // Implementation of LEO_MUL_128
     #[inline(always)]
     fn mul_128(
         value_lo: uint8x16_t,
@@ -163,7 +161,7 @@ impl Neon {
         (prod_lo, prod_hi)
     }
 
-    //// {x_lo, x_hi} ^= {y_lo, y_hi} * log_m
+    // {x_lo, x_hi} ^= {y_lo, y_hi} * log_m.
     // Implementation of LEO_MULADD_128
     #[inline(always)]
     fn muladd_128(
@@ -289,7 +287,6 @@ impl Neon {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // Drop unsafe privileges
         self.fft_private(data, pos, size, truncated_size, skew_delta);
     }
 
@@ -452,7 +449,6 @@ impl Neon {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // Drop unsafe privileges
         self.ifft_private(data, pos, size, truncated_size, skew_delta);
     }
 

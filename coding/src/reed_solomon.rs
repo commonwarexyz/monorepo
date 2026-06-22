@@ -205,14 +205,14 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
 /// Return the canonical shard width for a payload and shard count.
 ///
 /// Encoding prefixes the payload with its length, splits the result across
-/// `k` original shards, and rounds up to an even width required by
-/// `reed-solomon-simd`. Decode uses the same calculation to reject commitments
-/// that decode to the same payload with a non-canonical shard width.
+/// `k` original shards, and rounds up to an even width required by the
+/// Reed-Solomon implementation. Decode uses the same calculation to reject
+/// commitments that decode to the same payload with a non-canonical shard width.
 const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
     let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
 
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
+    // Ensure shard length is even, as required by the Reed-Solomon implementation.
     if !shard_len.is_multiple_of(2) {
         shard_len += 1;
     }
@@ -923,7 +923,7 @@ mod tests {
     fn test_invalid_total() {
         let data = b"Test parameter validation";
 
-        // total <= min should panic
+        // The total shard count must exceed the recovery threshold.
         encode::<Sha256, _>(3, 3, data.as_slice(), &STRATEGY).unwrap();
     }
 
@@ -932,7 +932,7 @@ mod tests {
     fn test_invalid_min() {
         let data = b"Test parameter validation";
 
-        // min = 0 should panic
+        // The recovery threshold must be non-zero.
         encode::<Sha256, _>(5, 0, data.as_slice(), &STRATEGY).unwrap();
     }
 
@@ -1025,8 +1025,8 @@ mod tests {
         let data = b"leaf_count mismatch proof";
         let (commitment, shards) = RS::encode(&config_actual, data.as_slice(), &STRATEGY).unwrap();
 
-        // Previously this passed because check() ignored config and only verified
-        // against commitment root. It must now fail immediately.
+        // A proof generated under a different shard configuration is invalid
+        // for this commitment.
         let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }

@@ -118,11 +118,6 @@ recovery_chunk_1 = FFT( IFFT(original_chunk), skew_1 )
 
 This is implemented in [`LowRateEncoder`].
 
-# Decoding
-
-**TODO**
-
-
 [`GfElement`]: crate::reed_solomon::engine::GfElement
 [`HighRateEncoder`]: crate::reed_solomon::rate::HighRateEncoder
 [`LowRateEncoder`]: crate::reed_solomon::rate::LowRateEncoder

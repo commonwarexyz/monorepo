@@ -82,7 +82,7 @@ pub const GF_POLYNOMIAL: usize = 0x1002D;
 /// during processing and returned at the original shard length.
 pub const SHARD_CHUNK_BYTES: usize = 64;
 
-/// TODO
+/// Cantor basis used by the additive FFT over GF(2^16).
 pub const CANTOR_BASIS: [GfElement; GF_BITS] = [
     0x0001, 0xACCA, 0x3C0E, 0x163E, 0xC582, 0xED2E, 0x914C, 0x4012, 0x6C98, 0x10D8, 0x6A72, 0xB900,
     0xFDB8, 0xFB34, 0xFF38, 0x991E,

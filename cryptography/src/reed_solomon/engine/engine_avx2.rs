@@ -95,8 +95,6 @@ impl Default for Avx2 {
 
 // ======================================================================
 // Avx2 - PRIVATE
-//
-//
 
 #[derive(Copy, Clone)]
 struct LutAvx2 {
@@ -164,7 +162,7 @@ impl Avx2 {
         }
     }
 
-    // Impelemntation of LEO_MUL_256
+    // Implementation of LEO_MUL_256
     #[inline(always)]
     fn mul_256(value_lo: __m256i, value_hi: __m256i, lut_avx2: LutAvx2) -> (__m256i, __m256i) {
         let mut prod_lo: __m256i;
@@ -194,7 +192,7 @@ impl Avx2 {
         (prod_lo, prod_hi)
     }
 
-    //// {x_lo, x_hi} ^= {y_lo, y_hi} * log_m
+    // {x_lo, x_hi} ^= {y_lo, y_hi} * log_m.
     // Implementation of LEO_MULADD_256
     #[inline(always)]
     fn muladd_256(
@@ -311,7 +309,6 @@ impl Avx2 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // Drop unsafe privileges
         self.fft_private(data, pos, size, truncated_size, skew_delta);
     }
 
@@ -464,7 +461,6 @@ impl Avx2 {
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        // Drop unsafe privileges
         self.ifft_private(data, pos, size, truncated_size, skew_delta);
     }
 

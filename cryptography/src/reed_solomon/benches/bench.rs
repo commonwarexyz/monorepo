@@ -176,7 +176,6 @@ fn benchmarks_main(c: &mut Criterion) {
 // BENCHMARKS - RATE
 
 fn benchmarks_rate(c: &mut Criterion) {
-    // benchmarks_rate_one(c, "rate-Naive", Naive::new);
     benchmarks_rate_one(c, "rate", DefaultEngine::new);
 }
 

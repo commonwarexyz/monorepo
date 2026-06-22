@@ -262,9 +262,7 @@ impl ShardsRefMut<'_> {
     }
 
     // Returns mutable references to flat-arrays of shard-ranges
-    // `x .. x + count` and `y .. y + count`.
-    //
-    // Ranges must not overlap.
+    // `x .. x + count` and `y .. y + count`. Ranges must not overlap.
     pub(crate) fn flat2_mut(
         &mut self,
         mut x: usize,
