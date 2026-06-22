@@ -5,8 +5,8 @@ use crate::{
         reporter::MonitorReporter,
     },
     stateful::{
-        Application, Config as StatefulConfig, Proposed, PruneConfig, Stateful as StatefulActor,
-        SyncPlan,
+        Application, Config as StatefulConfig, Input, Proposed, PruneConfig,
+        Stateful as StatefulActor, SyncPlan,
         db::{
             DatabaseSet, Merkleized as _, Shared, SyncEngineConfig, Unmerkleized as _,
             p2p::{compact as compact_resolver, standard as qmdb_resolver},
@@ -20,6 +20,7 @@ use commonware_consensus::{
     Block as ConsensusBlock, CertifiableBlock, Heightable,
     marshal::{
         self,
+        ancestry::Ancestry,
         core::{Actor as MarshalActor, CommitmentFallback},
         resolver::p2p as marshal_resolver,
         standard::{Deferred, Standard},
@@ -58,7 +59,7 @@ use commonware_storage::{
 use commonware_utils::{
     NZDuration, NZU64, NZUsize, non_empty_range, range::NonEmptyRange, sync::Mutex, test_rng,
 };
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use rand_core::Rng;
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -239,7 +240,8 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     type Context = Context<sha256::Digest, ed25519::PublicKey>;
     type Block = Block;
     type Databases = MultiDatabaseSet<E>;
-    type InputProvider = ();
+    type Provider = ();
+    type Input = ();
 
     async fn genesis(&mut self) -> Self::Block {
         self.genesis.clone()
@@ -248,9 +250,9 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn propose(
         &mut self,
         context: (E, Self::Context),
-        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
-        _input: &mut Self::InputProvider,
+        _input: Input<Self::Input, Self::Provider>,
     ) -> Option<Proposed<Self, E>> {
         let mut ancestry = Box::pin(ancestry);
         let parent = ancestry.next().await?;
@@ -282,7 +284,7 @@ impl<E: Rng + Spawner + StorageContext> Application<E> for App {
     async fn verify(
         &mut self,
         _context: (E, Self::Context),
-        ancestry: impl Stream<Item = Arc<Self::Block>> + Send,
+        ancestry: impl Ancestry<Self::Block>,
         batches: <Self::Databases as DatabaseSet<E>>::Unmerkleized,
     ) -> Option<<Self::Databases as DatabaseSet<E>>::Merkleized> {
         let mut ancestry = Box::pin(ancestry);
@@ -634,7 +636,7 @@ impl EngineDefinition for MultiDbEngine {
             StatefulConfig {
                 application,
                 db_config,
-                input_provider: (),
+                provider: (),
                 marshal: marshal_mailbox.clone(),
                 mailbox_size: NZUsize!(100),
                 plan,

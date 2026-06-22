@@ -603,6 +603,14 @@ impl FixedEpocher {
         let last = first.checked_add(self.0 - 1)?;
         Some((Height::new(first), Height::new(last)))
     }
+
+    /// Returns the midpoint block height in the given epoch.
+    ///
+    /// Returns `None` if the epoch is not supported.
+    pub fn midpoint(&self, epoch: Epoch) -> Option<Height> {
+        let (first, _) = self.bounds(epoch)?;
+        first.get().checked_add(self.0 / 2).map(Height::new)
+    }
 }
 
 impl Epocher for FixedEpocher {

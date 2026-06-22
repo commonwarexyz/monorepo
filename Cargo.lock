@@ -1639,6 +1639,7 @@ dependencies = [
  "commonware-cryptography",
  "commonware-formatting",
  "commonware-macros",
+ "commonware-math",
  "commonware-p2p",
  "commonware-parallel",
  "commonware-resolver",

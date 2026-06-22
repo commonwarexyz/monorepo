@@ -1,5 +1,6 @@
 //! Simulation action types for testing.
 
+use commonware_consensus::types::Round;
 use commonware_cryptography::PublicKey;
 use commonware_p2p::simulated::Link;
 use commonware_runtime::deterministic;
@@ -19,12 +20,12 @@ pub enum Crash<P: PublicKey> {
         count: usize,
     },
 
-    /// Delay some validators from starting until after N finalizations.
-    Delay {
-        /// Number of validators to delay.
-        count: usize,
-        /// Number of finalizations before starting delayed validators.
-        after: u64,
+    /// Delay specific validators until the given round is observed.
+    DelayRound {
+        /// Validators to delay.
+        participants: Vec<P>,
+        /// Round to wait for before starting delayed validators.
+        round: Round,
     },
 
     /// Time-indexed action schedule for precise control.
