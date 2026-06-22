@@ -334,6 +334,68 @@ mod tests {
         PartitionedOrdered::new(context, OneCap)
     }
 
+    /// A partitioned ordered index with a tiny spill threshold, so partitions convert to the
+    /// spilled `BTreeMap` representation almost immediately. Routing the generic battery through
+    /// this fixture re-validates every behavior against the spilled cursor / nav / value paths.
+    fn new_partitioned_ordered_spilling(
+        context: deterministic::Context,
+    ) -> PartitionedOrdered<OneCap, u64, 1> {
+        PartitionedOrdered::with_threshold(context, OneCap, 2)
+    }
+
+    /// Run the generic index battery against the spilling fixture, so the spilled-partition
+    /// representation is exercised by the same assertions as the inline (SoA) representation.
+    #[test_traced]
+    fn test_partitioned_ordered_spilling() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            macro_rules! spilled {
+                ($($h:ident),+ $(,)?) => {$(
+                    $h(&mut new_partitioned_ordered_spilling(
+                        context.child(concat!("spill_", stringify!($h))),
+                    ));
+                )+};
+            }
+            spilled!(
+                run_index_basic,
+                run_index_get_many,
+                run_index_cursor_find,
+                run_index_key_lengths_and_metrics,
+                run_index_value_order,
+                run_index_remove_specific,
+                run_index_empty_key,
+                run_index_mutate_through_iterator,
+                run_index_mutate_middle_of_four,
+                run_index_remove_through_iterator,
+                run_index_insert_through_iterator,
+                run_index_cursor_insert_after_done_appends,
+                run_index_remove_to_nothing_then_add,
+                run_index_insert_and_remove_cursor,
+                run_index_insert_and_retain_vacant,
+                run_index_insert_and_retain_vacant_not_retained,
+                run_index_insert_and_retain_replace_one,
+                run_index_insert_and_retain_dead_insert,
+                run_index_insert_and_retain_single_value,
+                run_index_remove_middle_then_next,
+                run_index_remove_to_nothing,
+                run_index_cursor_insert_with_next,
+                run_index_cursor_delete_last_then_next,
+                run_index_delete_in_middle_then_continue,
+                run_index_delete_first,
+                run_index_delete_first_and_insert,
+                run_index_insert_at_entry_then_next,
+                run_index_delete_last_then_insert_while_done,
+                run_index_drop_mid_iteration_preserves_chain,
+                run_index_entry_replacement_not_a_collision,
+                run_index_large_collision_chain,
+            );
+            run_index_many_keys(
+                &mut new_partitioned_ordered_spilling(context.child("spill_many_keys")),
+                |bytes| context.fill(bytes),
+            );
+        });
+    }
+
     #[test_traced]
     fn test_hash_index_basic() {
         let runner = deterministic::Runner::default();

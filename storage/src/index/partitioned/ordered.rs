@@ -18,7 +18,10 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, MetricsExt as _},
     Metrics,
 };
-use std::ops::Range;
+use std::{
+    collections::{btree_map, hash_map, BTreeMap, HashMap},
+    ops::{Bound, Range},
+};
 
 const MUST_CALL_NEXT: &str = "must call Cursor::next()";
 const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
@@ -34,14 +37,14 @@ enum State {
     Done,
 }
 
-/// A [crate::index::Cursor] over the values of a single translated key within a partition.
+/// A [Cursor] over a translated key's values held inline in a partition's sorted arrays.
 ///
 /// The key's values occupy a contiguous `run` of indices in the partition's sorted arrays, cached
 /// here (resolved once when the cursor is created) so each operation avoids re-searching for it.
 /// The cursor borrows the partition exclusively, so it is the only writer: `run.start` never moves,
 /// and `insert`/`delete` adjust `run.end` by one in lockstep with the array, keeping the cached run
 /// exact without another `lower_bound`.
-pub struct Cursor<'a, K: Ord + Copy, V> {
+pub struct SoaCursor<'a, K: Ord + Copy, V> {
     partition: &'a mut Partition<K, V>,
     key: K,
     run: Range<usize>,
@@ -51,7 +54,7 @@ pub struct Cursor<'a, K: Ord + Copy, V> {
     pruned: &'a Counter,
 }
 
-impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
+impl<'a, K: Ord + Copy, V> SoaCursor<'a, K, V> {
     const fn new(
         partition: &'a mut Partition<K, V>,
         key: K,
@@ -72,7 +75,7 @@ impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
     }
 }
 
-impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, V> {
+impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SoaCursor<'_, K, V> {
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {
@@ -140,10 +143,199 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
     }
 }
 
-/// A partitioned index storing each partition as sorted struct-of-arrays.
+/// A [Cursor] over a translated key's values held in a spilled partition's `BTreeMap`.
+///
+/// A spilled partition lives in the index's `spilled` side-table, each key mapping to its values
+/// newest-first. The cursor re-resolves the key's value vector through the side-table on each
+/// operation: spilling is the rare, attack-driven case, so the extra `BTreeMap` descent is off the
+/// hot path. Deleting a key's last value drops its entry, and emptying the partition's last key
+/// removes it from the side-table (reverting it to an empty sorted-array partition).
+pub struct SpilledCursor<'a, K: Ord + Copy, V> {
+    spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
+    partition: usize,
+    key: K,
+    state: State,
+    keys: &'a Gauge,
+    items: &'a Gauge,
+    pruned: &'a Counter,
+}
+
+impl<'a, K: Ord + Copy, V> SpilledCursor<'a, K, V> {
+    const fn new(
+        spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
+        partition: usize,
+        key: K,
+        keys: &'a Gauge,
+        items: &'a Gauge,
+        pruned: &'a Counter,
+    ) -> Self {
+        Self {
+            spilled,
+            partition,
+            key,
+            state: State::NeedNext { from: 0 },
+            keys,
+            items,
+            pruned,
+        }
+    }
+
+    /// The key's value vector (newest-first), or `None` if the key is absent.
+    fn vals(&self) -> Option<&Vec<V>> {
+        self.spilled
+            .get(&self.partition)
+            .and_then(|inner| inner.get(&self.key))
+    }
+
+    fn vals_mut(&mut self) -> Option<&mut Vec<V>> {
+        self.spilled
+            .get_mut(&self.partition)
+            .and_then(|inner| inner.get_mut(&self.key))
+    }
+}
+
+impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SpilledCursor<'_, K, V> {
+    type Value = V;
+
+    fn next(&mut self) -> Option<&V> {
+        let off = match self.state {
+            State::Done => return None,
+            State::NeedNext { from } => from,
+            State::Active { offset } => offset + 1,
+        };
+        // Two resolutions (length, then value): collapsing them needs the resolved borrow held
+        // across the `self.state` write, which NLL rejects (the returned value re-borrows `self`).
+        if off >= self.vals().map_or(0, Vec::len) {
+            self.state = State::Done;
+            return None;
+        }
+        self.state = State::Active { offset: off };
+        Some(&self.vals().unwrap()[off])
+    }
+
+    fn update(&mut self, value: V) {
+        match self.state {
+            State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
+            State::Done => panic!("{NO_ACTIVE_ITEM}"),
+            State::Active { offset } => self.vals_mut().unwrap()[offset] = value,
+        }
+    }
+
+    fn insert(&mut self, value: V) {
+        match self.state {
+            State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
+            State::Active { offset } => {
+                // Place immediately after the current value (newest-first); `next()` then returns
+                // the value after the inserted one.
+                self.vals_mut().unwrap().insert(offset + 1, value);
+                self.items.inc();
+                self.state = State::NeedNext { from: offset + 2 };
+            }
+            State::Done => {
+                // Append at the oldest position (vector end), re-creating the key (and partition
+                // entry) if it was emptied; a vacant key entry is a new key.
+                let inner = self.spilled.entry(self.partition).or_default();
+                match inner.entry(self.key) {
+                    btree_map::Entry::Occupied(mut run) => run.get_mut().push(value),
+                    btree_map::Entry::Vacant(run) => {
+                        run.insert(vec![value]);
+                        self.keys.inc();
+                    }
+                }
+                self.items.inc();
+            }
+        }
+    }
+
+    fn delete(&mut self) {
+        let offset = match self.state {
+            State::NeedNext { .. } => panic!("{MUST_CALL_NEXT}"),
+            State::Done => panic!("{NO_ACTIVE_ITEM}"),
+            State::Active { offset } => offset,
+        };
+        // While Active the cursor's partition and key are both present, so both entries are
+        // occupied; holding them lets the de-spill path drop the key and check emptiness without
+        // re-looking-up.
+        let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(self.partition) else {
+            unreachable!()
+        };
+        let btree_map::Entry::Occupied(mut run) = partition.get_mut().entry(self.key) else {
+            unreachable!()
+        };
+        let vals = run.get_mut();
+        vals.remove(offset);
+        let key_emptied = vals.is_empty();
+        self.items.dec();
+        self.pruned.inc();
+        if key_emptied {
+            // Removed the key's last value; drop the key, and de-spill the partition (back to an
+            // empty sorted array) if that was its last key.
+            self.keys.dec();
+            run.remove();
+            if partition.get().is_empty() {
+                partition.remove();
+            }
+        }
+        // The value after the deleted one shifted into `offset`.
+        self.state = State::NeedNext { from: offset };
+    }
+}
+
+/// A [crate::index::Cursor] over a translated key's values, dispatching to the partition's
+/// representation: inline sorted arrays ([SoaCursor]) or a spilled `BTreeMap` ([SpilledCursor]).
+pub enum Cursor<'a, K: Ord + Copy, V> {
+    Soa(SoaCursor<'a, K, V>),
+    Spilled(SpilledCursor<'a, K, V>),
+}
+
+impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, V> {
+    type Value = V;
+
+    fn next(&mut self) -> Option<&V> {
+        match self {
+            Cursor::Soa(c) => c.next(),
+            Cursor::Spilled(c) => c.next(),
+        }
+    }
+
+    fn update(&mut self, value: V) {
+        match self {
+            Cursor::Soa(c) => c.update(value),
+            Cursor::Spilled(c) => c.update(value),
+        }
+    }
+
+    fn insert(&mut self, value: V) {
+        match self {
+            Cursor::Soa(c) => c.insert(value),
+            Cursor::Spilled(c) => c.insert(value),
+        }
+    }
+
+    fn delete(&mut self) {
+        match self {
+            Cursor::Soa(c) => c.delete(),
+            Cursor::Spilled(c) => c.delete(),
+        }
+    }
+}
+
+/// Sorted-array length at which a partition spills to a `BTreeMap`. Set well above any honest
+/// occupancy (even ~1B keys at P=3 averages ~60 entries per partition) so honest workloads never
+/// spill; it exists only to bound adversarial key-grinding that floods a single partition.
+const SPILL_THRESHOLD: usize = 512;
+
+/// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
+/// partition to a `BTreeMap` to bound adversarial key-grinding (see `spilled`).
 pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     translator: T,
     partitions: Box<[Partition<T::Key, V>]>,
+    /// Partitions that have spilled out of their sorted arrays (over-full from grinding), keyed by
+    /// partition index; each maps translated keys to their values newest-first. Empty unless an
+    /// attack occurs. A spilled partition's sorted arrays are emptied, so an *empty* partition with
+    /// an entry here is "spilled"; an empty partition with no entry is genuinely empty.
+    spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
+    threshold: usize,
     keys: Gauge,
     items: Gauge,
     pruned: Counter,
@@ -152,6 +344,12 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given metrics context and translator.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
+        Self::with_threshold(ctx, translator, SPILL_THRESHOLD)
+    }
+
+    /// Create a new [Index] with an explicit spill threshold (used by tests to exercise spilling
+    /// without inserting [SPILL_THRESHOLD] keys).
+    pub(crate) fn with_threshold(ctx: impl Metrics, translator: T, threshold: usize) -> Self {
         const {
             assert!(P > 0 && P <= 3, "P must be in 1..=3");
         }
@@ -163,10 +361,97 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         Self {
             translator,
             partitions,
+            spilled: HashMap::new(),
+            threshold,
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
         }
+    }
+
+    /// Spill partition `i` to the side-table if its sorted array has reached the threshold. Pure
+    /// representation change: the key/item counts are unaffected, so the metrics are not touched.
+    fn maybe_spill(&mut self, i: usize) {
+        if self.partitions[i].len() < self.threshold {
+            return;
+        }
+        let inner: BTreeMap<T::Key, Vec<V>> = self.partitions[i].drain_runs().into_iter().collect();
+        self.spilled.insert(i, inner);
+    }
+
+    /// The values for translated key `k` in partition `i`, newest-first (empty if absent), from
+    /// whichever representation the partition currently uses.
+    fn partition_values(&self, i: usize, k: &T::Key) -> &[V] {
+        if self.partitions[i].is_empty() && !self.spilled.is_empty() {
+            if let Some(inner) = self.spilled.get(&i) {
+                return inner.get(k).map_or(&[], Vec::as_slice);
+            }
+        }
+        self.partitions[i].values(k)
+    }
+
+    /// Values of the smallest key in partition `i` (None if the partition is empty).
+    fn partition_first(&self, i: usize) -> Option<&[V]> {
+        if let Some(vals) = self.partitions[i].first_values() {
+            return Some(vals);
+        }
+        if !self.spilled.is_empty() {
+            if let Some(inner) = self.spilled.get(&i) {
+                return inner.first_key_value().map(|(_, v)| v.as_slice());
+            }
+        }
+        None
+    }
+
+    /// Values of the largest key in partition `i` (None if the partition is empty).
+    fn partition_last(&self, i: usize) -> Option<&[V]> {
+        if let Some(vals) = self.partitions[i].last_values() {
+            return Some(vals);
+        }
+        if !self.spilled.is_empty() {
+            if let Some(inner) = self.spilled.get(&i) {
+                return inner.last_key_value().map(|(_, v)| v.as_slice());
+            }
+        }
+        None
+    }
+
+    /// Values of the smallest key strictly greater than `k` in partition `i`.
+    fn partition_next_after(&self, i: usize, k: &T::Key) -> Option<&[V]> {
+        if let Some(vals) = self.partitions[i].next_values_after(k) {
+            return Some(vals);
+        }
+        if !self.spilled.is_empty() {
+            if let Some(inner) = self.spilled.get(&i) {
+                return inner
+                    .range((Bound::Excluded(*k), Bound::Unbounded))
+                    .next()
+                    .map(|(_, v)| v.as_slice());
+            }
+        }
+        None
+    }
+
+    /// Values of the largest key strictly less than `k` in partition `i`.
+    fn partition_prev_before(&self, i: usize, k: &T::Key) -> Option<&[V]> {
+        if let Some(vals) = self.partitions[i].prev_values_before(k) {
+            return Some(vals);
+        }
+        if !self.spilled.is_empty() {
+            if let Some(inner) = self.spilled.get(&i) {
+                return inner
+                    .range((Bound::Unbounded, Bound::Excluded(*k)))
+                    .next_back()
+                    .map(|(_, v)| v.as_slice());
+            }
+        }
+        None
+    }
+
+    /// Number of partitions currently spilled to the side-table.
+    #[cfg(test)]
+    fn spilled_count(&self) -> usize {
+        self.spilled.len()
     }
 }
 
@@ -189,7 +474,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        self.partitions[i].values(&k).iter()
+        self.partition_values(i, &k).iter()
     }
 
     fn get_many<'a, K: AsRef<[u8]>>(&'a self, keys: &[K], mut visit: impl FnMut(usize, &'a V))
@@ -209,7 +494,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             .collect();
         order.sort_unstable();
         for (partition, translated, key_idx) in order {
-            for value in self.partitions[partition].values(&translated) {
+            for value in self.partition_values(partition, &translated) {
                 visit(key_idx, value);
             }
         }
@@ -218,19 +503,38 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     fn get_mut<'a>(&'a mut self, key: &[u8]) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        let partition = &mut self.partitions[i];
-        let run = partition.run_range(&k);
-        if run.is_empty() {
-            return None;
+        if !self.partitions[i].is_empty() {
+            let run = self.partitions[i].run_range(&k);
+            if run.is_empty() {
+                return None;
+            }
+            return Some(Cursor::Soa(SoaCursor::new(
+                &mut self.partitions[i],
+                k,
+                run,
+                &self.keys,
+                &self.items,
+                &self.pruned,
+            )));
         }
-        Some(Cursor::new(
-            partition,
-            k,
-            run,
-            &self.keys,
-            &self.items,
-            &self.pruned,
-        ))
+        // Partition i is empty here; if it has spilled and holds `k`, hand out a spilled cursor.
+        // The `!is_empty()` short-circuit keeps this free (no hashing of `i`) until an attack.
+        if !self.spilled.is_empty()
+            && self
+                .spilled
+                .get(&i)
+                .is_some_and(|inner| inner.contains_key(&k))
+        {
+            return Some(Cursor::Spilled(SpilledCursor::new(
+                &mut self.spilled,
+                i,
+                k,
+                &self.keys,
+                &self.items,
+                &self.pruned,
+            )));
+        }
+        None
     }
 
     fn get_mut_or_insert<'a>(
@@ -240,34 +544,87 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     ) -> Option<Self::Cursor<'a>> {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        let partition = &mut self.partitions[i];
-        let run = partition.run_range(&k);
-        if run.is_empty() {
-            partition.insert_at(run.start, k, value);
+        if !self.partitions[i].is_empty() {
+            let run = self.partitions[i].run_range(&k);
+            if !run.is_empty() {
+                return Some(Cursor::Soa(SoaCursor::new(
+                    &mut self.partitions[i],
+                    k,
+                    run,
+                    &self.keys,
+                    &self.items,
+                    &self.pruned,
+                )));
+            }
+            self.partitions[i].insert_at(run.start, k, value);
             self.keys.inc();
             self.items.inc();
+            self.maybe_spill(i);
             return None;
         }
-        Some(Cursor::new(
-            partition,
-            k,
-            run,
-            &self.keys,
-            &self.items,
-            &self.pruned,
-        ))
+        // Partition i is empty here; if it has spilled, serve or create the key in its `BTreeMap`.
+        // The `!is_empty()` short-circuit keeps this free (no hashing of `i`) until an attack
+        // occurs; `inner`'s borrow ends at `contains_key` so the re-borrow for the cursor is sound.
+        if !self.spilled.is_empty() {
+            if let Some(inner) = self.spilled.get(&i) {
+                if inner.contains_key(&k) {
+                    return Some(Cursor::Spilled(SpilledCursor::new(
+                        &mut self.spilled,
+                        i,
+                        k,
+                        &self.keys,
+                        &self.items,
+                        &self.pruned,
+                    )));
+                }
+                self.spilled.get_mut(&i).unwrap().insert(k, vec![value]);
+                self.keys.inc();
+                self.items.inc();
+                return None;
+            }
+        }
+        // Genuinely empty partition: start a fresh sorted array.
+        self.partitions[i].insert_at(0, k, value);
+        self.keys.inc();
+        self.items.inc();
+        self.maybe_spill(i);
+        None
     }
 
     fn insert(&mut self, key: &[u8], value: Self::Value) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        let partition = &mut self.partitions[i];
-        let run = partition.run_range(&k);
-        partition.insert_at(run.start, k, value);
-        self.items.inc();
-        if run.is_empty() {
-            self.keys.inc();
+        if !self.partitions[i].is_empty() {
+            let run = self.partitions[i].run_range(&k);
+            let new_key = run.is_empty();
+            self.partitions[i].insert_at(run.start, k, value);
+            self.items.inc();
+            if new_key {
+                self.keys.inc();
+            }
+            self.maybe_spill(i);
+            return;
         }
+        // Partition i is empty here. If it has spilled, route into its `BTreeMap`; the
+        // `!is_empty()` short-circuit keeps this free (no hashing of `i`) until an attack occurs.
+        if !self.spilled.is_empty() {
+            if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
+                match partition.get_mut().entry(k) {
+                    btree_map::Entry::Occupied(mut run) => run.get_mut().insert(0, value),
+                    btree_map::Entry::Vacant(run) => {
+                        run.insert(vec![value]);
+                        self.keys.inc();
+                    }
+                }
+                self.items.inc();
+                return;
+            }
+        }
+        // Genuinely empty partition: start a fresh sorted array.
+        self.partitions[i].insert_at(0, k, value);
+        self.items.inc();
+        self.keys.inc();
+        self.maybe_spill(i);
     }
 
     fn insert_and_retain(
@@ -289,16 +646,33 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
     fn remove(&mut self, key: &[u8]) {
         let (i, sub) = partition_index_and_sub_key::<P>(key);
         let k = self.translator.transform(sub);
-        let partition = &mut self.partitions[i];
-        let run = partition.run_range(&k);
-        if run.is_empty() {
+        if !self.partitions[i].is_empty() {
+            let run = self.partitions[i].run_range(&k);
+            if run.is_empty() {
+                return;
+            }
+            let n = run.len();
+            self.partitions[i].remove_run(run);
+            self.keys.dec();
+            self.items.dec_by(n as i64);
+            self.pruned.inc_by(n as u64);
             return;
         }
-        let n = run.len();
-        partition.remove_run(run);
-        self.keys.dec();
-        self.items.dec_by(n as i64);
-        self.pruned.inc_by(n as u64);
+        // Partition i is empty here; if spilled, remove from its `BTreeMap` (and drop the
+        // partition entry, reverting to an empty sorted array, once its last key is gone).
+        if !self.spilled.is_empty() {
+            if let hash_map::Entry::Occupied(mut partition) = self.spilled.entry(i) {
+                if let Some(vals) = partition.get_mut().remove(&k) {
+                    let n = vals.len();
+                    self.keys.dec();
+                    self.items.dec_by(n as i64);
+                    self.pruned.inc_by(n as u64);
+                    if partition.get().is_empty() {
+                        partition.remove();
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(test)]
@@ -329,19 +703,20 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let k = self.translator.transform(sub);
         // The largest translated key strictly less than `k`: within the partition first, then the
         // last key of the nearest lower partition, else cycle to the global last key.
-        if let Some(vals) = self.partitions[i].prev_values_before(&k) {
+        if let Some(vals) = self.partition_prev_before(i, &k) {
             return Some((vals.iter(), false));
         }
-        for p in self.partitions[..i].iter().rev() {
-            if let Some(vals) = p.last_values() {
+        for p in (0..i).rev() {
+            if let Some(vals) = self.partition_last(p) {
                 return Some((vals.iter(), false));
             }
         }
-        self.partitions
-            .iter()
-            .rev()
-            .find_map(|p| p.last_values())
-            .map(|vals| (vals.iter(), true))
+        for p in (0..self.partitions.len()).rev() {
+            if let Some(vals) = self.partition_last(p) {
+                return Some((vals.iter(), true));
+            }
+        }
+        None
     }
 
     fn next_translated_key<'a>(
@@ -355,39 +730,44 @@ impl<T: Translator, V: Send + Sync, const P: usize> Ordered for Index<T, V, P> {
         let k = self.translator.transform(sub);
         // The smallest translated key strictly greater than `k`: within the partition first, then
         // the first key of the nearest higher partition, else cycle to the global first key.
-        if let Some(vals) = self.partitions[i].next_values_after(&k) {
+        if let Some(vals) = self.partition_next_after(i, &k) {
             return Some((vals.iter(), false));
         }
-        for p in &self.partitions[i + 1..] {
-            if let Some(vals) = p.first_values() {
+        for p in i + 1..self.partitions.len() {
+            if let Some(vals) = self.partition_first(p) {
                 return Some((vals.iter(), false));
             }
         }
-        self.partitions
-            .iter()
-            .find_map(|p| p.first_values())
-            .map(|vals| (vals.iter(), true))
+        for p in 0..self.partitions.len() {
+            if let Some(vals) = self.partition_first(p) {
+                return Some((vals.iter(), true));
+            }
+        }
+        None
     }
 
     fn first_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.partitions
-            .iter()
-            .find_map(|p| p.first_values())
-            .map(|vals| vals.iter())
+        for p in 0..self.partitions.len() {
+            if let Some(vals) = self.partition_first(p) {
+                return Some(vals.iter());
+            }
+        }
+        None
     }
 
     fn last_translated_key<'a>(&'a self) -> Option<impl Iterator<Item = &'a V> + Send + 'a>
     where
         V: 'a,
     {
-        self.partitions
-            .iter()
-            .rev()
-            .find_map(|p| p.last_values())
-            .map(|vals| vals.iter())
+        for p in (0..self.partitions.len()).rev() {
+            if let Some(vals) = self.partition_last(p) {
+                return Some(vals.iter());
+            }
+        }
+        None
     }
 }
 
@@ -401,6 +781,128 @@ mod tests {
 
     fn new_index(context: deterministic::Context) -> Index<OneCap, u64, 1> {
         Index::new(context, OneCap)
+    }
+
+    /// Index with a tiny spill threshold: a partition spills once it holds two entries. With
+    /// `OneCap` + P=1 the key byte selects the partition and the next byte is the translated key,
+    /// so keys sharing a first byte land in one partition.
+    fn new_index_spilling(context: deterministic::Context) -> Index<OneCap, u64, 1> {
+        Index::with_threshold(context, OneCap, 2)
+    }
+
+    #[test_traced]
+    fn test_spill_transition() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+            // Distinct translated keys in one partition (prefix 0x10).
+            index.insert(&[0x10, 0x01], 1);
+            assert_eq!(index.spilled_count(), 0);
+            index.insert(&[0x10, 0x02], 2); // second entry crosses the threshold -> spills
+            assert_eq!(index.spilled_count(), 1);
+            index.insert(&[0x10, 0x03], 3); // routed straight into the spilled map
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.keys(), 3);
+            assert_eq!(index.items(), 3);
+
+            // Values are served correctly from the spilled representation, newest-first.
+            assert_eq!(
+                index.get(&[0x10, 0x01]).copied().collect::<Vec<_>>(),
+                vec![1]
+            );
+            index.insert(&[0x10, 0x02], 22);
+            assert_eq!(
+                index.get(&[0x10, 0x02]).copied().collect::<Vec<_>>(),
+                vec![22, 2]
+            );
+            assert_eq!(index.items(), 4);
+
+            // A different prefix lands in its own (still inline) partition.
+            index.insert(&[0x20, 0x05], 5);
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(
+                index.get(&[0x20, 0x05]).copied().collect::<Vec<_>>(),
+                vec![5]
+            );
+        });
+    }
+
+    #[test_traced]
+    fn test_spill_nav() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+            // Partition 0x10: keys 0x01, 0x02 -> spills. Partition 0x20: key 0x05 -> inline.
+            // Partition 0x30: keys 0x07, 0x08 -> spills. Nav must cross spilled<->inline boundaries.
+            index.insert(&[0x10, 0x01], 1);
+            index.insert(&[0x10, 0x02], 2);
+            index.insert(&[0x20, 0x05], 5);
+            index.insert(&[0x30, 0x07], 7);
+            index.insert(&[0x30, 0x08], 8);
+            assert_eq!(index.spilled_count(), 2); // 0x10 and 0x30; 0x20 stays inline
+
+            assert_eq!(index.first_translated_key().unwrap().next(), Some(&1));
+            assert_eq!(index.last_translated_key().unwrap().next(), Some(&8));
+
+            // Within a spilled partition.
+            let (mut it, wrapped) = index.next_translated_key(&[0x10, 0x01]).unwrap();
+            assert!(!wrapped);
+            assert_eq!(it.next(), Some(&2));
+            // Spilled -> inline boundary.
+            let (mut it, wrapped) = index.next_translated_key(&[0x10, 0x02]).unwrap();
+            assert!(!wrapped);
+            assert_eq!(it.next(), Some(&5));
+            // Inline -> spilled boundary.
+            let (mut it, wrapped) = index.next_translated_key(&[0x20, 0x05]).unwrap();
+            assert!(!wrapped);
+            assert_eq!(it.next(), Some(&7));
+            // Spilled -> inline boundary, backwards.
+            let (mut it, wrapped) = index.prev_translated_key(&[0x30, 0x07]).unwrap();
+            assert!(!wrapped);
+            assert_eq!(it.next(), Some(&5));
+            // Inline -> spilled boundary, backwards.
+            let (mut it, wrapped) = index.prev_translated_key(&[0x20, 0x05]).unwrap();
+            assert!(!wrapped);
+            assert_eq!(it.next(), Some(&2));
+            // Wrap-around from the global last key.
+            let (mut it, wrapped) = index.next_translated_key(&[0x30, 0x08]).unwrap();
+            assert!(wrapped);
+            assert_eq!(it.next(), Some(&1));
+        });
+    }
+
+    #[test_traced]
+    fn test_spill_despill_on_full_drain() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+            index.insert(&[0x10, 0x01], 1);
+            index.insert(&[0x10, 0x02], 2); // spills
+            assert_eq!(index.spilled_count(), 1);
+
+            index.remove(&[0x10, 0x01]);
+            assert_eq!(index.spilled_count(), 1); // 0x02 still present
+            index.remove(&[0x10, 0x02]);
+            assert_eq!(index.spilled_count(), 0); // last key removed -> de-spilled
+            assert_eq!(index.keys(), 0);
+
+            // The partition reverts to an inline sorted array.
+            index.insert(&[0x10, 0x09], 9);
+            assert_eq!(index.spilled_count(), 0);
+            assert_eq!(
+                index.get(&[0x10, 0x09]).copied().collect::<Vec<_>>(),
+                vec![9]
+            );
+        });
+    }
+
+    #[test_traced]
+    #[should_panic(expected = "must call Cursor::next()")]
+    fn test_spill_cursor_delete_before_next_panics() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+            index.insert(&[0x10, 0x01], 1);
+            index.insert(&[0x10, 0x02], 2); // spills
+            let mut cursor = index.get_mut(&[0x10, 0x01]).unwrap(); // SpilledCursor
+            cursor.delete();
+        });
     }
 
     #[test_traced]

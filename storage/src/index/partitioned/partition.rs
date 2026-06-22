@@ -30,6 +30,39 @@ impl<K, V> Default for Partition<K, V> {
 }
 
 impl<K: Ord + Copy, V> Partition<K, V> {
+    /// Whether the partition holds no entries.
+    pub(super) const fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The number of stored entries (values, counting collisions). This is the size of the sorted
+    /// array, i.e. the cost driver of an insert memmove, so it is what the spill guard thresholds
+    /// on.
+    pub(super) const fn len(&self) -> usize {
+        self.keys.len()
+    }
+
+    /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
+    /// per distinct key with the values newest-first (matching the run order: SoA stores a run's
+    /// newest at its lowest index). Used to spill an over-full partition into a `BTreeMap`.
+    pub(super) fn drain_runs(&mut self) -> Vec<(K, Vec<V>)> {
+        let keys = std::mem::take(&mut self.keys);
+        let vals = std::mem::take(&mut self.vals);
+        let mut vals = vals.into_iter();
+        let mut runs = Vec::new();
+        let mut i = 0;
+        while i < keys.len() {
+            let key = keys[i];
+            let mut j = i + 1;
+            while j < keys.len() && keys[j] == key {
+                j += 1;
+            }
+            runs.push((key, vals.by_ref().take(j - i).collect()));
+            i = j;
+        }
+        runs
+    }
+
     /// Index of the first entry whose key is `>= key` (the start of `key`'s run, or its insertion
     /// point if absent).
     fn lower_bound(&self, key: &K) -> usize {
@@ -232,5 +265,21 @@ mod tests {
         insert(&mut p, 10, 1);
         p.set(0, 99);
         assert_eq!(p.values(&10), &[99]);
+    }
+
+    #[test]
+    fn test_partition_drain_runs() {
+        let mut p = Partition::<u16, u64>::default();
+        // Two runs: key 10 with three values (newest-first 111, 11, 1), key 20 with one.
+        for (k, v) in [(10u16, 1u64), (20, 2), (10, 11), (10, 111)] {
+            insert(&mut p, k, v);
+        }
+        assert_eq!(p.len(), 4);
+        let runs = p.drain_runs();
+        // One pair per distinct key, ascending, values newest-first.
+        assert_eq!(runs, vec![(10, vec![111, 11, 1]), (20, vec![2])]);
+        // The partition is left empty.
+        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
     }
 }
