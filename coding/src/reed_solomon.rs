@@ -282,6 +282,7 @@ fn read_data_len(shards: &[&[u8]]) -> Result<usize, Error> {
 
 mod gf8 {
     use super::Error;
+    use commonware_parallel::Strategy;
     use std::sync::OnceLock;
 
     #[cfg(target_arch = "x86")]
@@ -497,15 +498,20 @@ mod gf8 {
         m: usize,
         shard_len: usize,
         originals: &[&[u8]],
+        strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Error> {
         debug_assert_eq!(originals.len(), k);
-        let mut recoveries = vec![0u8; m * shard_len];
-        for row in 0..m {
-            let recovery = &mut recoveries[row * shard_len..(row + 1) * shard_len];
+        let rows = strategy.map_collect_vec(0..m, |row| {
+            let mut recovery = vec![0u8; shard_len];
             for (col, original) in originals.iter().enumerate() {
                 debug_assert_eq!(original.len(), shard_len);
-                add_mul(recovery, original, cauchy(row, col, m)?);
+                add_mul(&mut recovery, original, cauchy(row, col, m)?);
             }
+            Ok(recovery)
+        });
+        let mut recoveries = Vec::with_capacity(m * shard_len);
+        for row in rows {
+            recoveries.extend(row?);
         }
         Ok(recoveries)
     }
@@ -557,6 +563,7 @@ mod gf8 {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use commonware_parallel::Sequential;
 
         fn combinations(
             n: usize,
@@ -599,7 +606,8 @@ mod gf8 {
                 })
                 .collect::<Vec<_>>();
             let original_refs = originals.iter().map(Vec::as_slice).collect::<Vec<_>>();
-            let recoveries = encode_recoveries(k, m, shard_len, &original_refs).unwrap();
+            let recoveries =
+                encode_recoveries(k, m, shard_len, &original_refs, &Sequential).unwrap();
 
             let mut all = original_refs;
             all.extend(recoveries.chunks(shard_len));
@@ -653,6 +661,7 @@ mod gf8 {
 
 mod gf16 {
     use super::Error;
+    use commonware_parallel::Strategy;
     use std::sync::OnceLock;
 
     pub(super) const FIELD_SIZE: usize = 1 << 16;
@@ -796,6 +805,7 @@ mod gf16 {
         m: usize,
         shard_len: usize,
         originals: &[&[u8]],
+        strategy: &impl Strategy,
     ) -> Result<Vec<u8>, Error> {
         if !shard_len.is_multiple_of(2) || k + m > FIELD_ORDER {
             return Err(Error::Inconsistent);
@@ -805,17 +815,23 @@ mod gf16 {
             .iter()
             .enumerate()
             .filter(|(_, shard)| is_non_zero(shard))
+            .map(|(idx, shard)| (idx, *shard))
             .collect::<Vec<_>>();
         let mut recoveries = vec![0u8; m * shard_len];
         if active.is_empty() {
             return Ok(recoveries);
         }
-        for row in 0..m {
-            let recovery = &mut recoveries[row * shard_len..(row + 1) * shard_len];
+        let rows = strategy.map_collect_vec(0..m, |row| {
+            let mut recovery = vec![0u8; shard_len];
             for (col, original) in &active {
                 debug_assert_eq!(original.len(), shard_len);
-                add_mul(recovery, original, cauchy(row, *col, m)?)?;
+                add_mul(&mut recovery, original, cauchy(row, *col, m)?)?;
             }
+            Ok(recovery)
+        });
+        recoveries.clear();
+        for row in rows {
+            recoveries.extend(row?);
         }
         Ok(recoveries)
     }
@@ -896,6 +912,7 @@ mod gf16 {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use commonware_parallel::Sequential;
 
         #[test]
         fn field_identities() {
@@ -921,7 +938,8 @@ mod gf16 {
                 })
                 .collect::<Vec<_>>();
             let original_refs = originals.iter().map(Vec::as_slice).collect::<Vec<_>>();
-            let recoveries = encode_recoveries(k, m, shard_len, &original_refs).unwrap();
+            let recoveries =
+                encode_recoveries(k, m, shard_len, &original_refs, &Sequential).unwrap();
             let provided_originals = (2..k)
                 .map(|i| (i, originals[i].as_slice()))
                 .collect::<Vec<_>>();
@@ -943,11 +961,12 @@ fn encode_recoveries(
     m: usize,
     shard_len: usize,
     originals: &[&[u8]],
+    strategy: &impl Strategy,
 ) -> Result<Vec<u8>, Error> {
     if k + m <= gf8::FIELD_SIZE {
-        return gf8::encode_recoveries(k, m, shard_len, originals);
+        return gf8::encode_recoveries(k, m, shard_len, originals, strategy);
     }
-    gf16::encode_recoveries(k, m, shard_len, originals)
+    gf16::encode_recoveries(k, m, shard_len, originals, strategy)
 }
 
 fn reconstruct_originals(
@@ -1006,7 +1025,7 @@ fn encode<H: Hasher, S: Strategy>(
     let (padded, shard_len) = prepare_data(data, k);
 
     let original_refs = padded.chunks(shard_len).collect::<Vec<_>>();
-    let recovery_buf = encode_recoveries(k, m, shard_len, &original_refs)?;
+    let recovery_buf = encode_recoveries(k, m, shard_len, &original_refs, strategy)?;
 
     // Create zero-copy Bytes views into the original and recovery buffers
     let originals: Bytes = padded.into();
@@ -1109,7 +1128,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         reconstruct_originals(k, m, shard_len, &provided_originals, &provided_recoveries)?;
     let original_refs = original_shards.iter().map(Vec::as_slice).collect::<Vec<_>>();
     let data = extract_data(&original_refs, k, shard_len)?;
-    let recovery_buf = encode_recoveries(k, m, shard_len, &original_refs)?;
+    let recovery_buf = encode_recoveries(k, m, shard_len, &original_refs, strategy)?;
     let mut shards = original_refs;
     shards.extend(recovery_buf.chunks(shard_len));
 
@@ -1420,7 +1439,7 @@ mod tests {
             .map(|shard| shard.to_vec())
             .collect::<Vec<_>>();
         let original_refs = padded.chunks(shard_len).collect::<Vec<_>>();
-        let recovery = encode_recoveries(k, m, shard_len, &original_refs).unwrap();
+        let recovery = encode_recoveries(k, m, shard_len, &original_refs, &STRATEGY).unwrap();
         shards.extend(recovery.chunks(shard_len).map(<[u8]>::to_vec));
 
         let (root, chunks) = build_chunks(&shards);
@@ -1680,8 +1699,14 @@ mod tests {
         let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
 
         let original_refs = padded.chunks(shard_size).collect::<Vec<_>>();
-        let recovery = encode_recoveries(min as usize, m as usize, shard_size, &original_refs)
-            .unwrap();
+        let recovery = encode_recoveries(
+            min as usize,
+            m as usize,
+            shard_size,
+            &original_refs,
+            &STRATEGY,
+        )
+        .unwrap();
         let mut recovery_shards: Vec<Vec<u8>> =
             recovery.chunks(shard_size).map(<[u8]>::to_vec).collect();
 
@@ -1747,7 +1772,7 @@ mod tests {
 
         let mut shards: Vec<Vec<u8>> = padded.chunks(shard_len).map(|s| s.to_vec()).collect();
         let original_refs = padded.chunks(shard_len).collect::<Vec<_>>();
-        let recovery = encode_recoveries(k, m, shard_len, &original_refs).unwrap();
+        let recovery = encode_recoveries(k, m, shard_len, &original_refs, &STRATEGY).unwrap();
         shards.extend(recovery.chunks(shard_len).map(<[u8]>::to_vec));
 
         let mut builder = Builder::<Sha256>::new(total as usize);
@@ -1801,7 +1826,8 @@ mod tests {
             .map(|shard| shard.to_vec())
             .collect();
         let original_refs = padded.chunks(oversized_shard_len).collect::<Vec<_>>();
-        let recovery = encode_recoveries(k, m, oversized_shard_len, &original_refs).unwrap();
+        let recovery =
+            encode_recoveries(k, m, oversized_shard_len, &original_refs, &STRATEGY).unwrap();
         oversized_shards.extend(recovery.chunks(oversized_shard_len).map(<[u8]>::to_vec));
 
         let mut builder = Builder::<Sha256>::new(total as usize);
