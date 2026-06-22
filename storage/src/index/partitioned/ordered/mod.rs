@@ -64,7 +64,7 @@ enum State {
 /// The cursor borrows the partition exclusively, so it is the only writer: `run.start` never moves,
 /// and `insert`/`delete` adjust `run.end` by one in lockstep with the array, keeping the cached run
 /// exact without another `lower_bound`.
-pub struct SoaCursor<'a, K: Ord + Copy, V> {
+struct SoaCursor<'a, K: Ord + Copy, V> {
     partition: &'a mut Partition<K, V>,
     key: K,
     run: Range<usize>,
@@ -170,7 +170,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SoaCursor<'_, 
 /// operation: spilling is the rare, attack-driven case, so the extra `BTreeMap` descent is off the
 /// hot path. Deleting a key's last value drops its entry, and emptying the partition's last key
 /// removes it from the side-table (reverting it to an empty sorted-array partition).
-pub struct SpilledCursor<'a, K: Ord + Copy, V> {
+struct SpilledCursor<'a, K: Ord + Copy, V> {
     spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
     partition: usize,
     key: K,
@@ -301,41 +301,56 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SpilledCursor<
     }
 }
 
-/// A [crate::index::Cursor] over a translated key's values, dispatching to the partition's
-/// representation: inline sorted arrays ([SoaCursor]) or a spilled `BTreeMap` ([SpilledCursor]).
-pub enum Cursor<'a, K: Ord + Copy, V> {
+/// A [crate::index::Cursor] over a translated key's values.
+///
+/// Opaque: it dispatches internally to the partition's representation -- inline sorted arrays
+/// (`SoaCursor`) or a spilled `BTreeMap` (`SpilledCursor`) -- without exposing which, so the spill
+/// mechanism stays an implementation detail rather than part of the public API.
+pub struct Cursor<'a, K: Ord + Copy, V>(CursorInner<'a, K, V>);
+
+enum CursorInner<'a, K: Ord + Copy, V> {
     Soa(SoaCursor<'a, K, V>),
     Spilled(SpilledCursor<'a, K, V>),
+}
+
+impl<'a, K: Ord + Copy, V> Cursor<'a, K, V> {
+    const fn soa(cursor: SoaCursor<'a, K, V>) -> Self {
+        Self(CursorInner::Soa(cursor))
+    }
+
+    const fn spilled(cursor: SpilledCursor<'a, K, V>) -> Self {
+        Self(CursorInner::Spilled(cursor))
+    }
 }
 
 impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, V> {
     type Value = V;
 
     fn next(&mut self) -> Option<&V> {
-        match self {
-            Cursor::Soa(c) => c.next(),
-            Cursor::Spilled(c) => c.next(),
+        match &mut self.0 {
+            CursorInner::Soa(c) => c.next(),
+            CursorInner::Spilled(c) => c.next(),
         }
     }
 
     fn update(&mut self, value: V) {
-        match self {
-            Cursor::Soa(c) => c.update(value),
-            Cursor::Spilled(c) => c.update(value),
+        match &mut self.0 {
+            CursorInner::Soa(c) => c.update(value),
+            CursorInner::Spilled(c) => c.update(value),
         }
     }
 
     fn insert(&mut self, value: V) {
-        match self {
-            Cursor::Soa(c) => c.insert(value),
-            Cursor::Spilled(c) => c.insert(value),
+        match &mut self.0 {
+            CursorInner::Soa(c) => c.insert(value),
+            CursorInner::Spilled(c) => c.insert(value),
         }
     }
 
     fn delete(&mut self) {
-        match self {
-            Cursor::Soa(c) => c.delete(),
-            Cursor::Spilled(c) => c.delete(),
+        match &mut self.0 {
+            CursorInner::Soa(c) => c.delete(),
+            CursorInner::Spilled(c) => c.delete(),
         }
     }
 }
@@ -530,7 +545,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
             if run.is_empty() {
                 return None;
             }
-            return Some(Cursor::Soa(SoaCursor::new(
+            return Some(Cursor::soa(SoaCursor::new(
                 &mut self.partitions[i],
                 k,
                 run,
@@ -547,7 +562,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
                 .get(&i)
                 .is_some_and(|inner| inner.contains_key(&k))
         {
-            return Some(Cursor::Spilled(SpilledCursor::new(
+            return Some(Cursor::spilled(SpilledCursor::new(
                 &mut self.spilled,
                 i,
                 k,
@@ -569,7 +584,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         if !self.partitions[i].is_empty() {
             let run = self.partitions[i].run_range(&k);
             if !run.is_empty() {
-                return Some(Cursor::Soa(SoaCursor::new(
+                return Some(Cursor::soa(SoaCursor::new(
                     &mut self.partitions[i],
                     k,
                     run,
@@ -590,7 +605,7 @@ impl<T: Translator, V: Send + Sync, const P: usize> Unordered for Index<T, V, P>
         if !self.spilled.is_empty() {
             if let Some(inner) = self.spilled.get(&i) {
                 if inner.contains_key(&k) {
-                    return Some(Cursor::Spilled(SpilledCursor::new(
+                    return Some(Cursor::spilled(SpilledCursor::new(
                         &mut self.spilled,
                         i,
                         k,
