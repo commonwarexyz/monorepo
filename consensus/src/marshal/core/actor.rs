@@ -1796,12 +1796,15 @@ where
             return block_sync;
         }
 
-        // The notarization sync is observed (and panics on failure) by its own
-        // driver; here we only fold its completion into the certified barrier.
+        // Wait for the notarization-certificate sync alongside the block sync and
+        // fail the barrier unless both are durable. (The notarization sync is also
+        // observed by its own pool driver, which panics on failure; propagating the
+        // result here makes the barrier obviously correct without relying on that
+        // panic to win a race against the finalize vote.)
         let notarization_wait = notarization_sync.wait();
         Handle::from_future(async move {
-            let (_, block_result) = join(notarization_wait, block_sync).await;
-            block_result
+            let (notarization_result, block_result) = join(notarization_wait, block_sync).await;
+            notarization_result.and(block_result)
         })
     }
 

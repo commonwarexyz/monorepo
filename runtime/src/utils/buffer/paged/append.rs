@@ -1246,6 +1246,11 @@ impl<B: Blob> Append<B> {
     }
 
     /// Flush buffered data and start making all pending mutations durable.
+    ///
+    /// The returned [`Handle`] is the durability signal: the caller must await it
+    /// to observe completion (and any failure). Once a sync is started the pending
+    /// mutations are considered issued, so a later [`Self::sync`] without
+    /// intervening writes returns immediately and does not wait for this handle.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
         let buf_guard = self.buffer.write().await;
         self.flush_internal(buf_guard, true, false).await?;

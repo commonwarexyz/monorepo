@@ -306,6 +306,11 @@ impl<B: Blob> Write<B> {
     }
 
     /// Flush buffered bytes and start durably syncing mutations tracked by this writer.
+    ///
+    /// The returned [`Handle`] is the durability signal: the caller must await it
+    /// to observe completion (and any failure). Once a sync is started the pending
+    /// mutations are considered issued, so a later [`Self::sync`] without
+    /// intervening writes returns immediately and does not wait for this handle.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
         let mut state = self.state.write().await;
         if let Some((buf, offset)) = state.buffer.take() {
