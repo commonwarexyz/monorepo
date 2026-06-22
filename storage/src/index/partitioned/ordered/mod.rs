@@ -46,7 +46,7 @@ use std::{
 const MUST_CALL_NEXT: &str = "must call Cursor::next()";
 const NO_ACTIVE_ITEM: &str = "no active item in Cursor";
 
-/// Position of a [Cursor] within its key's value run (offsets are newest-first, 0 = newest).
+/// Position of a [Cursor] within its key's value run (offset 0 is the run's first value).
 enum State {
     /// Before the first `next()` or after an `insert()`/`delete()`: the next `next()` returns the
     /// value at run offset `from`.
@@ -57,13 +57,14 @@ enum State {
     Done,
 }
 
-/// A [Cursor] over a translated key's values held inline in a partition's sorted arrays.
+/// A [Cursor] over a single translated key's values, held inline in a partition's sorted arrays
+/// where they occupy a contiguous index range (`run`).
 ///
-/// The key's values occupy a contiguous `run` of indices in the partition's sorted arrays, cached
-/// here (resolved once when the cursor is created) so each operation avoids re-searching for it.
-/// The cursor borrows the partition exclusively, so it is the only writer: `run.start` never moves,
-/// and `insert`/`delete` adjust `run.end` by one in lockstep with the array, keeping the cached run
-/// exact without another `lower_bound`.
+/// The cursor resolves `run` once, when created, and caches it so each operation indexes straight
+/// into the arrays instead of searching for the key again. The cache stays correct because the
+/// cursor borrows the partition exclusively: it is the sole writer and only ever adds or removes
+/// this key's own values. Nothing shifts the entries before the run, so `run.start` is fixed, and
+/// each `insert`/`delete` adjusts `run.end` by one to stay aligned with the array.
 struct SoaCursor<'a, K: Ord + Copy, V> {
     partition: &'a mut Partition<K, V>,
     key: K,
@@ -158,6 +159,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SoaCursor<'_, 
             // Removed the key's last value; the key is gone.
             self.keys.dec();
         }
+
         // The value after the deleted one shifted into `offset`.
         self.state = State::NeedNext { from: offset };
     }
@@ -200,7 +202,8 @@ impl<'a, K: Ord + Copy, V> SpilledCursor<'a, K, V> {
         }
     }
 
-    /// The key's value vector (newest-first), or `None` if the key is absent.
+    /// The values stored for the cursor's key, or `None` if the key has no values -- either its
+    /// entry was removed or the whole partition de-spilled.
     fn vals(&self) -> Option<&Vec<V>> {
         self.spilled
             .get(&self.partition)
@@ -223,6 +226,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SpilledCursor<
             State::NeedNext { from } => from,
             State::Active { offset } => offset + 1,
         };
+
         // Two resolutions (length, then value): collapsing them needs the resolved borrow held
         // across the `self.state` write, which NLL rejects (the returned value re-borrows `self`).
         if off >= self.vals().map_or(0, Vec::len) {
@@ -273,6 +277,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SpilledCursor<
             State::Done => panic!("{NO_ACTIVE_ITEM}"),
             State::Active { offset } => offset,
         };
+
         // While Active the cursor's partition and key are both present, so both entries are
         // occupied; holding them lets the de-spill path drop the key and check emptiness without
         // re-looking-up.
@@ -296,16 +301,13 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SpilledCursor<
                 partition.remove();
             }
         }
+
         // The value after the deleted one shifted into `offset`.
         self.state = State::NeedNext { from: offset };
     }
 }
 
 /// A [crate::index::Cursor] over a translated key's values.
-///
-/// Opaque: it dispatches internally to the partition's representation -- inline sorted arrays
-/// (`SoaCursor`) or a spilled `BTreeMap` (`SpilledCursor`) -- without exposing which, so the spill
-/// mechanism stays an implementation detail rather than part of the public API.
 pub struct Cursor<'a, K: Ord + Copy, V>(CursorInner<'a, K, V>);
 
 enum CursorInner<'a, K: Ord + Copy, V> {
@@ -365,28 +367,38 @@ const SPILL_THRESHOLD: usize = 512;
 /// partition to a `BTreeMap` to bound adversarial distinct-key grinding (see `spilled` and the
 /// module docs).
 pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
+    /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
+
+    /// The `2^(8*P)` partitions, indexed by the `P`-byte key prefix. Each stores its translated
+    /// keys and values as sorted arrays (the inline representation); an emptied partition may
+    /// instead have spilled (see `spilled`).
     partitions: Box<[Partition<T::Key, V>]>,
+
     /// Partitions that have spilled out of their sorted arrays (over-full from grinding), keyed by
-    /// partition index; each maps translated keys to their values newest-first. Empty unless an
-    /// attack occurs. A spilled partition's sorted arrays are emptied, so an *empty* partition with
-    /// an entry here is "spilled"; an empty partition with no entry is genuinely empty.
+    /// partition index; each maps translated keys to their values newest-first. Typically empty
+    /// unless key distribution is non-uniform, e.g. due to grinding. A spilled partition's sorted
+    /// arrays are emptied, so an *empty* partition with an entry here is "spilled"; an empty
+    /// partition with no entry is genuinely empty.
     spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
+
+    /// Sorted-array length at which a partition spills to `spilled`; [SPILL_THRESHOLD] in
+    /// production, lowered by tests to exercise spilling cheaply.
     threshold: usize,
+
+    /// Metric: distinct translated keys currently held across all partitions.
     keys: Gauge,
+
+    /// Metric: stored values currently held across all partitions.
     items: Gauge,
+
+    /// Metric: cumulative values removed (via `remove`, cursor `delete`, or `retain`).
     pruned: Counter,
 }
 
 impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
     /// Create a new [Index] with the given metrics context and translator.
     pub fn new(ctx: impl Metrics, translator: T) -> Self {
-        Self::with_threshold(ctx, translator, SPILL_THRESHOLD)
-    }
-
-    /// Create a new [Index] with an explicit spill threshold (used by tests to exercise spilling
-    /// without inserting [SPILL_THRESHOLD] keys).
-    pub(crate) fn with_threshold(ctx: impl Metrics, translator: T, threshold: usize) -> Self {
         const {
             assert!(P > 0 && P <= 3, "P must be in 1..=3");
         }
@@ -399,11 +411,20 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
             translator,
             partitions,
             spilled: HashMap::new(),
-            threshold,
+            threshold: SPILL_THRESHOLD,
             keys: ctx.gauge("keys", "Number of translated keys in the index"),
             items: ctx.gauge("items", "Number of items in the index"),
             pruned: ctx.counter("pruned", "Number of items pruned"),
         }
+    }
+
+    /// Create a new [Index] with an explicit spill threshold so tests can exercise spilling without
+    /// inserting [SPILL_THRESHOLD] keys.
+    #[cfg(test)]
+    pub(crate) fn with_threshold(ctx: impl Metrics, translator: T, threshold: usize) -> Self {
+        let mut index = Self::new(ctx, translator);
+        index.threshold = threshold;
+        index
     }
 
     /// Spill partition `i` to the side-table if its sorted array has reached the threshold. Pure
@@ -416,8 +437,8 @@ impl<T: Translator, V: Send + Sync, const P: usize> Index<T, V, P> {
         self.spilled.insert(i, inner);
     }
 
-    /// The values for translated key `k` in partition `i`, newest-first (empty if absent), from
-    /// whichever representation the partition currently uses.
+    /// The values for translated key `k` in partition `i` (empty if absent), from whichever
+    /// representation the partition currently uses.
     fn partition_values(&self, i: usize, k: &T::Key) -> &[V] {
         if self.partitions[i].is_empty() && !self.spilled.is_empty() {
             if let Some(inner) = self.spilled.get(&i) {
@@ -927,6 +948,70 @@ mod tests {
                 index.get(&[0x10, 0x09]).copied().collect::<Vec<_>>(),
                 vec![9]
             );
+        });
+    }
+
+    #[test_traced]
+    fn test_spill_full_lifecycle() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+
+            // Empty.
+            assert_eq!(index.spilled_count(), 0);
+            assert_eq!(index.keys(), 0);
+            assert_eq!(index.items(), 0);
+
+            // Empty -> inline: one entry stays below the threshold (2).
+            index.insert(&[0x10, 0x01], 1);
+            assert_eq!(index.spilled_count(), 0);
+
+            // Inline -> spilled: a second distinct key crosses the threshold.
+            index.insert(&[0x10, 0x02], 2);
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.keys(), 2);
+            assert_eq!(index.items(), 2);
+
+            // Spilled -> empty, draining both keys through a SpilledCursor (the cursor de-spill
+            // path); the partition reverts only once its last key is gone.
+            {
+                let mut cursor = index.get_mut(&[0x10, 0x01]).unwrap();
+                assert_eq!(cursor.next().copied(), Some(1));
+                cursor.delete();
+            }
+            assert_eq!(index.spilled_count(), 1); // 0x02 still present
+            {
+                let mut cursor = index.get_mut(&[0x10, 0x02]).unwrap();
+                assert_eq!(cursor.next().copied(), Some(2));
+                cursor.delete();
+            }
+            assert_eq!(index.spilled_count(), 0); // de-spilled back to empty
+            assert_eq!(index.keys(), 0);
+            assert_eq!(index.items(), 0);
+
+            // Empty -> inline -> spilled a second time: a de-spilled partition is fully reusable.
+            index.insert(&[0x10, 0x03], 3);
+            assert_eq!(index.spilled_count(), 0);
+            index.insert(&[0x10, 0x04], 4);
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(
+                index.get(&[0x10, 0x03]).copied().collect::<Vec<_>>(),
+                vec![3]
+            );
+            assert_eq!(
+                index.get(&[0x10, 0x04]).copied().collect::<Vec<_>>(),
+                vec![4]
+            );
+
+            // Spilled -> empty again, this time via `remove` (the other de-spill path).
+            index.remove(&[0x10, 0x03]);
+            assert_eq!(index.spilled_count(), 1); // 0x04 still present
+            index.remove(&[0x10, 0x04]);
+            assert_eq!(index.spilled_count(), 0);
+            assert_eq!(index.keys(), 0);
+            assert_eq!(index.items(), 0);
+
+            // Every removed value was counted once: 2 via cursor delete + 2 via remove.
+            assert_eq!(index.pruned(), 4);
         });
     }
 

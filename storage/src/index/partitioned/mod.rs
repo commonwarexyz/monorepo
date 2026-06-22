@@ -5,9 +5,8 @@
 //! - [`ordered`] keeps each partition as sorted struct-of-arrays. Eliding the shared prefix from
 //!   the stored keys makes it dense per key, so partitioning lowers the average bytes/key (by the
 //!   prefix length) once the fixed per-partition overhead is amortized over enough keys.
-//! - [`unordered`] keeps each partition as a hash sub-index. Here partitioning buys prefix sharding
-//!   and parallel loading, not a per-key memory saving: a hashmap pads the elided prefix back up to
-//!   the value's alignment.
+//! - [`unordered`] keeps each partition as a hash sub-index. Due to struct element alignment this
+//!   doesn't necessarily reduce memory per key even ignoring the fixed per-partition overhead.
 //!
 //! # Example
 //!
