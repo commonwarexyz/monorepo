@@ -268,6 +268,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failed_encoder_reset_preserves_state() {
+        let original = test_util::generate_original(2, 1024, 123);
+        let mut encoder = Encoder::new(2, 3, 1024).unwrap();
+
+        assert_eq!(
+            encoder.reset(3, 2, 3),
+            Err(Error::InvalidShardSize { shard_bytes: 3 })
+        );
+
+        for shard in &original {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let result = encoder.encode().unwrap();
+        let recovery: Vec<_> = result.recovery_iter().collect();
+
+        test_util::assert_hash(&recovery, test_util::LOW_2_3);
+    }
+
+    #[test]
+    fn failed_decoder_reset_preserves_state() {
+        let original = test_util::generate_original(2, 1024, 123);
+        let mut encoder = Encoder::new(2, 3, 1024).unwrap();
+        for shard in &original {
+            encoder.add_original_shard(shard).unwrap();
+        }
+        let result = encoder.encode().unwrap();
+        let recovery: Vec<_> = result.recovery_iter().map(<[u8]>::to_vec).collect();
+
+        let mut decoder = Decoder::new(2, 3, 1024).unwrap();
+
+        assert_eq!(
+            decoder.reset(3, 2, 3),
+            Err(Error::InvalidShardSize { shard_bytes: 3 })
+        );
+
+        decoder.add_recovery_shard(0, &recovery[0]).unwrap();
+        decoder.add_recovery_shard(1, &recovery[1]).unwrap();
+        let result = decoder.decode().unwrap();
+        let restored: BTreeMap<_, _> = result.restored_original_iter().collect();
+
+        assert_eq!(restored[&0], original[0]);
+        assert_eq!(restored[&1], original[1]);
+    }
+
     // ==================================================
     // supports
 

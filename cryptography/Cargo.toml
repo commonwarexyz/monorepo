@@ -120,6 +120,7 @@ std = [
 	"num-rational",
 	"num-traits",
 	"num-traits?/std",
+	"once_cell/std",
 	"p256/std",
 	"rand/std",
 	"rand/std_rng",

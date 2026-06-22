@@ -1,8 +1,8 @@
 use crate::reed_solomon::{
     engine::{Engine, GF_ORDER},
     rate::{
-        DecoderWork, EncoderWork, HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder,
-        Rate, RateDecoder, RateEncoder,
+        DecoderWork, EncoderWork, HighRate, HighRateDecoder, HighRateEncoder, LowRate,
+        LowRateDecoder, LowRateEncoder, Rate, RateDecoder, RateEncoder,
     },
     DecoderResult, EncoderResult, Error,
 };
@@ -62,6 +62,20 @@ fn use_high_rate(original_count: usize, recovery_count: usize) -> Result<bool, E
     }
 }
 
+fn validate_rate<E: Engine>(
+    original_count: usize,
+    recovery_count: usize,
+    shard_bytes: usize,
+) -> Result<bool, Error> {
+    let use_high = use_high_rate(original_count, recovery_count)?;
+    if use_high {
+        HighRate::<E>::validate(original_count, recovery_count, shard_bytes)?;
+    } else {
+        LowRate::<E>::validate(original_count, recovery_count, shard_bytes)?;
+    }
+    Ok(use_high)
+}
+
 // ======================================================================
 // DefaultRate - PUBLIC
 
@@ -85,7 +99,7 @@ enum InnerEncoder<E: Engine> {
     High(HighRateEncoder<E>),
     Low(LowRateEncoder<E>),
 
-    // This is only used temporarily during `reset`, never anywhere else.
+    // Used only after reset validation, while switching rates.
     #[default]
     None,
 }
@@ -163,39 +177,45 @@ impl<E: Engine> RateEncoder<E> for DefaultRateEncoder<E> {
         recovery_count: usize,
         shard_bytes: usize,
     ) -> Result<(), Error> {
-        let new_rate_is_high = use_high_rate(original_count, recovery_count)?;
+        let new_rate_is_high = validate_rate::<E>(original_count, recovery_count, shard_bytes)?;
+
+        match &mut self.0 {
+            InnerEncoder::High(high) if new_rate_is_high => {
+                return high.reset(original_count, recovery_count, shard_bytes);
+            }
+            InnerEncoder::Low(low) if !new_rate_is_high => {
+                return low.reset(original_count, recovery_count, shard_bytes);
+            }
+            _ => {}
+        }
 
         self.0 = match core::mem::take(&mut self.0) {
-            InnerEncoder::High(mut high) => {
-                if new_rate_is_high {
-                    high.reset(original_count, recovery_count, shard_bytes)?;
-                    InnerEncoder::High(high)
-                } else {
-                    let (engine, work) = high.into_parts();
-                    InnerEncoder::Low(LowRateEncoder::new(
+            InnerEncoder::High(high) => {
+                let (engine, work) = high.into_parts();
+                InnerEncoder::Low(
+                    LowRateEncoder::new(
                         original_count,
                         recovery_count,
                         shard_bytes,
                         engine,
                         Some(work),
-                    )?)
-                }
+                    )
+                    .expect("low-rate encoder configuration was validated"),
+                )
             }
 
-            InnerEncoder::Low(mut low) => {
-                if new_rate_is_high {
-                    let (engine, work) = low.into_parts();
-                    InnerEncoder::High(HighRateEncoder::new(
+            InnerEncoder::Low(low) => {
+                let (engine, work) = low.into_parts();
+                InnerEncoder::High(
+                    HighRateEncoder::new(
                         original_count,
                         recovery_count,
                         shard_bytes,
                         engine,
                         Some(work),
-                    )?)
-                } else {
-                    low.reset(original_count, recovery_count, shard_bytes)?;
-                    InnerEncoder::Low(low)
-                }
+                    )
+                    .expect("high-rate encoder configuration was validated"),
+                )
             }
 
             InnerEncoder::None => unreachable!(),
@@ -213,7 +233,7 @@ enum InnerDecoder<E: Engine> {
     High(HighRateDecoder<E>),
     Low(LowRateDecoder<E>),
 
-    // This is only used temporarily during `reset`, never anywhere else.
+    // Used only after reset validation, while switching rates.
     #[default]
     None,
 }
@@ -307,39 +327,45 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
         recovery_count: usize,
         shard_bytes: usize,
     ) -> Result<(), Error> {
-        let new_rate_is_high = use_high_rate(original_count, recovery_count)?;
+        let new_rate_is_high = validate_rate::<E>(original_count, recovery_count, shard_bytes)?;
+
+        match &mut self.0 {
+            InnerDecoder::High(high) if new_rate_is_high => {
+                return high.reset(original_count, recovery_count, shard_bytes);
+            }
+            InnerDecoder::Low(low) if !new_rate_is_high => {
+                return low.reset(original_count, recovery_count, shard_bytes);
+            }
+            _ => {}
+        }
 
         self.0 = match core::mem::take(&mut self.0) {
-            InnerDecoder::High(mut high) => {
-                if new_rate_is_high {
-                    high.reset(original_count, recovery_count, shard_bytes)?;
-                    InnerDecoder::High(high)
-                } else {
-                    let (engine, work) = high.into_parts();
-                    InnerDecoder::Low(LowRateDecoder::new(
+            InnerDecoder::High(high) => {
+                let (engine, work) = high.into_parts();
+                InnerDecoder::Low(
+                    LowRateDecoder::new(
                         original_count,
                         recovery_count,
                         shard_bytes,
                         engine,
                         Some(work),
-                    )?)
-                }
+                    )
+                    .expect("low-rate decoder configuration was validated"),
+                )
             }
 
-            InnerDecoder::Low(mut low) => {
-                if new_rate_is_high {
-                    let (engine, work) = low.into_parts();
-                    InnerDecoder::High(HighRateDecoder::new(
+            InnerDecoder::Low(low) => {
+                let (engine, work) = low.into_parts();
+                InnerDecoder::High(
+                    HighRateDecoder::new(
                         original_count,
                         recovery_count,
                         shard_bytes,
                         engine,
                         Some(work),
-                    )?)
-                } else {
-                    low.reset(original_count, recovery_count, shard_bytes)?;
-                    InnerDecoder::Low(low)
-                }
+                    )
+                    .expect("high-rate decoder configuration was validated"),
+                )
             }
 
             InnerDecoder::None => unreachable!(),

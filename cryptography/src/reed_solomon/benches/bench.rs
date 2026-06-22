@@ -43,6 +43,24 @@ fn generate_shards(shard_count: usize, shard_bytes: usize, seed: u8) -> Vec<Vec<
         .collect()
 }
 
+fn encode_recovery(
+    original_count: usize,
+    recovery_count: usize,
+    original: &[Vec<u8>],
+) -> Vec<Vec<u8>> {
+    let mut encoder = Encoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
+    for shard in original {
+        encoder.add_original_shard(shard).unwrap();
+    }
+    let recovery = encoder
+        .encode()
+        .unwrap()
+        .recovery_iter()
+        .map(<[u8]>::to_vec)
+        .collect();
+    recovery
+}
+
 // ======================================================================
 // BENCHMARKS - MAIN
 
@@ -122,12 +140,7 @@ fn benchmarks_main(c: &mut Criterion) {
             group.sample_size(sample_size);
 
             let original = generate_shards(original_count, SHARD_BYTES, 0);
-            let recovery = commonware_cryptography::reed_solomon::encode(
-                original_count,
-                recovery_count,
-                &original,
-            )
-            .unwrap();
+            let recovery = encode_recovery(original_count, recovery_count, &original);
             let max_original_loss_count = std::cmp::min(original_count, recovery_count);
 
             for loss_percent in [1, 100] {
@@ -266,12 +279,7 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
 
         for (original_count, recovery_count) in cases {
             let original = generate_shards(original_count, SHARD_BYTES, 0);
-            let recovery = commonware_cryptography::reed_solomon::encode(
-                original_count,
-                recovery_count,
-                &original,
-            )
-            .unwrap();
+            let recovery = encode_recovery(original_count, recovery_count, &original);
             group.throughput(Throughput::Bytes(
                 ((original_count + recovery_count) * SHARD_BYTES) as u64,
             ));
@@ -314,12 +322,7 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
 
         for (original_count, recovery_count) in cases {
             let original = generate_shards(original_count, SHARD_BYTES, 0);
-            let recovery = commonware_cryptography::reed_solomon::encode(
-                original_count,
-                recovery_count,
-                &original,
-            )
-            .unwrap();
+            let recovery = encode_recovery(original_count, recovery_count, &original);
             group.throughput(Throughput::Bytes(
                 ((original_count + recovery_count) * SHARD_BYTES) as u64,
             ));
