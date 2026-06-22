@@ -337,8 +337,8 @@ fn encode<H: Hasher, S: Strategy>(
         Some(ranges) => {
             let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
             let mut buf = vec![0u8; m * shard_len];
-            let dst = striped::Dst::new(&mut buf, shard_len);
-            strategy.try_map_collect_vec(ranges, |range| {
+            let dsts = striped::dsts(&mut buf, shard_len, &ranges);
+            strategy.try_map_collect_vec(ranges.into_iter().zip(dsts), |(range, dst)| {
                 striped::encode_recovery_into(k, m, range, &original_shards, dst)
             })?;
             buf
@@ -435,37 +435,48 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 mod striped {
     use super::*;
 
-    /// Target for writing stripes into a shared, strided output buffer in parallel.
-    ///
-    /// The base address is held as a `usize` so disjoint stripe tasks can write the same
-    /// allocation concurrently (a `&mut` would not be `Send` across tasks).
-    #[derive(Clone, Copy)]
-    pub(super) struct Dst {
-        ptr: usize,
-        shard_len: usize,
+    /// Target for writing one stripe into every output shard.
+    pub(super) struct Dst<'a> {
+        shards: Vec<&'a mut [u8]>,
     }
 
-    impl Dst {
-        pub(super) fn new(buf: &mut [u8], shard_len: usize) -> Self {
-            Self {
-                ptr: buf.as_mut_ptr() as usize,
-                shard_len,
+    impl Dst<'_> {
+        /// Copies `src` into stripe `index`.
+        fn write(&mut self, index: usize, src: &[u8]) {
+            self.shards[index].copy_from_slice(src);
+        }
+    }
+
+    /// Split a strided shard buffer into one mutable destination per stripe.
+    pub(super) fn dsts<'a>(
+        buf: &'a mut [u8],
+        shard_len: usize,
+        ranges: &[Range<usize>],
+    ) -> Vec<Dst<'a>> {
+        let shard_count = buf.len() / shard_len;
+        let mut dsts = ranges
+            .iter()
+            .map(|_| Dst {
+                shards: Vec::with_capacity(shard_count),
+            })
+            .collect::<Vec<_>>();
+
+        for shard in buf.chunks_exact_mut(shard_len) {
+            let mut remaining = shard;
+            let mut cursor = 0usize;
+            for (dst, range) in dsts.iter_mut().zip(ranges) {
+                debug_assert_eq!(range.start, cursor);
+
+                let (stripe, rest) = remaining.split_at_mut(range.len());
+                dst.shards.push(stripe);
+
+                remaining = rest;
+                cursor = range.end;
             }
+            debug_assert!(remaining.is_empty());
         }
 
-        /// Copies `src` into stripe `range` of shard `index`.
-        ///
-        /// # Safety
-        ///
-        /// Callers must ensure no two concurrent writes overlap. Stripe `range`s are disjoint
-        /// and shard slots are disjoint, so concurrent tasks never alias. `index` and `range`
-        /// must stay within the buffer the [`Dst`] was built from, and `src.len()` must
-        /// equal `range.len()`.
-        unsafe fn write(&self, index: usize, range: &Range<usize>, src: &[u8]) {
-            let start = index * self.shard_len + range.start;
-            let out = std::slice::from_raw_parts_mut((self.ptr as *mut u8).add(start), range.len());
-            out.copy_from_slice(src);
-        }
+        dsts
     }
 
     /// Split a shard of `shard_len` bytes into disjoint stripe ranges, or return `None`
@@ -518,7 +529,7 @@ mod striped {
         provided_originals: &[(usize, &[u8])],
         provided_recoveries: &[(usize, &[u8])],
         missing_originals: &[usize],
-        dst: Dst,
+        mut dst: Dst<'_>,
     ) -> Result<(), Error> {
         let shard_len = range.len();
         let mut decoder = Cached::take(
@@ -544,9 +555,7 @@ mod striped {
             let shard = decoding
                 .restored_original(*idx)
                 .ok_or(Error::Inconsistent)?;
-            // SAFETY: stripe `range`s and missing-original slots are disjoint, so concurrent
-            // tasks never alias; see [`Dst::write`].
-            unsafe { dst.write(pos, &range, shard) };
+            dst.write(pos, shard);
         }
 
         Ok(())
@@ -559,7 +568,7 @@ mod striped {
         m: usize,
         range: Range<usize>,
         originals: &[impl AsRef<[u8]>],
-        dst: Dst,
+        mut dst: Dst<'_>,
     ) -> Result<(), Error> {
         let shard_len = range.len();
         let mut encoder = Cached::take(
@@ -577,9 +586,7 @@ mod striped {
         }
         let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
         for (i, shard) in encoding.recovery_iter().enumerate() {
-            // SAFETY: stripe `range`s and recovery shard slots are disjoint, so concurrent
-            // tasks never alias; see [`Dst::write`].
-            unsafe { dst.write(i, &range, shard) };
+            dst.write(i, shard);
         }
 
         Ok(())
@@ -613,8 +620,8 @@ mod striped {
 
         let mut restored_originals = vec![0u8; missing_originals.len() * shard_len];
         if !missing_originals.is_empty() {
-            let dst = Dst::new(&mut restored_originals, shard_len);
-            strategy.try_map_collect_vec(ranges.clone(), |range| {
+            let dsts = dsts(&mut restored_originals, shard_len, &ranges);
+            strategy.try_map_collect_vec(ranges.iter().cloned().zip(dsts), |(range, dst)| {
                 decode_missing_original_into(
                     k,
                     m,
@@ -641,9 +648,10 @@ mod striped {
 
         // Re-encode all recovery shards from the reconstructed originals, one stripe per task.
         let mut recovery_buf = vec![0u8; m * shard_len];
-        let dst = Dst::new(&mut recovery_buf, shard_len);
-        strategy
-            .try_map_collect_vec(ranges, |range| encode_recovery_into(k, m, range, &original_refs, dst))?;
+        let dsts = dsts(&mut recovery_buf, shard_len, &ranges);
+        strategy.try_map_collect_vec(ranges.into_iter().zip(dsts), |(range, dst)| {
+            encode_recovery_into(k, m, range, &original_refs, dst)
+        })?;
         let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
 
         // Provided originals are already bound to the commitment by their checked digests.
@@ -1464,10 +1472,9 @@ mod tests {
         }
     }
 
-    /// Single-threaded exercise of the striped encode helper and its [`striped::Dst`]
-    /// raw-pointer writes (kept miri-checkable, independent of any [`Strategy`]): splitting a
-    /// shard into stripes and encoding each must reproduce the single full-width encode
-    /// byte-for-byte.
+    /// Single-threaded exercise of the striped encode helper and its [`striped::Dst`]:
+    /// splitting a shard into stripes and encoding each must reproduce the single full-width
+    /// encode byte-for-byte.
     #[test]
     fn test_striped_encode_into_matches_full_width() {
         let k = 2usize;
@@ -1482,17 +1489,24 @@ mod tests {
         }
         let originals: Vec<&[u8]> = originals_buf.chunks(shard_len).collect();
 
-        // Encode each stripe into its slot via Dst (the `unsafe` path).
+        // Encode each stripe into its slot via Dst.
         let mut striped_recovery = vec![0u8; m * shard_len];
-        let dst = striped::Dst::new(&mut striped_recovery, shard_len);
-        for range in &ranges {
-            striped::encode_recovery_into(k, m, range.clone(), &originals, dst).unwrap();
+        let dsts = striped::dsts(&mut striped_recovery, shard_len, &ranges);
+        for (range, dst) in ranges.iter().cloned().zip(dsts) {
+            striped::encode_recovery_into(k, m, range, &originals, dst).unwrap();
         }
 
         // A single full-width encode must produce the identical recovery buffer.
         let mut full_recovery = vec![0u8; m * shard_len];
-        let dst_full = striped::Dst::new(&mut full_recovery, shard_len);
-        striped::encode_recovery_into(k, m, 0..shard_len, &originals, dst_full).unwrap();
+        let full_range = 0..shard_len;
+        let dst_full = striped::dsts(
+            &mut full_recovery,
+            shard_len,
+            std::slice::from_ref(&full_range),
+        )
+        .pop()
+        .unwrap();
+        striped::encode_recovery_into(k, m, full_range, &originals, dst_full).unwrap();
 
         assert_eq!(striped_recovery, full_recovery);
     }
