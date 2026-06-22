@@ -3,13 +3,19 @@ use commonware_codec::{FixedSize, Read, Write};
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use rand_core::CryptoRngCore;
 
+mod simd;
+
 /// The modulus P := 2^64 - 2^32 + 1.
 ///
 /// This is a prime number, and we use it to form a field of this order.
 const P: u64 = u64::wrapping_neg(1 << 32) + 1;
 
 /// An element of the [Goldilocks field](https://xn--2-umb.com/22/goldilocks/).
+///
+/// `repr(transparent)` guarantees the same layout as `u64`, which the SIMD NTT
+/// kernels rely on to reinterpret `&[F]` as `&[u64]`.
 #[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct F(u64);
 
 impl FixedSize for F {
@@ -423,6 +429,10 @@ impl FieldNTT for F {
             let (addition, carry) = self.0.overflowing_add(P);
             Self((u64::from(carry) << 63) | (addition >> 1))
         }
+    }
+
+    fn ntt_dense<const FORWARD: bool>(rows: usize, cols: usize, data: &mut [Self]) {
+        simd::ntt_dense::<FORWARD>(rows, cols, data)
     }
 }
 

@@ -162,6 +162,85 @@ fn ntt<const FORWARD: bool, F: FieldNTT, M: IndexMut<(usize, usize), Output = F>
     }
 }
 
+/// Validate a dense NTT's shape and return `log2(rows)`.
+pub(crate) fn dense_ntt_lg_rows(rows: usize, cols: usize, data_len: usize) -> usize {
+    assert!(
+        rows.is_power_of_two(),
+        "rows should be a non-zero power of 2"
+    );
+    let expected_len = rows.checked_mul(cols).expect("rows * cols overflows usize");
+    assert_eq!(data_len, expected_len, "data length must equal rows * cols");
+    rows.ilog2() as usize
+}
+
+/// In-place NTT (inverse when `FORWARD` is false) over a dense, row-major
+/// `rows x cols` slice, treating each column as an independent lane.
+///
+/// This is the default kernel behind [`crate::algebra::FieldNTT::ntt_dense`] and is
+/// equivalent to running [`ntt`] over a row-major [`Matrix`]. It operates on whole
+/// row slices (rather than an indexable view) so that a field can override
+/// `ntt_dense` with a vectorized kernel over the contiguous columns. Single-column
+/// and partial-segment NTTs continue to use [`ntt`].
+pub(crate) fn ntt_dense_scalar<const FORWARD: bool, F: FieldNTT>(
+    rows: usize,
+    cols: usize,
+    data: &mut [F],
+) {
+    let lg_rows = dense_ntt_lg_rows(rows, cols, data.len());
+    let w = {
+        let w = F::root_of_unity(lg_rows as u8).expect("too many rows to perform NTT");
+        if FORWARD {
+            w
+        } else {
+            w.exp(&[(1 << lg_rows) - 1])
+        }
+    };
+    let stages = {
+        let mut out = vec![(0usize, F::zero()); lg_rows];
+        let mut w_i = w;
+        for i in (0..lg_rows).rev() {
+            out[i] = (i, w_i.clone());
+            w_i = w_i.clone() * &w_i;
+        }
+        if !FORWARD {
+            out.reverse();
+        }
+        out
+    };
+    for (stage, w) in stages.into_iter() {
+        let skip = 1 << stage;
+        let mut i = 0;
+        while i < rows {
+            let mut w_j = F::one();
+            for j in 0..skip {
+                let index_a = i + j;
+                let index_b = index_a + skip;
+                // `index_a < index_b`, so the two row slices are disjoint.
+                let (left, right) = data.split_at_mut(index_b * cols);
+                let a = &mut left[index_a * cols..index_a * cols + cols];
+                let b = &mut right[..cols];
+                if FORWARD {
+                    for k in 0..cols {
+                        let w_j_b = w_j.clone() * &b[k];
+                        let a_k = a[k].clone();
+                        a[k] = a_k.clone() + &w_j_b;
+                        b[k] = a_k - &w_j_b;
+                    }
+                } else {
+                    for k in 0..cols {
+                        let a_k = a[k].clone();
+                        let b_k = b[k].clone();
+                        a[k] = (a_k.clone() + &b_k).div_2();
+                        b[k] = ((a_k - &b_k) * &w_j).div_2();
+                    }
+                }
+                w_j *= &w;
+            }
+            i += 2 * skip;
+        }
+    }
+}
+
 /// Columns of some larger piece of data.
 ///
 /// This allows us to easily do NTTs over partial segments of some bigger matrix.
@@ -837,20 +916,35 @@ impl<F: Additive> Matrix<F> {
         }
         assert_eq!(self.cols, other.rows);
         let out_cols = other.cols;
-        let rows: Vec<Vec<F>> = strategy.map_collect_vec(0..self.rows, |i| {
-            let mut row = vec![F::zero(); out_cols];
-            for j in 0..self.cols {
-                let c = self[(i, j)].clone();
-                let other_j = &other[j];
-                for (k, out_k) in row.iter_mut().enumerate() {
-                    *out_k += &(c.clone() * &other_j[k]);
+        if self.rows == 0 || out_cols == 0 {
+            return Self {
+                rows: self.rows,
+                cols: out_cols,
+                data: Vec::new(),
+            };
+        }
+        let num_blocks = strategy.parallelism_hint().clamp(1, self.rows);
+        let block_rows = self.rows.div_ceil(num_blocks);
+        let num_blocks = self.rows.div_ceil(block_rows);
+        let blocks: Vec<Vec<F>> = strategy.map_collect_vec(0..num_blocks, |b| {
+            let row_start = b * block_rows;
+            let row_end = (row_start + block_rows).min(self.rows);
+            let mut block = vec![F::zero(); (row_end - row_start) * out_cols];
+            for (local_i, i) in (row_start..row_end).enumerate() {
+                let row = &mut block[local_i * out_cols..(local_i + 1) * out_cols];
+                for j in 0..self.cols {
+                    let c = self[(i, j)].clone();
+                    let other_j = &other[j];
+                    for (k, out_k) in row.iter_mut().enumerate() {
+                        *out_k += &(c.clone() * &other_j[k]);
+                    }
                 }
             }
-            row
+            block
         });
         let mut data = Vec::with_capacity(self.rows * out_cols);
-        for row in rows {
-            data.extend(row);
+        for block in blocks {
+            data.extend(block);
         }
         Self {
             rows: self.rows,
@@ -863,19 +957,25 @@ impl<F: Additive> Matrix<F> {
 /// Perform a (possibly parallel) NTT over the columns of a [`Matrix`].
 ///
 /// Each column is an independent NTT lane (the per-stage butterflies mix rows, never
-/// columns), so transforming the columns in groups is identical to running [`ntt`] in
-/// place over the whole matrix. We split the columns into one contiguous block per
+/// columns), so transforming the columns in groups is identical to running the dense
+/// NTT over the whole matrix. We split the columns into one contiguous block per
 /// worker (per [`Strategy::parallelism_hint`]) and let `strategy` run the blocks
-/// concurrently. A sequential strategy hints a single block, so it transforms the
-/// matrix in place with no copies. Each block is copied out as a small row-major
-/// sub-matrix so both the copy and the transform stay on contiguous memory (a strided,
-/// column-at-a-time gather is an order of magnitude slower).
-fn par_matrix_ntt<const FORWARD: bool, F: FieldNTT, S: Strategy>(data: &mut Matrix<F>, strategy: &S) {
+/// concurrently, applying the per-field [`FieldNTT::ntt_dense`] kernel (which may be
+/// SIMD-accelerated) to each block. A sequential strategy hints a single block, so it
+/// runs `ntt_dense` over the matrix in place with no copies. Each parallel block is
+/// copied out as a small row-major sub-matrix so both the copy and the transform stay
+/// on contiguous memory (a strided, column-at-a-time gather is an order of magnitude
+/// slower). This composes thread-level parallelism (across blocks) with SIMD (within
+/// each block's `ntt_dense`).
+fn par_matrix_ntt<const FORWARD: bool, F: FieldNTT, S: Strategy>(
+    data: &mut Matrix<F>,
+    strategy: &S,
+) {
     let rows = data.rows;
     let cols = data.cols;
     let num_blocks = strategy.parallelism_hint().clamp(1, cols.max(1));
     if num_blocks <= 1 {
-        ntt::<FORWARD, F, Matrix<F>>(rows, cols, data);
+        F::ntt_dense::<FORWARD>(rows, cols, &mut data.data);
         return;
     }
     let block_cols = cols.div_ceil(num_blocks);
@@ -894,7 +994,8 @@ fn par_matrix_ntt<const FORWARD: bool, F: FieldNTT, S: Strategy>(data: &mut Matr
                 cols: cn,
                 data: buf,
             };
-            ntt::<FORWARD, F, Matrix<F>>(rows, cn, &mut block);
+            // Each worker runs the (possibly SIMD) per-field dense NTT on its block.
+            F::ntt_dense::<FORWARD>(rows, cn, &mut block.data);
             block
         })
     };
@@ -1603,6 +1704,7 @@ mod test {
         ));
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn strategy_methods_match_sequential() {
         use commonware_parallel::Rayon;
