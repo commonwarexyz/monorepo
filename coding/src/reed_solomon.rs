@@ -291,6 +291,365 @@ fn read_data_len(shards: &[&[u8]]) -> Result<usize, Error> {
     Ok(data_len)
 }
 
+mod gf8 {
+    use super::Error;
+    use std::sync::OnceLock;
+
+    pub(super) const FIELD_SIZE: usize = 256;
+    const FIELD_ORDER: usize = FIELD_SIZE - 1;
+    const GENERATOR: u16 = 2;
+    const POLYNOMIAL: u16 = 0x11d;
+
+    struct Tables {
+        exp: [u8; FIELD_ORDER * 2],
+        log: [u8; FIELD_SIZE],
+    }
+
+    fn tables() -> &'static Tables {
+        static TABLES: OnceLock<Tables> = OnceLock::new();
+        TABLES.get_or_init(|| {
+            let mut exp = [0u8; FIELD_ORDER * 2];
+            let mut log = [0u8; FIELD_SIZE];
+            let mut x = 1u16;
+            for (i, slot) in exp.iter_mut().take(FIELD_ORDER).enumerate() {
+                *slot = x as u8;
+                log[x as usize] = i as u8;
+                x = mul_no_table(x, GENERATOR);
+            }
+            for i in FIELD_ORDER..exp.len() {
+                exp[i] = exp[i - FIELD_ORDER];
+            }
+            Tables { exp, log }
+        })
+    }
+
+    const fn mul_no_table(mut a: u16, mut b: u16) -> u16 {
+        let mut out = 0u16;
+        while b != 0 {
+            if b & 1 != 0 {
+                out ^= a;
+            }
+            b >>= 1;
+            a <<= 1;
+            if a & FIELD_SIZE as u16 != 0 {
+                a ^= POLYNOMIAL;
+            }
+        }
+        out & (FIELD_SIZE as u16 - 1)
+    }
+
+    fn add_mul(out: &mut [u8], input: &[u8], coeff: u8) {
+        if coeff == 0 {
+            return;
+        }
+        if coeff == 1 {
+            for (o, i) in out.iter_mut().zip(input) {
+                *o ^= *i;
+            }
+            return;
+        }
+        let tables = tables();
+        let coeff_log = tables.log[coeff as usize] as usize;
+        for (o, i) in out.iter_mut().zip(input) {
+            if *i == 0 {
+                continue;
+            }
+            let idx = coeff_log + tables.log[*i as usize] as usize;
+            *o ^= tables.exp[idx];
+        }
+    }
+
+    fn mul(a: u8, b: u8) -> u8 {
+        if a == 0 || b == 0 {
+            return 0;
+        }
+        let tables = tables();
+        tables.exp[tables.log[a as usize] as usize + tables.log[b as usize] as usize]
+    }
+
+    fn inv(a: u8) -> Result<u8, Error> {
+        if a == 0 {
+            return Err(Error::Inconsistent);
+        }
+        let tables = tables();
+        Ok(tables.exp[FIELD_ORDER - tables.log[a as usize] as usize])
+    }
+
+    fn cauchy(row: usize, col: usize, m: usize) -> Result<u8, Error> {
+        let x = row as u8;
+        let y = (m + col) as u8;
+        inv(x ^ y)
+    }
+
+    fn matrix_row(index: usize, k: usize, m: usize, out: &mut [u8]) -> Result<(), Error> {
+        out.fill(0);
+        if index < k {
+            out[index] = 1;
+            return Ok(());
+        }
+        let row = index - k;
+        for (col, coeff) in out.iter_mut().enumerate() {
+            *coeff = cauchy(row, col, m)?;
+        }
+        Ok(())
+    }
+
+    fn invert(matrix: &[u8], k: usize) -> Result<Vec<u8>, Error> {
+        let mut left = matrix.to_vec();
+        let mut right = vec![0u8; k * k];
+        for i in 0..k {
+            right[i * k + i] = 1;
+        }
+
+        for col in 0..k {
+            let pivot = (col..k)
+                .find(|&row| left[row * k + col] != 0)
+                .ok_or(Error::Inconsistent)?;
+            if pivot != col {
+                for j in 0..k {
+                    left.swap(col * k + j, pivot * k + j);
+                    right.swap(col * k + j, pivot * k + j);
+                }
+            }
+
+            let scale = inv(left[col * k + col])?;
+            for j in 0..k {
+                left[col * k + j] = mul(left[col * k + j], scale);
+                right[col * k + j] = mul(right[col * k + j], scale);
+            }
+
+            for row in 0..k {
+                if row == col {
+                    continue;
+                }
+                let factor = left[row * k + col];
+                if factor == 0 {
+                    continue;
+                }
+                for j in 0..k {
+                    left[row * k + j] ^= mul(factor, left[col * k + j]);
+                    right[row * k + j] ^= mul(factor, right[col * k + j]);
+                }
+            }
+        }
+
+        Ok(right)
+    }
+
+    pub fn encode_recoveries(
+        k: usize,
+        m: usize,
+        shard_len: usize,
+        originals: &[&[u8]],
+    ) -> Result<Vec<u8>, Error> {
+        debug_assert_eq!(originals.len(), k);
+        let mut recoveries = vec![0u8; m * shard_len];
+        for row in 0..m {
+            let recovery = &mut recoveries[row * shard_len..(row + 1) * shard_len];
+            for (col, original) in originals.iter().enumerate() {
+                debug_assert_eq!(original.len(), shard_len);
+                add_mul(recovery, original, cauchy(row, col, m)?);
+            }
+        }
+        Ok(recoveries)
+    }
+
+    pub fn reconstruct_originals(
+        k: usize,
+        m: usize,
+        shard_len: usize,
+        provided_originals: &[(usize, &[u8])],
+        provided_recoveries: &[(usize, &[u8])],
+    ) -> Result<Vec<Vec<u8>>, Error> {
+        let mut selected = Vec::with_capacity(k);
+        selected.extend(
+            provided_originals
+                .iter()
+                .map(|(index, shard)| (*index, *shard)),
+        );
+        selected.extend(
+            provided_recoveries
+                .iter()
+                .map(|(index, shard)| (k + *index, *shard)),
+        );
+        selected.truncate(k);
+        if selected.len() < k {
+            return Err(Error::NotEnoughChunks);
+        }
+
+        let mut matrix = vec![0u8; k * k];
+        let mut row = vec![0u8; k];
+        for (selected_row, (index, shard)) in selected.iter().enumerate() {
+            if shard.len() != shard_len {
+                return Err(Error::Inconsistent);
+            }
+            matrix_row(*index, k, m, &mut row)?;
+            matrix[selected_row * k..(selected_row + 1) * k].copy_from_slice(&row);
+        }
+        let inverse = invert(&matrix, k)?;
+
+        let mut originals = vec![vec![0u8; shard_len]; k];
+        for out_row in 0..k {
+            for (selected_row, (_, shard)) in selected.iter().enumerate() {
+                let coeff = inverse[out_row * k + selected_row];
+                add_mul(&mut originals[out_row], shard, coeff);
+            }
+        }
+        Ok(originals)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn combinations(
+            n: usize,
+            k: usize,
+            start: usize,
+            current: &mut Vec<usize>,
+            out: &mut Vec<Vec<usize>>,
+        ) {
+            if current.len() == k {
+                out.push(current.clone());
+                return;
+            }
+            for i in start..n {
+                current.push(i);
+                combinations(n, k, i + 1, current, out);
+                current.pop();
+            }
+        }
+
+        #[test]
+        fn field_identities() {
+            for a in 1..=u8::MAX {
+                assert_eq!(mul(a, inv(a).unwrap()), 1);
+                for b in 0..=u8::MAX {
+                    assert_eq!(mul(a, b), mul(b, a));
+                }
+            }
+        }
+
+        #[test]
+        fn all_small_subsets_recover() {
+            let k = 4usize;
+            let m = 3usize;
+            let shard_len = 8usize;
+            let originals = (0..k)
+                .map(|i| {
+                    (0..shard_len)
+                        .map(|j| (i * 17 + j * 31) as u8)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let original_refs = originals.iter().map(Vec::as_slice).collect::<Vec<_>>();
+            let recoveries = encode_recoveries(k, m, shard_len, &original_refs).unwrap();
+
+            let mut all = original_refs;
+            all.extend(recoveries.chunks(shard_len));
+
+            let mut selections = Vec::new();
+            combinations(k + m, k, 0, &mut Vec::new(), &mut selections);
+            for selection in selections {
+                let provided_originals = selection
+                    .iter()
+                    .filter_map(|&i| (i < k).then(|| (i, all[i])))
+                    .collect::<Vec<_>>();
+                let provided_recoveries = selection
+                    .iter()
+                    .filter_map(|&i| (i >= k).then(|| (i - k, all[i])))
+                    .collect::<Vec<_>>();
+                let recovered =
+                    reconstruct_originals(
+                        k,
+                        m,
+                        shard_len,
+                        &provided_originals,
+                        &provided_recoveries,
+                    )
+                    .unwrap();
+                assert_eq!(recovered, originals);
+            }
+        }
+    }
+}
+
+fn encode_recoveries(
+    k: usize,
+    m: usize,
+    shard_len: usize,
+    originals: &[&[u8]],
+) -> Result<Vec<u8>, Error> {
+    if k + m <= gf8::FIELD_SIZE {
+        return gf8::encode_recoveries(k, m, shard_len, originals);
+    }
+
+    let mut encoder = Cached::take(
+        &CACHED_ENCODER,
+        || ReedSolomonEncoder::new(k, m, shard_len),
+        |enc| enc.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+    for shard in originals {
+        encoder
+            .add_original_shard(shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+
+    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+    let mut buf = Vec::with_capacity(m * shard_len);
+    for shard in encoding.recovery_iter() {
+        buf.extend_from_slice(shard);
+    }
+    Ok(buf)
+}
+
+fn reconstruct_originals(
+    k: usize,
+    m: usize,
+    shard_len: usize,
+    provided_originals: &[(usize, &[u8])],
+    provided_recoveries: &[(usize, &[u8])],
+) -> Result<Vec<Vec<u8>>, Error> {
+    if k + m <= gf8::FIELD_SIZE {
+        return gf8::reconstruct_originals(
+            k,
+            m,
+            shard_len,
+            provided_originals,
+            provided_recoveries,
+        );
+    }
+
+    let mut decoder = Cached::take(
+        &CACHED_DECODER,
+        || ReedSolomonDecoder::new(k, m, shard_len),
+        |dec| dec.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+    for (idx, shard) in provided_originals {
+        decoder
+            .add_original_shard(*idx, shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+    for (idx, shard) in provided_recoveries {
+        decoder
+            .add_recovery_shard(*idx, shard)
+            .map_err(Error::ReedSolomon)?;
+    }
+    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+
+    let mut shards = vec![Vec::new(); k];
+    for (idx, shard) in provided_originals
+        .iter()
+        .map(|(idx, shard)| (*idx, *shard))
+        .chain(decoding.restored_original_iter())
+    {
+        shards[idx] = shard.to_vec();
+    }
+    Ok(shards)
+}
+
 /// Type alias for the internal encoding result.
 type Encoding<D> = (D, Vec<Chunk<D>>);
 
@@ -327,28 +686,8 @@ fn encode<H: Hasher, S: Strategy>(
     // Prepare data as a contiguous buffer of k shards
     let (padded, shard_len) = prepare_data(data, k);
 
-    // Create or reuse encoder
-    let recovery_buf = {
-        let mut encoder = Cached::take(
-            &CACHED_ENCODER,
-            || ReedSolomonEncoder::new(k, m, shard_len),
-            |enc| enc.reset(k, m, shard_len),
-        )
-        .map_err(Error::ReedSolomon)?;
-        for shard in padded.chunks(shard_len) {
-            encoder
-                .add_original_shard(shard)
-                .map_err(Error::ReedSolomon)?;
-        }
-
-        // Compute recovery shards and collect into a contiguous buffer
-        let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-        let mut buf = Vec::with_capacity(m * shard_len);
-        for shard in encoding.recovery_iter() {
-            buf.extend_from_slice(shard);
-        }
-        buf
-    };
+    let original_refs = padded.chunks(shard_len).collect::<Vec<_>>();
+    let recovery_buf = encode_recoveries(k, m, shard_len, &original_refs)?;
 
     // Create zero-copy Bytes views into the original and recovery buffers
     let originals: Bytes = padded.into();
@@ -447,49 +786,13 @@ fn decode<'a, H: Hasher, S: Strategy>(
         return Err(Error::NotEnoughChunks);
     }
 
-    // Decode original data
-    let mut decoder = Cached::take(
-        &CACHED_DECODER,
-        || ReedSolomonDecoder::new(k, m, shard_len),
-        |dec| dec.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-    for (idx, shard) in &provided_originals {
-        decoder
-            .add_original_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    for (idx, shard) in &provided_recoveries {
-        decoder
-            .add_recovery_shard(*idx, shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-
-    // Reconstruct all original shards
-    let mut shards = vec![Default::default(); k];
-    for (idx, shard) in provided_originals
-        .into_iter()
-        .chain(decoding.restored_original_iter())
-    {
-        shards[idx] = shard;
-    }
-    let data = extract_data(&shards, k, shard_len)?;
-
-    // Re-encode recovered data to get recovery shards
-    let mut encoder = Cached::take(
-        &CACHED_ENCODER,
-        || ReedSolomonEncoder::new(k, m, shard_len),
-        |enc| enc.reset(k, m, shard_len),
-    )
-    .map_err(Error::ReedSolomon)?;
-    for shard in shards.iter().take(k) {
-        encoder
-            .add_original_shard(shard)
-            .map_err(Error::ReedSolomon)?;
-    }
-    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    shards.extend(encoding.recovery_iter());
+    let original_shards =
+        reconstruct_originals(k, m, shard_len, &provided_originals, &provided_recoveries)?;
+    let original_refs = original_shards.iter().map(Vec::as_slice).collect::<Vec<_>>();
+    let data = extract_data(&original_refs, k, shard_len)?;
+    let recovery_buf = encode_recoveries(k, m, shard_len, &original_refs)?;
+    let mut shards = original_refs;
+    shards.extend(recovery_buf.chunks(shard_len));
 
     // Confirm all checked shards match the canonical codeword before reusing their digests.
     for (idx, shard) in provided_shards {
