@@ -843,18 +843,14 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver.await.ok().flatten()
     }
 
-    /// Enqueues a proposed-block notification and returns its sync handle receiver
-    /// without awaiting it.
+    /// Notifies the actor that a block has been locally proposed, returning a
+    /// receiver for its durable-sync handle without awaiting it.
     ///
     /// The message is enqueued synchronously (before this returns), so a subsequent
-    /// [Self::forward] for the same block is ordered after it. This lets a leader broadcast
-    /// the proposal digest immediately and await durability later (at certification),
-    /// overlapping the durable sync with consensus voting.
-    pub(crate) fn proposed_deferred(
-        &self,
-        round: Round,
-        block: V::Block,
-    ) -> oneshot::Receiver<Handle<()>> {
+    /// [Self::forward] for the same block is ordered after it. This lets a leader
+    /// broadcast the proposal digest immediately and await durability later (at
+    /// certification), overlapping the durable sync with consensus voting.
+    pub fn proposed(&self, round: Round, block: V::Block) -> oneshot::Receiver<Handle<()>> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Proposed {
             span: info_span!("marshal.mailbox.proposed", round = %round),
@@ -865,29 +861,10 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
         receiver
     }
 
-    /// Notifies the actor that a block has been locally proposed.
-    ///
-    /// Returns after the block is durably persisted.
-    #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn proposed(&self, round: Round, block: V::Block) -> bool {
-        match self.proposed_deferred(round, block).await {
-            Ok(handle) => {
-                handle.await.expect("failed to sync proposed block");
-                true
-            }
-            Err(_) => false,
-        }
-    }
-
-    /// Enqueues a verified-block notification and returns its sync handle receiver
-    /// without awaiting it.
-    ///
-    /// Enqueued synchronously, as with [Self::proposed_deferred].
-    pub(crate) fn verified_deferred(
-        &self,
-        round: Round,
-        block: V::Block,
-    ) -> oneshot::Receiver<Handle<()>> {
+    /// Notifies the actor that a block has been verified, returning a receiver for
+    /// its durable-sync handle without awaiting it. Enqueued synchronously, as with
+    /// [Self::proposed].
+    pub fn verified(&self, round: Round, block: V::Block) -> oneshot::Receiver<Handle<()>> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Verified {
             span: info_span!("marshal.mailbox.verified", round = %round),
@@ -896,20 +873,6 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             ack: Some(ack),
         });
         receiver
-    }
-
-    /// Notifies the actor that a block has been verified.
-    ///
-    /// Returns after the block is durably persisted.
-    #[must_use = "callers must consider block durability before proceeding"]
-    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
-        match self.verified_deferred(round, block).await {
-            Ok(handle) => {
-                handle.await.expect("failed to sync verified block");
-                true
-            }
-            Err(_) => false,
-        }
     }
 
     /// Notifies the actor that a block has been certified.
@@ -1274,7 +1237,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_methods_return_false_when_mailbox_closes_before_sync_handle() {
+    fn durable_methods_report_failure_when_mailbox_closed() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let (sender, receiver) =
@@ -1282,8 +1245,8 @@ mod tests {
             let mailbox = Mailbox::<harness::S, Standard<harness::B>>::new(sender);
             drop(receiver);
 
-            assert!(!mailbox.proposed(round(1), block(1)).await);
-            assert!(!mailbox.verified(round(2), block(2)).await);
+            assert!(mailbox.proposed(round(1), block(1)).await.is_err());
+            assert!(mailbox.verified(round(2), block(2)).await.is_err());
             assert!(!mailbox.certified(round(3), block(3)).await);
         });
     }

@@ -332,7 +332,7 @@ where
                     // vote, establishing durability.
                     let (durable_tx, durable_rx) = oneshot::channel();
                     verification_tasks.insert(consensus_context.round, digest, durable_rx);
-                    let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
+                    let verified_rx = marshal.verified(consensus_context.round, parent);
                     let success = tx.send_lossy(digest);
                     let Ok(handle) = verified_rx.await else {
                         return;
@@ -397,7 +397,7 @@ where
                 // durability.
                 let (durable_tx, durable_rx) = oneshot::channel();
                 verification_tasks.insert(consensus_context.round, digest, durable_rx);
-                let proposed_rx = marshal.proposed_deferred(consensus_context.round, built_block);
+                let proposed_rx = marshal.proposed(consensus_context.round, built_block);
                 let success = tx.send_lossy(digest);
                 let Ok(handle) = proposed_rx.await else {
                     return;
@@ -513,7 +513,15 @@ where
                 // resolves true only after both app verification succeeds and the store is durable.
                 let store_block = block.clone();
                 let store_marshal = marshal.clone();
-                let store = async move { store_marshal.verified(round, store_block).await };
+                let store = async move {
+                    match store_marshal.verified(round, store_block).await {
+                        Ok(handle) => {
+                            handle.await.expect("failed to sync verified block");
+                            true
+                        }
+                        Err(_) => false,
+                    }
+                };
                 let verify_then_vote = async {
                     let valid = run_app_verify(
                         runtime_context,
@@ -754,7 +762,12 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, parent).await);
+            marshal
+                .verified(parent_round, parent)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -765,7 +778,12 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.verified(round, block).await);
+            marshal
+                .verified(round, block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             // Complete verify first so the block is already available locally.
             let verify_rx = inline.verify(verify_context, digest).await;
@@ -835,7 +853,12 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, parent).await);
+            marshal
+                .verified(parent_round, parent)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             let round = Round::new(Epoch::zero(), View::new(2));
             let verify_context = Ctx {
@@ -846,7 +869,12 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(marshal.verified(round, block).await);
+            marshal
+                .verified(round, block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             // Certify should still resolve by waiting on marshal block availability directly.
             let certify_rx = inline.certify(round, digest).await;
@@ -910,7 +938,7 @@ mod tests {
                 1900,
             );
             let boundary_digest = boundary_block.digest();
-            assert!(marshal.verified(boundary_round, boundary_block).await);
+            marshal.verified(boundary_round, boundary_block).await.expect("durable: enqueue").await.expect("durable: synced");
 
             let reproposal_round = Round::new(Epoch::zero(), View::new(boundary_height.get() + 1));
             let reproposal_context = Ctx {
@@ -1096,7 +1124,12 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            assert!(marshal.verified(parent_round, parent).await);
+            marshal
+                .verified(parent_round, parent)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             // The leader builds the child via `app.propose`.
             let round = Round::new(Epoch::zero(), View::new(2));
@@ -1313,7 +1346,12 @@ mod tests {
             let pre_application = pre_setup.application;
 
             let stale_block = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
-            assert!(pre_marshal.verified(round, stale_block).await);
+            pre_marshal
+                .verified(round, stale_block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             // Simulate a crash: abort the actor and drop every handle so the
             // storage partition is fully released before reopening.

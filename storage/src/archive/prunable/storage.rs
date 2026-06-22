@@ -429,9 +429,11 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
 
     /// Start syncing all pending writes.
     pub async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
+        // Collect pending sections and update metrics
         let pending: Vec<u64> = self.pending.iter().copied().collect();
         self.syncs.inc_by(pending.len() as u64);
 
+        // Start syncing the oversized journal (handles both index and values)
         let syncs = pending.iter().map(|s| self.oversized.start_sync(*s));
         let handles = try_join_all(syncs).await?;
         self.pending.clear();

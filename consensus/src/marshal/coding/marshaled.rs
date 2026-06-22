@@ -842,7 +842,7 @@ where
                     // vote, establishing durability.
                     let (durable_tx, durable_rx) = oneshot::channel();
                     verification_tasks.insert(round, commitment, durable_rx);
-                    let verified_rx = marshal.verified_deferred(round, parent);
+                    let verified_rx = marshal.verified(round, parent);
                     let success = tx.send_lossy(commitment);
                     let Ok(handle) = verified_rx.await else {
                         return;
@@ -912,7 +912,7 @@ where
                 // durability.
                 let (durable_tx, durable_rx) = oneshot::channel();
                 verification_tasks.insert(round, commitment, durable_rx);
-                let proposed_rx = marshal.proposed_deferred(round, coded_block);
+                let proposed_rx = marshal.proposed(round, coded_block);
                 let success = tx.send_lossy(commitment);
                 let Ok(handle) = proposed_rx.await else {
                     return;
@@ -1058,7 +1058,14 @@ where
 
                     // Valid re-proposal: notify the marshal and complete the
                     // certification gate task for `certify`.
-                    if !marshal.verified(round, block).await {
+                    let durable = match marshal.verified(round, block).await {
+                        Ok(handle) => {
+                            handle.await.expect("failed to sync verified block");
+                            true
+                        }
+                        Err(_) => false,
+                    };
+                    if !durable {
                         return;
                     }
                     task_tx.send_lossy(true);

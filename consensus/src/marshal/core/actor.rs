@@ -122,7 +122,7 @@ where
     // Last proposed block
     last_proposed_block: Option<(Round, V::Commitment, V::Block)>,
     // Verified-block syncs reused by the matching notarized/certified write.
-    verified_coverage: SyncRegistry<BlockDigestFor<V>>,
+    verified_syncs: SyncRegistry<BlockDigestFor<V>>,
     // Notarization-certificate syncs joined by the matching certified block's barrier.
     notarization_syncs: SyncRegistry<BlockDigestFor<V>>,
     // Current processed floor and any pending floor update
@@ -240,7 +240,7 @@ where
                 block_codec_config: config.block_codec_config,
                 strategy: config.strategy,
                 last_proposed_block: None,
-                verified_coverage: SyncRegistry::new(),
+                verified_syncs: SyncRegistry::new(),
                 notarization_syncs: SyncRegistry::new(),
                 floor,
                 stream,
@@ -618,12 +618,12 @@ where
                 let digest = block.digest();
 
                 // If the round has already been pruned by tip advancement,
-                // `put_verified_start_sync` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
                 let handle = self
                     .cache
-                    .put_verified_start_sync(round, digest, block.clone().into())
+                    .put_verified(round, digest, block.clone().into())
                     .await;
                 let handle = self.track_verified_sync(syncs, round, digest, handle);
 
@@ -641,13 +641,10 @@ where
                 let digest = block.digest();
 
                 // If the round has already been pruned by tip advancement,
-                // `put_verified_start_sync` is a no-op because the round is below
+                // `put_verified` is a no-op because the round is below
                 // the retention floor (and no longer is required by consensus
                 // to make progress).
-                let handle = self
-                    .cache
-                    .put_verified_start_sync(round, digest, block.into())
-                    .await;
+                let handle = self.cache.put_verified(round, digest, block.into()).await;
                 let handle = self.track_verified_sync(syncs, round, digest, handle);
                 ack.expect("durable ack present").send_lossy(handle);
             }
@@ -672,25 +669,30 @@ where
                 let commitment = notarization.proposal.payload;
                 let digest = V::commitment_to_inner(commitment);
 
-                // Cache the notarization once per round. Its sync is observed by
-                // its own driver and later joined into the certify barrier.
-                match self.notarization_syncs.digest(round) {
-                    Some(pending) if pending != digest => warn!(
-                        ?round,
-                        ?pending,
-                        ?digest,
-                        "notarization sync already pending for different digest"
-                    ),
-                    Some(_) => {}
-                    None => {
-                        let sync = self
-                            .cache
-                            .put_notarization_start_sync(round, digest, notarization)
-                            .await;
-                        let (shared, drive) = SharedSync::observe(sync);
-                        syncs.push(async move { observe_sync(drive.await, round, "notarization") });
-                        self.notarization_syncs.register(round, digest, shared);
+                // Persist the notarization. We skip only an exact re-delivery
+                // (a sync for this same digest is already in flight). A different
+                // digest at the same round means the leader may have equivocated,
+                // so we still persist it: both certificates must survive. The
+                // registry keeps the first sync for the certify barrier; a second,
+                // equivocating sync is still driven to durability by its own
+                // observer.
+                let pending = self.notarization_syncs.digest(round);
+                if pending != Some(digest) {
+                    if let Some(pending) = pending {
+                        warn!(
+                            ?round,
+                            ?pending,
+                            ?digest,
+                            "persisting second notarization digest at round (possible equivocation)"
+                        );
                     }
+                    let sync = self
+                        .cache
+                        .put_notarization(round, digest, notarization)
+                        .await;
+                    let (shared, drive) = SharedSync::observe(sync);
+                    syncs.push(async move { observe_sync(drive.await, round, "notarization") });
+                    self.notarization_syncs.register(round, digest, shared);
                 }
 
                 // A notarization alone is not enough to fetch missing proposal
@@ -1573,9 +1575,11 @@ where
                     let height = block.height();
                     self.put_notarized_block(round, digest, block.clone().into())
                         .await;
-                    self.cache
+                    let handle = self
+                        .cache
                         .put_notarization(round, digest, notarization)
                         .await;
+                    observe_sync(handle.await, round, "notarization");
 
                     // A notarized delivery can carry the pending floor block
                     // after the finalization is cached.
@@ -1723,16 +1727,16 @@ where
         sync: Handle<()>,
     ) -> Handle<()> {
         // If this (round, digest) is already tracked, reuse the in-flight sync.
-        // This only fires on a duplicate delivery, whose `put_verified_start_sync`
+        // This only fires on a duplicate delivery, whose `put_verified`
         // deduped against the existing archive entry and so returned a completed
         // no-op handle; `sync` carries no pending durability work and is dropped.
-        if let Some(handle) = self.verified_coverage.wait(round, digest) {
+        if let Some(handle) = self.verified_syncs.wait(round, digest) {
             return handle;
         }
         let (shared, drive) = SharedSync::observe(sync);
         syncs.push(async move { observe_sync(drive.await, round, "verified") });
         let handle = shared.wait();
-        self.verified_coverage.register(round, digest, shared);
+        self.verified_syncs.register(round, digest, shared);
         handle
     }
 
@@ -1749,7 +1753,7 @@ where
         digest: BlockDigestFor<V>,
         block: V::StoredBlock,
     ) {
-        if self.verified_coverage.covers(round, digest) {
+        if self.verified_syncs.covers(round, digest) {
             debug!(
                 ?round,
                 name = "notarized",
@@ -1758,7 +1762,7 @@ where
             return;
         }
 
-        let handle = self.cache.put_block_start_sync(round, digest, block).await;
+        let handle = self.cache.put_block(round, digest, block).await;
         observe_sync(handle.await, round, "notarized");
     }
 
@@ -1770,7 +1774,7 @@ where
         digest: BlockDigestFor<V>,
         block: V::StoredBlock,
     ) -> Handle<()> {
-        if let Some(handle) = self.verified_coverage.wait(round, digest) {
+        if let Some(handle) = self.verified_syncs.wait(round, digest) {
             debug!(
                 ?round,
                 name = "notarized",
@@ -1779,7 +1783,7 @@ where
             return handle;
         }
 
-        self.cache.put_block_start_sync(round, digest, block).await
+        self.cache.put_block(round, digest, block).await
     }
 
     /// Folds any pending notarization-certificate sync for `round` into the
@@ -2268,7 +2272,7 @@ where
             previous.view().saturating_sub(self.view_retention_timeout),
         );
         self.cache.prune_by_view(prune_round).await;
-        self.verified_coverage.prune(prune_round);
+        self.verified_syncs.prune(prune_round);
         self.notarization_syncs.prune(prune_round);
 
         // Prune round-bound requests at or below the processed round.

@@ -37,7 +37,13 @@ impl Stage {
         block: V::Block,
     ) -> bool {
         match self {
-            Self::Verified => marshal.verified(round, block).await,
+            Self::Verified => match marshal.verified(round, block).await {
+                Ok(handle) => {
+                    handle.await.expect("failed to sync verified block");
+                    true
+                }
+                Err(_) => false,
+            },
             Self::Certified => marshal.certified(round, block).await,
         }
     }

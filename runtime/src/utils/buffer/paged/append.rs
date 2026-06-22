@@ -1252,9 +1252,12 @@ impl<B: Blob> Append<B> {
     /// mutations are considered issued, so a later [`Self::sync`] without
     /// intervening writes returns immediately and does not wait for this handle.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
+        // Flush any buffered data, including any partial page (plain writes only,
+        // so the durability barrier is started separately below).
         let buf_guard = self.buffer.write().await;
         self.flush_internal(buf_guard, true, false).await?;
 
+        // Start syncing pending mutations and return the completion handle.
         let mut blob_state = self.blob_state.write().await;
         Ok(blob_state.start_sync().await)
     }

@@ -1,5 +1,5 @@
 use crate::{
-    marshal::core::{durability::observe_sync, Variant},
+    marshal::core::Variant,
     simplex::types::{Finalization, Notarization},
     types::{Epoch, Height, Round, View},
 };
@@ -297,7 +297,7 @@ where
     /// The archive name is historical: callers may start this durability work
     /// after structural validation and before the application verdict is known.
     /// Consensus must not treat presence in this cache as application validity.
-    pub(crate) async fn put_verified_start_sync(
+    pub(crate) async fn put_verified(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
@@ -345,7 +345,7 @@ where
     }
 
     /// Add a notarized block to the prunable archive and start syncing it.
-    pub(crate) async fn put_block_start_sync(
+    pub(crate) async fn put_block(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,
@@ -362,21 +362,8 @@ where
         Self::handle_start_result(result, round, "notarized")
     }
 
-    /// Add a notarization to the prunable archive.
-    pub(crate) async fn put_notarization(
-        &mut self,
-        round: Round,
-        digest: <V::Block as Digestible>::Digest,
-        notarization: Notarization<S, V::Commitment>,
-    ) {
-        let handle = self
-            .put_notarization_start_sync(round, digest, notarization)
-            .await;
-        observe_sync(handle.await, round, "notarization");
-    }
-
     /// Add a notarization to the prunable archive and start syncing it.
-    pub(crate) async fn put_notarization_start_sync(
+    pub(crate) async fn put_notarization(
         &mut self,
         round: Round,
         digest: <V::Block as Digestible>::Digest,

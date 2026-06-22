@@ -585,16 +585,20 @@ mod tests {
             )
             .await
             .mailbox;
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
-                    .await
-            );
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
-                    .await
-            );
+
+            peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
+
+            peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
             context.sleep(Duration::from_millis(200)).await;
 
@@ -686,21 +690,27 @@ mod tests {
             )
             .await
             .mailbox;
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
-                    .await
-            );
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
-                    .await
-            );
-            assert!(
-                peer_mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
-                    .await
-            );
+
+            peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(1)), block_one.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
+
+            peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), block_two.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
+
+            peer_mailbox
+                .verified(Round::new(Epoch::zero(), View::new(3)), block_three.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_two.clone()).await;
             StandardHarness::report_finalization(&mut peer_mailbox, finalization_three.clone())
                 .await;
@@ -895,14 +905,15 @@ mod tests {
             .await
             .mailbox;
             for (i, block) in blocks.iter().enumerate() {
-                assert!(
-                    peer_mailbox
-                        .verified(
-                            Round::new(Epoch::zero(), View::new(block.height().get())),
-                            (*block).clone(),
-                        )
-                        .await
-                );
+                peer_mailbox
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(block.height().get())),
+                        (*block).clone(),
+                    )
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
                 StandardHarness::report_finalization(&mut peer_mailbox, finalizations[i].clone())
                     .await;
             }
@@ -998,14 +1009,15 @@ mod tests {
             .await
             .mailbox;
             for block in blocks.iter() {
-                assert!(
-                    peer_mailbox
-                        .verified(
-                            Round::new(Epoch::zero(), View::new(block.height().get())),
-                            block.clone(),
-                        )
-                        .await
-                );
+                peer_mailbox
+                    .verified(
+                        Round::new(Epoch::zero(), View::new(block.height().get())),
+                        block.clone(),
+                    )
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
             }
             context.sleep(Duration::from_millis(200)).await;
 
@@ -1244,8 +1256,10 @@ mod tests {
                     (),
                 )
                 .await;
-                let sync = mgr.put_block_start_sync(round, digest, block.clone()).await;
-                sync.await.expect("failed to sync block");
+                mgr.put_block(round, digest, block.clone())
+                    .await
+                    .await
+                    .expect("failed to sync block");
             }
 
             // Re-init the cache (simulating restart). find_block should fail
@@ -1556,7 +1570,12 @@ mod tests {
             for block in &canonical {
                 let height = block.height();
                 let round = Round::new(Epoch::zero(), View::new(height.get()));
-                assert!(mailbox.verified(round, block.clone()).await);
+                mailbox
+                    .verified(round, block.clone())
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
                 let finalization = StandardHarness::make_finalization(
                     Proposal {
                         round,
@@ -1621,7 +1640,12 @@ mod tests {
             // canonical chain.
             let next = make_raw_block(canonical[2].digest(), Height::new(4), 4);
             let next_round = Round::new(Epoch::zero(), View::new(5));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            mailbox
+                .verified(next_round, next.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let next_finalization = StandardHarness::make_finalization(
                 Proposal {
                     round: next_round,
@@ -1755,7 +1779,12 @@ mod tests {
                 let block =
                     B::new::<Sha256>(block_context.clone(), genesis.digest(), Height::new(1), 100);
                 let digest = block.digest();
-                assert!(marshal.verified(round, block).await);
+                marshal
+                    .verified(round, block)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2160,7 +2189,12 @@ mod tests {
                 let child =
                     B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(3), 200);
                 let child_digest = child.digest();
-                assert!(marshal.verified(child_round, child).await);
+                marshal
+                    .verified(child_round, child)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 let verify = wrapper.verify(child_context, child_digest).await;
                 wait_until(
@@ -2195,7 +2229,12 @@ mod tests {
                     "{kind:?}: malicious child height must not drive parent fetches"
                 );
 
-                assert!(marshal.verified(parent_round, parent).await);
+                marshal
+                    .verified(parent_round, parent)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
                 let verify_result = verify.await.expect("verify result missing");
                 if kind == WrapperKind::Inline {
                     assert!(
@@ -2280,7 +2319,7 @@ mod tests {
                 let parent_proposal = Proposal::new(parent_round, View::zero(), parent_digest);
                 let parent_notarization =
                     StandardHarness::make_notarization(parent_proposal, &schemes, QUORUM);
-                assert!(honest_mailbox.verified(parent_round, parent.clone()).await);
+                honest_mailbox.verified(parent_round, parent.clone()).await.expect("durable: enqueue").await.expect("durable: synced");
                 StandardHarness::report_notarization(&mut honest_mailbox, parent_notarization)
                     .await;
                 assert!(honest_mailbox.get_block(&parent_digest).await.is_some());
@@ -2322,7 +2361,7 @@ mod tests {
                 let child =
                     B::new::<Sha256>(child_context.clone(), parent_digest, Height::new(2), 200);
                 let child_digest = child.digest();
-                assert!(victim_mailbox.verified(child_round, child).await);
+                victim_mailbox.verified(child_round, child).await.expect("durable: enqueue").await.expect("durable: synced");
 
                 let mock_app: MockVerifyingApp<B, S> = MockVerifyingApp::new();
                 let mut wrapper = Wrapper::new(
@@ -2463,12 +2502,14 @@ mod tests {
                     1900,
                 );
                 let boundary_digest = boundary_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(boundary_round, boundary_block.clone())
-                        .await
-                );
+
+                marshal
+                    .clone()
+                    .verified(boundary_round, boundary_block.clone())
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2536,12 +2577,14 @@ mod tests {
                     1900,
                 );
                 let boundary_digest = boundary_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(boundary_round, boundary_block)
-                        .await
-                );
+
+                marshal
+                    .clone()
+                    .verified(boundary_round, boundary_block)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2575,12 +2618,14 @@ mod tests {
                     1000,
                 );
                 let non_boundary_digest = non_boundary_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(non_boundary_round, non_boundary_block)
-                        .await
-                );
+
+                marshal
+                    .clone()
+                    .verified(non_boundary_round, non_boundary_block)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2681,12 +2726,14 @@ mod tests {
                     200,
                 );
                 let malformed_digest = malformed_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(malformed_round, malformed_block)
-                        .await
-                );
+
+                marshal
+                    .clone()
+                    .verified(malformed_round, malformed_block)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2724,7 +2771,12 @@ mod tests {
                 let parent =
                     B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 300);
                 let parent_digest = parent.digest();
-                assert!(marshal.verified(parent_round, parent).await);
+                marshal
+                    .verified(parent_round, parent)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 let mismatch_round = Round::new(Epoch::zero(), View::new(3));
                 let mismatched_context = Ctx {
@@ -2739,12 +2791,14 @@ mod tests {
                     400,
                 );
                 let mismatched_digest = mismatched_block.digest();
-                assert!(
-                    marshal
-                        .clone()
-                        .verified(mismatch_round, mismatched_block)
-                        .await
-                );
+
+                marshal
+                    .clone()
+                    .verified(mismatch_round, mismatched_block)
+                    .await
+                    .expect("durable: enqueue")
+                    .await
+                    .expect("durable: synced");
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -2816,7 +2870,7 @@ mod tests {
                 };
                 let parent = B::new::<Sha256>(parent_context, genesis.digest(), Height::new(1), 100);
                 let parent_digest = parent.digest();
-                assert!(marshal.verified(parent_round, parent).await);
+                marshal.verified(parent_round, parent).await.expect("durable: enqueue").await.expect("durable: synced");
 
                 // 2) Publish a valid child; only application-level verification should fail.
                 let round = Round::new(Epoch::zero(), View::new(2));
@@ -2827,7 +2881,7 @@ mod tests {
                 };
                 let block = B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
                 let digest = block.digest();
-                assert!(marshal.verified(round, block).await);
+                marshal.verified(round, block).await.expect("durable: enqueue").await.expect("durable: synced");
 
                 context.sleep(Duration::from_millis(10)).await;
 
@@ -3394,7 +3448,12 @@ mod tests {
             let round = Round::new(Epoch::zero(), View::new(1));
             let block = make_raw_block(genesis.digest(), Height::new(1), 100);
             let digest = block.digest();
-            assert!(mailbox.verified(round, block).await);
+            mailbox
+                .verified(round, block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             mailbox.forward(
                 round,
                 digest,
@@ -3529,7 +3588,12 @@ mod tests {
 
             let served = make_raw_block(Sha256::hash(b"served-parent"), Height::new(1), 100);
             let served_round = Round::new(Epoch::zero(), View::new(1));
-            assert!(mailbox.verified(served_round, served.clone()).await);
+            mailbox
+                .verified(served_round, served.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let (response, response_rx) = oneshot::channel();
             resolver.enqueue(handler::Message::Produce {
                 key: handler::Key::Block(StandardHarness::commitment(&served)),
@@ -3539,7 +3603,12 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            mailbox
+                .verified(next_round, next.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -3550,7 +3619,12 @@ mod tests {
             context.sleep(Duration::from_millis(100)).await;
             assert!(matches!(started_rx.try_recv(), Err(TryRecvError::Empty)));
 
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            mailbox
+                .verified(floor_round, floor_block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             assert_eq!(started_rx.await.unwrap(), Height::new(5));
         });
     }
@@ -3607,7 +3681,12 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            mailbox
+                .verified(next_round, next.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -3726,7 +3805,12 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            mailbox
+                .verified(next_round, next.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -3801,7 +3885,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            mailbox
+                .verified(block1_round, block1.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -3842,7 +3931,12 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
+            mailbox
+                .verified(floor_round, floor_block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             assert_eq!(
                 mailbox
                     .get_block(Height::new(5))
@@ -3905,7 +3999,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1).await);
+            mailbox
+                .verified(block1_round, block1)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4016,7 +4115,12 @@ mod tests {
             let missing = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let later = make_raw_block(missing.digest(), Height::new(7), 700);
             let later_round = Round::new(Epoch::zero(), View::new(7));
-            assert!(mailbox.verified(later_round, later.clone()).await);
+            mailbox
+                .verified(later_round, later.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let later_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     later_round,
@@ -4041,7 +4145,12 @@ mod tests {
                 "gap repair must wait until the floor anchor is resolved"
             );
 
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            mailbox
+                .verified(floor_round, floor_block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -4131,7 +4240,12 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            mailbox
+                .verified(floor_round, floor_block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -4229,7 +4343,12 @@ mod tests {
 
             let old_next_round = Round::new(Epoch::zero(), View::new(6));
             let old_next = make_raw_block(old_floor_block.digest(), Height::new(6), 600);
-            assert!(mailbox.verified(old_next_round, old_next.clone()).await);
+            mailbox
+                .verified(old_next_round, old_next.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let old_next_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     old_next_round,
@@ -4244,7 +4363,12 @@ mod tests {
 
             let new_next_round = Round::new(Epoch::zero(), View::new(8));
             let new_next = make_raw_block(new_floor_block.digest(), Height::new(8), 800);
-            assert!(mailbox.verified(new_next_round, new_next.clone()).await);
+            mailbox
+                .verified(new_next_round, new_next.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let new_next_finalization = StandardHarness::make_finalization(
                 Proposal::new(
                     new_next_round,
@@ -4374,7 +4498,12 @@ mod tests {
 
             let next = make_raw_block(floor_block.digest(), Height::new(6), 600);
             let next_round = Round::new(Epoch::zero(), View::new(6));
-            assert!(mailbox.verified(next_round, next.clone()).await);
+            mailbox
+                .verified(next_round, next.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             let next_finalization = StandardHarness::make_finalization(
                 Proposal::new(next_round, View::new(5), StandardHarness::commitment(&next)),
                 &schemes,
@@ -4423,7 +4552,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            mailbox
+                .verified(block1_round, block1.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4477,7 +4611,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block2_round, block2).await);
+            mailbox
+                .verified(block2_round, block2)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             assert!(mailbox.get_finalization(Height::new(2)).await.is_some());
             context.sleep(Duration::from_millis(100)).await;
@@ -4490,7 +4629,12 @@ mod tests {
 
             // Once the anchor arrives, dispatch restarts at the floor
             // successor instead of treating the stale ack as progress.
-            assert!(mailbox.verified(floor_round, floor_block).await);
+            mailbox
+                .verified(floor_round, floor_block)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             select! {
                 height = application.acknowledged() => {
                     assert_eq!(
@@ -4539,7 +4683,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1).await);
+            mailbox
+                .verified(block1_round, block1)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4616,7 +4765,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            mailbox
+                .verified(block1_round, block1.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4647,7 +4801,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block2_round, block2).await);
+            mailbox
+                .verified(block2_round, block2)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             wait_until(
                 &context,
@@ -4750,7 +4909,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block1_round, block1.clone()).await);
+            mailbox
+                .verified(block1_round, block1.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block1_finalization).await;
             wait_until(
                 &context,
@@ -4781,7 +4945,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block2_round, block2).await);
+            mailbox
+                .verified(block2_round, block2)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, block2_finalization).await;
             wait_until(
                 &context,
@@ -4843,7 +5012,12 @@ mod tests {
                 &schemes,
                 QUORUM,
             );
-            assert!(mailbox.verified(block_round, block.clone()).await);
+            mailbox
+                .verified(block_round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
             assert_eq!(application.acknowledged().await, Height::new(1));
 
@@ -4896,11 +5070,13 @@ mod tests {
             let fetches_before = resolver.fetches().len();
             mailbox.hint_notarized(floor_round, Sha256::hash(b"missing-after-stale-floor"));
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
-            assert!(
-                mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
-                    .await
-            );
+
+            mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_before,
@@ -5276,10 +5452,12 @@ mod tests {
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
-            assert!(
-                mailbox.verified(round, block.clone()).await,
-                "verified block should persist before finalization"
-            );
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
@@ -5304,12 +5482,13 @@ mod tests {
             );
 
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
-            assert!(
-                mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
-                    .await,
-                "barrier verification should be processed"
-            );
+
+            mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_before,
@@ -5356,7 +5535,12 @@ mod tests {
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
@@ -5382,11 +5566,13 @@ mod tests {
             StandardHarness::report_finalization(&mut mailbox, stale_finalization).await;
 
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
-            assert!(
-                mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
-                    .await
-            );
+
+            mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_before,
@@ -5474,7 +5660,12 @@ mod tests {
             let mut mailbox = mailbox;
             assert_eq!(application.acknowledged().await, Height::zero());
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             let retain_floor = resolver.retain_count() + 2;
@@ -5515,11 +5706,13 @@ mod tests {
             );
 
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
-            assert!(
-                mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
-                    .await
-            );
+
+            mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_before,
@@ -5662,7 +5855,12 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(floor_round, floor_block.clone()).await);
+            mailbox
+                .verified(floor_round, floor_block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             mailbox.set_floor(floor_finalization);
             select! {
                 height = started => {
@@ -5701,12 +5899,13 @@ mod tests {
                 CommitmentFallback::FetchByRound { round: floor_round },
             );
             let barrier = make_raw_block(floor_block.digest(), Height::new(6), 600);
-            assert!(
-                mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(6)), barrier)
-                    .await,
-                "barrier verification should be processed"
-            );
+
+            mailbox
+                .verified(Round::new(Epoch::zero(), View::new(6)), barrier)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -5768,7 +5967,12 @@ mod tests {
             .await;
 
             mailbox.set_floor(finalization.clone());
-            assert!(mailbox.verified(round, block.clone()).await);
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             wait_until(
                 &context,
                 Duration::from_secs(5),
@@ -5790,11 +5994,13 @@ mod tests {
             let fetches_before = resolver.fetches().len();
             mailbox.hint_notarized(round, Sha256::hash(b"missing-after-set-floor"));
             let barrier = make_raw_block(block.digest(), Height::new(2), 200);
-            assert!(
-                mailbox
-                    .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
-                    .await
-            );
+
+            mailbox
+                .verified(Round::new(Epoch::zero(), View::new(2)), barrier)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             assert_eq!(
                 resolver.fetches().len(),
                 fetches_before,
@@ -5992,10 +6198,12 @@ mod tests {
             )
             .await;
 
-            assert!(
-                mailbox.verified(round, block.clone()).await,
-                "verified block should persist to the cache"
-            );
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, finalization.clone()).await;
 
             select! {
@@ -6269,7 +6477,12 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            assert!(mailbox.proposed(round, block.clone()).await);
+            mailbox
+                .proposed(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             let targets = vec![participants[1].clone()];
             mailbox.forward(round, digest, Recipients::Some(targets.clone()));
@@ -6325,7 +6538,12 @@ mod tests {
             .await;
             let buffer = buffer.expect("buffer was provided");
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
 
             let targets = vec![participants[1].clone(), participants[2].clone()];
             mailbox.forward(round, digest, Recipients::Some(targets.clone()));
@@ -6388,7 +6606,12 @@ mod tests {
                 QUORUM,
             );
             mailbox.set_floor(finalization);
-            assert!(mailbox.verified(floor_round, floor_anchor).await);
+            mailbox
+                .verified(floor_round, floor_anchor)
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             context.sleep(Duration::from_millis(50)).await;
 
             mailbox.hint_finalized(Height::new(5), NonEmptyVec::new(participants[1].clone()));
@@ -6432,7 +6655,12 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             // Wait until marshal has durably stored the finalization.
@@ -6523,7 +6751,12 @@ mod tests {
             )
             .await;
 
-            assert!(mailbox.verified(round, block.clone()).await);
+            mailbox
+                .verified(round, block.clone())
+                .await
+                .expect("durable: enqueue")
+                .await
+                .expect("durable: synced");
             StandardHarness::report_finalization(&mut mailbox, finalization).await;
 
             while mailbox.get_finalization(Height::new(1)).await.is_none() {
