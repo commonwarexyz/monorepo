@@ -54,11 +54,7 @@ use futures::{
     try_join,
 };
 use rand_core::CryptoRngCore;
-use std::{
-    collections::BTreeMap,
-    future::Future,
-    num::NonZeroUsize,
-};
+use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{debug, info_span, warn, Instrument as _, Span};
 
 // Resolver request keys are expressed in the variant commitment type, which
@@ -1726,7 +1722,10 @@ where
         digest: BlockDigestFor<V>,
         sync: Handle<()>,
     ) -> Handle<()> {
-        // Reuse the in-flight sync if this (round, digest) is already tracked.
+        // If this (round, digest) is already tracked, reuse the in-flight sync.
+        // This only fires on a duplicate delivery, whose `put_verified_start_sync`
+        // deduped against the existing archive entry and so returned a completed
+        // no-op handle; `sync` carries no pending durability work and is dropped.
         if let Some(handle) = self.verified_coverage.wait(round, digest) {
             return handle;
         }
@@ -1739,9 +1738,11 @@ where
 
     /// Persists a notarized block, blocking until it is durable.
     ///
-    /// When a verified sync already covers this `(round, digest)`, its driver
-    /// guarantees durability, so we skip both the redundant write and the
-    /// blocking wait.
+    /// When a verified sync already covers this `(round, digest)`, skip both the
+    /// redundant write and the blocking wait: reads consult the verified and
+    /// notarized archives together (and both prune on the same boundary), so the
+    /// block stays retrievable from the verified copy, and that copy's pool driver
+    /// already guarantees its durability (panicking on failure).
     async fn put_notarized_block(
         &mut self,
         round: Round,
@@ -1749,7 +1750,11 @@ where
         block: V::StoredBlock,
     ) {
         if self.verified_coverage.covers(round, digest) {
-            debug!(?round, name = "notarized", "cache covered by verified block");
+            debug!(
+                ?round,
+                name = "notarized",
+                "cache covered by verified block"
+            );
             return;
         }
 
@@ -1766,7 +1771,11 @@ where
         block: V::StoredBlock,
     ) -> Handle<()> {
         if let Some(handle) = self.verified_coverage.wait(round, digest) {
-            debug!(?round, name = "notarized", "cache covered by verified block");
+            debug!(
+                ?round,
+                name = "notarized",
+                "cache covered by verified block"
+            );
             return handle;
         }
 

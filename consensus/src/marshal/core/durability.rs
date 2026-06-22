@@ -270,7 +270,10 @@ mod tests {
         assert_eq!(registry.digest(round(4)), None, "below floor is rejected");
 
         registry.register(round(5), digest(b"b"), pending_sync());
-        assert!(registry.covers(round(5), digest(b"b")), "at floor is admitted");
+        assert!(
+            registry.covers(round(5), digest(b"b")),
+            "at floor is admitted"
+        );
     }
 
     #[test]
@@ -281,7 +284,10 @@ mod tests {
 
         let taken = registry.take(round(1)).expect("entry present");
         assert_eq!(taken.0, a);
-        assert!(registry.take(round(1)).is_none(), "taking twice yields None");
+        assert!(
+            registry.take(round(1)).is_none(),
+            "taking twice yields None"
+        );
         assert_eq!(registry.digest(round(1)), None);
     }
 
@@ -296,6 +302,9 @@ mod tests {
 
         assert_eq!(registry.digest(round(1)), None, "below floor dropped");
         assert!(registry.covers(round(2), digest(b"b")), "at floor retained");
-        assert!(registry.covers(round(3), digest(b"c")), "above floor retained");
+        assert!(
+            registry.covers(round(3), digest(b"c")),
+            "above floor retained"
+        );
     }
 }
