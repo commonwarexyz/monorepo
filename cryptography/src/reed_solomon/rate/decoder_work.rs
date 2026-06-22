@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    engine::{Shards, ShardsRefMut},
+    engine::{Shards, ShardsRefMut, SHARD_CHUNK_BYTES},
     Error,
 };
 use fixedbitset::FixedBitSet;
@@ -28,7 +28,7 @@ pub struct DecoderWork {
 impl DecoderWork {
     /// Creates new [`DecoderWork`] which initially
     /// has no working space allocated.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             original_count: 0,
             recovery_count: 0,
@@ -139,7 +139,7 @@ impl DecoderWork {
         }
     }
 
-    pub(crate) fn original_count(&self) -> usize {
+    pub(crate) const fn original_count(&self) -> usize {
         self.original_count
     }
 
@@ -153,7 +153,7 @@ impl DecoderWork {
         recovery_base_pos: usize,
         work_count: usize,
     ) {
-        assert!(shard_bytes % 2 == 0);
+        assert!(shard_bytes.is_multiple_of(2));
 
         self.original_count = original_count;
         self.recovery_count = recovery_count;
@@ -175,7 +175,8 @@ impl DecoderWork {
             self.received.grow(max_received_pos);
         }
 
-        self.shards.resize(work_count, shard_bytes.div_ceil(64));
+        self.shards
+            .resize(work_count, shard_bytes.div_ceil(SHARD_CHUNK_BYTES));
     }
 
     pub(crate) fn reset_received(&mut self) {
@@ -202,7 +203,7 @@ impl DecoderWork {
         );
     }
 
-    pub(crate) fn missing_original_count(&self) -> usize {
+    pub(crate) const fn missing_original_count(&self) -> usize {
         self.original_count - self.original_received_count
     }
 }

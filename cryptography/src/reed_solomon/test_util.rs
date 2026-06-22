@@ -10,33 +10,39 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 // ======================================================================
-// IntOrRange - CRATE
+// ShardSelection - CRATE
 
-pub(crate) trait IntOrRange {
-    // incluside
-    fn min(&self) -> usize;
-    // exclusive
-    fn max(&self) -> usize;
+#[derive(Debug)]
+pub(crate) enum ShardSelection {
+    Index(usize),
+    Range(Range<usize>),
 }
 
-impl IntOrRange for usize {
-    fn min(&self) -> usize {
-        *self
-    }
-
-    fn max(&self) -> usize {
-        self + 1
+impl ShardSelection {
+    fn indices(&self) -> Range<usize> {
+        match self {
+            Self::Index(index) => *index..*index + 1,
+            Self::Range(range) => range.clone(),
+        }
     }
 }
 
-impl IntOrRange for Range<usize> {
-    fn min(&self) -> usize {
-        self.start
-    }
+pub(crate) const fn index(index: usize) -> ShardSelection {
+    ShardSelection::Index(index)
+}
 
-    fn max(&self) -> usize {
-        self.end
-    }
+pub(crate) const fn range(start: usize, end: usize) -> ShardSelection {
+    ShardSelection::Range(start..end)
+}
+
+pub(crate) struct Roundtrip<'a> {
+    pub(crate) original_count: usize,
+    pub(crate) recovery_count: usize,
+    pub(crate) shard_bytes: usize,
+    pub(crate) recovery_hash: &'a str,
+    pub(crate) decoder_original: &'a [ShardSelection],
+    pub(crate) decoder_recovery: &'a [ShardSelection],
+    pub(crate) seed: u8,
 }
 
 // ======================================================================
@@ -83,17 +89,12 @@ pub(crate) fn generate_original(
 // ======================================================================
 // RATE ENCODER/DECODER - TEST SINGLE-ROUND ROUNDTRIP
 
-pub(crate) fn roundtrip<R: Rate<E>, E: Engine, T: IntOrRange>(
+pub(crate) fn roundtrip<R: Rate<E>, E: Engine>(
     encoder: &mut R::RateEncoder,
     decoder: &mut R::RateDecoder,
-    original_count: usize,
-    shard_bytes: usize,
-    recovery_hash: &str,
-    decoder_original: &[T],
-    decoder_recovery: &[T],
-    seed: u8,
+    cfg: &Roundtrip<'_>,
 ) {
-    let original = generate_original(original_count, shard_bytes, seed);
+    let original = generate_original(cfg.original_count, cfg.shard_bytes, cfg.seed);
 
     for original in &original {
         encoder.add_original_shard(original).unwrap();
@@ -102,71 +103,65 @@ pub(crate) fn roundtrip<R: Rate<E>, E: Engine, T: IntOrRange>(
     let result = encoder.encode().unwrap();
     let recovery: Vec<_> = result.recovery_iter().collect();
 
-    assert_hash(&recovery, recovery_hash);
+    assert_hash(&recovery, cfg.recovery_hash);
 
-    let mut original_received = FixedBitSet::with_capacity(original_count);
+    let mut original_received = FixedBitSet::with_capacity(cfg.original_count);
 
-    for x in decoder_original {
-        for i in x.min()..x.max() {
-            decoder.add_original_shard(i, &original[i]).unwrap();
+    for selection in cfg.decoder_original {
+        let indices = selection.indices();
+        for (i, shard) in original
+            .iter()
+            .enumerate()
+            .take(indices.end)
+            .skip(indices.start)
+        {
+            decoder.add_original_shard(i, shard).unwrap();
             original_received.set(i, true);
         }
     }
 
-    for x in decoder_recovery {
-        for i in x.min()..x.max() {
-            decoder.add_recovery_shard(i, recovery[i]).unwrap();
+    for selection in cfg.decoder_recovery {
+        let indices = selection.indices();
+        for (i, shard) in recovery
+            .iter()
+            .enumerate()
+            .take(indices.end)
+            .skip(indices.start)
+        {
+            decoder.add_recovery_shard(i, *shard).unwrap();
         }
     }
 
     let result = decoder.decode().unwrap();
     let restored: BTreeMap<_, _> = result.restored_original_iter().collect();
 
-    for i in 0..original_count {
+    for i in 0..cfg.original_count {
         if !original_received[i] {
             assert_eq!(restored[&i], original[i]);
         }
     }
 }
 
-pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine, T: IntOrRange>(
-    new_engine: fn() -> E,
-    original_count: usize,
-    recovery_count: usize,
-    shard_bytes: usize,
-    recovery_hash: &str,
-    decoder_original: &[T],
-    decoder_recovery: &[T],
-    seed: u8,
-) {
+pub(crate) fn roundtrip_single<R: Rate<E>, E: Engine>(new_engine: fn() -> E, cfg: &Roundtrip<'_>) {
     let mut encoder = R::encoder(
-        original_count,
-        recovery_count,
-        shard_bytes,
+        cfg.original_count,
+        cfg.recovery_count,
+        cfg.shard_bytes,
         new_engine(),
         None,
     )
     .unwrap();
 
     let mut decoder = R::decoder(
-        original_count,
-        recovery_count,
-        shard_bytes,
+        cfg.original_count,
+        cfg.recovery_count,
+        cfg.shard_bytes,
         new_engine(),
         None,
     )
     .unwrap();
 
-    roundtrip::<R, E, T>(
-        &mut encoder,
-        &mut decoder,
-        original_count,
-        shard_bytes,
-        recovery_hash,
-        decoder_original,
-        decoder_recovery,
-        seed,
-    );
+    roundtrip::<R, E>(&mut encoder, &mut decoder, cfg);
 }
 
 macro_rules! roundtrip_single {
@@ -175,30 +170,28 @@ macro_rules! roundtrip_single {
      $recovery_count: expr,
      $shard_bytes: expr,
      $recovery_hash: expr,
-     $decoder_original: expr,
+    $decoder_original: expr,
      $decoder_recovery: expr,
      $seed: expr $(,)?
     ) => {
-        crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _, _>(
+        let cfg = crate::reed_solomon::test_util::Roundtrip {
+            original_count: $original_count,
+            recovery_count: $recovery_count,
+            shard_bytes: $shard_bytes,
+            recovery_hash: $recovery_hash,
+            decoder_original: $decoder_original,
+            decoder_recovery: $decoder_recovery,
+            seed: $seed,
+        };
+
+        crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
             crate::reed_solomon::engine::Naive::new,
-            $original_count,
-            $recovery_count,
-            $shard_bytes,
-            $recovery_hash,
-            $decoder_original,
-            $decoder_recovery,
-            $seed,
+            &cfg,
         );
 
-        crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _, _>(
+        crate::reed_solomon::test_util::roundtrip_single::<$Rate<_>, _>(
             crate::reed_solomon::engine::NoSimd::new,
-            $original_count,
-            $recovery_count,
-            $shard_bytes,
-            $recovery_hash,
-            $decoder_original,
-            $decoder_recovery,
-            $seed,
+            &cfg,
         );
     };
 }
@@ -323,16 +316,17 @@ macro_rules! roundtrip_two_rounds_inner {
         )
         .unwrap();
 
-        test_util::roundtrip::<$Rate<_>, _, _>(
-            &mut encoder,
-            &mut decoder,
-            $original_count_a,
-            $shard_bytes_a,
-            $recovery_hash_a,
-            $decoder_original_a,
-            $decoder_recovery_a,
-            $seed_a,
-        );
+        let cfg_a = test_util::Roundtrip {
+            original_count: $original_count_a,
+            recovery_count: $recovery_count_a,
+            shard_bytes: $shard_bytes_a,
+            recovery_hash: $recovery_hash_a,
+            decoder_original: $decoder_original_a,
+            decoder_recovery: $decoder_recovery_a,
+            seed: $seed_a,
+        };
+
+        test_util::roundtrip::<$Rate<_>, _>(&mut encoder, &mut decoder, &cfg_a);
 
         if $explicit_reset {
             encoder
@@ -344,16 +338,17 @@ macro_rules! roundtrip_two_rounds_inner {
                 .unwrap();
         }
 
-        test_util::roundtrip::<$Rate<_>, _, _>(
-            &mut encoder,
-            &mut decoder,
-            $original_count_b,
-            $shard_bytes_b,
-            $recovery_hash_b,
-            $decoder_original_b,
-            $decoder_recovery_b,
-            $seed_b,
-        );
+        let cfg_b = test_util::Roundtrip {
+            original_count: $original_count_b,
+            recovery_count: $recovery_count_b,
+            shard_bytes: $shard_bytes_b,
+            recovery_hash: $recovery_hash_b,
+            decoder_original: $decoder_original_b,
+            decoder_recovery: $decoder_recovery_b,
+            seed: $seed_b,
+        };
+
+        test_util::roundtrip::<$Rate<_>, _>(&mut encoder, &mut decoder, &cfg_b);
     };
 }
 
@@ -364,12 +359,19 @@ macro_rules! test_rate_encoder_errors {
     ($Encoder:ident) => {
         #[test]
         fn different_shard_size_in_add_original_shard() {
-            let mut encoder = $Encoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut encoder = $Encoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
-                encoder.add_original_shard([0; 128]),
+                encoder.add_original_shard([0; crate::reed_solomon::SHARD_CHUNK_BYTES * 2]),
                 Err(Error::DifferentShardSize {
-                    shard_bytes: 64,
-                    got: 128
+                    shard_bytes: crate::reed_solomon::SHARD_CHUNK_BYTES,
+                    got: crate::reed_solomon::SHARD_CHUNK_BYTES * 2
                 }),
             );
         }
@@ -384,7 +386,14 @@ macro_rules! test_rate_encoder_errors {
 
         #[test]
         fn invalid_shard_size_in_reset() {
-            let mut encoder = $Encoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut encoder = $Encoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
                 encoder.reset(1, 1, 123),
                 Err(Error::InvalidShardSize { shard_bytes: 123 }),
@@ -393,7 +402,14 @@ macro_rules! test_rate_encoder_errors {
 
         #[test]
         fn too_few_original_shards() {
-            let mut encoder = $Encoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut encoder = $Encoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
                 encoder.encode().err(),
                 Some(Error::TooFewOriginalShards {
@@ -405,10 +421,19 @@ macro_rules! test_rate_encoder_errors {
 
         #[test]
         fn too_many_original_shards() {
-            let mut encoder = $Encoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
-            encoder.add_original_shard([0; 64]).unwrap();
+            let mut encoder = $Encoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
+            encoder
+                .add_original_shard([0; crate::reed_solomon::SHARD_CHUNK_BYTES])
+                .unwrap();
             assert_eq!(
-                encoder.add_original_shard([0; 64]),
+                encoder.add_original_shard([0; crate::reed_solomon::SHARD_CHUNK_BYTES]),
                 Err(Error::TooManyOriginalShards { original_count: 1 }),
             );
         }
@@ -416,7 +441,14 @@ macro_rules! test_rate_encoder_errors {
         #[test]
         fn unsupported_shard_count_in_new() {
             assert_eq!(
-                $Encoder::new(0, 1, 64, NoSimd::new(), None).err(),
+                $Encoder::new(
+                    0,
+                    1,
+                    crate::reed_solomon::SHARD_CHUNK_BYTES,
+                    NoSimd::new(),
+                    None
+                )
+                .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 0,
                     recovery_count: 1,
@@ -426,9 +458,16 @@ macro_rules! test_rate_encoder_errors {
 
         #[test]
         fn unsupported_shard_count_in_reset() {
-            let mut encoder = $Encoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut encoder = $Encoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
-                encoder.reset(0, 1, 64),
+                encoder.reset(0, 1, crate::reed_solomon::SHARD_CHUNK_BYTES),
                 Err(Error::UnsupportedShardCount {
                     original_count: 0,
                     recovery_count: 1,
@@ -445,53 +484,92 @@ macro_rules! test_rate_decoder_errors {
     ($Decoder:ident) => {
         #[test]
         fn different_shard_size_in_add_original_shard() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
-                decoder.add_original_shard(0, [0; 128]),
+                decoder.add_original_shard(0, [0; crate::reed_solomon::SHARD_CHUNK_BYTES * 2]),
                 Err(Error::DifferentShardSize {
-                    shard_bytes: 64,
-                    got: 128
+                    shard_bytes: crate::reed_solomon::SHARD_CHUNK_BYTES,
+                    got: crate::reed_solomon::SHARD_CHUNK_BYTES * 2
                 }),
             );
         }
 
         #[test]
         fn different_shard_size_in_add_recovery_shard() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
-                decoder.add_recovery_shard(0, [0; 128]),
+                decoder.add_recovery_shard(0, [0; crate::reed_solomon::SHARD_CHUNK_BYTES * 2]),
                 Err(Error::DifferentShardSize {
-                    shard_bytes: 64,
-                    got: 128
+                    shard_bytes: crate::reed_solomon::SHARD_CHUNK_BYTES,
+                    got: crate::reed_solomon::SHARD_CHUNK_BYTES * 2
                 }),
             );
         }
 
         #[test]
         fn duplicate_shard_index_in_add_original_shard() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
-            decoder.add_original_shard(0, [0; 64]).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
+            decoder
+                .add_original_shard(0, [0; crate::reed_solomon::SHARD_CHUNK_BYTES])
+                .unwrap();
             assert_eq!(
-                decoder.add_original_shard(0, [0; 64]),
+                decoder.add_original_shard(0, [0; crate::reed_solomon::SHARD_CHUNK_BYTES]),
                 Err(Error::DuplicateOriginalShardIndex { index: 0 }),
             );
         }
 
         #[test]
         fn duplicate_shard_index_in_add_recovert_shard() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
-            decoder.add_recovery_shard(0, [0; 64]).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
+            decoder
+                .add_recovery_shard(0, [0; crate::reed_solomon::SHARD_CHUNK_BYTES])
+                .unwrap();
             assert_eq!(
-                decoder.add_recovery_shard(0, [0; 64]),
+                decoder.add_recovery_shard(0, [0; crate::reed_solomon::SHARD_CHUNK_BYTES]),
                 Err(Error::DuplicateRecoveryShardIndex { index: 0 }),
             );
         }
 
         #[test]
         fn invalid_original_shard_index() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
-                decoder.add_original_shard(1, [0; 64]),
+                decoder.add_original_shard(1, [0; crate::reed_solomon::SHARD_CHUNK_BYTES]),
                 Err(Error::InvalidOriginalShardIndex {
                     original_count: 1,
                     index: 1,
@@ -501,9 +579,16 @@ macro_rules! test_rate_decoder_errors {
 
         #[test]
         fn invalid_recovery_shard_index() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
-                decoder.add_recovery_shard(1, [0; 64]),
+                decoder.add_recovery_shard(1, [0; crate::reed_solomon::SHARD_CHUNK_BYTES]),
                 Err(Error::InvalidRecoveryShardIndex {
                     recovery_count: 1,
                     index: 1,
@@ -521,7 +606,14 @@ macro_rules! test_rate_decoder_errors {
 
         #[test]
         fn invalid_shard_size_in_reset() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
                 decoder.reset(1, 1, 123),
                 Err(Error::InvalidShardSize { shard_bytes: 123 }),
@@ -530,7 +622,14 @@ macro_rules! test_rate_decoder_errors {
 
         #[test]
         fn not_enough_shards() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
                 decoder.decode().err(),
                 Some(Error::NotEnoughShards {
@@ -544,7 +643,14 @@ macro_rules! test_rate_decoder_errors {
         #[test]
         fn unsupported_shard_count_in_new() {
             assert_eq!(
-                $Decoder::new(0, 1, 64, NoSimd::new(), None).err(),
+                $Decoder::new(
+                    0,
+                    1,
+                    crate::reed_solomon::SHARD_CHUNK_BYTES,
+                    NoSimd::new(),
+                    None
+                )
+                .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 0,
                     recovery_count: 1,
@@ -554,9 +660,16 @@ macro_rules! test_rate_decoder_errors {
 
         #[test]
         fn unsupported_shard_count_in_reset() {
-            let mut decoder = $Decoder::new(1, 1, 64, NoSimd::new(), None).unwrap();
+            let mut decoder = $Decoder::new(
+                1,
+                1,
+                crate::reed_solomon::SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None,
+            )
+            .unwrap();
             assert_eq!(
-                decoder.reset(0, 1, 64),
+                decoder.reset(0, 1, crate::reed_solomon::SHARD_CHUNK_BYTES),
                 Err(Error::UnsupportedShardCount {
                     original_count: 0,
                     recovery_count: 1,
@@ -570,7 +683,7 @@ macro_rules! test_rate_decoder_errors {
 // RECOVERY HASHES
 
 // SHA256 hashes of some recovery shards.
-// - shard_bytes = 1024 (or 64 if mentioned explicitly)
+// - shard_bytes = 1024 (or `SHARD_CHUNK_BYTES` if mentioned explicitly)
 // - Original shards are from `generate_original`.
 
 // ==================================================
@@ -776,7 +889,7 @@ pub(crate) const EITHER_3_4: &str =
 pub(crate) const EITHER_4_3: &str =
     "e43d0903b619f4b17c5389ce869317ce549e3f6d2fe3aa2805ef4d4fb7adce74";
 
-// 32768 original ; 32768 recovery ; 11 seed ; shard_bytes = 64
+// 32768 original ; 32768 recovery ; 11 seed ; shard_bytes = SHARD_CHUNK_BYTES
 pub(crate) const EITHER_32768_32768_11: &str =
     "432025ead0e3f432f74e30500076a8c2b5554f5dfb7767b62fc3a8126eef7389";
 
@@ -799,12 +912,12 @@ pub(crate) const HIGH_5_2: &str =
 pub(crate) const HIGH_5_3: &str =
     "6f53d5175900d70b4821d1d0c947d0c47a802add0d620bfa72d57dd983dfc156";
 
-// 3000 original ; 30000 recovery ; 14 seed ; shard_bytes = 64
+// 3000 original ; 30000 recovery ; 14 seed ; shard_bytes = SHARD_CHUNK_BYTES
 // NOTE: Chunk size is 4096, with partial chunk at end.
 pub(crate) const HIGH_3000_30000_14: &str =
     "2d7d97fd92be0721b4fcfac8814fe0dd9ad07959eb40558c6ed9af09943fed4e";
 
-// 60000 original ; 3000 recovery ; 12 seed ; shard_bytes = 64
+// 60000 original ; 3000 recovery ; 12 seed ; shard_bytes = SHARD_CHUNK_BYTES
 // NOTE: Chunk size is 4096, with partial chunk at end.
 pub(crate) const HIGH_60000_3000_12: &str =
     "88e68e1d86a0fc168a549e195845d20b49ff85734db20d560c36ff2e14f78676";
@@ -829,12 +942,12 @@ pub(crate) const LOW_2_5: &str = "24449ae058f54a33b3b7ee568761e68e36bd7171ee2a32
 // 3 original ; 5 recovery ; 135 seed
 pub(crate) const LOW_3_5: &str = "c23920347f00328dceca9cb6012d797d97f366617cf27aae5c45b4f0b8491552";
 
-// 3000 original ; 60000 recovery ; 13 seed ; shard_bytes = 64
+// 3000 original ; 60000 recovery ; 13 seed ; shard_bytes = SHARD_CHUNK_BYTES
 // NOTE: Chunk size is 4096, with partial chunk at end.
 pub(crate) const LOW_3000_60000_13: &str =
     "d44f9c9ed9158f8aad140794e64a730577327f195753af21b810090966b4b4df";
 
-// 30000 original ; 3000 recovery ; 15 seed ; shard_bytes = 64
+// 30000 original ; 3000 recovery ; 15 seed ; shard_bytes = SHARD_CHUNK_BYTES
 // NOTE: Chunk size is 4096, with partial chunk at end.
 pub(crate) const LOW_30000_3000_15: &str =
     "202f99a2ade121d2404e967d5c04ff390f7a147070a2dcbe71dcf3baeafdf93a";

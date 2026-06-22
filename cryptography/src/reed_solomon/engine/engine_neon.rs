@@ -1,6 +1,6 @@
 use crate::reed_solomon::engine::{
     tables::{self, Mul128, Multiply128lutT, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER,
+    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES,
 };
 use core::{arch::aarch64::*, iter::zip};
 
@@ -28,6 +28,9 @@ impl Neon {
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
+        cpufeatures::new!(has_neon_for_engine, "neon");
+        assert!(has_neon_for_engine::get());
+
         let mul128 = tables::get_mul128();
         let skew = tables::get_skew();
 
@@ -38,12 +41,13 @@ impl Neon {
 impl Engine for Neon {
     fn fft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.fft_private_neon(data, pos, size, truncated_size, skew_delta);
         }
@@ -51,24 +55,27 @@ impl Engine for Neon {
 
     fn ifft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.ifft_private_neon(data, pos, size, truncated_size, skew_delta);
         }
     }
 
-    fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.mul_neon(x, log_m);
         }
     }
 
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe { Self::eval_poly_neon(erasures, truncated_size) }
     }
 }
@@ -89,11 +96,12 @@ impl Default for Neon {
 
 impl Neon {
     #[target_feature(enable = "neon")]
-    unsafe fn mul_neon(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    unsafe fn mul_neon(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         let lut = &self.mul128[log_m as usize];
 
         for chunk in x.iter_mut() {
             let x_ptr: *mut u8 = chunk.as_mut_ptr();
+            // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
             unsafe {
                 let x0_lo = vld1q_u8(x_ptr);
                 let x1_lo = vld1q_u8(x_ptr.add(16));
@@ -121,6 +129,7 @@ impl Neon {
         let mut prod_lo: uint8x16_t;
         let mut prod_hi: uint8x16_t;
 
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let t0_lo = vld1q_u8(core::ptr::from_ref::<u128>(&lut.lo[0]).cast::<u8>());
             let t1_lo = vld1q_u8(core::ptr::from_ref::<u128>(&lut.lo[1]).cast::<u8>());
@@ -165,6 +174,7 @@ impl Neon {
         lut: &Multiply128lutT,
     ) -> (uint8x16_t, uint8x16_t) {
         let (prod_lo, prod_hi) = Self::mul_128(y_lo, y_hi, lut);
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             x_lo = veorq_u8(x_lo, prod_lo);
             x_hi = veorq_u8(x_hi, prod_hi);
@@ -179,10 +189,16 @@ impl Neon {
 impl Neon {
     // Implementation of LEO_FFTB_128
     #[inline(always)]
-    fn fftb_128(&self, x: &mut [u8; 64], y: &mut [u8; 64], log_m: GfElement) {
+    fn fftb_128(
+        &self,
+        x: &mut [u8; SHARD_CHUNK_BYTES],
+        y: &mut [u8; SHARD_CHUNK_BYTES],
+        log_m: GfElement,
+    ) {
         let lut = &self.mul128[log_m as usize];
         let x_ptr: *mut u8 = x.as_mut_ptr();
         let y_ptr: *mut u8 = y.as_mut_ptr();
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x0_lo = vld1q_u8(x_ptr);
             let mut x1_lo = vld1q_u8(x_ptr.add(16));
@@ -216,7 +232,12 @@ impl Neon {
 
     // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
     #[inline(always)]
-    fn fft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn fft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         for (x_chunk, y_chunk) in zip(x.iter_mut(), y.iter_mut()) {
             self.fftb_128(x_chunk, y_chunk, log_m);
         }
@@ -225,7 +246,7 @@ impl Neon {
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -262,7 +283,7 @@ impl Neon {
     #[target_feature(enable = "neon")]
     unsafe fn fft_private_neon(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -275,7 +296,7 @@ impl Neon {
     #[inline(always)]
     fn fft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -331,11 +352,17 @@ impl Neon {
 impl Neon {
     // Implementation of LEO_IFFTB_128
     #[inline(always)]
-    fn ifftb_128(&self, x: &mut [u8; 64], y: &mut [u8; 64], log_m: GfElement) {
+    fn ifftb_128(
+        &self,
+        x: &mut [u8; SHARD_CHUNK_BYTES],
+        y: &mut [u8; SHARD_CHUNK_BYTES],
+        log_m: GfElement,
+    ) {
         let lut = &self.mul128[log_m as usize];
         let x_ptr: *mut u8 = x.as_mut_ptr();
         let y_ptr: *mut u8 = y.as_mut_ptr();
 
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x0_lo = vld1q_u8(x_ptr);
             let mut x1_lo = vld1q_u8(x_ptr.add(16));
@@ -368,7 +395,12 @@ impl Neon {
     }
 
     #[inline(always)]
-    fn ifft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn ifft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         for (x_chunk, y_chunk) in zip(x.iter_mut(), y.iter_mut()) {
             self.ifftb_128(x_chunk, y_chunk, log_m);
         }
@@ -377,7 +409,7 @@ impl Neon {
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -414,7 +446,7 @@ impl Neon {
     #[target_feature(enable = "neon")]
     unsafe fn ifft_private_neon(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -427,7 +459,7 @@ impl Neon {
     #[inline(always)]
     fn ifft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,

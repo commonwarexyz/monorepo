@@ -5,11 +5,11 @@ use crate::reed_solomon::rate::EncoderWork;
 
 /// Result of encoding. Contains the generated recovery shards.
 ///
-/// This struct is created by [`ReedSolomonEncoder::encode`]
+/// This struct is created by [`Encoder::encode`]
 /// and [`RateEncoder::encode`].
 ///
 /// [`RateEncoder::encode`]: crate::reed_solomon::rate::RateEncoder::encode
-/// [`ReedSolomonEncoder::encode`]: crate::reed_solomon::ReedSolomonEncoder::encode
+/// [`Encoder::encode`]: crate::reed_solomon::Encoder::encode
 pub struct EncoderResult<'a> {
     work: &'a mut EncoderWork,
 }
@@ -28,7 +28,7 @@ impl EncoderResult<'_> {
     ///
     /// Recovery shards have indexes `0..recovery_count`
     /// and these same indexes must be used when decoding.
-    pub fn recovery_iter(&self) -> Recovery<'_> {
+    pub const fn recovery_iter(&self) -> Recovery<'_> {
         Recovery::new(self.work)
     }
 }
@@ -37,7 +37,7 @@ impl EncoderResult<'_> {
 // EncoderResult - CRATE
 
 impl<'a> EncoderResult<'a> {
-    pub(crate) fn new(work: &'a mut EncoderWork) -> Self {
+    pub(crate) const fn new(work: &'a mut EncoderWork) -> Self {
         Self { work }
     }
 }
@@ -95,7 +95,7 @@ impl ExactSizeIterator for Recovery<'_> {}
 // Recovery - CRATE
 
 impl<'a> Recovery<'a> {
-    pub(crate) fn new(work: &'a EncoderWork) -> Self {
+    pub(crate) const fn new(work: &'a EncoderWork) -> Self {
         Self {
             ended: false,
             next_index: 0,
@@ -110,7 +110,7 @@ impl<'a> Recovery<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{test_util, ReedSolomonEncoder};
+    use crate::reed_solomon::{test_util, Encoder};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
 
@@ -120,26 +120,28 @@ mod tests {
     // Recovery
     fn encoder_result() {
         let original = test_util::generate_original(2, 1024, 123);
-        let mut encoder = ReedSolomonEncoder::new(2, 3, 1024).unwrap();
+        let mut encoder = Encoder::new(2, 3, 1024).unwrap();
 
         for original in &original {
             encoder.add_original_shard(original).unwrap();
         }
 
-        let result: EncoderResult = encoder.encode().unwrap();
+        let result: EncoderResult<'_> = encoder.encode().unwrap();
 
-        let mut all = Vec::new();
-        all.push(result.recovery(0).unwrap());
-        all.push(result.recovery(1).unwrap());
-        all.push(result.recovery(2).unwrap());
+        let all = vec![
+            result.recovery(0).unwrap(),
+            result.recovery(1).unwrap(),
+            result.recovery(2).unwrap(),
+        ];
         assert!(result.recovery(3).is_none());
         test_util::assert_hash(all, test_util::LOW_2_3);
 
-        let mut iter: Recovery = result.recovery_iter();
-        let mut all = Vec::new();
-        all.push(iter.next().unwrap());
-        all.push(iter.next().unwrap());
-        all.push(iter.next().unwrap());
+        let mut iter: Recovery<'_> = result.recovery_iter();
+        let all = vec![
+            iter.next().unwrap(),
+            iter.next().unwrap(),
+            iter.next().unwrap(),
+        ];
         assert!(iter.next().is_none());
         test_util::assert_hash(all, test_util::LOW_2_3);
     }
@@ -147,15 +149,15 @@ mod tests {
     #[test]
     fn encoder_result_size_hint() {
         let original = test_util::generate_original(2, 1024, 123);
-        let mut encoder = ReedSolomonEncoder::new(2, 3, 1024).unwrap();
+        let mut encoder = Encoder::new(2, 3, 1024).unwrap();
 
         for original in &original {
             encoder.add_original_shard(original).unwrap();
         }
 
-        let result: EncoderResult = encoder.encode().unwrap();
+        let result: EncoderResult<'_> = encoder.encode().unwrap();
 
-        let mut iter: Recovery = result.recovery_iter();
+        let mut iter: Recovery<'_> = result.recovery_iter();
 
         assert_eq!(iter.len(), 3);
 

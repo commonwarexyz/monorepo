@@ -13,8 +13,8 @@
 //!
 //! - [`DefaultRate`], [`DefaultRateEncoder`], [`DefaultRateDecoder`]
 //!     - Encoding/decoding using high or low rate as appropriate.
-//!     - These are basically same as [`ReedSolomonEncoder`]
-//!       and [`ReedSolomonDecoder`] except with slightly different API
+//!     - These are basically same as [`Encoder`]
+//!       and [`Decoder`] except with slightly different API
 //!       which allows specifying [`Engine`] and working space.
 //! - [`HighRate`], [`HighRateEncoder`], [`HighRateDecoder`]
 //!     - Encoding/decoding using only high rate.
@@ -24,8 +24,8 @@
 //! [simple usage]: crate::reed_solomon#simple-usage
 //! [basic usage]: crate::reed_solomon#basic-usage
 //! [algorithm > Rate]: crate::reed_solomon::algorithm#rate
-//! [`ReedSolomonEncoder`]: crate::reed_solomon::ReedSolomonEncoder
-//! [`ReedSolomonDecoder`]: crate::reed_solomon::ReedSolomonDecoder
+//! [`Encoder`]: crate::reed_solomon::Encoder
+//! [`Decoder`]: crate::reed_solomon::Decoder
 //! [`DefaultEngine`]: crate::reed_solomon::engine::DefaultEngine
 
 pub use self::{
@@ -119,17 +119,17 @@ where
     /// Rate of this encoder.
     type Rate: Rate<E>;
 
-    /// Like [`ReedSolomonEncoder::add_original_shard`](crate::reed_solomon::ReedSolomonEncoder::add_original_shard).
+    /// Like [`Encoder::add_original_shard`](crate::reed_solomon::Encoder::add_original_shard).
     fn add_original_shard<T: AsRef<[u8]>>(&mut self, original_shard: T) -> Result<(), Error>;
 
-    /// Like [`ReedSolomonEncoder::encode`](crate::reed_solomon::ReedSolomonEncoder::encode).
+    /// Like [`Encoder::encode`](crate::reed_solomon::Encoder::encode).
     fn encode(&mut self) -> Result<EncoderResult<'_>, Error>;
 
     /// Consumes this encoder returning its [`Engine`] and [`EncoderWork`]
     /// so that they can be re-used by another encoder.
     fn into_parts(self) -> (E, EncoderWork);
 
-    /// Like [`ReedSolomonEncoder::new`](crate::reed_solomon::ReedSolomonEncoder::new)
+    /// Like [`Encoder::new`](crate::reed_solomon::Encoder::new)
     /// with [`Engine`] to use and optional working space to be re-used.
     fn new(
         original_count: usize,
@@ -139,7 +139,7 @@ where
         work: Option<EncoderWork>,
     ) -> Result<Self, Error>;
 
-    /// Like [`ReedSolomonEncoder::reset`](crate::reed_solomon::ReedSolomonEncoder::reset).
+    /// Like [`Encoder::reset`](crate::reed_solomon::Encoder::reset).
     fn reset(
         &mut self,
         original_count: usize,
@@ -185,28 +185,28 @@ where
     /// Rate of this decoder.
     type Rate: Rate<E>;
 
-    /// Like [`ReedSolomonDecoder::add_original_shard`](crate::reed_solomon::ReedSolomonDecoder::add_original_shard).
+    /// Like [`Decoder::add_original_shard`](crate::reed_solomon::Decoder::add_original_shard).
     fn add_original_shard<T: AsRef<[u8]>>(
         &mut self,
         index: usize,
         original_shard: T,
     ) -> Result<(), Error>;
 
-    /// Like [`ReedSolomonDecoder::add_recovery_shard`](crate::reed_solomon::ReedSolomonDecoder::add_recovery_shard).
+    /// Like [`Decoder::add_recovery_shard`](crate::reed_solomon::Decoder::add_recovery_shard).
     fn add_recovery_shard<T: AsRef<[u8]>>(
         &mut self,
         index: usize,
         recovery_shard: T,
     ) -> Result<(), Error>;
 
-    /// Like [`ReedSolomonDecoder::decode`](crate::reed_solomon::ReedSolomonDecoder::decode).
+    /// Like [`Decoder::decode`](crate::reed_solomon::Decoder::decode).
     fn decode(&mut self) -> Result<DecoderResult<'_>, Error>;
 
     /// Consumes this decoder returning its [`Engine`] and [`DecoderWork`]
     /// so that they can be re-used by another decoder.
     fn into_parts(self) -> (E, DecoderWork);
 
-    /// Like [`ReedSolomonDecoder::new`](crate::reed_solomon::ReedSolomonDecoder::new)
+    /// Like [`Decoder::new`](crate::reed_solomon::Decoder::new)
     /// with [`Engine`] to use and optional working space to be re-used.
     fn new(
         original_count: usize,
@@ -216,7 +216,7 @@ where
         work: Option<DecoderWork>,
     ) -> Result<Self, Error>;
 
-    /// Like [`ReedSolomonDecoder::reset`](crate::reed_solomon::ReedSolomonDecoder::reset).
+    /// Like [`Decoder::reset`](crate::reed_solomon::Decoder::reset).
     fn reset(
         &mut self,
         original_count: usize,

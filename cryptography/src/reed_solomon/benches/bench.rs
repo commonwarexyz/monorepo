@@ -7,7 +7,7 @@ use commonware_cryptography::reed_solomon::{
     rate::{
         HighRateDecoder, HighRateEncoder, LowRateDecoder, LowRateEncoder, RateDecoder, RateEncoder,
     },
-    ReedSolomonDecoder, ReedSolomonEncoder,
+    Decoder, Encoder, SHARD_CHUNK_BYTES,
 };
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::{Rng, RngCore, SeedableRng};
@@ -22,9 +22,13 @@ const SHARD_BYTES: usize = 1024;
 // ======================================================================
 // UTIL
 
-fn generate_shards_64(shard_count: usize, chunk_count: usize, seed: u8) -> Vec<Vec<[u8; 64]>> {
+fn generate_shard_chunks(
+    shard_count: usize,
+    chunk_count: usize,
+    seed: u8,
+) -> Vec<Vec<[u8; SHARD_CHUNK_BYTES]>> {
     let mut rng = ChaCha8Rng::from_seed([seed; 32]);
-    let mut shards = vec![vec![[0u8; 64]; chunk_count]; shard_count];
+    let mut shards = vec![vec![[0u8; SHARD_CHUNK_BYTES]; chunk_count]; shard_count];
     for shard in &mut shards {
         rng.fill_bytes(shard.as_flattened_mut());
     }
@@ -32,8 +36,8 @@ fn generate_shards_64(shard_count: usize, chunk_count: usize, seed: u8) -> Vec<V
 }
 
 fn generate_shards(shard_count: usize, shard_bytes: usize, seed: u8) -> Vec<Vec<u8>> {
-    assert_eq!(shard_bytes % 64, 0);
-    generate_shards_64(shard_count, shard_bytes / 64, seed)
+    assert_eq!(shard_bytes % SHARD_CHUNK_BYTES, 0);
+    generate_shard_chunks(shard_count, shard_bytes / SHARD_CHUNK_BYTES, seed)
         .into_iter()
         .map(|s| s.into_flattened())
         .collect()
@@ -87,8 +91,7 @@ fn benchmarks_main(c: &mut Criterion) {
                 ((original_count + recovery_count) * SHARD_BYTES) as u64,
             ));
 
-            let mut encoder =
-                ReedSolomonEncoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
+            let mut encoder = Encoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
 
             let id = format!(
                 "original={original_count} recovery={recovery_count} shard_bytes={SHARD_BYTES}"
@@ -134,7 +137,7 @@ fn benchmarks_main(c: &mut Criterion) {
                 let recovery_provided_count = original_loss_count;
 
                 let mut decoder =
-                    ReedSolomonDecoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
+                    Decoder::new(original_count, recovery_count, SHARD_BYTES).unwrap();
 
                 let id = format!(
                     "original={original_count} recovery={recovery_count} shard_bytes={SHARD_BYTES} loss={loss_percent}"
@@ -381,7 +384,7 @@ fn benchmarks_engine(c: &mut Criterion) {
 }
 
 fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine: E) {
-    let shard_len_64 = SHARD_BYTES / 64;
+    let shard_chunk_count = SHARD_BYTES / SHARD_CHUNK_BYTES;
 
     let mut rng = ChaCha8Rng::from_seed([0; 32]);
     let mut data = [(); GF_ORDER].map(|_| rng.gen());
@@ -399,15 +402,17 @@ fn benchmarks_engine_one<E: Engine>(c: &mut Criterion, engine_name: &str, engine
         |b| b.iter(|| E::eval_poly(black_box(&mut data), GF_ORDER / 8)),
     );
 
-    let mut x = generate_shards_64(1, shard_len_64, 0).pop().unwrap();
+    let mut x = generate_shard_chunks(1, shard_chunk_count, 0)
+        .pop()
+        .unwrap();
 
     c.bench_function(
         &format!("reed_solomon::engine_mul/engine={engine_name} shard_bytes={SHARD_BYTES}"),
         |b| b.iter(|| engine.mul(black_box(x.as_mut_slice()), black_box(12345))),
     );
 
-    let shards_128_data = &mut generate_shards_64(1, 128 * shard_len_64, 0)[0];
-    let mut shards_128 = ShardsRefMut::new(128, shard_len_64, shards_128_data.as_mut());
+    let shards_128_data = &mut generate_shard_chunks(1, 128 * shard_chunk_count, 0)[0];
+    let mut shards_128 = ShardsRefMut::new(128, shard_chunk_count, shards_128_data.as_mut());
 
     c.bench_function(
         &format!("reed_solomon::engine_fft/engine={engine_name} shards=128"),

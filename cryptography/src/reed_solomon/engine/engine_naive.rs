@@ -1,6 +1,6 @@
 use crate::reed_solomon::engine::{
     tables::{self, Exp, Log, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS,
+    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, SHARD_CHUNK_BYTES,
 };
 
 // ======================================================================
@@ -10,7 +10,7 @@ use crate::reed_solomon::engine::{
 ///
 /// - [`Naive`] is meant for those who want to study
 ///   the source code to understand [`Engine`].
-/// - [`Naive`] also includes some debug assertions
+/// - [`Naive`] also includes some assertions
 ///   which are not present in other implementations.
 #[derive(Clone, Copy)]
 pub struct Naive {
@@ -42,14 +42,14 @@ impl Naive {
 impl Engine for Naive {
     fn fft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        debug_assert!(size.is_power_of_two());
-        debug_assert!(truncated_size <= size);
+        assert!(size.is_power_of_two());
+        assert!(truncated_size <= size);
 
         let mut dist = size / 2;
         while dist > 0 {
@@ -74,14 +74,14 @@ impl Engine for Naive {
 
     fn ifft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
-        debug_assert!(size.is_power_of_two());
-        debug_assert!(truncated_size <= size);
+        assert!(size.is_power_of_two());
+        assert!(truncated_size <= size);
 
         let mut dist = 1;
         while dist < size {
@@ -104,14 +104,14 @@ impl Engine for Naive {
         }
     }
 
-    fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         for chunk in x.iter_mut() {
-            for i in 0..32 {
+            for i in 0..SHARD_CHUNK_BYTES / 2 {
                 let lo = GfElement::from(chunk[i]);
-                let hi = GfElement::from(chunk[i + 32]);
+                let hi = GfElement::from(chunk[i + SHARD_CHUNK_BYTES / 2]);
                 let prod = tables::mul(lo | (hi << 8), log_m, self.exp, self.log);
                 chunk[i] = prod as u8;
-                chunk[i + 32] = (prod >> 8) as u8;
+                chunk[i + SHARD_CHUNK_BYTES / 2] = (prod >> 8) as u8;
             }
         }
     }
@@ -131,16 +131,21 @@ impl Default for Naive {
 
 impl Naive {
     /// `x[] ^= y[] * log_m`
-    fn mul_add(&self, x: &mut [[u8; 64]], y: &[[u8; 64]], log_m: GfElement) {
-        debug_assert_eq!(x.len(), y.len());
+    fn mul_add(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &[[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
+        assert_eq!(x.len(), y.len());
 
         for (x_chunk, y_chunk) in core::iter::zip(x.iter_mut(), y.iter()) {
-            for i in 0..32 {
+            for i in 0..SHARD_CHUNK_BYTES / 2 {
                 let lo = GfElement::from(y_chunk[i]);
-                let hi = GfElement::from(y_chunk[i + 32]);
+                let hi = GfElement::from(y_chunk[i + SHARD_CHUNK_BYTES / 2]);
                 let prod = tables::mul(lo | (hi << 8), log_m, self.exp, self.log);
                 x_chunk[i] ^= prod as u8;
-                x_chunk[i + 32] ^= (prod >> 8) as u8;
+                x_chunk[i + SHARD_CHUNK_BYTES / 2] ^= (prod >> 8) as u8;
             }
         }
     }

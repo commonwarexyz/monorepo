@@ -3,7 +3,7 @@
 //! [`Engine`]: crate::reed_solomon::engine::Engine
 
 use crate::reed_solomon::engine::{
-    fwht, tables, Engine, GfElement, ShardsRefMut, GF_BITS, GF_ORDER,
+    fwht, tables, Engine, GfElement, ShardsRefMut, GF_BITS, GF_ORDER, SHARD_CHUNK_BYTES,
 };
 use core::iter::zip;
 
@@ -32,8 +32,8 @@ pub fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
 
 /// `x[] ^= y[]`
 #[inline(always)]
-pub fn xor(xs: &mut [[u8; 64]], ys: &[[u8; 64]]) {
-    debug_assert_eq!(xs.len(), ys.len());
+pub fn xor(xs: &mut [[u8; SHARD_CHUNK_BYTES]], ys: &[[u8; SHARD_CHUNK_BYTES]]) {
+    assert_eq!(xs.len(), ys.len());
 
     for (x_chunk, y_chunk) in zip(xs.iter_mut(), ys.iter()) {
         for (x, y) in zip(x_chunk.iter_mut(), y_chunk.iter()) {
@@ -46,7 +46,7 @@ pub fn xor(xs: &mut [[u8; 64]], ys: &[[u8; 64]]) {
 ///
 /// Ranges must not overlap.
 #[inline(always)]
-pub fn xor_within(data: &mut ShardsRefMut, x: usize, y: usize, count: usize) {
+pub fn xor_within(data: &mut ShardsRefMut<'_>, x: usize, y: usize, count: usize) {
     let (xs, ys) = data.flat2_mut(x, y, count);
     xor(xs, ys);
 }
@@ -75,7 +75,7 @@ pub(crate) fn sub_mod(x: GfElement, y: GfElement) -> GfElement {
 #[inline(always)]
 pub(crate) fn fft_skew_end(
     engine: &impl Engine,
-    data: &mut ShardsRefMut,
+    data: &mut ShardsRefMut<'_>,
     pos: usize,
     size: usize,
     truncated_size: usize,
@@ -87,7 +87,7 @@ pub(crate) fn fft_skew_end(
 #[inline(always)]
 pub(crate) fn ifft_skew_end(
     engine: &impl Engine,
-    data: &mut ShardsRefMut,
+    data: &mut ShardsRefMut<'_>,
     pos: usize,
     size: usize,
     truncated_size: usize,
@@ -96,7 +96,7 @@ pub(crate) fn ifft_skew_end(
 }
 
 // Formal derivative.
-pub(crate) fn formal_derivative(data: &mut ShardsRefMut) {
+pub(crate) fn formal_derivative(data: &mut ShardsRefMut<'_>) {
     for i in 1..data.len() {
         let width: usize = 1 << i.trailing_zeros();
         xor_within(data, i - width, i, width);

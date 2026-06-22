@@ -95,11 +95,11 @@ enum InnerEncoder<E: Engine> {
 
 /// Reed-Solomon encoder using high or low rate as appropriate.
 ///
-/// This is basically same as [`ReedSolomonEncoder`]
+/// This is basically same as [`Encoder`]
 /// except with slightly different API which allows
 /// specifying [`Engine`] and [`EncoderWork`].
 ///
-/// [`ReedSolomonEncoder`]: crate::reed_solomon::ReedSolomonEncoder
+/// [`Encoder`]: crate::reed_solomon::Encoder
 pub struct DefaultRateEncoder<E: Engine>(InnerEncoder<E>);
 
 impl<E: Engine> RateEncoder<E> for DefaultRateEncoder<E> {
@@ -223,11 +223,11 @@ enum InnerDecoder<E: Engine> {
 
 /// Reed-Solomon decoder using high or low rate as appropriate.
 ///
-/// This is basically same as [`ReedSolomonDecoder`]
+/// This is basically same as [`Decoder`]
 /// except with slightly different API which allows
 /// specifying [`Engine`] and [`DecoderWork`].
 ///
-/// [`ReedSolomonDecoder`]: crate::reed_solomon::ReedSolomonDecoder
+/// [`Decoder`]: crate::reed_solomon::Decoder
 pub struct DefaultRateDecoder<E: Engine>(InnerDecoder<E>);
 
 impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
@@ -369,8 +369,11 @@ mod tests {
                 *recovery_count,
                 1024,
                 recovery_hash,
-                &[*recovery_count..*original_count],
-                &[0..core::cmp::min(*original_count, *recovery_count)],
+                &[test_util::range(*recovery_count, *original_count)],
+                &[test_util::range(
+                    0,
+                    core::cmp::min(*original_count, *recovery_count)
+                )],
                 *seed,
             );
         }
@@ -384,8 +387,24 @@ mod tests {
         roundtrip_two_rounds!(
             DefaultRate,
             false,
-            (2, 3, 1024, test_util::LOW_2_3, &[], &[0, 2], 123),
-            (2, 3, 1024, test_util::LOW_2_3_223, &[0], &[1], 223),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3,
+                &[],
+                &[test_util::index(0), test_util::index(2)],
+                123
+            ),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3_223,
+                &[test_util::index(0)],
+                &[test_util::index(1)],
+                223
+            ),
         );
     }
 
@@ -394,8 +413,28 @@ mod tests {
         roundtrip_two_rounds!(
             DefaultRate,
             true,
-            (3, 2, 1024, test_util::HIGH_3_2, &[1], &[0, 1], 132),
-            (5, 3, 1024, test_util::HIGH_5_3, &[1, 3], &[0, 1, 2], 153),
+            (
+                3,
+                2,
+                1024,
+                test_util::HIGH_3_2,
+                &[test_util::index(1)],
+                &[test_util::index(0), test_util::index(1)],
+                132
+            ),
+            (
+                5,
+                3,
+                1024,
+                test_util::HIGH_5_3,
+                &[test_util::index(1), test_util::index(3)],
+                &[
+                    test_util::index(0),
+                    test_util::index(1),
+                    test_util::index(2)
+                ],
+                153
+            ),
         );
     }
 
@@ -404,8 +443,24 @@ mod tests {
         roundtrip_two_rounds!(
             DefaultRate,
             true,
-            (3, 2, 1024, test_util::HIGH_3_2, &[1], &[0, 1], 132),
-            (2, 3, 1024, test_util::LOW_2_3, &[], &[0, 2], 123),
+            (
+                3,
+                2,
+                1024,
+                test_util::HIGH_3_2,
+                &[test_util::index(1)],
+                &[test_util::index(0), test_util::index(1)],
+                132
+            ),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3,
+                &[],
+                &[test_util::index(0), test_util::index(2)],
+                123
+            ),
         );
     }
 
@@ -414,8 +469,24 @@ mod tests {
         roundtrip_two_rounds!(
             DefaultRate,
             true,
-            (2, 3, 1024, test_util::LOW_2_3, &[], &[0, 1], 123),
-            (3, 2, 1024, test_util::HIGH_3_2, &[1], &[0, 1], 132),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3,
+                &[],
+                &[test_util::index(0), test_util::index(1)],
+                123
+            ),
+            (
+                3,
+                2,
+                1024,
+                test_util::HIGH_3_2,
+                &[test_util::index(1)],
+                &[test_util::index(0), test_util::index(1)],
+                132
+            ),
         );
     }
 
@@ -424,8 +495,28 @@ mod tests {
         roundtrip_two_rounds!(
             DefaultRate,
             true,
-            (2, 3, 1024, test_util::LOW_2_3, &[], &[0, 2], 123),
-            (3, 5, 1024, test_util::LOW_3_5, &[], &[0, 2, 4], 135),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3,
+                &[],
+                &[test_util::index(0), test_util::index(2)],
+                123
+            ),
+            (
+                3,
+                5,
+                1024,
+                test_util::LOW_3_5,
+                &[],
+                &[
+                    test_util::index(0),
+                    test_util::index(2),
+                    test_util::index(4)
+                ],
+                135
+            ),
         );
     }
 

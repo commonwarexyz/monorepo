@@ -1,6 +1,6 @@
 use crate::reed_solomon::engine::{
     tables::{self, Mul128, Multiply128lutT, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER,
+    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES,
 };
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
@@ -32,6 +32,9 @@ impl Avx2 {
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
+        cpufeatures::new!(has_avx2_for_engine, "avx2");
+        assert!(has_avx2_for_engine::get());
+
         let mul128 = tables::get_mul128();
         let skew = tables::get_skew();
 
@@ -42,12 +45,13 @@ impl Avx2 {
 impl Engine for Avx2 {
     fn fft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.fft_private_avx2(data, pos, size, truncated_size, skew_delta);
         }
@@ -55,24 +59,27 @@ impl Engine for Avx2 {
 
     fn ifft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.ifft_private_avx2(data, pos, size, truncated_size, skew_delta);
         }
     }
 
-    fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.mul_avx2(x, log_m);
         }
     }
 
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe { Self::eval_poly_avx2(erasures, truncated_size) }
     }
 }
@@ -106,6 +113,7 @@ struct LutAvx2 {
 impl From<&Multiply128lutT> for LutAvx2 {
     #[inline(always)]
     fn from(lut: &Multiply128lutT) -> Self {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             Self {
                 t0_lo: _mm256_broadcastsi128_si256(_mm_loadu_si128(
@@ -139,12 +147,13 @@ impl From<&Multiply128lutT> for LutAvx2 {
 
 impl Avx2 {
     #[target_feature(enable = "avx2")]
-    unsafe fn mul_avx2(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    unsafe fn mul_avx2(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         let lut = &self.mul128[log_m as usize];
         let lut_avx2 = LutAvx2::from(lut);
 
         for chunk in x.iter_mut() {
             let x_ptr = chunk.as_mut_ptr().cast::<__m256i>();
+            // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
             unsafe {
                 let x_lo = _mm256_loadu_si256(x_ptr);
                 let x_hi = _mm256_loadu_si256(x_ptr.add(1));
@@ -161,6 +170,7 @@ impl Avx2 {
         let mut prod_lo: __m256i;
         let mut prod_hi: __m256i;
 
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let clr_mask = _mm256_set1_epi8(0x0f);
 
@@ -195,6 +205,7 @@ impl Avx2 {
         lut_avx2: LutAvx2,
     ) -> (__m256i, __m256i) {
         let (prod_lo, prod_hi) = Self::mul_256(y_lo, y_hi, lut_avx2);
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             x_lo = _mm256_xor_si256(x_lo, prod_lo);
             x_hi = _mm256_xor_si256(x_hi, prod_hi);
@@ -209,10 +220,15 @@ impl Avx2 {
 impl Avx2 {
     // Implementation of LEO_FFTB_256
     #[inline(always)]
-    fn fftb_256(x: &mut [u8; 64], y: &mut [u8; 64], lut_avx2: LutAvx2) {
+    fn fftb_256(
+        x: &mut [u8; SHARD_CHUNK_BYTES],
+        y: &mut [u8; SHARD_CHUNK_BYTES],
+        lut_avx2: LutAvx2,
+    ) {
         let x_ptr = x.as_mut_ptr().cast::<__m256i>();
         let y_ptr = y.as_mut_ptr().cast::<__m256i>();
 
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x_lo = _mm256_loadu_si256(x_ptr);
             let mut x_hi = _mm256_loadu_si256(x_ptr.add(1));
@@ -235,7 +251,12 @@ impl Avx2 {
 
     // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
     #[inline(always)]
-    fn fft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn fft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         let lut = &self.mul128[log_m as usize];
         let lut_avx2 = LutAvx2::from(lut);
 
@@ -247,7 +268,7 @@ impl Avx2 {
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -284,7 +305,7 @@ impl Avx2 {
     #[target_feature(enable = "avx2")]
     unsafe fn fft_private_avx2(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -297,7 +318,7 @@ impl Avx2 {
     #[inline(always)]
     fn fft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -353,10 +374,15 @@ impl Avx2 {
 impl Avx2 {
     // Implementation of LEO_IFFTB_256
     #[inline(always)]
-    fn ifftb_256(x: &mut [u8; 64], y: &mut [u8; 64], lut_avx2: LutAvx2) {
+    fn ifftb_256(
+        x: &mut [u8; SHARD_CHUNK_BYTES],
+        y: &mut [u8; SHARD_CHUNK_BYTES],
+        lut_avx2: LutAvx2,
+    ) {
         let x_ptr = x.as_mut_ptr().cast::<__m256i>();
         let y_ptr = y.as_mut_ptr().cast::<__m256i>();
 
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x_lo = _mm256_loadu_si256(x_ptr);
             let mut x_hi = _mm256_loadu_si256(x_ptr.add(1));
@@ -378,7 +404,12 @@ impl Avx2 {
     }
 
     #[inline(always)]
-    fn ifft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn ifft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         let lut = &self.mul128[log_m as usize];
         let lut_avx2 = LutAvx2::from(lut);
 
@@ -390,7 +421,7 @@ impl Avx2 {
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -427,7 +458,7 @@ impl Avx2 {
     #[target_feature(enable = "avx2")]
     unsafe fn ifft_private_avx2(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -440,7 +471,7 @@ impl Avx2 {
     #[inline(always)]
     fn ifft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,

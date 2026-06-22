@@ -1,6 +1,6 @@
 use crate::reed_solomon::engine::{
     tables::{self, Mul128, Multiply128lutT, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER,
+    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES,
 };
 #[cfg(target_arch = "x86")]
 use core::arch::x86::*;
@@ -32,6 +32,9 @@ impl Ssse3 {
     ///
     /// [`LogWalsh`]: crate::reed_solomon::engine::tables::LogWalsh
     pub fn new() -> Self {
+        cpufeatures::new!(has_ssse3_for_engine, "ssse3");
+        assert!(has_ssse3_for_engine::get());
+
         let mul128 = tables::get_mul128();
         let skew = tables::get_skew();
 
@@ -42,12 +45,13 @@ impl Ssse3 {
 impl Engine for Ssse3 {
     fn fft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.fft_private_ssse3(data, pos, size, truncated_size, skew_delta);
         }
@@ -55,24 +59,27 @@ impl Engine for Ssse3 {
 
     fn ifft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
         skew_delta: usize,
     ) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.ifft_private_ssse3(data, pos, size, truncated_size, skew_delta);
         }
     }
 
-    fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             self.mul_ssse3(x, log_m);
         }
     }
 
     fn eval_poly(erasures: &mut [GfElement; GF_ORDER], truncated_size: usize) {
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe { Self::eval_poly_ssse3(erasures, truncated_size) }
     }
 }
@@ -93,11 +100,12 @@ impl Default for Ssse3 {
 
 impl Ssse3 {
     #[target_feature(enable = "ssse3")]
-    unsafe fn mul_ssse3(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    unsafe fn mul_ssse3(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         let lut = &self.mul128[log_m as usize];
 
         for chunk in x.iter_mut() {
             let x_ptr = chunk.as_mut_ptr().cast::<__m128i>();
+            // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
             unsafe {
                 let x0_lo = _mm_loadu_si128(x_ptr);
                 let x1_lo = _mm_loadu_si128(x_ptr.add(1));
@@ -119,6 +127,7 @@ impl Ssse3 {
         let mut prod_lo: __m128i;
         let mut prod_hi: __m128i;
 
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let t0_lo = _mm_loadu_si128(core::ptr::from_ref::<u128>(&lut.lo[0]).cast::<__m128i>());
             let t1_lo = _mm_loadu_si128(core::ptr::from_ref::<u128>(&lut.lo[1]).cast::<__m128i>());
@@ -163,6 +172,7 @@ impl Ssse3 {
         lut: &Multiply128lutT,
     ) -> (__m128i, __m128i) {
         let (prod_lo, prod_hi) = Self::mul_128(y_lo, y_hi, lut);
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             x_lo = _mm_xor_si128(x_lo, prod_lo);
             x_hi = _mm_xor_si128(x_hi, prod_hi);
@@ -177,10 +187,16 @@ impl Ssse3 {
 impl Ssse3 {
     // Implementation of LEO_FFTB_128
     #[inline(always)]
-    fn fftb_128(&self, x: &mut [u8; 64], y: &mut [u8; 64], log_m: GfElement) {
+    fn fftb_128(
+        &self,
+        x: &mut [u8; SHARD_CHUNK_BYTES],
+        y: &mut [u8; SHARD_CHUNK_BYTES],
+        log_m: GfElement,
+    ) {
         let lut = &self.mul128[log_m as usize];
         let x_ptr = x.as_mut_ptr().cast::<__m128i>();
         let y_ptr = y.as_mut_ptr().cast::<__m128i>();
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x0_lo = _mm_loadu_si128(x_ptr);
             let mut x1_lo = _mm_loadu_si128(x_ptr.add(1));
@@ -214,7 +230,12 @@ impl Ssse3 {
 
     // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
     #[inline(always)]
-    fn fft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn fft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         for (x_chunk, y_chunk) in zip(x.iter_mut(), y.iter_mut()) {
             self.fftb_128(x_chunk, y_chunk, log_m);
         }
@@ -223,7 +244,7 @@ impl Ssse3 {
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -260,7 +281,7 @@ impl Ssse3 {
     #[target_feature(enable = "ssse3")]
     unsafe fn fft_private_ssse3(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -273,7 +294,7 @@ impl Ssse3 {
     #[inline(always)]
     fn fft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -329,11 +350,17 @@ impl Ssse3 {
 impl Ssse3 {
     // Implementation of LEO_IFFTB_128
     #[inline(always)]
-    fn ifftb_128(&self, x: &mut [u8; 64], y: &mut [u8; 64], log_m: GfElement) {
+    fn ifftb_128(
+        &self,
+        x: &mut [u8; SHARD_CHUNK_BYTES],
+        y: &mut [u8; SHARD_CHUNK_BYTES],
+        log_m: GfElement,
+    ) {
         let lut = &self.mul128[log_m as usize];
         let x_ptr = x.as_mut_ptr().cast::<__m128i>();
         let y_ptr = y.as_mut_ptr().cast::<__m128i>();
 
+        // SAFETY: Constructors and runtime dispatch ensure the SIMD feature is available; offsets stay within fixed-size shard buffers.
         unsafe {
             let mut x0_lo = _mm_loadu_si128(x_ptr);
             let mut x1_lo = _mm_loadu_si128(x_ptr.add(1));
@@ -366,7 +393,12 @@ impl Ssse3 {
     }
 
     #[inline(always)]
-    fn ifft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn ifft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         for (x_chunk, y_chunk) in zip(x.iter_mut(), y.iter_mut()) {
             self.ifftb_128(x_chunk, y_chunk, log_m);
         }
@@ -375,7 +407,7 @@ impl Ssse3 {
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -412,7 +444,7 @@ impl Ssse3 {
     #[target_feature(enable = "ssse3")]
     unsafe fn ifft_private_ssse3(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -425,7 +457,7 @@ impl Ssse3 {
     #[inline(always)]
     fn ifft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,

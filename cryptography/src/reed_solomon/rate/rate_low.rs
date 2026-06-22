@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    engine::{self, Engine, GF_MODULUS, GF_ORDER},
+    engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
     DecoderResult, EncoderResult, Error,
 };
@@ -132,7 +132,7 @@ impl<E: Engine> LowRateEncoder<E> {
     }
 
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
-        debug_assert!(Self::supports(original_count, recovery_count));
+        assert!(Self::supports(original_count, recovery_count));
 
         let chunk_size = original_count.next_power_of_two();
 
@@ -213,7 +213,7 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
             if received[i] {
                 self.engine.mul(&mut work[i], erasures[i]);
             } else {
-                work[i].fill([0; 64]);
+                work[i].fill([0; SHARD_CHUNK_BYTES]);
             }
         }
 
@@ -223,7 +223,7 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
             if received[i] {
                 self.engine.mul(&mut work[i], erasures[i]);
             } else {
-                work[i].fill([0; 64]);
+                work[i].fill([0; SHARD_CHUNK_BYTES]);
             }
         }
 
@@ -305,7 +305,7 @@ impl<E: Engine> LowRateDecoder<E> {
     }
 
     fn work_count(original_count: usize, recovery_count: usize) -> usize {
-        debug_assert!(Self::supports(original_count, recovery_count));
+        assert!(Self::supports(original_count, recovery_count));
 
         (original_count.next_power_of_two() + recovery_count).next_power_of_two()
     }
@@ -331,14 +331,23 @@ mod tests {
             1024,
             test_util::EITHER_3_3,
             &[],
-            &[0..3],
+            &[test_util::range(0, 3)],
             133
         );
     }
 
     #[test]
     fn roundtrip_no_originals_missing() {
-        roundtrip_single!(LowRate, 2, 3, 1024, test_util::LOW_2_3, &[0, 1], &[], 123);
+        roundtrip_single!(
+            LowRate,
+            2,
+            3,
+            1024,
+            test_util::LOW_2_3,
+            &[test_util::index(0), test_util::index(1)],
+            &[],
+            123
+        );
     }
 
     #[test]
@@ -350,8 +359,11 @@ mod tests {
                 *recovery_count,
                 1024,
                 recovery_hash,
-                &[*recovery_count..*original_count],
-                &[0..core::cmp::min(*original_count, *recovery_count)],
+                &[test_util::range(*recovery_count, *original_count)],
+                &[test_util::range(
+                    0,
+                    core::cmp::min(*original_count, *recovery_count)
+                )],
                 *seed,
             );
         }
@@ -364,10 +376,10 @@ mod tests {
             LowRate,
             3000,
             60000,
-            64,
+            crate::reed_solomon::SHARD_CHUNK_BYTES,
             test_util::LOW_3000_60000_13,
             &[],
-            &[0..3000],
+            &[test_util::range(0, 3000)],
             13,
         );
     }
@@ -379,10 +391,10 @@ mod tests {
             LowRate,
             30000,
             3000,
-            64,
+            crate::reed_solomon::SHARD_CHUNK_BYTES,
             test_util::LOW_30000_3000_15,
-            &[3000..30000],
-            &[0..3000],
+            &[test_util::range(3000, 30000)],
+            &[test_util::range(0, 3000)],
             15,
         );
     }
@@ -394,10 +406,10 @@ mod tests {
             LowRate,
             32768,
             32768,
-            64,
+            crate::reed_solomon::SHARD_CHUNK_BYTES,
             test_util::EITHER_32768_32768_11,
             &[],
-            &[0..32768],
+            &[test_util::range(0, 32768)],
             11,
         );
     }
@@ -410,8 +422,8 @@ mod tests {
             34000,
             8,
             test_util::LOW_2000_34000_123_8,
-            &[0..2000],
-            &[0..32000],
+            &[test_util::range(0, 2000)],
+            &[test_util::range(0, 32000)],
             123
         );
     }
@@ -424,8 +436,24 @@ mod tests {
         roundtrip_two_rounds!(
             LowRate,
             false,
-            (2, 3, 1024, test_util::LOW_2_3, &[], &[0, 2], 123),
-            (2, 3, 1024, test_util::LOW_2_3_223, &[], &[1, 2], 223),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3,
+                &[],
+                &[test_util::index(0), test_util::index(2)],
+                123
+            ),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3_223,
+                &[],
+                &[test_util::index(1), test_util::index(2)],
+                223
+            ),
         );
     }
 
@@ -434,8 +462,24 @@ mod tests {
         roundtrip_two_rounds!(
             LowRate,
             true,
-            (2, 3, 1024, test_util::LOW_2_3, &[], &[0, 2], 123),
-            (2, 5, 1024, test_util::LOW_2_5, &[], &[0, 4], 125),
+            (
+                2,
+                3,
+                1024,
+                test_util::LOW_2_3,
+                &[],
+                &[test_util::index(0), test_util::index(2)],
+                123
+            ),
+            (
+                2,
+                5,
+                1024,
+                test_util::LOW_2_5,
+                &[],
+                &[test_util::index(0), test_util::index(4)],
+                125
+            ),
         );
     }
 
@@ -446,15 +490,23 @@ mod tests {
         use crate::reed_solomon::{
             engine::NoSimd,
             rate::{LowRate, Rate},
-            Error,
+            Error, SHARD_CHUNK_BYTES,
         };
 
         #[test]
         fn decoder() {
-            assert!(LowRate::<NoSimd>::decoder(4096, 61440, 64, NoSimd::new(), None).is_ok());
+            assert!(LowRate::<NoSimd>::decoder(
+                4096,
+                61440,
+                SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None
+            )
+            .is_ok());
 
             assert_eq!(
-                LowRate::<NoSimd>::decoder(61440, 4096, 64, NoSimd::new(), None).err(),
+                LowRate::<NoSimd>::decoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -464,10 +516,18 @@ mod tests {
 
         #[test]
         fn encoder() {
-            assert!(LowRate::<NoSimd>::encoder(4096, 61440, 64, NoSimd::new(), None).is_ok());
+            assert!(LowRate::<NoSimd>::encoder(
+                4096,
+                61440,
+                SHARD_CHUNK_BYTES,
+                NoSimd::new(),
+                None
+            )
+            .is_ok());
 
             assert_eq!(
-                LowRate::<NoSimd>::encoder(61440, 4096, 64, NoSimd::new(), None).err(),
+                LowRate::<NoSimd>::encoder(61440, 4096, SHARD_CHUNK_BYTES, NoSimd::new(), None)
+                    .err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -496,10 +556,10 @@ mod tests {
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRate::<NoSimd>::validate(4096, 61440, 64).is_ok());
+            assert!(LowRate::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRate::<NoSimd>::validate(61440, 4096, 64).err(),
+                LowRate::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -515,7 +575,7 @@ mod tests {
         use crate::reed_solomon::{
             engine::NoSimd,
             rate::{LowRateEncoder, RateEncoder},
-            Error,
+            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================
@@ -542,10 +602,10 @@ mod tests {
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRateEncoder::<NoSimd>::validate(4096, 61440, 64).is_ok());
+            assert!(LowRateEncoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRateEncoder::<NoSimd>::validate(61440, 4096, 64).err(),
+                LowRateEncoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,
@@ -573,7 +633,7 @@ mod tests {
         use crate::reed_solomon::{
             engine::NoSimd,
             rate::{LowRateDecoder, RateDecoder},
-            Error,
+            Error, SHARD_CHUNK_BYTES,
         };
 
         // ==================================================
@@ -600,10 +660,10 @@ mod tests {
                 Some(Error::InvalidShardSize { shard_bytes: 123 })
             );
 
-            assert!(LowRateDecoder::<NoSimd>::validate(4096, 61440, 64).is_ok());
+            assert!(LowRateDecoder::<NoSimd>::validate(4096, 61440, SHARD_CHUNK_BYTES).is_ok());
 
             assert_eq!(
-                LowRateDecoder::<NoSimd>::validate(61440, 4096, 64).err(),
+                LowRateDecoder::<NoSimd>::validate(61440, 4096, SHARD_CHUNK_BYTES).err(),
                 Some(Error::UnsupportedShardCount {
                     original_count: 61440,
                     recovery_count: 4096,

@@ -2,7 +2,9 @@
 use crate::reed_solomon::engine::Neon;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 use crate::reed_solomon::engine::{Avx2, Ssse3};
-use crate::reed_solomon::engine::{Engine, GfElement, NoSimd, ShardsRefMut, GF_ORDER};
+use crate::reed_solomon::engine::{
+    Engine, GfElement, NoSimd, ShardsRefMut, GF_ORDER, SHARD_CHUNK_BYTES,
+};
 #[cfg(not(feature = "std"))]
 use alloc::boxed::Box;
 
@@ -64,7 +66,7 @@ impl Default for DefaultEngine {
 impl Engine for DefaultEngine {
     fn fft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -75,7 +77,7 @@ impl Engine for DefaultEngine {
 
     fn ifft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -84,7 +86,7 @@ impl Engine for DefaultEngine {
         self.0.ifft(data, pos, size, truncated_size, skew_delta);
     }
 
-    fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         self.0.mul(x, log_m);
     }
 

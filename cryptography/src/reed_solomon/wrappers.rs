@@ -5,14 +5,14 @@ use crate::reed_solomon::{
 };
 
 // ======================================================================
-// ReedSolomonEncoder - PUBLIC
+// Encoder - PUBLIC
 
 /// Reed-Solomon encoder using [`DefaultEngine`] and [`DefaultRate`].
 ///
 /// [`DefaultEngine`]: crate::reed_solomon::engine::DefaultEngine
-pub struct ReedSolomonEncoder(DefaultRateEncoder<DefaultEngine>);
+pub struct Encoder(DefaultRateEncoder<DefaultEngine>);
 
-impl ReedSolomonEncoder {
+impl Encoder {
     /// Adds one original shard to the encoder.
     ///
     /// Original shards have indexes `0..original_count` corresponding to the order
@@ -31,7 +31,7 @@ impl ReedSolomonEncoder {
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///
-    /// [`reset`]: ReedSolomonEncoder::reset
+    /// [`reset`]: Encoder::reset
     pub fn encode(&mut self) -> Result<EncoderResult<'_>, Error> {
         self.0.encode()
     }
@@ -74,10 +74,10 @@ impl ReedSolomonEncoder {
     /// # Examples
     ///
     /// ```rust
-    /// use commonware_cryptography::reed_solomon::ReedSolomonEncoder;
+    /// use commonware_cryptography::reed_solomon::Encoder;
     ///
-    /// assert_eq!(ReedSolomonEncoder::supports(60_000, 4_000), true);
-    /// assert_eq!(ReedSolomonEncoder::supports(60_000, 5_000), false);
+    /// assert_eq!(Encoder::supports(60_000, 4_000), true);
+    /// assert_eq!(Encoder::supports(60_000, 5_000), false);
     /// ```
     pub fn supports(original_count: usize, recovery_count: usize) -> bool {
         DefaultRate::<DefaultEngine>::supports(original_count, recovery_count)
@@ -85,14 +85,14 @@ impl ReedSolomonEncoder {
 }
 
 // ======================================================================
-// ReedSolomonDecoder - PUBLIC
+// Decoder - PUBLIC
 
 /// Reed-Solomon decoder using [`DefaultEngine`] and [`DefaultRate`].
 ///
 /// [`DefaultEngine`]: crate::reed_solomon::engine::DefaultEngine
-pub struct ReedSolomonDecoder(DefaultRateDecoder<DefaultEngine>);
+pub struct Decoder(DefaultRateDecoder<DefaultEngine>);
 
-impl ReedSolomonDecoder {
+impl Decoder {
     /// Adds one original shard to the decoder.
     ///
     /// - Shards can be added in any order.
@@ -129,7 +129,7 @@ impl ReedSolomonDecoder {
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///
-    /// [`reset`]: ReedSolomonDecoder::reset
+    /// [`reset`]: Decoder::reset
     pub fn decode(&mut self) -> Result<DecoderResult<'_>, Error> {
         self.0.decode()
     }
@@ -172,10 +172,10 @@ impl ReedSolomonDecoder {
     /// # Examples
     ///
     /// ```rust
-    /// use commonware_cryptography::reed_solomon::ReedSolomonDecoder;
+    /// use commonware_cryptography::reed_solomon::Decoder;
     ///
-    /// assert_eq!(ReedSolomonDecoder::supports(60_000, 4_000), true);
-    /// assert_eq!(ReedSolomonDecoder::supports(60_000, 5_000), false);
+    /// assert_eq!(Decoder::supports(60_000, 4_000), true);
+    /// assert_eq!(Decoder::supports(60_000, 5_000), false);
     /// ```
     pub fn supports(original_count: usize, recovery_count: usize) -> bool {
         DefaultRate::<DefaultEngine>::supports(original_count, recovery_count)
@@ -196,8 +196,8 @@ mod tests {
     // HELPERS
 
     fn roundtrip(
-        encoder: &mut ReedSolomonEncoder,
-        decoder: &mut ReedSolomonDecoder,
+        encoder: &mut Encoder,
+        decoder: &mut Decoder,
         original_count: usize,
         recovery_hash: &str,
         decoder_original: &[usize],
@@ -241,8 +241,8 @@ mod tests {
 
     #[test]
     fn roundtrip_two_rounds_reset_low_to_high() {
-        let mut encoder = ReedSolomonEncoder::new(2, 3, 1024).unwrap();
-        let mut decoder = ReedSolomonDecoder::new(2, 3, 1024).unwrap();
+        let mut encoder = Encoder::new(2, 3, 1024).unwrap();
+        let mut decoder = Decoder::new(2, 3, 1024).unwrap();
 
         roundtrip(
             &mut encoder,
@@ -273,10 +273,10 @@ mod tests {
 
     #[test]
     fn supports() {
-        assert!(ReedSolomonEncoder::supports(4096, 61440));
-        assert!(ReedSolomonEncoder::supports(61440, 4096));
+        assert!(Encoder::supports(4096, 61440));
+        assert!(Encoder::supports(61440, 4096));
 
-        assert!(ReedSolomonDecoder::supports(4096, 61440));
-        assert!(ReedSolomonDecoder::supports(61440, 4096));
+        assert!(Decoder::supports(4096, 61440));
+        assert!(Decoder::supports(61440, 4096));
     }
 }

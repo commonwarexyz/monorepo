@@ -1,5 +1,5 @@
 use crate::reed_solomon::{
-    engine::{Shards, ShardsRefMut},
+    engine::{Shards, ShardsRefMut, SHARD_CHUNK_BYTES},
     Error,
 };
 
@@ -22,7 +22,7 @@ pub struct EncoderWork {
 impl EncoderWork {
     /// Creates new [`EncoderWork`] which initially
     /// has no working space allocated.
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             original_count: 0,
             recovery_count: 0,
@@ -102,17 +102,18 @@ impl EncoderWork {
         shard_bytes: usize,
         work_count: usize,
     ) {
-        assert!(shard_bytes % 2 == 0);
+        assert!(shard_bytes.is_multiple_of(2));
 
         self.original_count = original_count;
         self.recovery_count = recovery_count;
         self.shard_bytes = shard_bytes;
 
         self.original_received_count = 0;
-        self.shards.resize(work_count, shard_bytes.div_ceil(64));
+        self.shards
+            .resize(work_count, shard_bytes.div_ceil(SHARD_CHUNK_BYTES));
     }
 
-    pub(crate) fn reset_received(&mut self) {
+    pub(crate) const fn reset_received(&mut self) {
         self.original_received_count = 0;
     }
 
@@ -121,7 +122,7 @@ impl EncoderWork {
             .undo_last_chunk_encoding(self.shard_bytes, 0..self.recovery_count);
     }
 
-    pub(crate) fn recovery_count(&self) -> usize {
+    pub(crate) const fn recovery_count(&self) -> usize {
         self.recovery_count
     }
 }

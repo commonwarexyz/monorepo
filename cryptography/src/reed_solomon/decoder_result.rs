@@ -5,11 +5,11 @@ use crate::reed_solomon::rate::DecoderWork;
 
 /// Result of decoding. Contains the restored original shards.
 ///
-/// This struct is created by [`ReedSolomonDecoder::decode`]
+/// This struct is created by [`Decoder::decode`]
 /// and [`RateDecoder::decode`].
 ///
 /// [`RateDecoder::decode`]: crate::reed_solomon::rate::RateDecoder::decode
-/// [`ReedSolomonDecoder::decode`]: crate::reed_solomon::ReedSolomonDecoder::decode
+/// [`Decoder::decode`]: crate::reed_solomon::Decoder::decode
 pub struct DecoderResult<'a> {
     work: &'a mut DecoderWork,
 }
@@ -24,7 +24,7 @@ impl DecoderResult<'_> {
 
     /// Returns iterator over all restored original shards
     /// and their indexes, ordered by indexes.
-    pub fn restored_original_iter(&self) -> RestoredOriginal<'_> {
+    pub const fn restored_original_iter(&self) -> RestoredOriginal<'_> {
         RestoredOriginal::new(self.work)
     }
 }
@@ -33,7 +33,7 @@ impl DecoderResult<'_> {
 // DecoderResult - CRATE
 
 impl<'a> DecoderResult<'a> {
-    pub(crate) fn new(work: &'a mut DecoderWork) -> Self {
+    pub(crate) const fn new(work: &'a mut DecoderWork) -> Self {
         Self { work }
     }
 }
@@ -79,12 +79,7 @@ impl<'a> Iterator for RestoredOriginal<'a> {
             index += 1;
         }
 
-        debug_assert!(
-            false,
-            "Inconsistency in internal data structures. Please report."
-        );
-
-        None
+        unreachable!("Inconsistency in internal data structures. Please report.");
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -101,7 +96,7 @@ impl ExactSizeIterator for RestoredOriginal<'_> {}
 // RestoredOriginal - CRATE
 
 impl<'a> RestoredOriginal<'a> {
-    pub(crate) fn new(work: &'a DecoderWork) -> Self {
+    pub(crate) const fn new(work: &'a DecoderWork) -> Self {
         Self {
             remaining: work.missing_original_count(),
             next_index: 0,
@@ -116,15 +111,15 @@ impl<'a> RestoredOriginal<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::reed_solomon::{test_util, ReedSolomonDecoder, ReedSolomonEncoder};
+    use crate::reed_solomon::{test_util, Decoder, Encoder, SHARD_CHUNK_BYTES};
     #[cfg(not(feature = "std"))]
     use alloc::vec::Vec;
 
     fn simple_roundtrip(shard_size: usize) {
         let original = test_util::generate_original(3, shard_size, 0);
 
-        let mut encoder = ReedSolomonEncoder::new(3, 2, shard_size).unwrap();
-        let mut decoder = ReedSolomonDecoder::new(3, 2, shard_size).unwrap();
+        let mut encoder = Encoder::new(3, 2, shard_size).unwrap();
+        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
 
         for original in &original {
             encoder.add_original_shard(original).unwrap();
@@ -139,14 +134,14 @@ mod tests {
         decoder.add_recovery_shard(0, recovery[0]).unwrap();
         decoder.add_recovery_shard(1, recovery[1]).unwrap();
 
-        let result: DecoderResult = decoder.decode().unwrap();
+        let result: DecoderResult<'_> = decoder.decode().unwrap();
 
         assert_eq!(result.restored_original(0).unwrap(), original[0]);
         assert!(result.restored_original(1).is_none());
         assert_eq!(result.restored_original(2).unwrap(), original[2]);
         assert!(result.restored_original(3).is_none());
 
-        let mut iter: RestoredOriginal = result.restored_original_iter();
+        let mut iter: RestoredOriginal<'_> = result.restored_original_iter();
         assert_eq!(iter.next(), Some((0, original[0].as_slice())));
         assert_eq!(iter.next(), Some((2, original[2].as_slice())));
         assert_eq!(iter.next(), None);
@@ -162,19 +157,32 @@ mod tests {
     }
 
     #[test]
-    fn shard_size_not_divisible_by_64() {
-        for shard_size in [2, 4, 6, 30, 32, 34, 62, 64, 66, 126, 128, 130] {
+    fn shard_size_not_divisible_by_chunk_size() {
+        for shard_size in [
+            2,
+            4,
+            6,
+            30,
+            32,
+            34,
+            62,
+            SHARD_CHUNK_BYTES,
+            66,
+            126,
+            128,
+            130,
+        ] {
             simple_roundtrip(shard_size);
         }
     }
 
     #[test]
     fn decoder_result_size_hint() {
-        let shard_size = 64;
+        let shard_size = SHARD_CHUNK_BYTES;
         let original = test_util::generate_original(3, shard_size, 0);
 
-        let mut encoder = ReedSolomonEncoder::new(3, 2, shard_size).unwrap();
-        let mut decoder = ReedSolomonDecoder::new(3, 2, shard_size).unwrap();
+        let mut encoder = Encoder::new(3, 2, shard_size).unwrap();
+        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
 
         for original in &original {
             encoder.add_original_shard(original).unwrap();
@@ -187,9 +195,9 @@ mod tests {
         decoder.add_recovery_shard(0, recovery[0]).unwrap();
         decoder.add_recovery_shard(1, recovery[1]).unwrap();
 
-        let result: DecoderResult = decoder.decode().unwrap();
+        let result: DecoderResult<'_> = decoder.decode().unwrap();
 
-        let mut iter: RestoredOriginal = result.restored_original_iter();
+        let mut iter: RestoredOriginal<'_> = result.restored_original_iter();
 
         assert_eq!(iter.len(), 2);
 
@@ -205,11 +213,11 @@ mod tests {
 
     #[test]
     fn decoder_result_size_hint_no_missing() {
-        let shard_size = 64;
+        let shard_size = SHARD_CHUNK_BYTES;
         let original = test_util::generate_original(3, shard_size, 0);
 
-        let mut encoder = ReedSolomonEncoder::new(3, 2, shard_size).unwrap();
-        let mut decoder = ReedSolomonDecoder::new(3, 2, shard_size).unwrap();
+        let mut encoder = Encoder::new(3, 2, shard_size).unwrap();
+        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
 
         for original in &original {
             encoder.add_original_shard(original).unwrap();
@@ -223,9 +231,9 @@ mod tests {
         decoder.add_original_shard(1, &original[1]).unwrap();
         decoder.add_original_shard(2, &original[2]).unwrap();
 
-        let result: DecoderResult = decoder.decode().unwrap();
+        let result: DecoderResult<'_> = decoder.decode().unwrap();
 
-        let mut iter: RestoredOriginal = result.restored_original_iter();
+        let mut iter: RestoredOriginal<'_> = result.restored_original_iter();
 
         assert_eq!(iter.len(), 0);
 

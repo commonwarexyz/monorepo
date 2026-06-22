@@ -174,7 +174,6 @@ pub fn mul(x: GfElement, log_m: GfElement, exp: &Exp, log: &Log) -> GfElement {
 // ======================================================================
 // FUNCTIONS - PRIVATE - initialize tables
 
-#[allow(clippy::needless_range_loop)]
 fn initialize_exp_log() -> ExpLog {
     let mut exp = Box::new([0; GF_ORDER]);
     let mut log = Box::new([0; GF_ORDER]);
@@ -194,19 +193,19 @@ fn initialize_exp_log() -> ExpLog {
     // CONVERT TO CANTOR BASIS
 
     log[0] = 0;
-    for i in 0..GF_BITS {
+    for (i, basis) in CANTOR_BASIS.iter().copied().enumerate().take(GF_BITS) {
         let width = 1usize << i;
         for j in 0..width {
-            log[j + width] = log[j] ^ CANTOR_BASIS[i];
+            log[j + width] = log[j] ^ basis;
         }
     }
 
-    for i in 0..GF_ORDER {
-        log[i] = exp[log[i] as usize];
+    for value in log.iter_mut() {
+        *value = exp[*value as usize];
     }
 
-    for i in 0..GF_ORDER {
-        exp[log[i] as usize] = i as GfElement;
+    for (i, value) in log.iter().copied().enumerate() {
+        exp[value as usize] = i as GfElement;
     }
 
     exp[GF_MODULUS as usize] = exp[0];
@@ -233,11 +232,18 @@ fn initialize_mul16() -> Box<Mul16> {
 
     for log_m in 0..=GF_MODULUS {
         let lut = &mut mul16[log_m as usize];
-        for i in 0..16 {
-            lut[0][i] = mul(i as GfElement, log_m, exp, log);
-            lut[1][i] = mul((i << 4) as GfElement, log_m, exp, log);
-            lut[2][i] = mul((i << 8) as GfElement, log_m, exp, log);
-            lut[3][i] = mul((i << 12) as GfElement, log_m, exp, log);
+        let [row0, row1, row2, row3] = lut;
+        for (i, (((x0, x1), x2), x3)) in row0
+            .iter_mut()
+            .zip(row1.iter_mut())
+            .zip(row2.iter_mut())
+            .zip(row3.iter_mut())
+            .enumerate()
+        {
+            *x0 = mul(i as GfElement, log_m, exp, log);
+            *x1 = mul((i << 4) as GfElement, log_m, exp, log);
+            *x2 = mul((i << 8) as GfElement, log_m, exp, log);
+            *x3 = mul((i << 12) as GfElement, log_m, exp, log);
         }
     }
 
@@ -275,7 +281,6 @@ fn initialize_mul128() -> Box<Mul128> {
     mul128.into_boxed_slice().try_into().unwrap()
 }
 
-#[allow(clippy::needless_range_loop)]
 fn initialize_skew() -> Box<Skew> {
     let exp = &get_exp_log().exp;
     let log = &get_exp_log().log;
@@ -284,8 +289,8 @@ fn initialize_skew() -> Box<Skew> {
 
     let mut temp = [0; GF_BITS - 1];
 
-    for i in 1..GF_BITS {
-        temp[i - 1] = 1 << i;
+    for (i, value) in temp.iter_mut().enumerate() {
+        *value = 1 << (i + 1);
     }
 
     for m in 0..GF_BITS - 1 {
@@ -293,11 +298,11 @@ fn initialize_skew() -> Box<Skew> {
 
         skew[(1 << m) - 1] = 0;
 
-        for i in m..GF_BITS - 1 {
+        for (i, temp_i) in temp.iter().copied().enumerate().skip(m) {
             let s: usize = 1 << (i + 1);
             let mut j = (1 << m) - 1;
             while j < s {
-                skew[j + s] = skew[j] ^ temp[i];
+                skew[j + s] = skew[j] ^ temp_i;
                 j += step;
             }
         }
@@ -310,8 +315,8 @@ fn initialize_skew() -> Box<Skew> {
         }
     }
 
-    for i in 0..GF_MODULUS as usize {
-        skew[i] = log[skew[i] as usize];
+    for value in skew.iter_mut() {
+        *value = log[*value as usize];
     }
 
     skew

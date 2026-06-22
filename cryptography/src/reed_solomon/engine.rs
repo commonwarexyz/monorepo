@@ -28,8 +28,8 @@
 //!
 //! [simple usage]: crate::reed_solomon#simple-usage
 //! [basic usage]: crate::reed_solomon#basic-usage
-//! [`ReedSolomonEncoder`]: crate::reed_solomon::ReedSolomonEncoder
-//! [`ReedSolomonDecoder`]: crate::reed_solomon::ReedSolomonDecoder
+//! [`Encoder`]: crate::reed_solomon::Encoder
+//! [`Decoder`]: crate::reed_solomon::Decoder
 //! [`rate`]: crate::reed_solomon::rate
 
 #[cfg(target_arch = "aarch64")]
@@ -75,6 +75,13 @@ pub const GF_MODULUS: GfElement = 65535;
 /// Galois field polynomial.
 pub const GF_POLYNOMIAL: usize = 0x1002D;
 
+/// Byte width of a shard chunk.
+///
+/// [`Engine`] methods process shard buffers as arrays of this size.
+/// Input shards may span multiple chunks; any partial final chunk is padded
+/// during processing and returned at the original shard length.
+pub const SHARD_CHUNK_BYTES: usize = 64;
+
 /// TODO
 pub const CANTOR_BASIS: [GfElement; GF_BITS] = [
     0x0001, 0xACCA, 0x3C0E, 0x163E, 0xC582, 0xED2E, 0x914C, 0x4012, 0x6C98, 0x10D8, 0x6A72, 0xB900,
@@ -115,7 +122,7 @@ pub trait Engine {
     ///       only `0u8`:s and garbage otherwise.
     fn fft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -135,7 +142,7 @@ pub trait Engine {
     ///       only `0u8`:s and garbage otherwise.
     fn ifft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -143,7 +150,7 @@ pub trait Engine {
     );
 
     /// `x[] *= log_m`
-    fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement);
+    fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement);
 
     // ============================================================
     // PROVIDED

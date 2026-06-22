@@ -10,38 +10,19 @@
 //!   and naming rules.
 //! - Uses workspace dependencies and [`commonware_formatting`] in the test harness.
 //! - Uses [`thiserror`] for error display formatting.
-//! - Uses scoped lint allowances for upstream implementation and test style.
+//! - Renamed upstream `ReedSolomonEncoder` and `ReedSolomonDecoder` to [`Encoder`] and [`Decoder`].
 //! - Uses plain code references for cfg-gated SIMD engine docs so rustdoc works on all targets.
-//! - Allows upstream SIMD unsafe blocks inside this vendor module.
 //!
 //! [`reed_solomon_simd`]: https://crates.io/crates/reed-solomon-simd
 //! [`thiserror`]: https://docs.rs/thiserror
-
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_ptr_alignment,
-    clippy::inline_always,
-    clippy::large_stack_arrays,
-    clippy::manual_is_multiple_of,
-    clippy::missing_errors_doc,
-    clippy::missing_const_for_fn,
-    clippy::module_inception,
-    clippy::must_use_candidate,
-    clippy::needless_range_loop,
-    clippy::single_range_in_vec_init,
-    clippy::too_many_arguments,
-    clippy::undocumented_unsafe_blocks,
-    clippy::vec_init_then_push,
-    clippy::wildcard_imports,
-    elided_lifetimes_in_paths
-)]
 
 extern crate alloc;
 
 pub use self::{
     decoder_result::{DecoderResult, RestoredOriginal},
     encoder_result::{EncoderResult, Recovery},
-    reed_solomon::{ReedSolomonDecoder, ReedSolomonEncoder},
+    engine::SHARD_CHUNK_BYTES,
+    wrappers::{Decoder, Encoder},
 };
 use alloc::{collections::BTreeMap, vec::Vec};
 use thiserror::Error;
@@ -52,7 +33,7 @@ mod test_util;
 
 mod decoder_result;
 mod encoder_result;
-mod reed_solomon;
+mod wrappers;
 
 pub mod algorithm {
     #![doc = include_str!("algorithm.md")]
@@ -166,7 +147,7 @@ pub enum Error {
     },
 }
 
-/// Encodes in one go using [`ReedSolomonEncoder`], returning generated recovery shards.
+/// Encodes in one go using [`Encoder`], returning generated recovery shards.
 pub fn encode<T>(
     original_count: usize,
     recovery_count: usize,
@@ -176,7 +157,7 @@ where
     T: IntoIterator,
     T::Item: AsRef<[u8]>,
 {
-    if !ReedSolomonEncoder::supports(original_count, recovery_count) {
+    if !Encoder::supports(original_count, recovery_count) {
         return Err(Error::UnsupportedShardCount {
             original_count,
             recovery_count,
@@ -194,7 +175,7 @@ where
         |first| Ok((first.as_ref().len(), first)),
     )?;
 
-    let mut encoder = ReedSolomonEncoder::new(original_count, recovery_count, shard_bytes)?;
+    let mut encoder = Encoder::new(original_count, recovery_count, shard_bytes)?;
 
     encoder.add_original_shard(first)?;
     for original in original {
@@ -206,7 +187,7 @@ where
     Ok(result.recovery_iter().map(<[u8]>::to_vec).collect())
 }
 
-/// Decodes in one go using [`ReedSolomonDecoder`], returning restored original shards
+/// Decodes in one go using [`Decoder`], returning restored original shards
 /// with their indexes.
 pub fn decode<O, R, OT, RT>(
     original_count: usize,
@@ -220,7 +201,7 @@ where
     OT: AsRef<[u8]>,
     RT: AsRef<[u8]>,
 {
-    if !ReedSolomonDecoder::supports(original_count, recovery_count) {
+    if !Decoder::supports(original_count, recovery_count) {
         return Err(Error::UnsupportedShardCount {
             original_count,
             recovery_count,
@@ -245,7 +226,7 @@ where
         });
     };
 
-    let mut decoder = ReedSolomonDecoder::new(original_count, recovery_count, shard_bytes)?;
+    let mut decoder = Decoder::new(original_count, recovery_count, shard_bytes)?;
 
     for (index, original) in original {
         decoder.add_original_shard(index, original)?;
@@ -286,24 +267,24 @@ mod tests {
     #[test]
     fn test_send() {
         fn assert_send<T: Send>() {}
-        assert_send::<ReedSolomonEncoder>();
-        assert_send::<ReedSolomonDecoder>();
+        assert_send::<Encoder>();
+        assert_send::<Decoder>();
         assert_send::<DefaultEngine>();
         assert_send::<DefaultRate<DefaultEngine>>();
-        assert_send::<DecoderResult>();
-        assert_send::<EncoderResult>();
+        assert_send::<DecoderResult<'_>>();
+        assert_send::<EncoderResult<'_>>();
         assert_send::<Error>();
     }
 
     #[test]
     fn test_sync() {
         fn assert_sync<T: Sync>() {}
-        assert_sync::<ReedSolomonEncoder>();
-        assert_sync::<ReedSolomonDecoder>();
+        assert_sync::<Encoder>();
+        assert_sync::<Decoder>();
         assert_sync::<DefaultEngine>();
         assert_sync::<DefaultRate<DefaultEngine>>();
-        assert_sync::<DecoderResult>();
-        assert_sync::<EncoderResult>();
+        assert_sync::<DecoderResult<'_>>();
+        assert_sync::<EncoderResult<'_>>();
         assert_sync::<Error>();
     }
 }

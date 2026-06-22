@@ -2,7 +2,7 @@ use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    reed_solomon::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder},
+    reed_solomon::{Decoder, Encoder, Error as RsError},
     Digest, Hasher,
 };
 use commonware_parallel::Strategy;
@@ -11,12 +11,12 @@ use commonware_utils::Cached;
 use std::marker::PhantomData;
 use thiserror::Error;
 
-// Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
+// Thread-local caches for reusing `Encoder` and `Decoder`
 // instances across calls. Constructing these objects is expensive because
 // the underlying engine initializes GF lookup tables. The `reset()` method
 // reconfigures the work buffers without rebuilding those tables.
-commonware_utils::thread_local_cache!(static CACHED_ENCODER: ReedSolomonEncoder);
-commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder);
+commonware_utils::thread_local_cache!(static CACHED_ENCODER: Encoder);
+commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
@@ -333,7 +333,7 @@ fn encode<H: Hasher, S: Strategy>(
     let recovery_buf = {
         let mut encoder = Cached::take(
             &CACHED_ENCODER,
-            || ReedSolomonEncoder::new(k, m, shard_len),
+            || Encoder::new(k, m, shard_len),
             |enc| enc.reset(k, m, shard_len),
         )
         .map_err(Error::ReedSolomon)?;
@@ -452,7 +452,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     // Decode original data
     let mut decoder = Cached::take(
         &CACHED_DECODER,
-        || ReedSolomonDecoder::new(k, m, shard_len),
+        || Decoder::new(k, m, shard_len),
         |dec| dec.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -481,7 +481,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     // Re-encode recovered data to get recovery shards
     let mut encoder = Cached::take(
         &CACHED_ENCODER,
-        || ReedSolomonEncoder::new(k, m, shard_len),
+        || Encoder::new(k, m, shard_len),
         |enc| enc.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -795,7 +795,7 @@ mod tests {
             padded[offset] ^= u.arbitrary::<u8>()? | 1;
         }
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
         for shard in padded.chunks(shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1064,7 +1064,7 @@ mod tests {
         let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
 
         // Re-encode the data
-        let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
+        let mut encoder = Encoder::new(min as usize, m as usize, shard_size).unwrap();
         for shard in padded.chunks(shard_size) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1134,7 +1134,7 @@ mod tests {
         let pad_offset = payload_end % shard_len;
         padded[pad_shard * shard_len + pad_offset] = 0xAA;
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
         for shard in padded.chunks(shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1188,7 +1188,7 @@ mod tests {
         padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
         padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(data);
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, oversized_shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, oversized_shard_len).unwrap();
         for shard in padded.chunks(oversized_shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }

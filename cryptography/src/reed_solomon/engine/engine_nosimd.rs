@@ -1,6 +1,6 @@
 use crate::reed_solomon::engine::{
     tables::{self, Mul16, Skew},
-    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS,
+    utils, Engine, GfElement, ShardsRefMut, GF_MODULUS, SHARD_CHUNK_BYTES,
 };
 use core::iter::zip;
 
@@ -35,7 +35,7 @@ impl NoSimd {
 impl Engine for NoSimd {
     fn fft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -46,7 +46,7 @@ impl Engine for NoSimd {
 
     fn ifft(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -55,13 +55,13 @@ impl Engine for NoSimd {
         self.ifft_private(data, pos, size, truncated_size, skew_delta);
     }
 
-    fn mul(&self, x: &mut [[u8; 64]], log_m: GfElement) {
+    fn mul(&self, x: &mut [[u8; SHARD_CHUNK_BYTES]], log_m: GfElement) {
         let lut = &self.mul16[log_m as usize];
 
         for x_chunk in x.iter_mut() {
-            let (x_lo, x_hi) = x_chunk.split_at_mut(32);
+            let (x_lo, x_hi) = x_chunk.split_at_mut(SHARD_CHUNK_BYTES / 2);
 
-            for i in 0..32 {
+            for i in 0..SHARD_CHUNK_BYTES / 2 {
                 let lo = x_lo[i];
                 let hi = x_hi[i];
                 let prod = lut[0][usize::from(lo & 15)]
@@ -89,14 +89,19 @@ impl Default for NoSimd {
 
 impl NoSimd {
     /// `x[] ^= y[] * log_m`
-    fn mul_add(&self, x: &mut [[u8; 64]], y: &[[u8; 64]], log_m: GfElement) {
+    fn mul_add(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &[[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         let lut = &self.mul16[log_m as usize];
 
         for (x_chunk, y_chunk) in zip(x.iter_mut(), y.iter()) {
-            let (x_lo, x_hi) = x_chunk.split_at_mut(32);
-            let (y_lo, y_hi) = y_chunk.split_at(32);
+            let (x_lo, x_hi) = x_chunk.split_at_mut(SHARD_CHUNK_BYTES / 2);
+            let (y_lo, y_hi) = y_chunk.split_at(SHARD_CHUNK_BYTES / 2);
 
-            for i in 0..32 {
+            for i in 0..SHARD_CHUNK_BYTES / 2 {
                 let lo = y_lo[i];
                 let hi = y_hi[i];
                 let prod = lut[0][usize::from(lo & 15)]
@@ -116,7 +121,12 @@ impl NoSimd {
 impl NoSimd {
     // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
     #[inline(always)]
-    fn fft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn fft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         self.mul_add(x, y, log_m);
         utils::xor(y, x);
     }
@@ -124,7 +134,7 @@ impl NoSimd {
     #[inline(always)]
     fn fft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -161,7 +171,7 @@ impl NoSimd {
     #[inline(always)]
     fn fft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -217,7 +227,12 @@ impl NoSimd {
 impl NoSimd {
     // Partial butterfly, caller must do `GF_MODULUS` check with `xor`.
     #[inline(always)]
-    fn ifft_butterfly_partial(&self, x: &mut [[u8; 64]], y: &mut [[u8; 64]], log_m: GfElement) {
+    fn ifft_butterfly_partial(
+        &self,
+        x: &mut [[u8; SHARD_CHUNK_BYTES]],
+        y: &mut [[u8; SHARD_CHUNK_BYTES]],
+        log_m: GfElement,
+    ) {
         utils::xor(y, x);
         self.mul_add(x, y, log_m);
     }
@@ -225,7 +240,7 @@ impl NoSimd {
     #[inline(always)]
     fn ifft_butterfly_two_layers(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         dist: usize,
         log_m01: GfElement,
@@ -262,7 +277,7 @@ impl NoSimd {
     #[inline(always)]
     fn ifft_private(
         &self,
-        data: &mut ShardsRefMut,
+        data: &mut ShardsRefMut<'_>,
         pos: usize,
         size: usize,
         truncated_size: usize,
@@ -318,7 +333,7 @@ impl NoSimd {
 
 #[cfg(test)]
 mod tests {
-    use crate::reed_solomon::engine::{Engine, Naive, NoSimd};
+    use crate::reed_solomon::engine::{Engine, Naive, NoSimd, SHARD_CHUNK_BYTES};
     #[cfg(not(feature = "std"))]
     use alloc::vec;
     use rand::{Rng, RngCore, SeedableRng};
@@ -332,7 +347,7 @@ mod tests {
         let mut rng = ChaCha8Rng::from_seed([0; 32]);
 
         for shard_chunks in 0..6 {
-            let mut data_nosimd = vec![[0; 64]; shard_chunks];
+            let mut data_nosimd = vec![[0; SHARD_CHUNK_BYTES]; shard_chunks];
             rng.fill_bytes(data_nosimd.as_flattened_mut());
             let mut data_naive = data_nosimd.clone();
 
