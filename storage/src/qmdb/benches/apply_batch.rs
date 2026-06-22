@@ -2,7 +2,7 @@
 
 use crate::common::{
     any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyOFixP256Db, AnyUFixDb,
-    ImmFixDb, CHUNK_SIZE,
+    Digest, ImmFixDb, CHUNK_SIZE,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
 use commonware_macros::boxed;
@@ -11,7 +11,10 @@ use commonware_runtime::{
     tokio::{Config, Context},
     Supervisor,
 };
-use commonware_storage::{merkle::mmb::Family as Mmb, qmdb::any::traits::BatchableDb};
+use commonware_storage::{
+    merkle::mmb::Family as Mmb,
+    qmdb::any::traits::{BatchableDb, UnmerkleizedBatch},
+};
 use commonware_utils::NZU64;
 use criterion::{criterion_group, Criterion};
 use rand::{rngs::StdRng, RngCore, SeedableRng};
@@ -31,11 +34,11 @@ type ImmDb = ImmFixDb<Mmb>;
 // optimization pays off.
 type ODb = AnyOFixP256Db<Mmb>;
 
-fn write_updates(
-    mut batch: <Db as BatchableDb>::Batch,
+fn write_updates<D: BatchableDb<K = Digest, V = Digest>>(
+    mut batch: D::Batch,
     updates: u64,
     rng: &mut StdRng,
-) -> <Db as BatchableDb>::Batch {
+) -> D::Batch {
     for _ in 0..updates {
         let idx = rng.next_u64() % NUM_KEYS;
         let key = Sha256::hash(&idx.to_be_bytes());
@@ -56,7 +59,7 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
     seed_db(&mut db, NUM_KEYS).await;
 
     let mut rng = StdRng::seed_from_u64(7);
-    let batch = write_updates(db.new_batch(), updates, &mut rng);
+    let batch = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let batch = batch.merkleize(&db, None).await.unwrap();
 
     let start = Instant::now();
@@ -78,15 +81,8 @@ async fn bench_ord_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_ord_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
 
-    // Inlined rather than sharing `write_updates`, whose `<Db as BatchableDb>::Batch` return type
-    // is pinned to the unordered DB; the loop body is identical.
     let mut rng = StdRng::seed_from_u64(7);
-    let mut batch = db.new_batch();
-    for _ in 0..updates {
-        let idx = rng.next_u64() % NUM_KEYS;
-        let key = Sha256::hash(&idx.to_be_bytes());
-        batch = batch.write(key, Some(make_fixed_value(&mut rng)));
-    }
+    let batch = write_updates::<ODb>(db.new_batch(), updates, &mut rng);
     let batch = batch.merkleize(&db, None).await.unwrap();
 
     let start = Instant::now();
@@ -103,10 +99,10 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
     seed_db(&mut db, NUM_KEYS).await;
 
     let mut rng = StdRng::seed_from_u64(7);
-    let parent = write_updates(db.new_batch(), updates, &mut rng);
+    let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let parent = parent.merkleize(&db, None).await.unwrap();
 
-    let child = write_updates(parent.new_batch(), updates, &mut rng);
+    let child = write_updates::<Db>(parent.new_batch(), updates, &mut rng);
     let child = child.merkleize(&db, None).await.unwrap();
 
     let start = Instant::now();
@@ -123,10 +119,10 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
     seed_db(&mut db, NUM_KEYS).await;
 
     let mut rng = StdRng::seed_from_u64(7);
-    let parent = write_updates(db.new_batch(), updates, &mut rng);
+    let parent = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let parent = parent.merkleize(&db, None).await.unwrap();
 
-    let child = write_updates(parent.new_batch(), updates, &mut rng);
+    let child = write_updates::<Db>(parent.new_batch(), updates, &mut rng);
     let child = child.merkleize(&db, None).await.unwrap();
 
     db.apply_batch(parent).await.unwrap();
@@ -146,13 +142,13 @@ async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) ->
     seed_db(&mut db, NUM_KEYS).await;
 
     let mut rng = StdRng::seed_from_u64(7);
-    let a = write_updates(db.new_batch(), updates, &mut rng);
+    let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let a = a.merkleize(&db, None).await.unwrap();
 
-    let b = write_updates(a.new_batch(), updates, &mut rng);
+    let b = write_updates::<Db>(a.new_batch(), updates, &mut rng);
     let b = b.merkleize(&db, None).await.unwrap();
 
-    let c = write_updates(b.new_batch(), updates, &mut rng);
+    let c = write_updates::<Db>(b.new_batch(), updates, &mut rng);
     let c = c.merkleize(&db, None).await.unwrap();
 
     db.apply_batch(a).await.unwrap();
@@ -172,13 +168,13 @@ async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration 
     seed_db(&mut db, NUM_KEYS).await;
 
     let mut rng = StdRng::seed_from_u64(7);
-    let a = write_updates(db.new_batch(), updates, &mut rng);
+    let a = write_updates::<Db>(db.new_batch(), updates, &mut rng);
     let a = a.merkleize(&db, None).await.unwrap();
 
-    let b = write_updates(a.new_batch(), updates, &mut rng);
+    let b = write_updates::<Db>(a.new_batch(), updates, &mut rng);
     let b = b.merkleize(&db, None).await.unwrap();
 
-    let c = write_updates(b.new_batch(), updates, &mut rng);
+    let c = write_updates::<Db>(b.new_batch(), updates, &mut rng);
     let c = c.merkleize(&db, None).await.unwrap();
 
     drop(a);
