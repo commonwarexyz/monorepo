@@ -535,16 +535,14 @@ impl Cache {
         let mut start = offset_in_page as usize;
         let mut gathered = 0;
         loop {
-            let Some(&slot) = self.index.get(&(blob_id, page_num)) else {
+            let Some(page) = self.cache.get(&(blob_id, page_num)) else {
                 buf.set_truncated();
                 return buf;
             };
-            let entry = &self.entries[slot];
-            assert_eq!(entry.key, (blob_id, page_num));
-            entry.referenced.store(true, Ordering::Relaxed);
+            let page = page.as_ref();
 
             let end = self.page_size.min(start.saturating_add(max_len - gathered));
-            if !buf.push(&self.page_slice(slot)[start..end]) {
+            if !buf.push(&page[start..end]) {
                 buf.set_truncated();
                 return buf;
             }
@@ -568,13 +566,10 @@ impl Cache {
     #[inline]
     fn resident_in_page(&self, blob_id: u64, offset: u64, want: usize) -> Option<&[u8]> {
         let (page_num, offset_in_page) = Self::offset_to_page(self.page_size as u64, offset);
-        let &slot = self.index.get(&(blob_id, page_num))?;
-        let entry = &self.entries[slot];
-        assert_eq!(entry.key, (blob_id, page_num));
-        entry.referenced.store(true, Ordering::Relaxed);
+        let page = self.cache.get(&(blob_id, page_num))?.as_ref();
         let start = offset_in_page as usize;
         let end = self.page_size.min(start.saturating_add(want));
-        Some(&self.page_slice(slot)[start..end])
+        Some(&page[start..end])
     }
 
     /// Decode a `T` from the resident prefix of `[offset, offset + max_len)`, letting the decoder
