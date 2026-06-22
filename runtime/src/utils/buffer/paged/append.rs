@@ -1574,7 +1574,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, Handle, Clock as _, IoBufsMut, Runner as _, Spawner as _,
+        BufferPool, BufferPoolConfig, Clock as _, Handle, IoBufsMut, Runner as _, Spawner as _,
         Storage as _, Supervisor as _,
     };
     use commonware_codec::ReadExt;
