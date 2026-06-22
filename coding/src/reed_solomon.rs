@@ -1,20 +1,22 @@
 use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{
+    reed_solomon::{Decoder, Encoder, Error as RsError},
+    Digest, Hasher,
+};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use commonware_utils::Cached;
-use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::marker::PhantomData;
 use thiserror::Error;
 
-// Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
+// Thread-local caches for reusing `Encoder` and `Decoder`
 // instances across calls. Constructing these objects is expensive because
 // the underlying engine initializes GF lookup tables. The `reset()` method
 // reconfigures the work buffers without rebuilding those tables.
-commonware_utils::thread_local_cache!(static CACHED_ENCODER: ReedSolomonEncoder);
-commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder);
+commonware_utils::thread_local_cache!(static CACHED_ENCODER: Encoder);
+commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
@@ -203,14 +205,14 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
 /// Return the canonical shard width for a payload and shard count.
 ///
 /// Encoding prefixes the payload with its length, splits the result across
-/// `k` original shards, and rounds up to an even width required by
-/// `reed-solomon-simd`. Decode uses the same calculation to reject commitments
-/// that decode to the same payload with a non-canonical shard width.
+/// `k` original shards, and rounds up to an even width required by the
+/// Reed-Solomon implementation. Decode uses the same calculation to reject
+/// commitments that decode to the same payload with a non-canonical shard width.
 const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
     let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
 
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
+    // Ensure shard length is even, as required by the Reed-Solomon implementation.
     if !shard_len.is_multiple_of(2) {
         shard_len += 1;
     }
@@ -331,7 +333,7 @@ fn encode<H: Hasher, S: Strategy>(
     let recovery_buf = {
         let mut encoder = Cached::take(
             &CACHED_ENCODER,
-            || ReedSolomonEncoder::new(k, m, shard_len),
+            || Encoder::new(k, m, shard_len),
             |enc| enc.reset(k, m, shard_len),
         )
         .map_err(Error::ReedSolomon)?;
@@ -450,7 +452,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     // Decode original data
     let mut decoder = Cached::take(
         &CACHED_DECODER,
-        || ReedSolomonDecoder::new(k, m, shard_len),
+        || Decoder::new(k, m, shard_len),
         |dec| dec.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -479,7 +481,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
     // Re-encode recovered data to get recovery shards
     let mut encoder = Cached::take(
         &CACHED_ENCODER,
-        || ReedSolomonEncoder::new(k, m, shard_len),
+        || Encoder::new(k, m, shard_len),
         |enc| enc.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -793,7 +795,7 @@ mod tests {
             padded[offset] ^= u.arbitrary::<u8>()? | 1;
         }
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
         for shard in padded.chunks(shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -921,7 +923,7 @@ mod tests {
     fn test_invalid_total() {
         let data = b"Test parameter validation";
 
-        // total <= min should panic
+        // The total shard count must exceed the recovery threshold.
         encode::<Sha256, _>(3, 3, data.as_slice(), &STRATEGY).unwrap();
     }
 
@@ -930,7 +932,7 @@ mod tests {
     fn test_invalid_min() {
         let data = b"Test parameter validation";
 
-        // min = 0 should panic
+        // The recovery threshold must be non-zero.
         encode::<Sha256, _>(5, 0, data.as_slice(), &STRATEGY).unwrap();
     }
 
@@ -1023,8 +1025,8 @@ mod tests {
         let data = b"leaf_count mismatch proof";
         let (commitment, shards) = RS::encode(&config_actual, data.as_slice(), &STRATEGY).unwrap();
 
-        // Previously this passed because check() ignored config and only verified
-        // against commitment root. It must now fail immediately.
+        // A proof generated under a different shard configuration is invalid
+        // for this commitment.
         let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
@@ -1062,7 +1064,7 @@ mod tests {
         let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
 
         // Re-encode the data
-        let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
+        let mut encoder = Encoder::new(min as usize, m as usize, shard_size).unwrap();
         for shard in padded.chunks(shard_size) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1132,7 +1134,7 @@ mod tests {
         let pad_offset = payload_end % shard_len;
         padded[pad_shard * shard_len + pad_offset] = 0xAA;
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
         for shard in padded.chunks(shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1186,7 +1188,7 @@ mod tests {
         padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
         padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(data);
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, oversized_shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, oversized_shard_len).unwrap();
         for shard in padded.chunks(oversized_shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1351,12 +1353,10 @@ mod tests {
         let result = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY);
         assert!(matches!(
             result,
-            Err(Error::ReedSolomon(
-                reed_solomon_simd::Error::UnsupportedShardCount {
-                    original_count: _,
-                    recovery_count: _,
-                }
-            ))
+            Err(Error::ReedSolomon(RsError::UnsupportedShardCount {
+                original_count: _,
+                recovery_count: _,
+            }))
         ));
     }
 
