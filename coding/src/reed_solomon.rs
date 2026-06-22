@@ -295,6 +295,18 @@ mod gf8 {
     use super::Error;
     use std::sync::OnceLock;
 
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::{
+        __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set1_epi8, _mm_shuffle_epi8, _mm_srli_epi16,
+        _mm_storeu_si128, _mm_xor_si128,
+    };
+
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::{
+        __m128i, _mm_and_si128, _mm_loadu_si128, _mm_set1_epi8, _mm_shuffle_epi8, _mm_srli_epi16,
+        _mm_storeu_si128, _mm_xor_si128,
+    };
+
     pub(super) const FIELD_SIZE: usize = 256;
     const FIELD_ORDER: usize = FIELD_SIZE - 1;
     const GENERATOR: u16 = 2;
@@ -339,6 +351,20 @@ mod gf8 {
     }
 
     fn add_mul(out: &mut [u8], input: &[u8], coeff: u8) {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if std::arch::is_x86_feature_detected!("ssse3") {
+                // SAFETY: Runtime feature detection above guarantees SSSE3 is available.
+                unsafe {
+                    add_mul_ssse3(out, input, coeff);
+                }
+                return;
+            }
+        }
+        add_mul_portable(out, input, coeff);
+    }
+
+    fn add_mul_portable(out: &mut [u8], input: &[u8], coeff: u8) {
         if coeff == 0 {
             return;
         }
@@ -357,6 +383,47 @@ mod gf8 {
             let idx = coeff_log + tables.log[*i as usize] as usize;
             *o ^= tables.exp[idx];
         }
+    }
+
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "ssse3")]
+    unsafe fn add_mul_ssse3(out: &mut [u8], input: &[u8], coeff: u8) {
+        if coeff == 0 || input.len() < 16 {
+            add_mul_portable(out, input, coeff);
+            return;
+        }
+
+        let mut low = [0u8; 16];
+        let mut high = [0u8; 16];
+        for i in 0u8..16 {
+            low[i as usize] = mul(coeff, i);
+            high[i as usize] = mul(coeff, i << 4);
+        }
+
+        let chunks = input.len() / 16;
+        // SAFETY: `low` and `high` are 16-byte local arrays. Unaligned loads are valid.
+        let low = unsafe { _mm_loadu_si128(low.as_ptr().cast::<__m128i>()) };
+        // SAFETY: `low` and `high` are 16-byte local arrays. Unaligned loads are valid.
+        let high = unsafe { _mm_loadu_si128(high.as_ptr().cast::<__m128i>()) };
+        let mask = _mm_set1_epi8(0x0f);
+
+        for i in 0..chunks {
+            let offset = i * 16;
+            // SAFETY: `offset` is within the chunked prefix of `input` and has at least 16 bytes.
+            let value = unsafe { _mm_loadu_si128(input.as_ptr().add(offset).cast::<__m128i>()) };
+            let lo = _mm_and_si128(value, mask);
+            let hi = _mm_and_si128(_mm_srli_epi16(value, 4), mask);
+            let product = _mm_xor_si128(_mm_shuffle_epi8(low, lo), _mm_shuffle_epi8(high, hi));
+            // SAFETY: `offset` is within the chunked prefix of `out` and has at least 16 bytes.
+            let previous = unsafe { _mm_loadu_si128(out.as_ptr().add(offset).cast::<__m128i>()) };
+            let result = _mm_xor_si128(previous, product);
+            // SAFETY: `offset` is within the chunked prefix of `out` and has at least 16 bytes.
+            unsafe {
+                _mm_storeu_si128(out.as_mut_ptr().add(offset).cast::<__m128i>(), result);
+            }
+        }
+
+        add_mul_portable(&mut out[chunks * 16..], &input[chunks * 16..], coeff);
     }
 
     fn mul(a: u8, b: u8) -> u8 {
@@ -569,6 +636,25 @@ mod gf8 {
                     )
                     .unwrap();
                 assert_eq!(recovered, originals);
+            }
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[test]
+        fn ssse3_matches_portable_add_mul() {
+            if !std::arch::is_x86_feature_detected!("ssse3") {
+                return;
+            }
+            let input = (0..257).map(|i| (i * 73) as u8).collect::<Vec<_>>();
+            for coeff in 0..=u8::MAX {
+                let mut portable = (0..257).map(|i| (i * 19) as u8).collect::<Vec<_>>();
+                let mut simd = portable.clone();
+                add_mul_portable(&mut portable, &input, coeff);
+                // SAFETY: Runtime feature detection above guarantees SSSE3 is available.
+                unsafe {
+                    add_mul_ssse3(&mut simd, &input, coeff);
+                }
+                assert_eq!(simd, portable);
             }
         }
     }
