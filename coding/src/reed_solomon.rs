@@ -1,28 +1,25 @@
 use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
-use commonware_cryptography::{Digest, Hasher};
+use commonware_cryptography::{
+    reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
+    Digest, Hasher,
+};
 use commonware_parallel::Strategy;
 use commonware_storage::bmt::{self, Builder};
 use commonware_utils::Cached;
-use reed_solomon_simd::{Error as RsError, ReedSolomonDecoder, ReedSolomonEncoder};
 use std::{marker::PhantomData, ops::Range};
 use thiserror::Error;
 
-// Thread-local caches for reusing `ReedSolomonEncoder` and `ReedSolomonDecoder`
+// Thread-local caches for reusing `Encoder` and `Decoder`
 // instances across calls. Constructing these objects is expensive because
 // the underlying engine initializes GF lookup tables. The `reset()` method
 // reconfigures the work buffers without rebuilding those tables.
-commonware_utils::thread_local_cache!(static CACHED_ENCODER: ReedSolomonEncoder);
-commonware_utils::thread_local_cache!(static CACHED_DECODER: ReedSolomonDecoder);
+commonware_utils::thread_local_cache!(static CACHED_ENCODER: Encoder);
+commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 
 // Keep each stripe large enough to amortize extra encoder/decoder setup
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
-// Non-final stripe widths must be a multiple of reed-solomon-simd's internal 64-byte SIMD
-// block (`[u8; 64]`), so splitting a shard on these boundaries yields byte-identical output to
-// encoding it whole. A mismatch would diverge the striped and non-striped commitments;
-// `test_recovery_output_format_pinned` guards the layout against dependency changes.
-const STRIPE_ALIGNMENT_BYTES: usize = 64;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
 #[derive(Error, Debug)]
@@ -211,14 +208,14 @@ fn prepare_data(mut data: impl Buf, k: usize) -> (Vec<u8>, usize) {
 /// Return the canonical shard width for a payload and shard count.
 ///
 /// Encoding prefixes the payload with its length, splits the result across
-/// `k` original shards, and rounds up to an even width required by
-/// `reed-solomon-simd`. Decode uses the same calculation to reject commitments
-/// that decode to the same payload with a non-canonical shard width.
+/// `k` original shards, and rounds up to an even width required by the
+/// Reed-Solomon implementation. Decode uses the same calculation to reject
+/// commitments that decode to the same payload with a non-canonical shard width.
 const fn canonical_shard_len(data_len: usize, k: usize) -> usize {
     let prefixed_len = u32::SIZE + data_len;
     let mut shard_len = prefixed_len.div_ceil(k);
 
-    // Ensure shard length is even (required for optimizations in `reed-solomon-simd`)
+    // Ensure shard length is even, as required by the Reed-Solomon implementation.
     if !shard_len.is_multiple_of(2) {
         shard_len += 1;
     }
@@ -339,26 +336,17 @@ fn encode<H: Hasher, S: Strategy>(
     let recovery_buf = match striped_ranges(shard_len, strategy.parallelism_hint()) {
         Some(ranges) => {
             let original_shards = padded.chunks(shard_len).collect::<Vec<_>>();
-            let recovery_stripes = strategy.try_map_collect_vec(ranges, |range| {
-                encode_recovery_stripe(k, m, range, &original_shards)
-            })?;
-
             let mut buf = vec![0u8; m * shard_len];
-            for stripe in recovery_stripes {
-                let (range, recovery_stripe) = stripe;
-                let stripe_len = range.len();
-                for i in 0..m {
-                    let stripe = &recovery_stripe[i * stripe_len..(i + 1) * stripe_len];
-                    let start = i * shard_len + range.start;
-                    buf[start..start + stripe_len].copy_from_slice(stripe);
-                }
-            }
+            let dst = buf.as_mut_ptr() as usize;
+            strategy.try_map_collect_vec(ranges, |range| {
+                encode_recovery_stripe_into(k, m, range, &original_shards, dst, shard_len)
+            })?;
             buf
         }
         None => {
             let mut encoder = Cached::take(
                 &CACHED_ENCODER,
-                || ReedSolomonEncoder::new(k, m, shard_len),
+                || Encoder::new(k, m, shard_len),
                 |enc| enc.reset(k, m, shard_len),
             )
             .map_err(Error::ReedSolomon)?;
@@ -370,9 +358,12 @@ fn encode<H: Hasher, S: Strategy>(
 
             // Compute recovery shards and collect into a contiguous buffer
             let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-            let mut buf = Vec::with_capacity(m * shard_len);
-            for shard in encoding.recovery_iter() {
-                buf.extend_from_slice(shard);
+            let mut buf = vec![0u8; m * shard_len];
+            for i in 0..m {
+                let start = i * shard_len;
+                encoding
+                    .copy_recovery(i, &mut buf[start..start + shard_len])
+                    .map_err(Error::ReedSolomon)?;
             }
             buf
         }
@@ -427,14 +418,15 @@ fn encode<H: Hasher, S: Strategy>(
 // compare provided recoveries against those stripes, and hash missing
 // recoveries without first materializing full recovery shards
 fn striped_ranges(shard_len: usize, parallelism: usize) -> Option<Vec<Range<usize>>> {
-    // Non-final stripes must end on aligned boundaries because reed-solomon-simd
-    // internally lays shards out in aligned symbol blocks with a special final tail
-    let full_blocks = shard_len / STRIPE_ALIGNMENT_BYTES;
+    // Non-final stripes must end on aligned boundaries because the vendored encoder
+    // internally lays shards out in aligned symbol blocks with a special final tail.
+    let full_blocks = shard_len / SHARD_CHUNK_BYTES;
     // Bound the stripe count by available parallelism, the number of MIN_STRIPE_BYTES
     // chunks (so each stripe stays large enough to amortize encoder/decoder setup), and
-    // the number of 64-byte blocks (each non-final stripe needs at least one whole block).
+    // the number of `SHARD_CHUNK_BYTES` blocks (each non-final stripe needs at
+    // least one whole block).
     // The block bound is implied by the MIN_STRIPE_BYTES bound today (MIN_STRIPE_BYTES is a
-    // multiple of STRIPE_ALIGNMENT_BYTES), but is kept to state the invariant explicitly.
+    // multiple of SHARD_CHUNK_BYTES), but is kept to state the invariant explicitly.
     let stripe_count = parallelism
         .min(shard_len / MIN_STRIPE_BYTES)
         .min(full_blocks)
@@ -451,8 +443,8 @@ fn striped_ranges(shard_len: usize, parallelism: usize) -> Option<Vec<Range<usiz
         let len = if remaining_stripes == 1 {
             remaining
         } else {
-            let remaining_full_blocks = remaining / STRIPE_ALIGNMENT_BYTES;
-            (remaining_full_blocks / remaining_stripes).max(1) * STRIPE_ALIGNMENT_BYTES
+            let remaining_full_blocks = remaining / SHARD_CHUNK_BYTES;
+            (remaining_full_blocks / remaining_stripes).max(1) * SHARD_CHUNK_BYTES
         };
         let end = start + len;
         ranges.push(start..end);
@@ -481,18 +473,20 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
     strategy: &'a S,
 }
 
-fn decode_missing_original_stripe(
+fn decode_missing_original_stripe_into(
     k: usize,
     m: usize,
     range: Range<usize>,
     provided_originals: &[(usize, &[u8])],
     provided_recoveries: &[(usize, &[u8])],
     missing_originals: &[usize],
-) -> Result<(Range<usize>, Vec<u8>), Error> {
+    dst: usize,
+    full_shard_len: usize,
+) -> Result<(), Error> {
     let shard_len = range.len();
     let mut decoder = Cached::take(
         &CACHED_DECODER,
-        || ReedSolomonDecoder::new(k, m, shard_len),
+        || Decoder::new(k, m, shard_len),
         |dec| dec.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -509,15 +503,19 @@ fn decode_missing_original_stripe(
     }
 
     let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
-    let mut restored = Vec::with_capacity(missing_originals.len() * shard_len);
     for idx in missing_originals {
-        let shard = decoding
-            .restored_original(*idx)
+        let start = *idx * full_shard_len + range.start;
+        // SAFETY: each task writes only `range` for each missing original shard. Stripe
+        // ranges are disjoint, and all target slices are within the preallocated
+        // `k * full_shard_len` originals buffer.
+        let dst =
+            unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
+        decoding
+            .copy_restored_original(*idx, dst)
             .ok_or(Error::Inconsistent)?;
-        restored.extend_from_slice(shard);
     }
 
-    Ok((range, restored))
+    Ok(())
 }
 
 fn encode_recovery_stripe(
@@ -529,7 +527,7 @@ fn encode_recovery_stripe(
     let shard_len = range.len();
     let mut encoder = Cached::take(
         &CACHED_ENCODER,
-        || ReedSolomonEncoder::new(k, m, shard_len),
+        || Encoder::new(k, m, shard_len),
         |enc| enc.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -541,12 +539,51 @@ fn encode_recovery_stripe(
             .map_err(Error::ReedSolomon)?;
     }
     let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-    let mut recoveries = Vec::with_capacity(m * shard_len);
-    for shard in encoding.recovery_iter() {
-        recoveries.extend_from_slice(shard);
+    let mut recoveries = vec![0u8; m * shard_len];
+    for i in 0..m {
+        let start = i * shard_len;
+        encoding
+            .copy_recovery(i, &mut recoveries[start..start + shard_len])
+            .map_err(Error::ReedSolomon)?;
     }
 
     Ok((range, recoveries))
+}
+
+fn encode_recovery_stripe_into(
+    k: usize,
+    m: usize,
+    range: Range<usize>,
+    originals: &[impl AsRef<[u8]>],
+    dst: usize,
+    full_shard_len: usize,
+) -> Result<(), Error> {
+    let shard_len = range.len();
+    let mut encoder = Cached::take(
+        &CACHED_ENCODER,
+        || Encoder::new(k, m, shard_len),
+        |enc| enc.reset(k, m, shard_len),
+    )
+    .map_err(Error::ReedSolomon)?;
+
+    for shard in originals.iter().take(k) {
+        let shard = shard.as_ref();
+        encoder
+            .add_original_shard(&shard[range.clone()])
+            .map_err(Error::ReedSolomon)?;
+    }
+    let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
+    for i in 0..m {
+        let start = i * full_shard_len + range.start;
+        // SAFETY: each task writes only `range` for each recovery shard. Stripe ranges
+        // are disjoint, and all target slices are within the preallocated
+        // `m * full_shard_len` recovery buffer.
+        let dst =
+            unsafe { std::slice::from_raw_parts_mut((dst as *mut u8).add(start), shard_len) };
+        encoding.copy_recovery(i, dst).map_err(Error::ReedSolomon)?;
+    }
+
+    Ok(())
 }
 
 fn decode_striped<'a, H: Hasher, S: Strategy>(
@@ -574,26 +611,19 @@ fn decode_striped<'a, H: Hasher, S: Strategy>(
         .collect::<Vec<_>>();
 
     if !missing_originals.is_empty() {
-        let decoded = strategy.try_map_collect_vec(ranges.clone(), |range| {
-            decode_missing_original_stripe(
+        let dst = originals.as_mut_ptr() as usize;
+        strategy.try_map_collect_vec(ranges.clone(), |range| {
+            decode_missing_original_stripe_into(
                 k,
                 m,
                 range,
                 &provided_originals,
                 &provided_recoveries,
                 &missing_originals,
+                dst,
+                shard_len,
             )
         })?;
-
-        for decoded in decoded {
-            let (range, restored_stripe) = decoded;
-            let stripe_len = range.len();
-            for (i, idx) in missing_originals.iter().enumerate() {
-                let stripe = &restored_stripe[i * stripe_len..(i + 1) * stripe_len];
-                let start = idx * shard_len + range.start;
-                originals[start..start + stripe_len].copy_from_slice(stripe);
-            }
-        }
     }
 
     let original_refs = originals.chunks(shard_len).collect::<Vec<_>>();
@@ -698,7 +728,7 @@ fn verify_sequential_codeword<H: Hasher, S: Strategy>(
 
     let mut encoder = Cached::take(
         &CACHED_ENCODER,
-        || ReedSolomonEncoder::new(k, m, shard_len),
+        || Encoder::new(k, m, shard_len),
         |enc| enc.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -786,7 +816,7 @@ fn decode_sequential<'a, H: Hasher, S: Strategy>(
 
     let mut decoder = Cached::take(
         &CACHED_DECODER,
-        || ReedSolomonDecoder::new(k, m, shard_len),
+        || Decoder::new(k, m, shard_len),
         |dec| dec.reset(k, m, shard_len),
     )
     .map_err(Error::ReedSolomon)?;
@@ -1165,7 +1195,7 @@ mod tests {
             padded[offset] ^= u.arbitrary::<u8>()? | 1;
         }
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
         for shard in padded.chunks(shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1293,7 +1323,7 @@ mod tests {
     fn test_invalid_total() {
         let data = b"Test parameter validation";
 
-        // total <= min should panic
+        // The total shard count must exceed the recovery threshold.
         encode::<Sha256, _>(3, 3, data.as_slice(), &STRATEGY).unwrap();
     }
 
@@ -1302,7 +1332,7 @@ mod tests {
     fn test_invalid_min() {
         let data = b"Test parameter validation";
 
-        // min = 0 should panic
+        // The recovery threshold must be non-zero.
         encode::<Sha256, _>(5, 0, data.as_slice(), &STRATEGY).unwrap();
     }
 
@@ -1545,19 +1575,19 @@ mod tests {
         assert_eq!(decoded, data);
     }
 
-    /// Pin the exact reed-solomon-simd recovery output for a fixed `(k, m, shard_len)` with a
-    /// partial final block (`shard_len % 64 != 0`). The striped coder assumes this crate's
-    /// internal 64-byte block layout and tail packing (see [`STRIPE_ALIGNMENT_BYTES`]); if a
-    /// dependency change alters the produced bytes this fixture trips, signalling that the
-    /// striping assumption must be re-verified before the new output is accepted.
+    /// Pin the exact vendored Reed-Solomon recovery output for a fixed `(k, m, shard_len)` with a
+    /// partial final block (`shard_len % SHARD_CHUNK_BYTES != 0`). The striped coder assumes this
+    /// crate's internal block layout and tail packing (see [`SHARD_CHUNK_BYTES`]); if the
+    /// implementation changes its produced bytes this fixture trips, signalling that the striping
+    /// assumption must be re-verified before the new output is accepted.
     #[test]
     fn test_recovery_output_format_pinned() {
         let k = 5usize;
         let m = 3usize;
-        // Two full 64-byte blocks plus a 2-byte partial tail.
-        let shard_len = 2 * STRIPE_ALIGNMENT_BYTES + 2;
+        // Two full blocks plus a 2-byte partial tail.
+        let shard_len = 2 * SHARD_CHUNK_BYTES + 2;
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
         for i in 0..k {
             let shard: Vec<u8> = (0..shard_len)
                 .map(|j| ((i * 31 + j * 7) & 0xFF) as u8)
@@ -1574,8 +1604,8 @@ mod tests {
         assert_eq!(
             format!("{digest}"),
             "e38bb9dbba4a102c4bd8447e212957742dab0af0c4148d4660c671f2f33d3df2",
-            "reed-solomon-simd recovery output changed; re-verify the 64-byte striping \
-             assumption (STRIPE_ALIGNMENT_BYTES) before updating this fixture"
+            "vendored Reed-Solomon recovery output changed; re-verify the striping \
+             assumption before updating this fixture"
         );
     }
 
@@ -1668,8 +1698,8 @@ mod tests {
         let data = b"leaf_count mismatch proof";
         let (commitment, shards) = RS::encode(&config_actual, data.as_slice(), &STRATEGY).unwrap();
 
-        // Previously this passed because check() ignored config and only verified
-        // against commitment root. It must now fail immediately.
+        // A proof generated under a different shard configuration is invalid
+        // for this commitment.
         let check_result = RS::check(&config_expected, &commitment, 0, &shards[0]);
         assert!(matches!(check_result, Err(Error::InvalidProof)));
     }
@@ -1707,7 +1737,7 @@ mod tests {
         let (padded, shard_size) = prepare_data(data.as_slice(), min as usize);
 
         // Re-encode the data
-        let mut encoder = ReedSolomonEncoder::new(min as usize, m as usize, shard_size).unwrap();
+        let mut encoder = Encoder::new(min as usize, m as usize, shard_size).unwrap();
         for shard in padded.chunks(shard_size) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1777,7 +1807,7 @@ mod tests {
         let pad_offset = payload_end % shard_len;
         padded[pad_shard * shard_len + pad_offset] = 0xAA;
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, shard_len).unwrap();
         for shard in padded.chunks(shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1831,7 +1861,7 @@ mod tests {
         padded[..u32::SIZE].copy_from_slice(&(data.len() as u32).to_be_bytes());
         padded[u32::SIZE..u32::SIZE + data.len()].copy_from_slice(data);
 
-        let mut encoder = ReedSolomonEncoder::new(k, m, oversized_shard_len).unwrap();
+        let mut encoder = Encoder::new(k, m, oversized_shard_len).unwrap();
         for shard in padded.chunks(oversized_shard_len) {
             encoder.add_original_shard(shard).unwrap();
         }
@@ -1996,12 +2026,10 @@ mod tests {
         let result = encode::<Sha256, _>(total, min, data.as_slice(), &STRATEGY);
         assert!(matches!(
             result,
-            Err(Error::ReedSolomon(
-                reed_solomon_simd::Error::UnsupportedShardCount {
-                    original_count: _,
-                    recovery_count: _,
-                }
-            ))
+            Err(Error::ReedSolomon(RsError::UnsupportedShardCount {
+                original_count: _,
+                recovery_count: _,
+            }))
         ));
     }
 
