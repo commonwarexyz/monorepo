@@ -91,12 +91,15 @@ suspicious_op_assign_impl = "allow"
 ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
+ark-bn254 = { version = "0.6.0", default-features = false }
 ark-ec = { version = "0.6.0", default-features = false }
 ark-ed-on-bls12-381-bandersnatch = { version = "0.6.0", default-features = false }
 ark-ff = { version = "0.6.0", default-features = false }
+ark-poly = { version = "0.6.0", default-features = false }
 ark-r1cs-std = { version = "0.6.0", default-features = false }
 ark-relations = { version = "0.6.0", default-features = false }
 ark-serialize = { version = "0.6.0", default-features = false }
+ark-std = { version = "0.6.0", default-features = false }
 aws-config = "1.8.17"
 aws-lc-rs = "1.16.3"
 aws-sdk-ec2 = { version = "1.228.0", default-features = false, features = [
@@ -167,6 +170,7 @@ io-uring = "0.7.4"
 libc = "0.2.172"
 libfuzzer-sys = "0.4.9"
 loom = "0.7.2"
+merlin = { version = "3.0.0", default-features = false }
 num-bigint = { version = "0.4.6", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }

@@ -11,16 +11,51 @@ repository = "https://github.com/commonwarexyz/monorepo/tree/main/privacy"
 documentation = "https://docs.rs/commonware-privacy"
 
 [dependencies]
+ark-bn254 = { workspace = true, optional = true, features = ["curve"] }
+ark-ec = { workspace = true, optional = true }
+ark-ff = { workspace = true, optional = true }
+ark-poly = { workspace = true, optional = true }
+ark-serialize = { workspace = true, optional = true, features = ["derive"] }
+ark-std = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 commonware-codec = { workspace = true, optional = true }
 commonware-macros.workspace = true
+merlin = { workspace = true, optional = true }
 rand_core.workspace = true
+rayon = { workspace = true, optional = true }
 
 [features]
 default = [ "std" ]
-codec = [ "dep:bytes", "dep:commonware-codec" ]
+codec = [
+    "dep:bytes",
+    "dep:commonware-codec",
+]
 mocks = []
+parallel = [
+    "ark-ec?/parallel",
+    "ark-ff?/parallel",
+    "ark-poly?/parallel",
+    "ark-std?/parallel",
+]
+zkpari = [
+    "dep:ark-bn254",
+    "dep:ark-ec",
+    "dep:ark-ff",
+    "dep:ark-poly",
+    "dep:ark-serialize",
+    "dep:ark-std",
+    "dep:merlin",
+    "dep:rayon",
+    "parallel",
+    "std",
+]
 std = [
+    "ark-bn254?/std",
+    "ark-ec?/std",
+    "ark-ff?/std",
+    "ark-poly?/std",
+    "ark-serialize?/std",
+    "ark-std?/std",
     "bytes?/std",
     "commonware-codec?/std",
     "commonware-macros/std",

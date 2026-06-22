@@ -14,4 +14,6 @@ commonware_macros::stability_scope!(ALPHA {
     #[cfg(feature = "mocks")]
     pub mod mocks;
     pub mod payments;
+    #[cfg(feature = "zkpari")]
+    pub mod zkpari;
 });
