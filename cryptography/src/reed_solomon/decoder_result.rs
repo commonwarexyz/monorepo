@@ -27,6 +27,19 @@ impl DecoderResult<'_> {
     pub const fn restored_original_iter(&self) -> RestoredOriginal<'_> {
         RestoredOriginal::new(self.work)
     }
+
+    /// Returns restored recovery shard with given `index`
+    /// or `None` if given `index` doesn't correspond to
+    /// a missing recovery shard.
+    pub fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
+        self.work.restored_recovery(index)
+    }
+
+    /// Returns iterator over all restored recovery shards
+    /// and their indexes, ordered by indexes.
+    pub const fn restored_recovery_iter(&self) -> RestoredRecovery<'_> {
+        RestoredRecovery::new(self.work)
+    }
 }
 
 // ======================================================================
@@ -99,6 +112,64 @@ impl<'a> RestoredOriginal<'a> {
     pub(crate) const fn new(work: &'a DecoderWork) -> Self {
         Self {
             remaining: work.missing_original_count(),
+            next_index: 0,
+            work,
+        }
+    }
+}
+
+// ======================================================================
+// RestoredRecovery - PUBLIC
+
+/// Iterator over restored recovery shards and their indexes.
+///
+/// This struct is created by [`DecoderResult::restored_recovery_iter`].
+pub struct RestoredRecovery<'a> {
+    remaining: usize,
+    next_index: usize,
+    work: &'a DecoderWork,
+}
+
+// ======================================================================
+// RestoredRecovery - IMPL Iterator
+
+impl<'a> Iterator for RestoredRecovery<'a> {
+    type Item = (usize, &'a [u8]);
+    fn next(&mut self) -> Option<(usize, &'a [u8])> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let mut index = self.next_index;
+        while index < self.work.recovery_count() {
+            if let Some(recovery) = self.work.restored_recovery(index) {
+                self.next_index = index + 1;
+                self.remaining -= 1;
+                return Some((index, recovery));
+            }
+            index += 1;
+        }
+
+        unreachable!("Inconsistency in internal data structures. Please report.");
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+// ======================================================================
+// RestoredRecovery - IMPL ExactSizeIterator
+
+impl ExactSizeIterator for RestoredRecovery<'_> {}
+
+// ======================================================================
+// RestoredRecovery - CRATE
+
+impl<'a> RestoredRecovery<'a> {
+    pub(crate) const fn new(work: &'a DecoderWork) -> Self {
+        Self {
+            remaining: work.missing_recovery_count(),
             next_index: 0,
             work,
         }
@@ -209,6 +280,69 @@ mod tests {
 
         assert!(iter.next().is_none());
         assert_eq!(iter.len(), 0);
+    }
+
+    // Decode from exactly `original_count` shards (dropping original 0 and every recovery
+    // except index 1) and assert the reconstructed recovery shards are byte-identical to the
+    // encoder's output. This is the load-bearing check for `restored_recovery`: the reveal +
+    // last-chunk-undo on the recovery positions must reproduce `encoding.recovery(i)` exactly,
+    // including the partial-final-chunk path (shard sizes not divisible by SHARD_CHUNK_BYTES).
+    fn recovery_roundtrip(original_count: usize, recovery_count: usize, shard_size: usize) {
+        let original = test_util::generate_original(original_count, shard_size, 0);
+
+        let mut encoder = Encoder::new(original_count, recovery_count, shard_size).unwrap();
+        for original in &original {
+            encoder.add_original_shard(original).unwrap();
+        }
+        let encoding = encoder.encode().unwrap();
+        let recovery: Vec<Vec<u8>> = encoding.recovery_iter().map(<[u8]>::to_vec).collect();
+
+        // Provide originals 1..original_count plus recovery 1 == exactly `original_count` shards,
+        // so original 0 and every recovery except index 1 are reconstructed.
+        let mut decoder = Decoder::new(original_count, recovery_count, shard_size).unwrap();
+        for (i, original) in original.iter().enumerate().skip(1) {
+            decoder.add_original_shard(i, original).unwrap();
+        }
+        decoder.add_recovery_shard(1, &recovery[1]).unwrap();
+        let decoding = decoder.decode().unwrap();
+
+        assert_eq!(decoding.restored_original(0).unwrap(), original[0].as_slice());
+        for (i, recovery) in recovery.iter().enumerate() {
+            let label = format!("oc={original_count} rc={recovery_count} ss={shard_size} rec={i}");
+            if i == 1 {
+                assert!(decoding.restored_recovery(i).is_none(), "provided recovery: {label}");
+            } else {
+                assert_eq!(
+                    decoding.restored_recovery(i).unwrap(),
+                    recovery.as_slice(),
+                    "restored recovery mismatch: {label}"
+                );
+            }
+        }
+
+        let via_iter: Vec<(usize, Vec<u8>)> = decoding
+            .restored_recovery_iter()
+            .map(|(i, s)| (i, s.to_vec()))
+            .collect();
+        let expected: Vec<(usize, Vec<u8>)> = (0..recovery_count)
+            .filter(|&i| i != 1)
+            .map(|i| (i, recovery[i].clone()))
+            .collect();
+        assert_eq!(via_iter, expected);
+    }
+
+    #[test]
+    fn restored_recovery_matches_encoder() {
+        // Shard sizes spanning the partial-final-chunk boundary (SHARD_CHUNK_BYTES = 64).
+        for shard_size in [2, 34, 62, SHARD_CHUNK_BYTES, 66, 130, 1024] {
+            // HighRate selections (original_count_pow2 >= recovery_count_pow2).
+            recovery_roundtrip(3, 2, shard_size);
+            recovery_roundtrip(16, 4, shard_size);
+            // LowRate selections (original_count_pow2 < recovery_count_pow2), incl. the
+            // 250-shard / k=83 / m=167 shape used by the coding crate.
+            recovery_roundtrip(4, 8, shard_size);
+            recovery_roundtrip(83, 167, shard_size);
+        }
     }
 
     #[test]

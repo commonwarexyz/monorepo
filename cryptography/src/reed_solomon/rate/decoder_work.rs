@@ -196,6 +196,19 @@ impl DecoderWork {
         }
     }
 
+    // This must only be called by `DecoderResult`. Returns a reconstructed recovery shard,
+    // which is only meaningful after `decode` has revealed and un-chunked the recovery
+    // positions (see `RateDecoder::decode`).
+    pub(crate) fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
+        let pos = self.recovery_base_pos + index;
+
+        if index < self.recovery_count && !self.received[pos] {
+            Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
+        } else {
+            None
+        }
+    }
+
     pub(crate) fn undo_last_chunk_encoding(&mut self) {
         self.shards.undo_last_chunk_encoding(
             self.shard_bytes,
@@ -203,7 +216,22 @@ impl DecoderWork {
         );
     }
 
+    pub(crate) fn undo_last_chunk_encoding_recovery(&mut self) {
+        self.shards.undo_last_chunk_encoding(
+            self.shard_bytes,
+            self.recovery_base_pos..self.recovery_base_pos + self.recovery_count,
+        );
+    }
+
     pub(crate) const fn missing_original_count(&self) -> usize {
         self.original_count - self.original_received_count
+    }
+
+    pub(crate) const fn recovery_count(&self) -> usize {
+        self.recovery_count
+    }
+
+    pub(crate) const fn missing_recovery_count(&self) -> usize {
+        self.recovery_count - self.recovery_received_count
     }
 }

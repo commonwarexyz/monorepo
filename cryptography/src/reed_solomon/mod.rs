@@ -17,7 +17,7 @@
 //! [`thiserror`]: https://docs.rs/thiserror
 
 pub use self::{
-    decoder_result::{DecoderResult, RestoredOriginal},
+    decoder_result::{DecoderResult, RestoredOriginal, RestoredRecovery},
     encoder_result::{EncoderResult, Recovery},
     engine::SHARD_CHUNK_BYTES,
     wrappers::{Decoder, Encoder},

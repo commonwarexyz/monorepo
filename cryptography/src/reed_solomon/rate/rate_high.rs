@@ -243,9 +243,23 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
             }
         }
 
+        // REVEAL ERASURES (RECOVERY)
+        //
+        // Recovery shards live at `work[0..recovery_count]`. Un-scale the missing ones by the
+        // inverse locator so they hold the canonical recovery values, mirroring the original
+        // reveal above. This lets `DecoderResult::restored_recovery` return them without a
+        // separate re-encode.
+
+        for i in 0..recovery_count {
+            if !received[i] {
+                self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
+            }
+        }
+
         // UNDO LAST CHUNK ENCODING
 
         self.work.undo_last_chunk_encoding();
+        self.work.undo_last_chunk_encoding_recovery();
 
         // DONE
 
