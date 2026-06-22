@@ -18,7 +18,7 @@ use thiserror::Error;
 commonware_utils::thread_local_cache!(static CACHED_ENCODER: Encoder);
 commonware_utils::thread_local_cache!(static CACHED_DECODER: Decoder);
 
-// Keep each stripe large enough to amortize extra encoder/decoder setup
+// Keep each stripe large enough to amortize extra encoder/decoder setup.
 const MIN_STRIPE_BYTES: usize = 8 * 1024;
 
 /// Errors that can occur when interacting with the Reed-Solomon coder.
