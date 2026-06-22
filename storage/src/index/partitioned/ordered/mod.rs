@@ -6,6 +6,23 @@
 //! partition's entries are sorted by translated key, this index is inherently ordered. It trades
 //! lookup/insert speed for memory density at scale; the unordered variant ([`super::unordered`])
 //! uses hash sub-indices instead and is faster when ordering is not required.
+//!
+//! # Adversarial grinding
+//!
+//! An order-preserving translator cannot randomize keys (that would break the ordering), so an
+//! attacker can grind the key suffix to flood one partition with distinct translated keys, making
+//! each sorted-array insert an O(occupancy) memmove. When a partition's array reaches
+//! `SPILL_THRESHOLD` entries it spills to a `BTreeMap` (the `spilled` field), bounding *distinct-key*
+//! grinding to O(log occupancy) per operation.
+//!
+//! The guard bounds distinct-key density only, not the length of a single key's value run. A
+//! translated key's values (hash collisions, or repeated inserts of one key) form a contiguous
+//! newest-first run in both representations -- the SoA `vals` array and a spilled key's value
+//! vector -- so inserting into a length-`L` run is O(L) either way: spilling reorganizes *across*
+//! keys (array to tree), never *within* one key's run. A long run is therefore not a target of this
+//! guard; its length is a function of the translator's collision-resistance (well-distributed keys
+//! average ~1) and is the price of this layout's density. Callers that need O(1) collision appends
+//! can use the flat `crate::index::ordered::Index`, which keeps a per-key overflow vector instead.
 
 mod partition;
 
@@ -325,11 +342,13 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
 
 /// Sorted-array length at which a partition spills to a `BTreeMap`. Set well above any honest
 /// occupancy (even ~1B keys at P=3 averages ~60 entries per partition) so honest workloads never
-/// spill; it exists only to bound adversarial key-grinding that floods a single partition.
+/// spill; it exists only to bound adversarial grinding that floods a partition with distinct
+/// translated keys (see the module docs for what the guard does and does not bound).
 const SPILL_THRESHOLD: usize = 512;
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
-/// partition to a `BTreeMap` to bound adversarial key-grinding (see `spilled`).
+/// partition to a `BTreeMap` to bound adversarial distinct-key grinding (see `spilled` and the
+/// module docs).
 pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     translator: T,
     partitions: Box<[Partition<T::Key, V>]>,
