@@ -55,7 +55,7 @@ use commonware_utils::sync::Mutex;
 use std::{
     fmt,
     marker::PhantomData,
-    ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
+    ops::{Add, AddAssign, Div, DivAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
 };
 
 /// Identifies a value in a [`Circuit`]: a constant, a witness, or the
@@ -198,12 +198,20 @@ struct ValuesBuilder<F> {
 /// });
 /// assert!(valued.is_satisfied());
 /// ```
-#[derive(Clone, Copy)]
 pub struct Values<'a, F> {
     constants: &'a [F],
     witnesses: &'a [F],
     nodes: &'a [F],
 }
+
+// Manual `Copy`/`Clone` so they hold for any `F`: the derived versions would
+// add a spurious `F: Copy`/`F: Clone` bound, but `Values` only holds slices.
+impl<F> Clone for Values<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<F> Copy for Values<'_, F> {}
 
 #[doc(hidden)]
 impl<'a, F> Index<CircuitIdx> for Values<'a, F> {
@@ -391,6 +399,19 @@ impl<'ctx, F> Var<'ctx, F> {
         }
     }
 
+    /// Create a "native" var holding a value outside any circuit.
+    ///
+    /// Like the vars produced by [`Additive::zero`] and [`Ring::one`], a
+    /// native var lives outside the circuit until it is combined with a
+    /// circuit-backed var, at which point it is folded in as a constant. This
+    /// is convenient for fixed constants (such as curve parameters) that are
+    /// the same in every circuit and so do not need a [`Context`] to create.
+    pub const fn native(value: F) -> Self {
+        Self {
+            inner: VarInner::Native(value),
+        }
+    }
+
     /// Create a var with a fixed, public value.
     pub fn constant(ctx: Context<'ctx, F>, value: F) -> Self {
         Self {
@@ -549,6 +570,43 @@ impl<'ctx, F: Multiplicative> Mul<&Self> for Var<'ctx, F> {
 impl<'ctx, F: Multiplicative> MulAssign<&Self> for Var<'ctx, F> {
     fn mul_assign(&mut self, rhs: &Self) {
         *self = self.clone() * rhs;
+    }
+}
+
+/// Division by `rhs`, computed as a single multiplication constraint.
+///
+/// Rather than inverting `rhs` and multiplying (which costs two
+/// multiplications), the prover supplies the quotient `q = self / rhs` as a
+/// witness and the circuit constrains `q * rhs == self`.
+///
+/// # Caveats
+///
+/// Like [`Field::inv`] on a circuit-backed var, this deviates from the
+/// `inv(0) = 0` field contract: dividing by a circuit-backed `rhs` of zero
+/// adds an unsatisfiable constraint when `self != 0`. Worse, `0 / 0`
+/// constrains `q * 0 == 0`, which holds for *any* `q`, leaving the quotient
+/// unconstrained. Only use `/` where `rhs` is known to be nonzero.
+impl<'ctx, F: Field> Div<&Self> for Var<'ctx, F> {
+    type Output = Self;
+
+    fn div(self, rhs: &Self) -> Self {
+        let &ctx = match (&self.inner, &rhs.inner) {
+            (VarInner::Native(a), VarInner::Native(b)) => {
+                return Self {
+                    inner: VarInner::Native(a.clone() * &b.inv()),
+                }
+            }
+            (VarInner::Circuit { ctx, .. }, _) | (_, VarInner::Circuit { ctx, .. }) => ctx,
+        };
+        let q = { Self::witness(ctx, |v| self.value(v) * &rhs.value(v).inv()) };
+        (q.clone() * rhs).assert_eq(&self);
+        q
+    }
+}
+
+impl<'ctx, F: Field> DivAssign<&Self> for Var<'ctx, F> {
+    fn div_assign(&mut self, rhs: &Self) {
+        *self = self.clone() / rhs;
     }
 }
 

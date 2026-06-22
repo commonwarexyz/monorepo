@@ -1,4 +1,7 @@
-use crate::bls12381::primitives::group::{Scalar, DST};
+use crate::{
+    bls12381::primitives::group::{Scalar, DST},
+    zk::circuit::Var,
+};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 use blst::blst_fr;
@@ -421,6 +424,74 @@ impl Read for G {
             "x not a canonical field element",
         ))?;
         Self::from_x(x).ok_or(CodecError::Invalid("Banderwagon", "point not in subgroup"))
+    }
+}
+
+/// An in circuit representation of a banderwagon point.
+#[derive(Clone)]
+pub struct GVar<'ctx> {
+    // We use an affine representation in circuit. Inversions are cheap in circuit,
+    // but expensive out of circuit. This makes the projecive representation less
+    // interesting for us.
+    x: Var<'ctx, Scalar>,
+    y: Var<'ctx, Scalar>,
+}
+
+impl<'ctx> Add<&Self> for GVar<'ctx> {
+    type Output = Self;
+
+    fn add(self, rhs: &Self) -> Self::Output {
+        // Complete affine addition law for the twisted Edwards curve
+        // `a*x^2 + y^2 = 1 + d*x^2*y^2` (the same formula as the projective
+        // `AddAssign` for `G`, specialized to `z = 1`):
+        //
+        //   x3 = (x1*y2 + y1*x2) / (1 + d*x1*x2*y1*y2)
+        //   y3 = (y1*y2 - a*x1*x2) / (1 - d*x1*x2*y1*y2)
+        //
+        // We use the standard circuit-optimal arrangement, which costs six
+        // multiplications (the rest are additions and scalings by the fixed
+        // constants `a`, `d`, all linear and free in an R1CS-style backend):
+        //
+        //   1. `A = x1*x2`
+        //   2. `B = y1*y2`
+        //   3. `U = (x1 + y1)*(x2 + y2)`, so `x1*y2 + y1*x2 = U - A - B`
+        //   4. `AB = A*B`, so the shared term `d*x1*x2*y1*y2 = d*AB`
+        //   5,6. the two `/` operations, each a single constraint `q*den == num`
+        //        (see [`Var`]'s `Div`).
+        //
+        // The curve is complete (`a` is a square and `d` is not), so both
+        // denominators are nonzero for every pair of subgroup points and the
+        // divisions never add an unsatisfiable or underconstrained quotient.
+        let Self { x: x1, y: y1 } = self;
+        let Self { x: x2, y: y2 } = rhs;
+
+        // Curve constants as native vars; they fold into the circuit as
+        // constants when combined with the (circuit-backed) coordinates.
+        let a = Var::native(A);
+        let d = Var::native(D);
+
+        let x1_x2 = x1.clone() * x2; // A
+        let y1_y2 = y1.clone() * y2; // B
+        let u = (x1 + &y1) * &(x2.clone() + y2); // U
+        let ab = x1_x2.clone() * &y1_y2; // A*B
+        let c = d * &ab; // d*x1*x2*y1*y2
+
+        let x_num = u - &x1_x2 - &y1_y2; // x1*y2 + y1*x2
+        let y_num = y1_y2 - &(a * &x1_x2); // y1*y2 - a*x1*x2
+        let one = Var::one();
+        let x_den = one.clone() + &c; // 1 + d*x1*x2*y1*y2
+        let y_den = one - &c; // 1 - d*x1*x2*y1*y2
+
+        Self {
+            x: x_num / &x_den,
+            y: y_num / &y_den,
+        }
+    }
+}
+
+impl<'ctx> AddAssign<&Self> for GVar<'ctx> {
+    fn add_assign(&mut self, rhs: &Self) {
+        *self = self.clone() + rhs;
     }
 }
 
