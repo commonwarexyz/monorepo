@@ -38,7 +38,8 @@ use commonware_storage::{
         Error,
     },
     translator::Translator,
-    Context as StorageContext, };
+    Context as StorageContext,
+};
 use commonware_utils::{channel::mpsc, non_empty_range, sync::TracedAsyncRwLock, Array};
 use std::{ops::Deref, sync::Arc};
 

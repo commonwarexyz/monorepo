@@ -21,8 +21,7 @@ use commonware_consensus::{
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
 use commonware_macros::select_loop;
-use commonware_runtime::{
-    telemetry::metrics::GaugeExt, ContextCell, Spawner, };
+use commonware_runtime::{telemetry::metrics::GaugeExt, ContextCell, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::{
     acknowledgement::Exact,

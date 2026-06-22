@@ -23,8 +23,7 @@ use commonware_consensus::{
     simplex::types::Finalization,
 };
 use commonware_cryptography::{certificate::Scheme, Digestible};
-use commonware_runtime::{
-    spawn_cell, telemetry::metrics::GaugeExt, ContextCell, Handle, Spawner, };
+use commonware_runtime::{spawn_cell, telemetry::metrics::GaugeExt, ContextCell, Handle, Spawner};
 use commonware_storage::Context as StorageContext;
 use commonware_utils::{channel::oneshot, sync::AsyncMutex};
 use futures::join;
