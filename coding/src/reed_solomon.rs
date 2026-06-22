@@ -547,15 +547,11 @@ mod striped {
         let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
 
         for (slot, &idx) in out.originals.iter_mut().zip(missing.originals) {
-            let shard = decoding
-                .restored_original(idx)
-                .ok_or(Error::Inconsistent)?;
+            let shard = decoding.restored_original(idx).ok_or(Error::Inconsistent)?;
             slot.copy_from_slice(shard);
         }
         for (slot, &idx) in out.recoveries.iter_mut().zip(missing.recoveries) {
-            let shard = decoding
-                .restored_recovery(idx)
-                .ok_or(Error::Inconsistent)?;
+            let shard = decoding.restored_recovery(idx).ok_or(Error::Inconsistent)?;
             slot.copy_from_slice(shard);
         }
 
@@ -689,7 +685,13 @@ mod striped {
             .into_iter()
             .zip(original_groups.into_iter().zip(recovery_groups))
             .map(|(range, (originals, recoveries))| {
-                (range, StripeOut { originals, recoveries })
+                (
+                    range,
+                    StripeOut {
+                        originals,
+                        recoveries,
+                    },
+                )
             })
             .collect();
         strategy.try_map_collect_vec(stripes, |(range, out)| {
