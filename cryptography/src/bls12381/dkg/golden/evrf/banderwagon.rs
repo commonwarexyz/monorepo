@@ -1,9 +1,8 @@
 //! Golden DKG eVRF over the native Banderwagon group.
 //!
-//! This is an alternative to [`super::bandersnatch`] that swaps the arkworks
-//! curve and R1CS machinery for our own [`crate::banderwagon`] group and
+//! Built entirely on our own [`crate::banderwagon`] group and
 //! [`crate::zk::circuit`] builder, converting to the bulletproofs circuit via
-//! [`zkc_to_circuit`] / [`zkc_to_circuit_and_witness`]. It exposes the same
+//! [`zkc_to_circuit`] / [`zkc_to_circuit_and_witness`]. It exposes the
 //! three entry points the eVRF layer relies on:
 //!
 //! * [`vrf_recv`]: the out-of-circuit VRF evaluation, run by the receiver;
@@ -36,8 +35,9 @@
 //!
 //! [`G::scalar_mul_x_squared`]: crate::banderwagon::G::scalar_mul_x_squared
 
+pub use crate::banderwagon::{F, G};
 use crate::{
-    banderwagon::{GVar, F, G},
+    banderwagon::GVar,
     bls12381::primitives::group::{Scalar, DST},
     zk::{
         bulletproofs::circuit::{zkc_to_circuit, zkc_to_circuit_and_witness, Circuit, Witness},
@@ -212,6 +212,24 @@ mod tests {
     use commonware_utils::test_rng;
 
     const TEST_DST: DST = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_BANDERWAGON_TEST";
+
+    /// Diagnostic: print circuit `internal_vars` (and `padded = next_pow2`) as a
+    /// function of the number of receivers, so we can size the bulletproofs setup
+    /// (see `WIRES_PER_PLAYER` / `WIRES_BASE` in `super::super`).
+    #[test]
+    #[ignore = "diagnostic; run with `--ignored` to print circuit sizes"]
+    fn measure_circuit_size_per_receiver() {
+        for n in [1usize, 2, 3, 5, 7, 10, 16] {
+            let receivers: Vec<G> = (0..n).map(|_| G::generator()).collect();
+            let circuit = vrf_batch_checked_circuit(b"measure", &G::generator(), &receivers);
+            let internal = circuit.internal_vars();
+            let padded = internal.next_power_of_two();
+            eprintln!(
+                "receivers={n:2} internal_vars={internal} padded={padded} (per_receiver={})",
+                internal.checked_div(n).unwrap_or_default()
+            );
+        }
+    }
 
     /// Sender and receiver, computing their own sides of the VRF, agree.
     #[test]

@@ -204,6 +204,45 @@ impl Field for F {
     }
 }
 
+impl FixedSize for F {
+    const SIZE: usize = 32;
+}
+
+impl Write for F {
+    fn write(&self, buf: &mut impl BufMut) {
+        // Little-endian canonical integer, one limb at a time.
+        for limb in self.limbs {
+            buf.put_u64_le(limb);
+        }
+    }
+}
+
+impl Read for F {
+    type Cfg = ();
+
+    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
+        let bytes = <[u8; 32]>::read(buf)?;
+        let limbs =
+            array::from_fn(|i| u64::from_le_bytes(bytes[i * 8..i * 8 + 8].try_into().unwrap()));
+        // Reject non-canonical encodings (`>= r`) so the `[0, r)` invariant that
+        // equality and arithmetic rely on holds for values from untrusted input.
+        // Canonical iff computing `limbs - r` borrows.
+        let mut borrow = false;
+        for (&x, &r) in limbs.iter().zip(Self::R.iter()) {
+            let (d, b) = x.overflowing_sub(r);
+            let (_, c) = d.overflowing_sub(borrow as u64);
+            borrow = b | c;
+        }
+        if !borrow {
+            return Err(CodecError::Invalid(
+                "banderwagon::F",
+                "scalar not canonical",
+            ));
+        }
+        Ok(Self { limbs })
+    }
+}
+
 #[cfg(any(test, feature = "arbitrary"))]
 impl arbitrary::Arbitrary<'_> for F {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
@@ -987,6 +1026,26 @@ mod tests {
             saw_top_bit,
             "random() never set the top bit; range is capped"
         );
+    }
+
+    #[test]
+    fn test_f_codec_round_trip() {
+        minifuzz::test(|u| {
+            let f: F = u.arbitrary()?;
+            assert_eq!(F::decode(f.encode()).unwrap(), f);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn test_f_codec_rejects_non_canonical() {
+        // `r` itself (the modulus) is the smallest non-canonical encoding.
+        let mut bytes = [0u8; 32];
+        for (i, limb) in F::R.iter().enumerate() {
+            bytes[i * 8..i * 8 + 8].copy_from_slice(&limb.to_le_bytes());
+        }
+        assert!(F::decode(&bytes[..]).is_err());
+        assert!(F::decode(&[0xffu8; 32][..]).is_err());
     }
 
     #[test]
