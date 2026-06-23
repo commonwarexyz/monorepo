@@ -33,8 +33,8 @@ const INDEX_INT_SIZE: usize = 4;
 /// Get the partition index for the given key, along with the prefix-stripped key for probing
 /// the referenced partition. The returned index value is in the range `[0, 2^(P*8) - 1]`.
 ///
-/// Partition order tracks lexicographic key order: the prefix is read big-endian and short keys are
-/// right-padded with zeros. The [`ordered`] variant relies on this to traverse keys in order.
+/// Partition order tracks lexicographic key order, which the [`ordered`] variant relies on to
+/// traverse keys in order.
 fn partition_index_and_sub_key<const P: usize>(key: &[u8]) -> (usize, &[u8]) {
     // TODO: Re-evaluate assertion placement after `generic_const_exprs` is stable.
     const {

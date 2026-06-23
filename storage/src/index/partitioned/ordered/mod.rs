@@ -176,8 +176,7 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for SoaCursor<'_, 
 ///
 /// A spilled partition lives in the index's `spilled` side-table, each key mapping to its values
 /// newest-first. The cursor re-resolves the key's value vector through the side-table on each
-/// operation. Deleting a key's last value drops its entry, and emptying the partition's last key
-/// removes it from the side-table (reverting it to an empty sorted-array partition).
+/// operation.
 struct SpilledCursor<'a, K: Ord + Copy, V> {
     spilled: &'a mut HashMap<usize, BTreeMap<K, Vec<V>>>,
     partition: usize,
