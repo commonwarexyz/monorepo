@@ -376,6 +376,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `0` disables it. The cache is held only for the
+    /// duration of init.
+    pub init_cache_size: usize,
 }
 
 impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S> {
@@ -384,6 +389,7 @@ impl<T: Translator, J, S: Strategy> From<Config<T, J, S>> for AnyConfig<T, J, S>
             merkle_config: cfg.merkle_config,
             journal_config: cfg.journal_config,
             translator: cfg.translator,
+            init_cache_size: cfg.init_cache_size,
         }
     }
 }
@@ -567,6 +573,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            init_cache_size: 1024,
         }
     }
 
@@ -595,6 +602,7 @@ pub mod tests {
             },
             grafted_metadata_partition: format!("{partition_prefix}-grafted-metadata-partition"),
             translator: T::default(),
+            init_cache_size: 1024,
         }
     }
 
@@ -1396,6 +1404,7 @@ pub mod tests {
                 },
                 grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
                 translator: OneCap,
+                init_cache_size: 1024,
             };
             let mut db = ForgedExclusionDb::init(context.child("db"), cfg)
                 .await

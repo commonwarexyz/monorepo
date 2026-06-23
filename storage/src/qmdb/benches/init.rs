@@ -19,6 +19,10 @@ const NUM_ELEMENTS: u64 = 100_000;
 const NUM_OPERATIONS: u64 = 1_000_000;
 const COMMIT_FREQUENCY: u32 = 10_000;
 
+/// Init-time `(location -> key)` cache sizes to compare: `0` disables the cache (the no-cache
+/// baseline), and a reasonably sized cache that covers the bench's working set.
+const CACHE_SIZES: [usize; 2] = [0, 1 << 18];
+
 cfg_if::cfg_if! {
     if #[cfg(not(full_bench))] {
         const CASES: [(u64, u64); 1] = [(NUM_ELEMENTS, NUM_OPERATIONS)];
@@ -55,42 +59,46 @@ fn bench_fixed_value_init(c: &mut Criterion) {
     let cfg = Config::default();
     for (elements, operations) in CASES {
         for &variant in FIXED_VARIANTS {
+            // Populated lazily on the first sample of the first matched cache size, then reused by
+            // every cache size for this variant (all read the same on-disk database).
             let mut initialized = false;
-            let runner = tokio::Runner::new(cfg.clone());
-            c.bench_function(
-                &format!(
-                    "{}/variant={} elements={elements} operations={operations}",
-                    module_path!(),
-                    variant.name(),
-                ),
-                |b| {
-                    // Setup: populate database (once, on first sample).
-                    if !initialized {
-                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
-                            |ctx| async move {
-                                dispatch_fixed!(ctx, variant, |db| {
-                                    populate_and_sync(
-                                        &mut db,
-                                        elements,
-                                        operations,
-                                        make_fixed_value,
-                                    )
-                                    .await;
-                                });
-                            },
-                        );
-                        initialized = true;
-                    }
+            for &cache_size in &CACHE_SIZES {
+                let runner = tokio::Runner::new(cfg.clone());
+                c.bench_function(
+                    &format!(
+                        "{}/variant={} cache={cache_size} elements={elements}",
+                        module_path!(),
+                        variant.name(),
+                    ),
+                    |b| {
+                        // Setup: populate database (once, on first matched sample).
+                        if !initialized {
+                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                                |ctx| async move {
+                                    dispatch_fixed!(ctx, variant, |db| {
+                                        populate_and_sync(
+                                            &mut db,
+                                            elements,
+                                            operations,
+                                            make_fixed_value,
+                                        )
+                                        .await;
+                                    });
+                                },
+                            );
+                            initialized = true;
+                        }
 
-                    // Benchmark: measure init time.
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<Context>();
-                        dispatch_fixed_timed_init!(ctx, variant, iters, |db| {
-                            assert_ne!(db.bounds().end, 0);
-                        })
-                    });
-                },
-            );
+                        // Benchmark: measure init time at this cache size.
+                        b.to_async(&runner).iter_custom(move |iters| async move {
+                            let ctx = context::get::<Context>();
+                            dispatch_fixed_timed_init!(ctx, variant, iters, cache_size, |db| {
+                                assert_ne!(db.bounds().end, 0);
+                            })
+                        });
+                    },
+                );
+            }
 
             // Cleanup: destroy database.
             if initialized {
@@ -117,42 +125,46 @@ fn bench_var_value_init(c: &mut Criterion) {
     let cfg = Config::default();
     for (elements, operations) in CASES {
         for &variant in VEC_VARIANTS {
+            // Populated lazily on the first sample of the first matched cache size, then reused by
+            // every cache size for this variant (all read the same on-disk database).
             let mut initialized = false;
-            let runner = tokio::Runner::new(cfg.clone());
-            c.bench_function(
-                &format!(
-                    "{}/variant={} elements={elements} operations={operations}",
-                    module_path!(),
-                    variant.name(),
-                ),
-                |b| {
-                    // Setup: populate database (once, on first sample).
-                    if !initialized {
-                        commonware_runtime::tokio::Runner::new(cfg.clone()).start(
-                            |ctx| async move {
-                                dispatch_var!(ctx, variant, |db| {
-                                    populate_and_sync(
-                                        &mut db,
-                                        elements,
-                                        operations,
-                                        make_var_value,
-                                    )
-                                    .await;
-                                });
-                            },
-                        );
-                        initialized = true;
-                    }
+            for &cache_size in &CACHE_SIZES {
+                let runner = tokio::Runner::new(cfg.clone());
+                c.bench_function(
+                    &format!(
+                        "{}/variant={} cache={cache_size} elements={elements}",
+                        module_path!(),
+                        variant.name(),
+                    ),
+                    |b| {
+                        // Setup: populate database (once, on first matched sample).
+                        if !initialized {
+                            commonware_runtime::tokio::Runner::new(cfg.clone()).start(
+                                |ctx| async move {
+                                    dispatch_var!(ctx, variant, |db| {
+                                        populate_and_sync(
+                                            &mut db,
+                                            elements,
+                                            operations,
+                                            make_var_value,
+                                        )
+                                        .await;
+                                    });
+                                },
+                            );
+                            initialized = true;
+                        }
 
-                    // Benchmark: measure init time.
-                    b.to_async(&runner).iter_custom(|iters| async move {
-                        let ctx = context::get::<Context>();
-                        dispatch_var_timed_init!(ctx, variant, iters, |db| {
-                            assert_ne!(db.bounds().end, 0);
-                        })
-                    });
-                },
-            );
+                        // Benchmark: measure init time at this cache size.
+                        b.to_async(&runner).iter_custom(move |iters| async move {
+                            let ctx = context::get::<Context>();
+                            dispatch_var_timed_init!(ctx, variant, iters, cache_size, |db| {
+                                assert_ne!(db.bounds().end, 0);
+                            })
+                        });
+                    },
+                );
+            }
 
             // Cleanup: destroy database.
             if initialized {

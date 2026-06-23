@@ -44,6 +44,9 @@ pub const PAGE_CACHE_SIZE: NonZeroUsize = NZUsize!(512);
 pub const DELETE_FREQUENCY: u32 = 10;
 pub const VARIABLE_VALUE_MAX_LEN: usize = 256;
 pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
+/// Default init-time `(location -> key)` cache size for bench databases. The init benchmark
+/// overrides this per-case to sweep cache sizes.
+pub const INIT_CACHE_SIZE: usize = 1 << 18;
 
 // -- Fixed value (Digest), fixed storage layout --
 
@@ -149,6 +152,7 @@ pub fn any_fix_cfg_with(
         merkle_config: merkle_cfg(PARTITION_FIX, ctx, page_cache.clone(), items_per_blob),
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -161,6 +165,7 @@ pub fn imm_fix_cfg_with(
         merkle_config: merkle_cfg(PARTITION_IMM, ctx, page_cache.clone(), items_per_blob),
         log: fix_log_cfg(PARTITION_IMM, page_cache, items_per_blob),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -180,6 +185,7 @@ pub fn cur_fix_cfg_with(
         journal_config: fix_log_cfg(PARTITION_FIX, page_cache, items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_FIX}"),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -198,6 +204,7 @@ pub fn any_var_digest_cfg_with(
         merkle_config: merkle_cfg(PARTITION_VAR, ctx, page_cache.clone(), items_per_blob),
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -217,6 +224,7 @@ pub fn cur_var_digest_cfg_with(
         journal_config: var_log_cfg(PARTITION_VAR, page_cache, ((), ()), items_per_blob),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -243,6 +251,7 @@ pub fn any_var_vec_cfg_with(
             items_per_blob,
         ),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -267,6 +276,7 @@ pub fn cur_var_vec_cfg_with(
         ),
         grafted_metadata_partition: format!("grafted-metadata-{PARTITION_VAR}"),
         translator: EightCap,
+        init_cache_size: INIT_CACHE_SIZE,
     }
 }
 
@@ -344,12 +354,13 @@ macro_rules! define_db_variants {
 
         #[allow(unused_macros)]
         macro_rules! $timed_dispatch_name {
-            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, |$db_name:ident| $body:expr) => {
+            ($ctx_expr:expr, $variant_expr:expr, $iters:expr, $cache_size:expr, |$db_name:ident| $body:expr) => {
                 match $variant_expr {
                     $(
                         $enum_name::$entry => {
                             let ctx = $ctx_expr;
-                            let cfg = $cfg(&ctx);
+                            let mut cfg = $cfg(&ctx);
+                            cfg.init_cache_size = $cache_size;
                             let start = std::time::Instant::now();
                             for _ in 0..$iters {
                                 #[allow(unused_mut)]

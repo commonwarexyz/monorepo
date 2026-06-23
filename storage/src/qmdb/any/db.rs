@@ -669,6 +669,7 @@ where
         mut index: I,
         log: AuthenticatedLog<F, E, C, H, S>,
         shared_bitmap: Option<Arc<Shared<N>>>,
+        cache_size: usize,
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
@@ -720,6 +721,7 @@ where
                     inactivity_floor_loc,
                     &log,
                     &mut index,
+                    cache_size,
                     |is_active, old_loc| {
                         let mut guard = bitmap.write();
                         guard.push(is_active);

@@ -192,6 +192,7 @@ pub(crate) mod test {
                 page_cache,
             },
             translator: TwoCap,
+            init_cache_size: 1024,
         }
     }
 

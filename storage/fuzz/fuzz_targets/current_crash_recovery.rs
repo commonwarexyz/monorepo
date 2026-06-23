@@ -120,6 +120,7 @@ fn make_config(
         },
         grafted_metadata_partition: format!("crash-grafted-merkle-metadata-{suffix}"),
         translator: TwoCap,
+        init_cache_size: 1024,
     }
 }
 

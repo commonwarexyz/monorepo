@@ -148,6 +148,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `0` disables it. The cache is held only for the
+    /// duration of init.
+    pub init_cache_size: usize,
 }
 
 /// An authenticated database that only supports adding new keyed values (no updates or
@@ -217,6 +222,7 @@ where
         mut journal: authenticated::Journal<F, E, C, H, S>,
         context: E,
         translator: T,
+        cache_size: usize,
     ) -> Result<Self, Error<F>> {
         if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
@@ -247,6 +253,7 @@ where
                 inactivity_floor_loc,
                 &journal.journal,
                 &mut snapshot,
+                cache_size,
                 |_, _| {},
             )
             .await?;

@@ -1567,6 +1567,7 @@ mod tests {
                 write_buffer: IO_BUFFER_SIZE,
             },
             translator: TwoCap,
+            init_cache_size: 1024,
         }
     }
 

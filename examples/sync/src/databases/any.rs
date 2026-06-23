@@ -48,6 +48,7 @@ pub fn create_config(context: &impl BufferPooler) -> Config<Translator, Sequenti
             page_cache,
         },
         translator: Translator::default(),
+        init_cache_size: 1 << 16,
     }
 }
 

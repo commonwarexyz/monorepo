@@ -51,7 +51,7 @@ use crate::{
     qmdb::operation::Operation,
 };
 use commonware_cryptography::Hasher as CryptoHasher;
-use commonware_utils::NZUsize;
+use commonware_utils::{cache::Clock, NZUsize};
 use core::num::NonZeroUsize;
 use futures::{pin_mut, StreamExt as _};
 use thiserror::Error;
@@ -230,10 +230,15 @@ const SNAPSHOT_READ_BUFFER_SIZE: NonZeroUsize = NZUsize!(1 << 16);
 /// operation, indicating activity status updates. The first argument of the callback is the
 /// activity status of the operation, and the second argument is the location of the operation it
 /// inactivates (if any). Returns the number of active keys in the db.
+///
+/// `cache_size` bounds a `(location -> key)` cache that lets collision resolution resolve
+/// candidates from memory instead of re-reading the log; `0` disables it. The cache is sized to
+/// the smaller of `cache_size` and the replay region.
 pub(super) async fn build_snapshot_from_log<F, C, I, Fn>(
     inactivity_floor_loc: crate::merkle::Location<F>,
     reader: &C,
     snapshot: &mut I,
+    cache_size: usize,
     mut callback: Fn,
 ) -> Result<usize, Error<F>>
 where
@@ -248,22 +253,34 @@ where
         .await?;
     pin_mut!(stream);
     let last_commit_loc = bounds.end.saturating_sub(1);
+
+    // Memoize `(location -> key)` for replayed update ops so collision resolution in
+    // `find_update_op` resolves candidates from memory instead of re-reading (and re-decoding) the
+    // log. The mapping is immutable (append-only log), so the cache never goes stale.
+    let replay_len = bounds.end.saturating_sub(*inactivity_floor_loc) as usize;
+    let mut cache = NonZeroUsize::new(cache_size.min(replay_len))
+        .map(Clock::<u64, <C::Item as Operation<F>>::Key>::new);
+
     let mut active_keys: usize = 0;
     while let Some(result) = stream.next().await {
         let (loc, op) = result?;
         if let Some(key) = op.key() {
             if op.is_delete() {
-                let old_loc = delete_key(snapshot, reader, key).await?;
+                let old_loc = delete_key(snapshot, reader, key, cache.as_mut()).await?;
                 callback(false, old_loc);
                 if old_loc.is_some() {
                     active_keys -= 1;
                 }
             } else if op.is_update() {
                 let new_loc = crate::merkle::Location::new(loc);
-                let old_loc = update_key(snapshot, reader, key, new_loc).await?;
+                let old_loc = update_key(snapshot, reader, key, new_loc, cache.as_mut()).await?;
                 callback(true, old_loc);
                 if old_loc.is_none() {
                     active_keys += 1;
+                }
+                // This update op is now a `find_update_op` candidate for later ops of its key.
+                if let Some(cache) = cache.as_mut() {
+                    cache.put(loc, key.clone());
                 }
             }
         } else if op.has_floor().is_some() {
@@ -280,6 +297,7 @@ async fn delete_key<F, I, R>(
     snapshot: &mut I,
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
+    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -293,7 +311,7 @@ where
     };
 
     // Find the matching key among all conflicts, then delete it.
-    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key).await? else {
+    let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? else {
         return Ok(None);
     };
     cursor.delete();
@@ -307,6 +325,7 @@ async fn update_key<F, I, R>(
     reader: &R,
     key: &<R::Item as Operation<F>>::Key,
     new_loc: Location<F>,
+    cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -321,7 +340,7 @@ where
     };
 
     // Find the matching key among all conflicts, then update its location.
-    if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key).await? {
+    if let Some(loc) = find_update_op::<F, _>(reader, &mut cursor, key, cache).await? {
         assert!(new_loc > loc);
         cursor.update(new_loc);
         return Ok(Some(loc));
@@ -343,6 +362,7 @@ async fn find_update_op<F, R>(
     reader: &R,
     cursor: &mut impl Cursor<Value = Location<F>>,
     key: &<R::Item as Operation<F>>::Key,
+    mut cache: Option<&mut Clock<u64, <R::Item as Operation<F>>::Key>>,
 ) -> Result<Option<Location<F>>, Error<F>>
 where
     F: Family,
@@ -350,9 +370,19 @@ where
     R::Item: Operation<F>,
 {
     while let Some(&loc) = cursor.next() {
-        let op = reader.read(*loc).await?;
-        let k = op.key().expect("operation without key");
-        if *k == *key {
+        // Consult the cache first; on a miss, read the log and populate.
+        let matches = if let Some(k) = cache.as_deref().and_then(|c| c.get(&*loc)) {
+            *k == *key
+        } else {
+            let op = reader.read(*loc).await?;
+            let k = op.key().expect("operation without key");
+            let matches = *k == *key;
+            if let Some(cache) = cache.as_deref_mut() {
+                cache.put(*loc, k.clone());
+            }
+            matches
+        };
+        if matches {
             return Ok(Some(loc));
         }
     }

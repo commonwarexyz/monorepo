@@ -110,6 +110,11 @@ pub struct Config<T: Translator, J, S: Strategy> {
 
     /// The translator used by the compressed index.
     pub translator: T,
+
+    /// Capacity (in entries) of the `(location -> key)` cache used during init to resolve snapshot
+    /// collisions without re-reading the log; `0` disables it. The cache is held only for the
+    /// duration of init.
+    pub init_cache_size: usize,
 }
 
 /// Configuration for an `Any` authenticated db with fixed-size values.
@@ -174,7 +179,7 @@ where
 
     let index = I::new(context.child("index"), cfg.translator);
     let metrics = db::Metrics::new(context);
-    db::Db::init_from_log(index, log, bitmap, metrics).await
+    db::Db::init_from_log(index, log, bitmap, cfg.init_cache_size, metrics).await
 }
 
 #[cfg(test)]
@@ -233,6 +238,7 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(1024),
             },
             translator: T::default(),
+            init_cache_size: 1024,
         }
     }
 
@@ -259,6 +265,7 @@ pub(crate) mod test {
                 write_buffer: NZUsize!(1024),
             },
             translator: T::default(),
+            init_cache_size: 1024,
         }
     }
 

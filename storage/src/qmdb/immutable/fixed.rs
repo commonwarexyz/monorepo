@@ -60,7 +60,7 @@ impl<
             ROOT_BAGGING,
         )
         .await?;
-        Self::init_from_journal(journal, context, cfg.translator).await
+        Self::init_from_journal(journal, context, cfg.translator, cfg.init_cache_size).await
     }
 }
 
@@ -113,6 +113,7 @@ mod tests {
                 write_buffer: NZUsize!(1024),
             },
             translator: TwoCap,
+            init_cache_size: 1024,
         }
     }
 
