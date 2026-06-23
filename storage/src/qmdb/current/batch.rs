@@ -860,9 +860,14 @@ where
     }
 
     /// Return the batch's safe sync boundary.
+    ///
+    /// This equals the boundary [`super::db::Db::sync_boundary`] reports once this batch is applied.
     pub fn sync_boundary(&self) -> Location<F> {
+        // Derive from the commit's chunk-aligned inactivity floor, the same quantity the DB uses
+        // after apply. Deliberately not the physical bitmap pruning boundary, which can lag the
+        // inactivity floor when pruning has not run.
         super::db::sync_boundary::<F, N>(
-            self.bitmap.pruned_chunks() as u64,
+            *self.inner.bounds().inactivity_floor / bitmap::Prunable::<N>::CHUNK_SIZE_BITS,
             self.inner.bounds().total_size,
         )
     }

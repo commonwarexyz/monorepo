@@ -570,31 +570,27 @@ impl<H: Hasher> PhasedScheme for Zoda<H> {
         let shuffled_indices = shuffle_indices(&transcript, encoded_data.rows());
 
         // Step 6: Produce the shards in parallel.
-        let shard_results: Vec<Result<StrongShard<H::Digest>, Error>> =
-            strategy.map_collect_vec(0..topology.total_shards, |shard_idx| {
-                let indices = &shuffled_indices
-                    [shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
-                let rows = Matrix::init(
-                    indices.len(),
-                    topology.data_cols,
-                    indices
-                        .iter()
-                        .flat_map(|&i| encoded_data[i as usize].iter().copied()),
-                );
-                let inclusion_proof = bmt
-                    .multi_proof(indices)
-                    .map_err(Error::FailedToCreateInclusionProof)?;
-                Ok(StrongShard {
-                    data_bytes,
-                    root,
-                    inclusion_proof,
-                    rows,
-                    checksum: checksum.clone(),
-                })
-            });
-        let shards = shard_results
-            .into_iter()
-            .collect::<Result<Vec<_>, Error>>()?;
+        let shards = strategy.try_map_collect_vec(0..topology.total_shards, |shard_idx| {
+            let indices =
+                &shuffled_indices[shard_idx * topology.samples..(shard_idx + 1) * topology.samples];
+            let rows = Matrix::init(
+                indices.len(),
+                topology.data_cols,
+                indices
+                    .iter()
+                    .flat_map(|&i| encoded_data[i as usize].iter().copied()),
+            );
+            let inclusion_proof = bmt
+                .multi_proof(indices)
+                .map_err(Error::FailedToCreateInclusionProof)?;
+            Ok(StrongShard {
+                data_bytes,
+                root,
+                inclusion_proof,
+                rows,
+                checksum: checksum.clone(),
+            })
+        })?;
         Ok((commitment, shards))
     }
 

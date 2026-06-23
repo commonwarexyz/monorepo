@@ -1606,7 +1606,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, IoBufsMut, Runner as _, Storage as _,
+        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Storage as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
@@ -2947,6 +2947,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
         }
     }
 
