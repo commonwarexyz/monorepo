@@ -1,6 +1,6 @@
 //! A storage wrapper that injects deterministic faults for testing crash recovery.
 
-use crate::{deterministic::BoxDynRng, Error, IoBufs, IoBufsMut};
+use crate::{deterministic::BoxDynRng, Error, Handle, IoBufs, IoBufsMut};
 use bytes::Buf;
 use commonware_utils::sync::{Mutex, RwLock};
 use rand::Rng;
@@ -391,6 +391,13 @@ impl<B: crate::Blob> crate::Blob for Blob<B> {
         }
         self.inner.sync().await
     }
+
+    async fn start_sync(&self) -> Handle<()> {
+        if self.ctx.should_fail(Op::Sync) {
+            return Handle::ready(Err(Error::Io(injected_io_error())));
+        }
+        self.inner.start_sync().await
+    }
 }
 
 #[cfg(test)]
@@ -449,6 +456,17 @@ mod tests {
         blob.write_at(0, b"data".to_vec()).await.unwrap();
 
         assert!(matches!(blob.sync().await, Err(Error::Io(_))));
+    }
+
+    #[tokio::test]
+    async fn test_faulty_storage_start_sync_always_fails() {
+        let h = Harness::new(Config::default().sync(1.0));
+
+        let (blob, _) = h.storage.open("partition", b"test").await.unwrap();
+        blob.write_at(0, b"data".to_vec()).await.unwrap();
+
+        let result = blob.start_sync().await.await;
+        assert!(matches!(result, Err(Error::Io(_))));
     }
 
     #[tokio::test]

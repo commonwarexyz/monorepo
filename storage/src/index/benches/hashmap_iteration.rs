@@ -11,7 +11,6 @@ struct MockIndex {
     section: u64,
     _offset: u32,
     _len: u32,
-    _next: Option<Box<Self>>,
 }
 
 fn bench_hashmap_iteration(c: &mut Criterion) {
@@ -31,7 +30,6 @@ fn bench_hashmap_iteration(c: &mut Criterion) {
                                 section: rng.gen(),
                                 _offset: rng.gen(),
                                 _len: rng.gen(),
-                                _next: None,
                             };
                             map.insert(key.clone(), value);
                         }

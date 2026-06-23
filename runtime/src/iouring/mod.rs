@@ -465,17 +465,34 @@ impl Handle {
 
     /// Submit a logical fsync request and wait for its completion.
     #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
-    pub async fn sync(&self, file: Arc<File>) -> std::io::Result<()> {
+    pub async fn sync(&self, file: Arc<File>) -> Result<(), Error> {
+        self.start_sync(file)
+            .await
+            .await
+            .map_err(|_| Error::Io(std::io::Error::other("failed to read result")))?
+    }
+
+    /// Begin a logical fsync request, returning the completion receiver without waiting.
+    ///
+    /// Enqueuing applies the same backpressure as every other request (it waits when the
+    /// submission channel is full). The returned receiver resolves once the fsync completes.
+    #[cfg_attr(not(feature = "iouring-storage"), allow(dead_code))]
+    pub async fn start_sync(&self, file: Arc<File>) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
-        self.enqueue(Request::Sync(SyncRequest {
+        let request = Request::Sync(SyncRequest {
             file,
             result: None,
             sender: tx,
-        }))
-        .await
-        .map_err(|_| std::io::Error::other("failed to send work"))?;
-        rx.await
-            .map_err(|_| std::io::Error::other("failed to read result"))?
+        });
+        if let Err(err) = self.enqueue(request).await {
+            let Request::Sync(request) = err.0 else {
+                unreachable!("sync enqueue returned wrong request variant");
+            };
+            let _ = request
+                .sender
+                .send(Err(Error::Io(std::io::Error::other("failed to send work"))));
+        }
+        rx
     }
 }
 
