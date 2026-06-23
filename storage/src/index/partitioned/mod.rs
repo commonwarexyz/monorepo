@@ -17,6 +17,11 @@
 //! makes a 2-byte prefix efficient only when indexing a large number (>> 2^16) of values, whereas a
 //! 1-byte prefix (256 partitions) can suit smaller datasets. Prefixes larger than 3 bytes are
 //! impractical and fail to compile.
+//!
+//! For the [`ordered`] variant a smaller prefix also lowers the point at which partitions spill to a
+//! `BTreeMap` (see its docs): a `P=1` index is guaranteed to spill once it holds more than 130,816
+//! entries, so prefer `P=2` or higher when keeping ordered access mostly inline matters at that
+//! scale.
 
 pub mod ordered;
 pub mod unordered;

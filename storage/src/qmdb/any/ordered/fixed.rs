@@ -50,6 +50,10 @@ impl<F: Family, E: Context, K: Array, V: FixedValue, H: Hasher, T: Translator, S
 /// See [partitioned::Db] for the generic type, or use the convenience aliases:
 /// - [partitioned::p256::Db] for 256 partitions (P=1)
 /// - [partitioned::p64k::Db] for 65,536 partitions (P=2)
+///
+/// `p256` suits smaller datasets, but its partitions spill to a `BTreeMap` once the index holds more
+/// than 130,816 entries (see [`crate::index::partitioned::ordered`]); prefer `p64k` to keep ordered
+/// access mostly inline at larger scale.
 pub mod partitioned {
     pub use super::{Operation, Update};
     use crate::{
