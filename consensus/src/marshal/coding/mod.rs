@@ -2606,12 +2606,9 @@ mod tests {
     }
 
     /// Regression: a validator must not vote finalize on a block that is not
-    /// durably persisted. `certify` resolves true ⟹ block is on disk for
+    /// durably persisted. If `certify` resolves true, the block is on disk for
     /// this validator. We assert this by aborting the marshal actor the
-    /// instant `certify` returns true; without the persist-before-certify
-    /// fix, the actor may have only had the `Verified` message enqueued (not
-    /// processed), and the block is lost on restart even though the validator
-    /// would have proceeded to broadcast a finalize vote.
+    /// instant `certify` returns true, then restarting from the same partition.
     #[test_traced("WARN")]
     fn test_marshaled_certify_persists_block_before_resolving() {
         for seed in 0u64..16 {
@@ -2737,16 +2734,15 @@ mod tests {
             let post_restart = marshal2.get_block(&child_digest).await;
             assert!(
                 post_restart.is_some(),
-                "certify resolved true ⟹ block must be durably persisted"
+                "certify resolved true, so block must be durably persisted"
             );
         });
     }
 
     /// Regression: a leader must be able to recover its own block across an unclean restart.
-    /// `propose` defers the block's sync handle (it is started but awaited at certification), so
-    /// the leader establishes durability by certifying its own proposal. After certify, the
-    /// block must survive restart even if `Relay::broadcast` never runs. This is the >= f+1
-    /// guarantee for the leader's own block.
+    /// `propose` registers a durability task, so the leader establishes durability by
+    /// certifying its own proposal. After certify, the block must survive restart even if
+    /// `Relay::broadcast` never runs. This is the >= f+1 guarantee for the leader's own block.
     #[test_traced("WARN")]
     fn test_marshaled_proposed_block_persists_across_restart() {
         let runner = deterministic::Runner::timed(Duration::from_secs(60));

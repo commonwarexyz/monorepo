@@ -501,11 +501,11 @@ where
     /// boundary block to avoid creating blocks that would be invalidated by the epoch transition.
     ///
     /// The proposal operation is spawned in a background task and returns a receiver that will
-    /// contain the proposed block's digest when ready. The block's persistence is started
-    /// before the digest is delivered but awaited only at certification, so its durable sync
-    /// overlaps consensus voting. The digest does not imply durability on its own;
-    /// [`CertifiableAutomaton::certify`] awaits the registered durability task before the
-    /// finalize vote.
+    /// contain the proposed block's digest when ready. The block's persistence is enqueued
+    /// before the digest is delivered, and the resulting sync handle is awaited only at
+    /// certification so it overlaps consensus voting. The digest does not imply durability on
+    /// its own; [`CertifiableAutomaton::certify`] awaits the registered durability task before
+    /// the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.deferred.propose", level = "info", skip_all, fields(round = %consensus_context.round))]
     async fn propose(
@@ -615,11 +615,9 @@ where
                 if parent.height() == last_in_epoch {
                     let digest = parent.digest();
 
-                    // Enqueue the persist before broadcasting the digest (so a later
-                    // `forward` is ordered after it), but await the sync handle only at
-                    // certify so it overlaps consensus voting. The leader certifies its
-                    // own proposal, so `certify` awaits this task before the finalize
-                    // vote, establishing durability.
+                    // Enqueue the persist before publishing the digest (so a later
+                    // `forward` is ordered after it), then let `certify` await the
+                    // returned sync handle before the finalize vote.
                     let (durable_tx, durable_rx) = oneshot::channel();
                     verification_tasks.insert(consensus_context.round, digest, durable_rx);
                     let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
@@ -680,11 +678,9 @@ where
 
                 let digest = built_block.digest();
 
-                // Enqueue the persist before broadcasting the digest (so a later
-                // `forward` is ordered after it), but await the sync handle only at certify
-                // so it overlaps consensus voting. The leader certifies its own proposal,
-                // so `certify` awaits this task before the finalize vote, establishing
-                // durability.
+                // Enqueue the persist before publishing the digest (so a later
+                // `forward` is ordered after it), then let `certify` await the
+                // returned sync handle before the finalize vote.
                 let (durable_tx, durable_rx) = oneshot::channel();
                 verification_tasks.insert(consensus_context.round, digest, durable_rx);
                 let proposed_rx = marshal.proposed(consensus_context.round, built_block);
@@ -1576,10 +1572,10 @@ mod tests {
         });
     }
 
-    /// Regression: in deferred mode `propose` defers the block's sync handle and registers a
-    /// durability task that `certify` awaits. After the leader certifies its own proposal,
-    /// the block must be durably recoverable across an unclean restart. This is the >= f+1
-    /// guarantee for the leader's own block.
+    /// Regression: in deferred mode `propose` registers a durability task that
+    /// `certify` awaits. After the leader certifies its own proposal, the block must be
+    /// durably recoverable across an unclean restart. This is the >= f+1 guarantee
+    /// for the leader's own block.
     #[test_traced("WARN")]
     fn test_deferred_propose_then_certify_persists_block() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
