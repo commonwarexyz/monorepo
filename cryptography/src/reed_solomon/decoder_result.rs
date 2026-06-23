@@ -27,19 +27,6 @@ impl DecoderResult<'_> {
     pub const fn restored_original_iter(&self) -> RestoredOriginal<'_> {
         RestoredOriginal::new(self.work)
     }
-
-    /// Returns restored recovery shard with given `index`
-    /// or `None` if given `index` doesn't correspond to
-    /// a missing recovery shard.
-    pub fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
-        self.work.restored_recovery(index)
-    }
-
-    /// Returns iterator over all restored recovery shards
-    /// and their indexes, ordered by indexes.
-    pub const fn restored_recovery_iter(&self) -> RestoredRecovery<'_> {
-        RestoredRecovery::new(self.work)
-    }
 }
 
 // ======================================================================
@@ -57,6 +44,52 @@ impl<'a> DecoderResult<'a> {
 impl Drop for DecoderResult<'_> {
     fn drop(&mut self) {
         self.work.reset_received();
+    }
+}
+
+// ======================================================================
+// RecoveryDecoderResult - PUBLIC
+
+/// Result of [`Decoder::decode_with_recovery`], exposing the restored original shards (like
+/// [`DecoderResult`]) and additionally the reconstructed recovery shards.
+///
+/// [`Decoder::decode_with_recovery`]: crate::reed_solomon::Decoder::decode_with_recovery
+pub struct RecoveryDecoderResult<'a> {
+    inner: DecoderResult<'a>,
+}
+
+impl RecoveryDecoderResult<'_> {
+    /// Returns the restored original shard with the given `index`, or `None` if it was provided or
+    /// `index` is out of range. See [`DecoderResult::restored_original`].
+    pub fn restored_original(&self, index: usize) -> Option<&[u8]> {
+        self.inner.restored_original(index)
+    }
+
+    /// Returns an iterator over the restored original shards and their indexes, ordered by index.
+    /// See [`DecoderResult::restored_original_iter`].
+    pub const fn restored_original_iter(&self) -> RestoredOriginal<'_> {
+        self.inner.restored_original_iter()
+    }
+
+    /// Returns the reconstructed recovery shard with the given `index`, or `None` if it was
+    /// provided, `index` is out of range, or all originals were present (so nothing was decoded).
+    pub fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
+        self.inner.work.restored_recovery(index)
+    }
+
+    /// Returns an iterator over the reconstructed recovery shards and their indexes, ordered by
+    /// index.
+    pub const fn restored_recovery_iter(&self) -> RestoredRecovery<'_> {
+        RestoredRecovery::new(self.inner.work)
+    }
+}
+
+// ======================================================================
+// RecoveryDecoderResult - CRATE
+
+impl<'a> RecoveryDecoderResult<'a> {
+    pub(crate) const fn new(inner: DecoderResult<'a>) -> Self {
+        Self { inner }
     }
 }
 
@@ -123,7 +156,7 @@ impl<'a> RestoredOriginal<'a> {
 
 /// Iterator over restored recovery shards and their indexes.
 ///
-/// This struct is created by [`DecoderResult::restored_recovery_iter`].
+/// This struct is created by [`RecoveryDecoderResult::restored_recovery_iter`].
 pub struct RestoredRecovery<'a> {
     remaining: usize,
     next_index: usize,
@@ -169,7 +202,7 @@ impl ExactSizeIterator for RestoredRecovery<'_> {}
 impl<'a> RestoredRecovery<'a> {
     pub(crate) const fn new(work: &'a DecoderWork) -> Self {
         Self {
-            remaining: work.missing_recovery_count(),
+            remaining: work.restored_recovery_count(),
             next_index: 0,
             work,
         }
@@ -304,7 +337,7 @@ mod tests {
             decoder.add_original_shard(i, original).unwrap();
         }
         decoder.add_recovery_shard(1, &recovery[1]).unwrap();
-        let decoding = decoder.decode().unwrap();
+        let decoding = decoder.decode_with_recovery().unwrap();
 
         assert_eq!(
             decoding.restored_original(0).unwrap(),
@@ -349,6 +382,35 @@ mod tests {
             recovery_roundtrip(4, 8, shard_size);
             recovery_roundtrip(83, 167, shard_size);
         }
+    }
+
+    #[test]
+    fn restored_recovery_none_when_all_originals_present() {
+        let shard_size = SHARD_CHUNK_BYTES;
+        let original = test_util::generate_original(3, shard_size, 0);
+
+        let mut encoder = Encoder::new(3, 2, shard_size).unwrap();
+        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
+        for original in &original {
+            encoder.add_original_shard(original).unwrap();
+        }
+        let _ = encoder.encode().unwrap();
+
+        // All originals present: decode short-circuits, so no recovery shard is revealed and the
+        // recovery accessors must report nothing (not the zeroed/stale work buffers).
+        decoder.add_original_shard(0, &original[0]).unwrap();
+        decoder.add_original_shard(1, &original[1]).unwrap();
+        decoder.add_original_shard(2, &original[2]).unwrap();
+        // Request recovery, but all originals are present so the decode short-circuits: nothing is
+        // reconstructed and the recovery accessors must still report nothing.
+        let result = decoder.decode_with_recovery().unwrap();
+
+        assert!(result.restored_recovery(0).is_none());
+        assert!(result.restored_recovery(1).is_none());
+
+        let mut iter = result.restored_recovery_iter();
+        assert_eq!(iter.len(), 0);
+        assert!(iter.next().is_none());
     }
 
     #[test]

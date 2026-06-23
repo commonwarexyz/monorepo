@@ -203,7 +203,7 @@ commonware_macros::stability_scope!(BETA {
         ///
         /// - `iter`: The collection to fold over
         /// - `identity`: A closure that produces the identity value for the fold.
-        /// - `fold_op`: Fallibly combines an accumulator with a single item: `(acc, item) -> acc`
+        /// - `fold_op`: Fallibly combines an accumulator with a single item: `(acc, item) -> Result<acc, E>`
         /// - `reduce_op`: Combines two successful accumulators: `(acc1, acc2) -> acc`.
         fn try_fold<I, R, E, ID, F, RD>(
             &self,
@@ -715,8 +715,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             T: Send,
             E: Send,
         {
-            // A direct parallel map collecting into `Result` short-circuits on error and
-            // avoids the per-partition `Vec` accumulation of the `try_fold` default.
             self.thread_pool.install(|| {
                 let items: Vec<I::Item> = iter.into_iter().collect();
                 items.into_par_iter().map(map_op).collect()
@@ -731,9 +729,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             F: Fn(&mut T, I::Item) -> R + Send + Sync,
             R: Send,
         {
-            // rayon's `map_init` reuses the per-job init value (e.g. a hasher) like
-            // `fold_init`, but collects directly into a `Vec` instead of folding into and
-            // reducing per-partition `Vec`s.
             self.thread_pool.install(|| {
                 let items: Vec<I::Item> = iter.into_iter().collect();
                 items.into_par_iter().map_init(init, map_op).collect()

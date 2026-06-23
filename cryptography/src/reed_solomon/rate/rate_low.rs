@@ -168,7 +168,7 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         self.work.add_recovery_shard(index, recovery_shard)
     }
 
-    fn decode(&mut self) -> Result<DecoderResult<'_>, Error> {
+    fn decode(&mut self, reveal_recovery: bool) -> Result<DecoderResult<'_>, Error> {
         let Some((mut work, original_count, recovery_count, received)) =
             self.work.decode_begin()?
         else {
@@ -245,21 +245,25 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
 
         // REVEAL ERASURES (RECOVERY)
         //
-        // Recovery shards live at `work[chunk_size..recovery_end]`. Un-scale the missing ones
-        // by the inverse locator so they hold the canonical recovery values, mirroring the
-        // original reveal above. This lets `DecoderResult::restored_recovery` return them
-        // without a separate re-encode.
+        // Only when the caller passed `reveal_recovery = true` to `decode`. Recovery shards
+        // live at `work[chunk_size..recovery_end]`. Un-scale the missing ones by the inverse
+        // locator so they hold the canonical recovery values, mirroring the original reveal above.
+        // This lets `RecoveryDecoderResult::restored_recovery` return them without a separate re-encode.
 
-        for i in chunk_size..recovery_end {
-            if !received[i] {
-                self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
+        if reveal_recovery {
+            for i in chunk_size..recovery_end {
+                if !received[i] {
+                    self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
+                }
             }
         }
 
         // UNDO LAST CHUNK ENCODING
 
         self.work.undo_last_chunk_encoding();
-        self.work.undo_last_chunk_encoding_recovery();
+        if reveal_recovery {
+            self.work.undo_last_chunk_encoding_recovery();
+        }
 
         // DONE
 

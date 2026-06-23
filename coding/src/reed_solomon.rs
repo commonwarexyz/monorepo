@@ -544,7 +544,7 @@ mod striped {
                 .add_recovery_shard(*idx, &shard[range.clone()])
                 .map_err(Error::ReedSolomon)?;
         }
-        let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+        let decoding = decoder.decode_with_recovery().map_err(Error::ReedSolomon)?;
 
         for (slot, &idx) in out.originals.iter_mut().zip(missing.originals) {
             let shard = decoding.restored_original(idx).ok_or(Error::Inconsistent)?;
@@ -589,8 +589,6 @@ mod striped {
         Ok(())
     }
 
-    /// Decode the codeword stripe by stripe, reconstructing the original data and
-    /// verifying the rebuilt commitment against `ctx.root`.
     /// Decode when all `k` originals are present: re-encode the recovery shards (recovery with
     /// missing originals uses [`decode_restored_only`]), confirm any provided recovery shards
     /// match the canonical re-encode, and verify the rebuilt commitment against `ctx.root`.
@@ -623,18 +621,13 @@ mod striped {
             encode_recovery_into(k, m, range, &original_refs, out)
         })?;
         let recovery_refs: Vec<&[u8]> = recovery_buf.chunks_exact(shard_len).collect();
-
-        let data = extract_data(&original_refs, k, shard_len)?;
-
-        // Provided originals are already bound to the commitment by their checked digests.
-        // Provided recoveries must match the canonical re-encode before reusing theirs.
-        for &(idx, shard) in &provided_recoveries {
-            if shard != recovery_refs[idx] {
-                return Err(Error::Inconsistent);
-            }
-        }
-
-        verify_codeword::<H, S>(ctx, shard_digests, &original_refs, &recovery_refs, data)
+        verify_reencoded::<H, S>(
+            ctx,
+            shard_digests,
+            &original_refs,
+            &recovery_refs,
+            &provided_recoveries,
+        )
     }
 
     /// Decode when an original is missing: recover the missing originals AND read the missing
@@ -720,69 +713,93 @@ mod striped {
             recovery_refs[*idx] = &restored_recoveries[start..start + shard_len];
         }
 
-        let data = extract_data(&original_refs, k, shard_len)?;
-        verify_codeword::<H, S>(ctx, shard_digests, &original_refs, &recovery_refs, data)
-    }
-
-    /// Hash every missing shard (original or recovery) in one pass, rebuild the Merkle tree,
-    /// and confirm its root matches the commitment.
-    fn verify_codeword<H: Hasher, S: Strategy>(
-        ctx: &DecodeCtx<'_, H, S>,
-        mut shard_digests: Vec<Option<H::Digest>>,
-        originals: &[&[u8]],
-        recoveries: &[&[u8]],
-        data: Vec<u8>,
-    ) -> Result<Vec<u8>, Error> {
-        let &DecodeCtx {
-            n,
-            k,
-            root,
-            strategy,
-            ..
-        } = ctx;
-        let missing_shards = shard_digests
-            .iter()
-            .enumerate()
-            .filter(|(_, digest)| digest.is_none())
-            .map(|(i, _)| {
-                (
-                    i,
-                    if i < k {
-                        originals[i]
-                    } else {
-                        recoveries[i - k]
-                    },
-                )
-            })
-            .collect::<Vec<_>>();
-
-        for (i, digest) in
-            strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
-                hasher.update(shard);
-                (i, hasher.finalize())
-            })
-        {
-            shard_digests[i] = Some(digest);
-        }
-
-        let mut builder = Builder::<H>::new(n);
-        shard_digests
-            .into_iter()
-            .map(|digest| digest.expect("digest must be present for every shard"))
-            .for_each(|digest| {
-                builder.add(&digest);
-            });
-        let tree = builder.build();
-        if tree.root() != *root {
-            return Err(Error::Inconsistent);
-        }
-
-        Ok(data)
+        verify_root::<H, S>(ctx, shard_digests, &original_refs, &recovery_refs)
     }
 }
 
-/// Sequential Reed-Solomon: recover and re-encode the codeword as a single
-/// Reed-Solomon instance, used when striping would not help.
+/// Extract the data and verify the commitment from a fully reconstructed codeword: read the data
+/// from `originals`, hash every missing shard (original or recovery), rebuild the Merkle tree, and
+/// confirm its root matches the commitment. Shared by both strategies and both decode paths once the
+/// full codeword is available (by re-encode with all originals present, or by decode-reveal).
+fn verify_root<H: Hasher, S: Strategy>(
+    ctx: &DecodeCtx<'_, H, S>,
+    mut shard_digests: Vec<Option<H::Digest>>,
+    originals: &[&[u8]],
+    recoveries: &[&[u8]],
+) -> Result<Vec<u8>, Error> {
+    let &DecodeCtx {
+        n,
+        k,
+        shard_len,
+        root,
+        strategy,
+        ..
+    } = ctx;
+    let data = extract_data(originals, k, shard_len)?;
+
+    let missing_shards = shard_digests
+        .iter()
+        .enumerate()
+        .filter(|(_, digest)| digest.is_none())
+        .map(|(i, _)| {
+            (
+                i,
+                if i < k {
+                    originals[i]
+                } else {
+                    recoveries[i - k]
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+
+    for (i, digest) in
+        strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
+            hasher.update(shard);
+            (i, hasher.finalize())
+        })
+    {
+        shard_digests[i] = Some(digest);
+    }
+
+    let mut builder = Builder::<H>::new(n);
+    shard_digests
+        .into_iter()
+        .map(|digest| digest.expect("digest must be present for every shard"))
+        .for_each(|digest| {
+            builder.add(&digest);
+        });
+    let tree = builder.build();
+    if tree.root() != *root {
+        return Err(Error::Inconsistent);
+    }
+
+    Ok(data)
+}
+
+/// All-originals verification: confirm any provided recovery shards match the canonical re-encode
+/// `recoveries` before their digests are trusted, then verify the commitment via [`verify_root`].
+/// This compare is what rejects a malicious encoder's non-canonical recovery shard when every
+/// original is present; with an original missing, the decode binds the recoveries instead.
+fn verify_reencoded<H: Hasher, S: Strategy>(
+    ctx: &DecodeCtx<'_, H, S>,
+    shard_digests: Vec<Option<H::Digest>>,
+    originals: &[&[u8]],
+    recoveries: &[&[u8]],
+    provided_recoveries: &[(usize, &[u8])],
+) -> Result<Vec<u8>, Error> {
+    // Provided originals are already bound to the commitment by their checked digests.
+    for &(idx, shard) in provided_recoveries {
+        if shard != recoveries[idx] {
+            return Err(Error::Inconsistent);
+        }
+    }
+    verify_root::<H, S>(ctx, shard_digests, originals, recoveries)
+}
+
+/// Sequential Reed-Solomon: reconstruct the codeword as a single Reed-Solomon instance (re-encode
+/// when all originals are present, decode-reveal when one is missing), used when striping would not
+/// help.
 mod sequential {
     use super::*;
 
@@ -798,8 +815,8 @@ mod sequential {
             k, m, shard_len, ..
         } = ctx;
         if provided_originals.len() == k {
-            // All originals are present, so skip Reed-Solomon decode and still run
-            // canonical re-encode/root verification below.
+            // All originals are present, so skip the Reed-Solomon decode and re-encode the
+            // recovery shards to verify the rebuilt commitment.
             let mut shards: Vec<&[u8]> = vec![&[]; k];
             for &(idx, shard) in &provided_originals {
                 shards[idx] = shard;
@@ -807,7 +824,11 @@ mod sequential {
             return verify_codeword::<H, S>(ctx, shard_digests, &provided_recoveries, &shards);
         }
 
-        // Decode original data.
+        // An original is missing: recover it and read the missing recovery shards straight out of
+        // one decode (decode-reveal), so no separate re-encode is needed. The caller feeds exactly
+        // `k` shards (surplus recoveries were trimmed and their digests cleared), so every
+        // reconstructed shard is the unique Reed-Solomon output for those `k` inputs and the root
+        // check binds it to the commitment, like in `striped::decode_restored_only`.
         let mut decoder = Cached::take(
             &CACHED_DECODER,
             || Decoder::new(k, m, shard_len),
@@ -824,37 +845,37 @@ mod sequential {
                 .add_recovery_shard(*idx, shard)
                 .map_err(Error::ReedSolomon)?;
         }
-        let decoding = decoder.decode().map_err(Error::ReedSolomon)?;
+        let decoding = decoder.decode_with_recovery().map_err(Error::ReedSolomon)?;
 
-        let mut shards: Vec<&[u8]> = vec![&[]; k];
+        let mut originals: Vec<&[u8]> = vec![&[]; k];
         for &(idx, shard) in &provided_originals {
-            shards[idx] = shard;
+            originals[idx] = shard;
         }
         for (idx, shard) in decoding.restored_original_iter() {
-            shards[idx] = shard;
+            originals[idx] = shard;
         }
-        verify_codeword::<H, S>(ctx, shard_digests, &provided_recoveries, &shards)
+        let mut recoveries: Vec<&[u8]> = vec![&[]; m];
+        for &(idx, shard) in &provided_recoveries {
+            recoveries[idx] = shard;
+        }
+        for (idx, shard) in decoding.restored_recovery_iter() {
+            recoveries[idx] = shard;
+        }
+
+        verify_root::<H, S>(ctx, shard_digests, &originals, &recoveries)
     }
 
-    /// Re-encode the recovery shards, confirm any provided recoveries match, hash the
-    /// remaining missing shards, rebuild the Merkle tree, and confirm its root matches
-    /// the commitment.
+    /// Re-encode the recovery shards from the originals, then verify the commitment via
+    /// [`verify_reencoded`].
     fn verify_codeword<H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
-        mut shard_digests: Vec<Option<H::Digest>>,
+        shard_digests: Vec<Option<H::Digest>>,
         provided_recoveries: &[(usize, &[u8])],
         originals: &[&[u8]],
     ) -> Result<Vec<u8>, Error> {
         let &DecodeCtx {
-            n,
-            k,
-            m,
-            shard_len,
-            root,
-            strategy,
+            k, m, shard_len, ..
         } = ctx;
-        let data = extract_data(originals, k, shard_len)?;
-
         let mut encoder = Cached::take(
             &CACHED_ENCODER,
             || Encoder::new(k, m, shard_len),
@@ -867,56 +888,21 @@ mod sequential {
                 .map_err(Error::ReedSolomon)?;
         }
         let encoding = encoder.encode().map_err(Error::ReedSolomon)?;
-
-        // Provided original bytes are already bound to the commitment by their verified
-        // inclusion proofs (their checked digests are reused when the root is rebuilt
-        // below), so they need no separate comparison here. Provided recovery shards must
-        // match the canonical re-encode before their checked digests are trusted.
-        for (idx, shard) in provided_recoveries {
-            let canonical = encoding.recovery(*idx).ok_or(Error::Inconsistent)?;
-            if *shard != canonical {
-                return Err(Error::Inconsistent);
-            }
-        }
-
-        let missing_shards = shard_digests
-            .iter()
-            .enumerate()
-            .filter(|(_, digest)| digest.is_none())
-            .map(|(i, _)| {
-                let shard = if i < k {
-                    originals[i]
-                } else {
-                    encoding
-                        .recovery(i - k)
-                        .expect("missing recovery index must be in range")
-                };
-                (i, shard)
+        let recovery_refs: Vec<&[u8]> = (0..m)
+            .map(|i| {
+                encoding
+                    .recovery(i)
+                    .expect("recovery index must be in range")
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        for (i, digest) in
-            strategy.map_init_collect_vec(missing_shards, H::new, |hasher, (i, shard)| {
-                hasher.update(shard);
-                (i, hasher.finalize())
-            })
-        {
-            shard_digests[i] = Some(digest);
-        }
-
-        let mut builder = Builder::<H>::new(n);
-        shard_digests
-            .into_iter()
-            .map(|digest| digest.expect("digest must be present for every shard"))
-            .for_each(|digest| {
-                builder.add(&digest);
-            });
-        let tree = builder.build();
-        if tree.root() != *root {
-            return Err(Error::Inconsistent);
-        }
-
-        Ok(data)
+        verify_reencoded::<H, S>(
+            ctx,
+            shard_digests,
+            originals,
+            &recovery_refs,
+            provided_recoveries,
+        )
     }
 }
 
@@ -1646,7 +1632,7 @@ mod tests {
             tamper_flip_recovery,
         ),
         // Tampered recovery that IS provided and forces RS reconstruction of a missing
-        // original (exercises striped::decode_missing_original_into on the striped path).
+        // original (exercises the striped `decode_restored_only` path).
         (
             "tampered_recovery_provided",
             &[0, 1, 2, 4],
@@ -1715,7 +1701,7 @@ mod tests {
         assert_adversarial_rejected(total, min, &data, &rayon);
 
         // Sanity: an untampered mixed (some originals + a recovery) set still decodes via the
-        // striped path, forcing striped::decode_missing_original_into to reconstruct an original.
+        // striped path, forcing striped::decode_restored_only to reconstruct an original.
         let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
         let mixed = [0u16, 1, 2, 4]
             .into_iter()

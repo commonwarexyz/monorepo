@@ -1,7 +1,7 @@
 use crate::reed_solomon::{
     engine::DefaultEngine,
     rate::{DefaultRate, DefaultRateDecoder, DefaultRateEncoder, Rate, RateDecoder, RateEncoder},
-    DecoderResult, EncoderResult, Error,
+    DecoderResult, EncoderResult, Error, RecoveryDecoderResult,
 };
 
 // ======================================================================
@@ -131,7 +131,18 @@ impl Decoder {
     ///
     /// [`reset`]: Decoder::reset
     pub fn decode(&mut self) -> Result<DecoderResult<'_>, Error> {
-        self.0.decode()
+        self.0.decode(false)
+    }
+
+    /// Like [`decode`](Decoder::decode), but also reconstructs the missing recovery shards,
+    /// returning a [`RecoveryDecoderResult`] that additionally exposes them via
+    /// [`RecoveryDecoderResult::restored_recovery`] / [`restored_recovery_iter`]. This costs up to
+    /// `recovery_count` extra field multiplications, so prefer [`decode`](Decoder::decode) when only
+    /// the original data is needed.
+    ///
+    /// [`restored_recovery_iter`]: RecoveryDecoderResult::restored_recovery_iter
+    pub fn decode_with_recovery(&mut self) -> Result<RecoveryDecoderResult<'_>, Error> {
+        Ok(RecoveryDecoderResult::new(self.0.decode(true)?))
     }
 
     /// Creates new decoder with given configuration

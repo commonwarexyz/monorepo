@@ -196,13 +196,15 @@ impl DecoderWork {
         }
     }
 
-    // This must only be called by `DecoderResult`. Returns a reconstructed recovery shard,
-    // which is only meaningful after `decode` has revealed and un-chunked the recovery
-    // positions (see `RateDecoder::decode`).
+    // This must only be called by `RecoveryDecoderResult` (i.e. after a `decode` that requested
+    // recovery). Returns a reconstructed recovery shard, or `None` when `index` is not a missing
+    // recovery shard or no decode ran (all originals were present, so the recovery work buffers were
+    // never written). The `missing_original_count() > 0` guard is what distinguishes the latter: a
+    // recovery-revealing decode runs the reveal iff it reconstructed a missing original.
     pub(crate) fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
         let pos = self.recovery_base_pos + index;
 
-        if index < self.recovery_count && !self.received[pos] {
+        if self.missing_original_count() > 0 && index < self.recovery_count && !self.received[pos] {
             Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
         } else {
             None
@@ -233,5 +235,15 @@ impl DecoderWork {
 
     pub(crate) const fn missing_recovery_count(&self) -> usize {
         self.recovery_count - self.recovery_received_count
+    }
+
+    // Number of recovery shards a recovery-revealing decode reconstructed. Zero when no decode ran
+    // (all originals present); otherwise the missing recovery count. Matches `restored_recovery`.
+    pub(crate) const fn restored_recovery_count(&self) -> usize {
+        if self.missing_original_count() > 0 {
+            self.missing_recovery_count()
+        } else {
+            0
+        }
     }
 }

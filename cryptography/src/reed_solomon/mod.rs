@@ -17,7 +17,7 @@
 //! [`thiserror`]: https://docs.rs/thiserror
 
 pub use self::{
-    decoder_result::{DecoderResult, RestoredOriginal, RestoredRecovery},
+    decoder_result::{DecoderResult, RecoveryDecoderResult, RestoredOriginal, RestoredRecovery},
     encoder_result::{EncoderResult, Recovery},
     engine::SHARD_CHUNK_BYTES,
     wrappers::{Decoder, Encoder},
@@ -174,6 +174,7 @@ mod tests {
         assert_send::<DefaultEngine>();
         assert_send::<DefaultRate<DefaultEngine>>();
         assert_send::<DecoderResult<'_>>();
+        assert_send::<RecoveryDecoderResult<'_>>();
         assert_send::<EncoderResult<'_>>();
         assert_send::<Error>();
     }
@@ -186,6 +187,7 @@ mod tests {
         assert_sync::<DefaultEngine>();
         assert_sync::<DefaultRate<DefaultEngine>>();
         assert_sync::<DecoderResult<'_>>();
+        assert_sync::<RecoveryDecoderResult<'_>>();
         assert_sync::<EncoderResult<'_>>();
         assert_sync::<Error>();
     }
