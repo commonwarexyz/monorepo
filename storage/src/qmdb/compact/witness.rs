@@ -8,10 +8,10 @@
 //! mismatch fails with [`Error::DataCorrupted`].
 //!
 //! Entries are strictly increasing in committed leaf count (`proof.leaves`), so a leaf count
-//! uniquely identifies a rewind or prune target. The journal `sync` after an append is the
-//! commit point: a crash before it drops the unsynced tail on reopen, recovering the previous
-//! commit. [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip entry is
-//! never pruned.
+//! uniquely identifies a rewind or prune target. The journal `commit` or `sync` after an append
+//! is the commit point: a crash before it drops the unsynced tail on reopen, recovering the
+//! previous commit. [`Store::prune`] bounds how far back [`Store::rewind`] can reach; the tip
+//! entry is never pruned.
 
 use crate::{
     journal::contiguous::{variable, Reader as _},
@@ -112,6 +112,16 @@ impl<F: Family, D: Digest> VerifiedWitness<F, D> {
 /// The contiguous variable journal that backs a witness [`Store`].
 pub(crate) type Journal<E, F, D> = variable::Journal<E, Witness<F, D>>;
 
+/// How a persisted witness entry is made durable.
+#[derive(Clone, Copy)]
+enum Durability {
+    /// Commit the journal: appended entries survive a crash, but journal recovery may be
+    /// required on reopen.
+    Commit,
+    /// Sync the journal and all of its metadata, minimizing recovery work on reopen.
+    Sync,
+}
+
 /// A contiguous journal plus an in-memory cache of the tip witness.
 pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     journal: Journal<E, F, D>,
@@ -160,12 +170,13 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         *self.tip_witness.write() = witness;
     }
 
-    /// Persist the current compact state as a new witness journal entry.
+    /// Persist the current compact state as a new witness journal entry, committing the journal
+    /// so the entry survives a crash. Journal recovery may be required on reopen.
     ///
     /// No-op if the cached witness already matches the Merkle (the witness is already durable).
     /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
     /// frontier, and refreshes the cache.
-    pub(crate) async fn persist<H, S>(
+    pub(crate) async fn commit<H, S>(
         &mut self,
         merkle: &compact::Merkle<F, D, S>,
         inactivity_floor_loc: Location<F>,
@@ -175,32 +186,106 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         H: Hasher<Digest = D>,
         S: Strategy,
     {
+        self.persist::<H, S>(
+            merkle,
+            inactivity_floor_loc,
+            last_commit_op_bytes,
+            Durability::Commit,
+        )
+        .await
+    }
+
+    /// Persist the current compact state as a new witness journal entry, syncing the journal and
+    /// all of its metadata to minimize recovery work on reopen.
+    ///
+    /// No-op if the cached witness already matches the Merkle (the witness is already durable).
+    /// Otherwise appends a witness built from the unpruned Merkle, prunes the Merkle to its
+    /// frontier, and refreshes the cache.
+    pub(crate) async fn sync<H, S>(
+        &mut self,
+        merkle: &compact::Merkle<F, D, S>,
+        inactivity_floor_loc: Location<F>,
+        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
+    ) -> Result<(), Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        self.persist::<H, S>(
+            merkle,
+            inactivity_floor_loc,
+            last_commit_op_bytes,
+            Durability::Sync,
+        )
+        .await
+    }
+
+    /// Shared body of [`Self::commit`] and [`Self::sync`]: stage what must be persisted, append
+    /// it, make it durable per `durability`, and install it as the cached tip.
+    ///
+    /// A pending import is cleared only after the entry is durable, so an interrupted journal
+    /// replacement is retried by the next persist.
+    async fn persist<H, S>(
+        &mut self,
+        merkle: &compact::Merkle<F, D, S>,
+        inactivity_floor_loc: Location<F>,
+        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
+        durability: Durability,
+    ) -> Result<(), Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
+        let Some(verified) = self
+            .stage::<H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes)
+            .await?
+        else {
+            return Ok(());
+        };
+        self.journal.append(&verified.witness).await?;
+        match durability {
+            Durability::Commit => self.journal.commit().await?,
+            Durability::Sync => self.journal.sync().await?,
+        }
+        self.import_pending.store(false, Ordering::Relaxed);
+        merkle.prune_to_frontier();
+        self.replace(verified);
+        Ok(())
+    }
+
+    /// Decide what a persist must write, clearing the journal first when an import is pending.
+    ///
+    /// Returns `None` if the durable tip already matches the in-memory Merkle and no import is
+    /// pending, otherwise the witness to append and install in the cache.
+    async fn stage<H, S>(
+        &mut self,
+        merkle: &compact::Merkle<F, D, S>,
+        inactivity_floor_loc: Location<F>,
+        last_commit_op_bytes: impl FnOnce() -> Vec<u8>,
+    ) -> Result<Option<VerifiedWitness<F, D>>, Error<F>>
+    where
+        H: Hasher<Digest = D>,
+        S: Strategy,
+    {
         // An equal leaf count means no commit has been applied since the cache was set.
         // Normally the cache mirrors the journal tip, so the state is already durable and there
         // is nothing to do. During a pending import the cached witness is not in the journal
         // yet, so it is exactly what must be persisted: replace the journal's contents with it.
         let cached_leaves = self.with(|w| w.leaf_count());
-        if cached_leaves == merkle.leaves() {
-            if self.import_pending.load(Ordering::Relaxed) {
-                self.clear_for_import().await?;
-                let witness = self.with(|w| w.witness.clone());
-                self.append_and_sync(&witness).await?;
+        let verified = if cached_leaves == merkle.leaves() {
+            if !self.import_pending.load(Ordering::Relaxed) {
+                return Ok(None);
             }
-            return Ok(());
-        }
-        if cached_leaves > merkle.leaves() {
+            self.with(|w| w.clone())
+        } else if cached_leaves > merkle.leaves() {
             return Err(Error::DataCorrupted("witness ahead of in-memory state"));
-        }
-
-        let verified =
-            build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes())?;
+        } else {
+            build_witness::<F, H, S>(merkle, inactivity_floor_loc, last_commit_op_bytes())?
+        };
         if self.import_pending.load(Ordering::Relaxed) {
             self.clear_for_import().await?;
         }
-        self.append_and_sync(&verified.witness).await?;
-        merkle.prune_to_frontier();
-        self.replace(verified);
-        Ok(())
+        Ok(Some(verified))
     }
 
     /// Rewind the journal so the entry committing exactly `target` leaves becomes the tip, then
@@ -320,17 +405,6 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     async fn clear_for_import(&mut self) -> Result<(), Error<F>> {
         let size = self.journal.size().await;
         self.journal.clear_to_size(size.max(1)).await?;
-        Ok(())
-    }
-
-    /// Append `entry` and sync it, making it the durable tip.
-    ///
-    /// A pending import is cleared only after the sync completes, so an interrupted journal
-    /// replacement is retried by the next persist.
-    async fn append_and_sync(&mut self, entry: &Witness<F, D>) -> Result<(), Error<F>> {
-        self.journal.append(entry).await?;
-        self.journal.sync().await?;
-        self.import_pending.store(false, Ordering::Relaxed);
         Ok(())
     }
 

@@ -4,6 +4,7 @@ use crate::common::{
     any_fix_cfg_with, imm_fix_cfg_with, make_fixed_value, seed_db, AnyUFixDb, ImmFixDb, CHUNK_SIZE,
 };
 use commonware_cryptography::{Hasher as _, Sha256};
+use commonware_macros::boxed;
 use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::{Config, Context},
@@ -44,6 +45,7 @@ async fn open_db(ctx: &Context) -> Db {
         .unwrap()
 }
 
+#[boxed]
 async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
@@ -60,6 +62,7 @@ async fn bench_direct_apply(ctx: &Context, updates: u64) -> Duration {
     elapsed
 }
 
+#[boxed]
 async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
@@ -79,6 +82,7 @@ async fn bench_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> D
     elapsed
 }
 
+#[boxed]
 async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
@@ -101,6 +105,7 @@ async fn bench_apply_with_committed_ancestor(ctx: &Context, updates: u64) -> Dur
 }
 
 // 1 committed + 1 uncommitted ancestor: apply A, then apply C (whose chain is [B, A]).
+#[boxed]
 async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
@@ -126,6 +131,7 @@ async fn bench_apply_committed_uncommitted_chain(ctx: &Context, updates: u64) ->
 }
 
 // 2 uncommitted ancestors: apply C directly without applying A or B.
+#[boxed]
 async fn bench_apply_multi_uncommitted(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_db(ctx).await;
     seed_db(&mut db, NUM_KEYS).await;
@@ -171,6 +177,7 @@ async fn open_imm_db(ctx: &Context) -> ImmDb {
         .unwrap()
 }
 
+#[boxed]
 async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_imm_db(ctx).await;
     let mut rng = StdRng::seed_from_u64(7);
@@ -194,6 +201,7 @@ async fn bench_imm_direct_apply(ctx: &Context, updates: u64) -> Duration {
     elapsed
 }
 
+#[boxed]
 async fn bench_imm_apply_with_uncommitted_ancestor(ctx: &Context, updates: u64) -> Duration {
     let mut db = open_imm_db(ctx).await;
     let mut rng = StdRng::seed_from_u64(7);

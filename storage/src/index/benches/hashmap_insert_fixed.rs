@@ -11,7 +11,6 @@ struct MockIndex {
     _section: u64,
     _offset: u32,
     _len: u32,
-    _next: Option<Box<Self>>,
 }
 
 fn bench_hashmap_insert_fixed(c: &mut Criterion) {
@@ -42,7 +41,6 @@ fn bench_hashmap_insert_fixed(c: &mut Criterion) {
                             _section: section,
                             _offset: offset,
                             _len: len,
-                            _next: None,
                         };
                         map.insert(key, value);
                     }
