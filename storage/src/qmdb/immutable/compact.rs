@@ -274,8 +274,8 @@ where
     /// Build a compact db handle from already-validated compact state.
     ///
     /// The caller has reconstructed the compact Merkle in memory and already authenticated the
-    /// supplied witness/root pair. The import lives only in memory until the first
-    /// [`Self::sync`], which replaces the journal's contents with it. Until then, dropping the
+    /// supplied witness/root pair. The import lives only in memory until the first [`Self::commit`]
+    /// or [`Self::sync`], which replaces the journal's contents with it. Until then, dropping the
     /// handle leaves the previous on-disk state untouched, and rewind/prune are rejected.
     pub(crate) fn init_from_validated_state(
         strategy: S,
@@ -411,7 +411,7 @@ where
     /// Return the compact-sync target described by the current witness.
     ///
     /// This reflects the last durably persisted commit, which may lag behind live in-memory
-    /// mutations until [`Self::sync`] is called.
+    /// mutations until [`Self::commit`] or [`Self::sync`] is called.
     pub fn target(&self) -> compact_sync::Target<F, H::Digest> {
         self.witness.with(VerifiedWitness::target)
     }
@@ -484,7 +484,7 @@ where
     /// Apply a merkleized batch to the database.
     ///
     /// Returns the range of locations written. The state is updated in memory only; call
-    /// [`Self::sync`] to persist.
+    /// [`Self::commit`] or [`Self::sync`] to persist.
     ///
     /// # Errors
     ///
@@ -515,11 +515,23 @@ where
         Ok(start_loc..Location::new(batch.bounds.total_size))
     }
 
-    /// Durably persist the current db state to disk.
+    /// Durably persist the current db state to disk. This is faster than [`Self::sync`] but
+    /// reopen may need to replay the witness journal's tail to recover.
+    #[tracing::instrument(name = "qmdb.immutable.compact.db.commit", level = "info", skip_all)]
+    pub async fn commit(&self) -> Result<(), Error<F>> {
+        self.witness
+            .commit::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
+                Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
+            })
+            .await
+    }
+
+    /// Durably persist the current db state to disk, also persisting journal metadata to
+    /// minimize recovery work on reopen.
     #[tracing::instrument(name = "qmdb.immutable.compact.db.sync", level = "info", skip_all)]
     pub async fn sync(&self) -> Result<(), Error<F>> {
         self.witness
-            .persist::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
+            .sync::<H, S>(&self.merkle, self.inactivity_floor_loc, || {
                 Self::encode_commit_op(self.last_commit_metadata.clone(), self.inactivity_floor_loc)
             })
             .await
@@ -532,8 +544,7 @@ where
     /// # Errors
     ///
     /// Returns [`crate::merkle::Error::RewindBeyondHistory`] (wrapped as [`Error::Merkle`]) if
-    /// no retained commit has exactly `target` operations (never synced, or pruned). Any error
-    /// is fatal for this handle: drop it and reopen from storage.
+    /// no retained commit has exactly `target` operations (never synced, or pruned).
     #[tracing::instrument(name = "qmdb.immutable.compact.db.rewind", level = "info", skip_all)]
     pub async fn rewind(&mut self, target: Location<F>) -> Result<(), Error<F>>
     where
@@ -565,16 +576,16 @@ where
         Ok(())
     }
 
-    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness
-    /// below the boundary may survive.
+    /// Drop witnesses for commits with fewer than `pruning_boundary` operations. Some witness below
+    /// the boundary may survive.
     ///
-    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness
-    /// always survives. The prune is made durable before this method returns.
+    /// Pruning bounds how far back [`Self::rewind`] can reach; the current commit's witness always
+    /// survives. The prune is made durable before this method returns.
     ///
     /// # Errors
     ///
-    /// Fails if a compact-sync import has not yet been persisted by [`Self::sync`]. Any error
-    /// is fatal for this handle: drop it and reopen from storage.
+    /// Fails if a compact-sync import has not yet been persisted by [`Self::commit`] or
+    /// [`Self::sync`].
     pub async fn prune(&mut self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.witness.prune(pruning_boundary).await
     }
@@ -926,6 +937,108 @@ mod tests {
             assert_eq!(db.get_metadata(), Some(meta1));
             assert_eq!(db.inactivity_floor_loc(), floor1);
 
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_commit_persists_across_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-commit-reopen";
+            let meta1 = Sha256::fill(0xaa);
+            let meta2 = Sha256::fill(0xbb);
+
+            let root_after_second = {
+                let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[1]), Sha256::fill(11u8))
+                        .merkleize(&db, Some(meta1), Location::new(0)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[2]), Sha256::fill(22u8))
+                        .merkleize(&db, Some(meta2), Location::new(1)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                db.root()
+            };
+
+            // Reopen recovers the committed tip even though the journal was never synced.
+            let db = open_db::<mmr::Family>(context.child("second"), partition).await;
+            assert_eq!(db.root(), root_after_second);
+            assert_eq!(db.get_metadata(), Some(meta2));
+            assert_eq!(db.inactivity_floor_loc(), Location::new(1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_rewind_to_committed_entry_after_reopen() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-commit-rewind-reopen";
+            let meta1 = Sha256::fill(0xaa);
+            let meta2 = Sha256::fill(0xbb);
+
+            let (root_a, size_a) = {
+                let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[1]), Sha256::fill(11u8))
+                        .merkleize(&db, Some(meta1), Location::new(0)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                let root_a = db.root();
+                let size_a = db.size();
+
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[2]), Sha256::fill(22u8))
+                        .merkleize(&db, Some(meta2), Location::new(1)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                (root_a, size_a)
+            };
+
+            // Both committed witnesses survive the crash: reopen recovers the tip, and the
+            // earlier commit remains a valid rewind target.
+            let mut db = open_db::<mmr::Family>(context.child("second"), partition).await;
+            db.rewind(size_a).await.unwrap();
+            assert_eq!(db.root(), root_a);
+            assert_eq!(db.get_metadata(), Some(meta1));
+            db.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced("INFO")]
+    fn test_compact_sync_after_commit() {
+        deterministic::Runner::default().start(|context| async move {
+            let partition = "immutable-sync-after-commit";
+            let meta = Sha256::fill(0xaa);
+
+            let root = {
+                let mut db = open_db::<mmr::Family>(context.child("first"), partition).await;
+                db.apply_batch(
+                    db.new_batch()
+                        .set(Sha256::hash(&[1]), Sha256::fill(11u8))
+                        .merkleize(&db, Some(meta), Location::new(0)),
+                )
+                .unwrap();
+                db.commit().await.unwrap();
+                // The commit already made the state durable, so this is a no-op.
+                db.sync().await.unwrap();
+                db.root()
+            };
+
+            let db = open_db::<mmr::Family>(context.child("second"), partition).await;
+            assert_eq!(db.root(), root);
+            assert_eq!(db.get_metadata(), Some(meta));
             db.destroy().await.unwrap();
         });
     }

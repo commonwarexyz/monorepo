@@ -83,6 +83,8 @@ stability_scope!(BETA {
         Exited,
         #[error("closed")]
         Closed,
+        #[error("aborted")]
+        Aborted,
         #[error("timeout")]
         Timeout,
         #[error("bind failed")]
@@ -759,6 +761,12 @@ stability_scope!(BETA {
 
         /// Ensure all pending data is durably persisted.
         fn sync(&self) -> impl Future<Output = Result<(), Error>> + Send;
+
+        /// Request that all pending data is durably persisted.
+        ///
+        /// Awaiting this future waits until the sync has started. Awaiting the returned
+        /// [`Handle`] waits for the same durability guarantee as [`Blob::sync`].
+        fn start_sync(&self) -> impl Future<Output = Handle<()>> + Send;
     }
 
     /// Interface that any runtime must implement to provide buffer pools.
@@ -838,6 +846,7 @@ mod tests {
     use commonware_macros::select;
     use commonware_utils::{
         channel::{mpsc, oneshot},
+        futures::Pool as FuturesPool,
         sync::Mutex,
         NZUsize, SystemTimeExt, NZU32,
     };
@@ -867,6 +876,15 @@ mod tests {
         }
         let result = runner.start(|_| error_future());
         assert_eq!(result, Err("An error occurred"));
+    }
+
+    #[test]
+    fn test_handle_can_use_futures_pool() {
+        deterministic::Runner::default().start(|_| async move {
+            let mut pool = FuturesPool::<Result<(), Error>>::default();
+            pool.push(Handle::ready(Ok(())));
+            assert!(pool.next_completed().await.is_ok());
+        });
     }
 
     fn test_clock_sleep<R: Runner>(runner: R)
