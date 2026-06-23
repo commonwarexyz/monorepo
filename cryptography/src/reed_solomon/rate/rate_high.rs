@@ -168,12 +168,14 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
         self.work.add_recovery_shard(index, recovery_shard)
     }
 
-    fn decode(&mut self) -> Result<DecoderResult<'_>, Error> {
+    fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error> {
         let Some((mut work, original_count, recovery_count, received)) =
             self.work.decode_begin()?
         else {
-            // Nothing to do, original data is complete.
-            return Ok(DecoderResult::new(&mut self.work));
+            // Every original was provided: nothing to reconstruct. Clear the received state and
+            // report nothing.
+            self.work.reset_received();
+            return Ok(None);
         };
 
         let chunk_size = recovery_count.next_power_of_two();
@@ -243,13 +245,31 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
             }
         }
 
+        // REVEAL ERASURES (RECOVERY)
+        //
+        // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
+        // live at `work[0..recovery_count]`. Un-scale the missing ones by the inverse locator so
+        // they hold the canonical recovery values, mirroring the original reveal above. This lets
+        // `DecoderResult::recovery` return them without a separate re-encode.
+
+        if compute_recovery {
+            for i in 0..recovery_count {
+                if !received[i] {
+                    self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
+                }
+            }
+        }
+
         // UNDO LAST CHUNK ENCODING
 
         self.work.undo_last_chunk_encoding();
+        if compute_recovery {
+            self.work.undo_last_chunk_encoding_recovery();
+        }
 
         // DONE
 
-        Ok(DecoderResult::new(&mut self.work))
+        Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
     fn into_parts(self) -> (E, DecoderWork) {

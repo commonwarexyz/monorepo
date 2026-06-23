@@ -186,10 +186,24 @@ impl DecoderWork {
     }
 
     // This must only be called by `DecoderResult`.
-    pub(crate) fn restored_original(&self, index: usize) -> Option<&[u8]> {
+    pub(crate) fn original(&self, index: usize) -> Option<&[u8]> {
         let pos = self.original_base_pos + index;
 
         if index < self.original_count && !self.received[pos] {
+            Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
+        } else {
+            None
+        }
+    }
+
+    // This must only be called by `RecoveryDecoderResult`, which is produced only by a
+    // recovery-computing decode (an original was missing and `compute_recovery` was set), so the
+    // recovery work buffers hold canonical values. Returns a reconstructed recovery shard, or `None`
+    // if `index` is not a missing recovery shard.
+    pub(crate) fn recovery(&self, index: usize) -> Option<&[u8]> {
+        let pos = self.recovery_base_pos + index;
+
+        if self.missing_original_count() > 0 && index < self.recovery_count && !self.received[pos] {
             Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
         } else {
             None
@@ -203,7 +217,22 @@ impl DecoderWork {
         );
     }
 
+    pub(crate) fn undo_last_chunk_encoding_recovery(&mut self) {
+        self.shards.undo_last_chunk_encoding(
+            self.shard_bytes,
+            self.recovery_base_pos..self.recovery_base_pos + self.recovery_count,
+        );
+    }
+
     pub(crate) const fn missing_original_count(&self) -> usize {
         self.original_count - self.original_received_count
+    }
+
+    pub(crate) const fn recovery_count(&self) -> usize {
+        self.recovery_count
+    }
+
+    pub(crate) const fn missing_recovery_count(&self) -> usize {
+        self.recovery_count - self.recovery_received_count
     }
 }

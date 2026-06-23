@@ -132,8 +132,12 @@ pub(crate) fn roundtrip<R: Rate<E>, E: Engine>(
         }
     }
 
-    let result = decoder.decode().unwrap();
-    let restored: BTreeMap<_, _> = result.restored_original_iter().collect();
+    let decoded = decoder.decode(false);
+    let restored: BTreeMap<_, _> = match &decoded {
+        Ok(Some(result)) => result.original_iter().collect(),
+        Ok(None) => BTreeMap::new(),
+        Err(e) => panic!("decode failed: {e:?}"),
+    };
 
     for i in 0..cfg.original_count {
         if !original_received[i] {
@@ -631,7 +635,7 @@ macro_rules! test_rate_decoder_errors {
             )
             .unwrap();
             assert_eq!(
-                decoder.decode().err(),
+                decoder.decode(false).err(),
                 Some(Error::NotEnoughShards {
                     original_count: 1,
                     original_received_count: 0,

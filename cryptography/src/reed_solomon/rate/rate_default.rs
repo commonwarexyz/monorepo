@@ -277,10 +277,10 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
         }
     }
 
-    fn decode(&mut self) -> Result<DecoderResult<'_>, Error> {
+    fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error> {
         match &mut self.0 {
-            InnerDecoder::High(high) => high.decode(),
-            InnerDecoder::Low(low) => low.decode(),
+            InnerDecoder::High(high) => high.decode(compute_recovery),
+            InnerDecoder::Low(low) => low.decode(compute_recovery),
             InnerDecoder::None => unreachable!(),
         }
     }

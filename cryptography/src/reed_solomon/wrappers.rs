@@ -1,7 +1,7 @@
 use crate::reed_solomon::{
     engine::DefaultEngine,
     rate::{DefaultRate, DefaultRateDecoder, DefaultRateEncoder, Rate, RateDecoder, RateEncoder},
-    DecoderResult, EncoderResult, Error,
+    DecoderResult, EncoderResult, Error, RecoveryDecoderResult,
 };
 
 // ======================================================================
@@ -121,17 +121,28 @@ impl Decoder {
         self.0.add_recovery_shard(index, recovery_shard)
     }
 
-    /// Decodes the added shards returning [`DecoderResult`]
-    /// which contains the restored original shards.
+    /// Decodes the added shards, returning `Some(`[`DecoderResult`]`)` with the restored original
+    /// shards, or `None` if every original shard was already provided (nothing to reconstruct).
     ///
-    /// When returned [`DecoderResult`] is dropped the decoder is
-    /// automatically [`reset`] and ready for new round of decoding.
+    /// When the returned [`DecoderResult`] is dropped the decoder is automatically [`reset`] and
+    /// ready for a new round of decoding.
     ///
     /// See [basic usage](crate::reed_solomon#basic-usage) for an example.
     ///
     /// [`reset`]: Decoder::reset
-    pub fn decode(&mut self) -> Result<DecoderResult<'_>, Error> {
-        self.0.decode()
+    pub fn decode(&mut self) -> Result<Option<DecoderResult<'_>>, Error> {
+        self.0.decode(false)
+    }
+
+    /// Like [`decode`](Decoder::decode), but also reconstructs the missing recovery shards, returning
+    /// `Some(`[`RecoveryDecoderResult`]`)` that additionally exposes them via
+    /// [`RecoveryDecoderResult::recovery`] / [`recovery_iter`]. This costs up to `recovery_count`
+    /// extra field multiplications, so prefer [`decode`](Decoder::decode) when only the original data
+    /// is needed.
+    ///
+    /// [`recovery_iter`]: RecoveryDecoderResult::recovery_iter
+    pub fn decode_with_recovery(&mut self) -> Result<Option<RecoveryDecoderResult<'_>>, Error> {
+        Ok(self.0.decode(true)?.map(RecoveryDecoderResult::new))
     }
 
     /// Creates new decoder with given configuration
@@ -226,8 +237,12 @@ mod tests {
             decoder.add_recovery_shard(*i, recovery[*i]).unwrap();
         }
 
-        let result = decoder.decode().unwrap();
-        let restored: BTreeMap<_, _> = result.restored_original_iter().collect();
+        let decoded = decoder.decode();
+        let restored: BTreeMap<_, _> = match &decoded {
+            Ok(Some(result)) => result.original_iter().collect(),
+            Ok(None) => BTreeMap::new(),
+            Err(e) => panic!("decode failed: {e:?}"),
+        };
 
         for i in 0..original_count {
             if !original_received[i] {
@@ -306,8 +321,12 @@ mod tests {
 
         decoder.add_recovery_shard(0, &recovery[0]).unwrap();
         decoder.add_recovery_shard(1, &recovery[1]).unwrap();
-        let result = decoder.decode().unwrap();
-        let restored: BTreeMap<_, _> = result.restored_original_iter().collect();
+        let decoded = decoder.decode();
+        let restored: BTreeMap<_, _> = match &decoded {
+            Ok(Some(result)) => result.original_iter().collect(),
+            Ok(None) => BTreeMap::new(),
+            Err(e) => panic!("decode failed: {e:?}"),
+        };
 
         assert_eq!(restored[&0], original[0]);
         assert_eq!(restored[&1], original[1]);

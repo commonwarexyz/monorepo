@@ -199,8 +199,10 @@ where
         recovery_shard: T,
     ) -> Result<(), Error>;
 
-    /// Like [`Decoder::decode`](crate::reed_solomon::Decoder::decode).
-    fn decode(&mut self) -> Result<DecoderResult<'_>, Error>;
+    /// Like [`Decoder::decode`](crate::reed_solomon::Decoder::decode): reconstructs the missing
+    /// shards, or returns `Ok(None)` if every original was already provided (nothing to reconstruct).
+    /// When `compute_recovery` is set, the missing recovery shards are also reconstructed.
+    fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error>;
 
     /// Consumes this decoder returning its [`Engine`] and [`DecoderWork`]
     /// so that they can be re-used by another decoder.

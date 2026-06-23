@@ -154,7 +154,7 @@ fn benchmarks_main(c: &mut Criterion) {
 
                 let id = format!(
                     "original={original_count} recovery={recovery_count} shard_bytes={SHARD_BYTES} loss={loss_percent}"
-            );
+                );
 
                 group.throughput(Throughput::Bytes(
                     ((original_count + recovery_count) * SHARD_BYTES) as u64,
@@ -308,7 +308,7 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
                     {
                         decoder.add_recovery_shard(index, shard).unwrap();
                     }
-                    decoder.decode().unwrap();
+                    decoder.decode(false).unwrap();
                 });
             });
         }
@@ -351,7 +351,7 @@ fn benchmarks_rate_one<E: Engine>(c: &mut Criterion, name: &str, new_engine: fn(
                     {
                         decoder.add_recovery_shard(index, shard).unwrap();
                     }
-                    decoder.decode().unwrap();
+                    decoder.decode(false).unwrap();
                 });
             });
         }
