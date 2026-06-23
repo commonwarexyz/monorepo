@@ -424,8 +424,7 @@ where
                 // app verification succeeds and the store is durable.
                 let store_block = block.clone();
                 let store_marshal = marshal.clone();
-                let store =
-                    async move { stage.store(&store_marshal, round, store_block).await };
+                let store = async move { stage.store(&store_marshal, round, store_block).await };
 
                 let ancestry_stream = marshal.ancestor_stream(
                     Arc::new(runtime_context.child("ancestor_stream")),

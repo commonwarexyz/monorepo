@@ -768,10 +768,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(
-                marshal.verified(round, block).await,
-                "durable: verified"
-            );
+            assert!(marshal.verified(round, block).await, "durable: verified");
 
             // Complete verify first so the block is already available locally.
             let verify_rx = inline.verify(verify_context, digest).await;
@@ -855,10 +852,7 @@ mod tests {
             let block =
                 B::new::<Sha256>(verify_context.clone(), parent_digest, Height::new(2), 200);
             let digest = block.digest();
-            assert!(
-                marshal.verified(round, block).await,
-                "durable: verified"
-            );
+            assert!(marshal.verified(round, block).await, "durable: verified");
 
             // Certify should still resolve by waiting on marshal block availability directly.
             let certify_rx = inline.certify(round, digest).await;

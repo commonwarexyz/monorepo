@@ -2924,9 +2924,7 @@ mod tests {
             let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(block_a.clone(), coding_config, &Sequential);
             let commitment_a = coded_a.commitment();
-            assert!(marshal
-                .verified(round, coded_a)
-                .await, "durable: verified");
+            assert!(marshal.verified(round, coded_a).await, "durable: verified");
 
             // After restart, a fresh application would build a different
             // block for the same round.
@@ -3017,9 +3015,10 @@ mod tests {
             let stale_block = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_coded: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(stale_block, coding_config, &Sequential);
-            assert!(marshal
-                .verified(round, stale_coded)
-                .await, "durable: verified");
+            assert!(
+                marshal.verified(round, stale_coded).await,
+                "durable: verified"
+            );
 
             // Simulate a replay where parent selection now points to a
             // different parent commitment than the cached block was built for.
