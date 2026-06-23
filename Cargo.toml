@@ -146,6 +146,7 @@ commonware-stream = { version = "2026.5.0", path = "stream" }
 commonware-utils = { version = "2026.5.0", path = "utils", default-features = false }
 console-subscriber = "0.5.0"
 const-hex = { version = "1.18.1", default-features = false }
+cpufeatures = "0.2.17"
 crc = "3.4.0"
 crc-fast = { version = "1.10.0", default-features = false }
 criterion = "0.7.0"
@@ -158,6 +159,7 @@ ecdsa = { version = "0.16.9", default-features = false }
 ed25519-consensus = "2.1.0"
 ed25519-zebra = "4.1.0"
 either = "1.13.0"
+fixedbitset = { version = "0.5.7", default-features = false }
 futures = "0.3.31"
 futures-timer = "3.0.3"
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
@@ -171,6 +173,7 @@ num-bigint = { version = "0.4.6", default-features = false }
 num-integer = "0.1.46"
 num-rational = { version = "0.4.2", features = ["num-bigint"] }
 num-traits = { version = "0.2.19", default-features = false }
+once_cell = { version = "1.21.3", default-features = false }
 opentelemetry = "0.31.0"
 opentelemetry-otlp = "0.31.0"
 opentelemetry_sdk = "0.31.0"
@@ -191,7 +194,6 @@ rand_core = "0.6.4"
 rand_distr = "0.4.3"
 ratatui = "0.29.0"
 rayon = { version = "1.10.0", default-features = false }
-reed-solomon-simd = "3.1.0"
 reqwest = "0.12.12"
 rstest = "0.26.1"
 serde = "1.0.218"
@@ -297,9 +299,6 @@ opt-level = 3
 opt-level = 3
 
 [profile.test.package.rand_chacha]
-opt-level = 3
-
-[profile.test.package.reed-solomon-simd]
 opt-level = 3
 
 [profile.test.package.sha2]

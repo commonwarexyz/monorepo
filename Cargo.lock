@@ -1400,7 +1400,6 @@ dependencies = [
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
  "rayon",
- "reed-solomon-simd",
  "thiserror 2.0.17",
 ]
 
@@ -1569,15 +1568,18 @@ dependencies = [
  "commonware-math",
  "commonware-parallel",
  "commonware-utils",
+ "cpufeatures 0.2.17",
  "crc",
  "crc-fast",
  "criterion",
  "ctutils 0.3.1",
  "curve25519-dalek",
  "ecdsa",
+ "fixedbitset",
  "getrandom 0.2.16",
  "num-rational",
  "num-traits",
+ "once_cell",
  "p256",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -4638,30 +4640,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "readme-rustdocifier"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08ad765b21a08b1a8e5cdce052719188a23772bcbefb3c439f0baaf62c56ceac"
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
  "bitflags",
-]
-
-[[package]]
-name = "reed-solomon-simd"
-version = "3.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cffef0520d30fbd4151fb20e262947ae47fb0ab276a744a19b6398438105a072"
-dependencies = [
- "cpufeatures 0.2.17",
- "fixedbitset",
- "once_cell",
- "readme-rustdocifier",
 ]
 
 [[package]]
