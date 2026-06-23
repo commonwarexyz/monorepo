@@ -211,12 +211,7 @@ impl Request {
                 let _ = w.sender.send(Err(Error::Timeout));
             }
             Self::Sync(s) => {
-                // Sync requests currently do not carry deadlines, but keep the
-                // timeout path consistent with storage's std::io::Result API.
-                let _ = s.sender.send(Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "request timed out",
-                )));
+                let _ = s.sender.send(Err(Error::Timeout));
             }
         }
     }
@@ -610,9 +605,9 @@ pub(super) struct SyncRequest {
     /// File descriptor to sync.
     pub(super) file: Arc<File>,
     /// Terminal result captured by `on_cqe` and delivered by `finish`.
-    pub(super) result: Option<std::io::Result<()>>,
+    pub(super) result: Option<Result<(), Error>>,
     /// Completion channel for the top-level caller.
-    pub(super) sender: oneshot::Sender<std::io::Result<()>>,
+    pub(super) sender: oneshot::Sender<Result<(), Error>>,
 }
 
 impl SyncRequest {
@@ -628,11 +623,13 @@ impl SyncRequest {
         match CqeResult::from_raw(result, state) {
             CqeResult::Retry => false,
             CqeResult::Cancelled => {
-                self.result = Some(Err(std::io::Error::from_raw_os_error(libc::ECANCELED)));
+                self.result = Some(Err(Error::Io(std::io::Error::from_raw_os_error(
+                    libc::ECANCELED,
+                ))));
                 true
             }
             CqeResult::Error(code) => {
-                self.result = Some(Err(std::io::Error::from_raw_os_error(-code)));
+                self.result = Some(Err(Error::Io(std::io::Error::from_raw_os_error(-code))));
                 true
             }
             CqeResult::Zero | CqeResult::Positive(_) => {
@@ -1336,7 +1333,10 @@ mod tests {
         let err = block_on(rx)
             .expect("missing timeout cancel result")
             .expect_err("expected timeout cancel error");
-        assert_eq!(err.raw_os_error(), Some(libc::ECANCELED));
+        match err {
+            Error::Io(err) => assert_eq!(err.raw_os_error(), Some(libc::ECANCELED)),
+            other => panic!("expected io error, got {other:?}"),
+        }
 
         // Hard errors should round-trip as std::io::Error values.
         let (tx, rx) = oneshot::channel();
@@ -1350,7 +1350,10 @@ mod tests {
         let err = block_on(rx)
             .expect("missing hard error result")
             .expect_err("expected hard error");
-        assert_eq!(err.raw_os_error(), Some(libc::EIO));
+        match err {
+            Error::Io(err) => assert_eq!(err.raw_os_error(), Some(libc::EIO)),
+            other => panic!("expected io error, got {other:?}"),
+        }
 
         // Both zero and positive CQE results should count as sync success.
         let (tx, rx) = oneshot::channel();
@@ -1377,7 +1380,6 @@ mod tests {
             .expect("missing positive-result completion")
             .expect("sync should succeed on positive");
 
-        // Local timeout delivery should use TimedOut for the storage-facing API.
         let (tx, rx) = oneshot::channel();
         let request = Request::Sync(SyncRequest {
             file: make_file_fd(),
@@ -1388,7 +1390,7 @@ mod tests {
         let err = block_on(rx)
             .expect("missing timeout result")
             .expect_err("expected timeout error");
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(matches!(err, Error::Timeout));
     }
 
     #[test]
@@ -1546,7 +1548,6 @@ mod tests {
             Err(Error::Timeout)
         ));
 
-        // Sync uses `std::io::ErrorKind::TimedOut` to match its storage-facing API.
         let (tx, rx) = oneshot::channel();
         let request = Request::Sync(SyncRequest {
             file: make_file_fd(),
@@ -1557,6 +1558,6 @@ mod tests {
         let err = block_on(rx)
             .expect("missing sync timeout")
             .expect_err("sync timeout should be an error");
-        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+        assert!(matches!(err, Error::Timeout));
     }
 }

@@ -45,6 +45,8 @@ commonware_macros::stability_scope!(ALPHA {
     pub mod lthash;
     pub use crate::lthash::LtHash;
 
+    pub mod reed_solomon;
+
     pub mod zk;
 });
 commonware_macros::stability_scope!(BETA {
