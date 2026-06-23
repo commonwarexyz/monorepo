@@ -14,25 +14,39 @@ use commonware_parallel::Strategy;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use std::array;
 
-/// A scalar exponent for the Banderwagon group [`G`].
+/// A scalar exponent for the Banderwagon group [`G`]: an element of the scalar
+/// field `Z/r`, where `r` is the prime group order.
 ///
-/// Stored as a little-endian 256-bit integer but constrained to `F::BITS`
-/// bits. That width is chosen below both the circuit field modulus `p`
-/// (`SCALAR_BITS = 255`) *and* the group order `r` (bit length 253), so every
-/// value is at once a canonical field element (`< p`) and a unique group scalar
-/// (`< r`). This is what lets the in-circuit secret be witnessed directly as
-/// `F::BITS` bits with no recomposition or canonicity constraint (see
-/// `G::scalar_mul_bits`): the bits simply *are* the exponent.
+/// Stored as a canonical little-endian integer in `[0, r)`. The in-circuit
+/// secret is witnessed directly as its [`bits`](F::bits) (`F::BITS` of them,
+/// enough to cover all of `[0, r)`), with no recomposition or canonicity
+/// constraint (see `G::scalar_mul_bits`): the bits simply *are* the exponent.
+/// A witnessed bit pattern is not itself constrained to `[0, r)` and so may
+/// exceed `r`, but that is harmless: every use feeds the bits into a group
+/// scalar multiplication, which is well-defined modulo `r`, so any alias of the
+/// same residue yields the same result.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct F {
     limbs: [u64; 4],
 }
 
 impl F {
-    /// The fixed bit-width of an exponent; see [`F`].
-    const BITS: usize = 252;
+    /// The bit-width of the modulus `r`; enough bits to represent any element of
+    /// `[0, r)`. See [`F`].
+    const BITS: usize = 253;
 
-    /// The little-endian bits of the integer, exactly `F::BITS` of them.
+    /// The field modulus `r`, the prime order of the Banderwagon group, as
+    /// little-endian 64-bit limbs. Every [`F`] value is kept canonical in
+    /// `[0, r)`, so `PartialEq` (derived limb equality) is correct.
+    const R: [u64; 4] = [
+        0x74fd_06b5_2876_e7e1,
+        0xff8f_8700_7419_0471,
+        0x0cce_7602_0268_7600,
+        0x1cfb_69d4_ca67_5f52,
+    ];
+
+    /// The little-endian bits of the integer, `F::BITS` of them (enough to
+    /// represent any element of `[0, r)`).
     pub fn bits(&self) -> Vec<bool> {
         (0..Self::BITS)
             .map(|i| (self.limbs[i / 64] >> (i % 64)) & 1 == 1)
@@ -42,9 +56,165 @@ impl F {
 
 impl Random for F {
     fn random(mut rng: impl rand_core::CryptoRngCore) -> Self {
-        let mut limbs: [u64; 4] = array::from_fn(|_| rng.next_u64());
-        limbs[3] &= (1u64 << (Self::BITS % 64)) - 1;
-        Self { limbs }
+        // Rejection-sample a uniform element of `[0, r)`. Each candidate is
+        // `F::BITS` random bits (the width of `r`), so it lands in `[0, 2^BITS)`
+        // and is accepted with probability `r / 2^BITS > 0.9`: ~1.1 draws on
+        // average.
+        loop {
+            let mut limbs: [u64; 4] = array::from_fn(|_| rng.next_u64());
+            limbs[3] &= (1u64 << (Self::BITS - 192)) - 1;
+            // Accept iff `limbs < r`, i.e. computing `limbs - r` borrows.
+            let mut borrow = false;
+            for (&x, &r) in limbs.iter().zip(Self::R.iter()) {
+                let (d, b) = x.overflowing_sub(r);
+                let (_, c) = d.overflowing_sub(borrow as u64);
+                borrow = b | c;
+            }
+            if borrow {
+                return Self { limbs };
+            }
+        }
+    }
+}
+
+impl<'a> AddAssign<&'a Self> for F {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        // Add the two canonical `< r` integers limb by limb with carry. The sum
+        // is `< 2r < 2^254`, so it never overflows the 256-bit `limbs`.
+        let mut sum = [0u64; 4];
+        let mut carry = false;
+        for (s, (&x, &y)) in sum.iter_mut().zip(self.limbs.iter().zip(rhs.limbs.iter())) {
+            let (a, b) = x.overflowing_add(y);
+            let (a, c) = a.overflowing_add(carry as u64);
+            *s = a;
+            carry = b | c;
+        }
+        // Reduce: since `sum < 2r`, subtracting `r` at most once is enough.
+        // Compute `sum - r`; a final borrow means `sum < r`, so we keep `sum`.
+        let mut diff = [0u64; 4];
+        let mut borrow = false;
+        for (d, (&s, &r)) in diff.iter_mut().zip(sum.iter().zip(Self::R.iter())) {
+            let (x, b) = s.overflowing_sub(r);
+            let (x, c) = x.overflowing_sub(borrow as u64);
+            *d = x;
+            borrow = b | c;
+        }
+        self.limbs = if borrow { sum } else { diff };
+    }
+}
+
+impl<'a> Add<&'a Self> for F {
+    type Output = Self;
+
+    fn add(mut self, rhs: &'a Self) -> Self::Output {
+        self += rhs;
+        self
+    }
+}
+
+impl Neg for F {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        // `-0 = 0`; otherwise `r - self`, which lies in `[1, r)` and is canonical.
+        if self.limbs == [0u64; 4] {
+            return self;
+        }
+        let mut diff = [0u64; 4];
+        let mut borrow = false;
+        for (d, (&r, &x)) in diff.iter_mut().zip(Self::R.iter().zip(self.limbs.iter())) {
+            let (v, b) = r.overflowing_sub(x);
+            let (v, c) = v.overflowing_sub(borrow as u64);
+            *d = v;
+            borrow = b | c;
+        }
+        Self { limbs: diff }
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for F {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        let rhs = -rhs.clone();
+        *self += &rhs;
+    }
+}
+
+impl<'a> Sub<&'a Self> for F {
+    type Output = Self;
+
+    fn sub(mut self, rhs: &'a Self) -> Self::Output {
+        self -= rhs;
+        self
+    }
+}
+
+impl<'a> MulAssign<&'a Self> for F {
+    fn mul_assign(&mut self, rhs: &'a Self) {
+        // `a * b mod r` is `a` added to itself `b` times in the additive group,
+        // which `Additive::scale` computes by double-and-add. Each step reduces
+        // mod `r`, so the result is canonical.
+        //
+        // This is deliberately slow (~380 modular additions per multiply, ~100x
+        // a schoolbook mul) and not constant-time (the loop branches on the bits
+        // of `rhs`). That is fine for our use: the only production caller is the
+        // eVRF signing response `s = e * x + k`, whose cost is dwarfed by the
+        // accompanying `G` scalar multiplication, and whose surrounding native
+        // code is variable-time regardless. To improve when needed: replace with
+        // schoolbook 4x4-limb multiplication into a 512-bit product followed by a
+        // Montgomery (or Barrett) reduction, and make it constant-time if a
+        // caller ever multiplies secret material on a timing-sensitive path.
+        *self = self.scale(&rhs.limbs);
+    }
+}
+
+impl<'a> Mul<&'a Self> for F {
+    type Output = Self;
+
+    fn mul(mut self, rhs: &'a Self) -> Self::Output {
+        self *= rhs;
+        self
+    }
+}
+
+impl Object for F {}
+
+impl Additive for F {
+    fn zero() -> Self {
+        Self { limbs: [0u64; 4] }
+    }
+}
+
+impl Multiplicative for F {}
+
+impl Ring for F {
+    fn one() -> Self {
+        Self {
+            limbs: [1, 0, 0, 0],
+        }
+    }
+}
+
+impl Field for F {
+    fn inv(&self) -> Self {
+        // Fermat: for prime `r`, `a^(r-2) = a^-1` for nonzero `a`, and the
+        // square-and-multiply leaves `0^(r-2) = 0`, matching the trait contract.
+        // `r - 2` only borrows from the lowest limb (`R[0]` ends in `...e1`).
+        self.exp(&[Self::R[0] - 2, Self::R[1], Self::R[2], Self::R[3]])
+    }
+}
+
+#[cfg(any(test, feature = "arbitrary"))]
+impl arbitrary::Arbitrary<'_> for F {
+    fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
+        // Reduce an arbitrary 256-bit integer mod `r` via the additive
+        // double-and-add (`1` scaled by the integer), keeping it canonical.
+        let limbs: [u64; 4] = [
+            u.arbitrary()?,
+            u.arbitrary()?,
+            u.arbitrary()?,
+            u.arbitrary()?,
+        ];
+        Ok(Self::one().scale(&limbs))
     }
 }
 
@@ -367,7 +537,7 @@ impl G {
     /// quotient identifies `(x, y)` with `(-x, -y)`: a plain x-coordinate flips
     /// sign between the two representatives, whereas its square is a well-defined
     /// function of the group element (no representative to agree on, no
-    /// [`canonicalize`](Self::canonicalize) needed). The native counterpart of
+    /// `canonicalize` needed). The native counterpart of
     /// the in-circuit [`scalar_mul_x_squared`](Self::scalar_mul_x_squared).
     pub fn scalar_mul_x_squared_base(&self, scalar: &Scalar) -> Scalar {
         let (mut x, _) = self.scale(&scalar_limbs(scalar)).affine();
@@ -378,7 +548,7 @@ impl G {
     /// Out-of-circuit squared affine x-coordinate of `[x] * self` for an [`F`]
     /// exponent — the native counterpart of
     /// [`scalar_mul_x_squared_bits`](Self::scalar_mul_x_squared_bits). Like
-    /// [`scalar_mul_x_squared_native`](Self::scalar_mul_x_squared_native), the
+    /// [`scalar_mul_x_squared_base`](Self::scalar_mul_x_squared_base), the
     /// square is representative-independent.
     pub fn scalar_mul_x_squared_f(&self, x: &F) -> Scalar {
         let (mut a, _) = (self.clone() * x).affine();
@@ -732,7 +902,7 @@ impl G {
     /// sign between the two representatives, whereas its square is a well-defined
     /// function of the group element, so the read agrees regardless of which
     /// representative a point happens to hold. The in-circuit counterpart of
-    /// [`scalar_mul_x_squared_native`](Self::scalar_mul_x_squared_native).
+    /// [`scalar_mul_x_squared_base`](Self::scalar_mul_x_squared_base).
     pub fn scalar_mul_x_squared<'ctx>(
         &self,
         ctx: Context<'ctx, Scalar>,
@@ -746,7 +916,7 @@ impl G {
     /// little-endian bits, rather than as a [`Var`] to be decomposed.
     ///
     /// This is the path for an [`F`] exponent (e.g. the eVRF secret): the bits
-    /// are the witness, so unlike [`scalar_mul`](Self::scalar_mul) there is no
+    /// are the witness, so unlike `scalar_mul` there is no
     /// recomposition or canonicity constraint — see [`F`] for why that is sound
     /// at `F::BITS` width. The caller must allocate the bits once and reuse the
     /// same slice across operations, so a single exponent is bound everywhere.
@@ -779,6 +949,54 @@ mod tests {
             * &F {
                 limbs: [u.arbitrary()?, 0, 0, 0],
             })
+    }
+
+    #[test]
+    fn test_field_laws() {
+        // Exercise the full algebraic suite (additive, multiplicative, ring, and
+        // field/inverse laws) on `F`.
+        minifuzz::test(commonware_math::algebra::test_suites::fuzz_field::<F>);
+    }
+
+    #[test]
+    fn test_random_canonical_and_full_range() {
+        // `random()` must stay canonical (`< r`) and, unlike the old 252-bit
+        // cap, cover the whole field: values in `[2^252, r)` (top bit set) must
+        // occur.
+        let mut rng = commonware_utils::test_rng();
+        let mut saw_top_bit = false;
+        for _ in 0..1000 {
+            let f = F::random(&mut rng);
+            // Canonical iff `f - r` borrows.
+            let mut borrow = false;
+            for (&x, &r) in f.limbs.iter().zip(F::R.iter()) {
+                let (d, b) = x.overflowing_sub(r);
+                let (_, c) = d.overflowing_sub(borrow as u64);
+                borrow = b | c;
+            }
+            assert!(borrow, "random() produced a non-canonical value: {f:?}");
+            saw_top_bit |= f.bits()[F::BITS - 1];
+        }
+        assert!(
+            saw_top_bit,
+            "random() never set the top bit; range is capped"
+        );
+    }
+
+    #[test]
+    fn test_field_modulus_matches_group_order() {
+        // The field modulus `r` must be the order of the group `G`: scaling the
+        // generator by the integer product `a * b` must agree with scaling it by
+        // the field product `a * b mod r`. This ties `F::R` to the independently
+        // verified group law (see the codec test vectors), and would fail for any
+        // other modulus.
+        minifuzz::test(|u| {
+            let a: F = u.arbitrary()?;
+            let b: F = u.arbitrary()?;
+            let g = G::generator();
+            assert_eq!((g.clone() * &a) * &b, g * &(a * &b));
+            Ok(())
+        });
     }
 
     #[test]
