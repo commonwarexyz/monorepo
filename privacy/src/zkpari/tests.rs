@@ -100,6 +100,29 @@ mod core {
     }
 
     #[test]
+    fn batch_verify_with_strategy() {
+        use commonware_parallel::Rayon;
+        use core::num::NonZeroUsize;
+
+        let mut rng = seeded_rng();
+        let (pk, vk) = ZkPari::<E>::keygen(&mut rng);
+        let proofs: Vec<_> = (0..12u64)
+            .map(|value| {
+                let opening = CommittedInputOpening::<Fr>::rand(&mut rng);
+                (
+                    ZkPari::<E>::prove_with_openings(value, &pk, &[opening], &mut rng),
+                    Vec::new(),
+                )
+            })
+            .collect();
+
+        let strategy = Rayon::new(NonZeroUsize::new(3).unwrap()).unwrap();
+        assert!(ZkPari::<E>::batch_verify_with_strategy(
+            &strategy, &proofs, &vk, &mut rng
+        ));
+    }
+
+    #[test]
     fn proof_serialization_roundtrip_and_malformed_inputs() {
         let (_pk, vk, proof) = prove_value(11);
         let mut bytes = Vec::new();
@@ -154,6 +177,8 @@ mod core {
 }
 
 mod payments_backend {
+    #[cfg(feature = "simulator")]
+    use crate::zkpari::ZkPari;
     use crate::{
         payments::{Backend, Commitment, Opening},
         zkpari::payments::{PaymentCommitment, ZkPariBackend},
@@ -278,6 +303,76 @@ mod payments_backend {
             &params,
             &[(100, wrong_commitment, proof)],
             &[],
+            &[],
+            &mut rng
+        ));
+    }
+
+    #[test]
+    fn backend_batch_verify_with_strategy() {
+        use commonware_parallel::Rayon;
+        use core::num::NonZeroUsize;
+
+        fn verify_with_generic_backend<B: Backend>(
+            strategy: &impl commonware_parallel::Strategy,
+            params: &B::Params,
+            funds: &[(u64, B::Commitment, B::FundProof)],
+            transfers: &[(B::Commitment, B::Commitment, B::TransferProof)],
+            burns: &[(B::Commitment, u64, B::BurnProof)],
+            rng: &mut impl rand_core::CryptoRngCore,
+        ) -> bool {
+            B::batch_verify_with_strategy(strategy, params, funds, transfers, burns, rng)
+        }
+
+        let mut rng = rng();
+        let params = params();
+        let (commitment, opening, fund_proof) = Payments::fund(&params, 100, &mut rng);
+        let (amount_commitment, _amount_opening, transfer_proof) =
+            Payments::transfer(&params, &commitment, &opening, 30, &mut rng);
+        let burn_proof = Payments::burn(&params, &commitment, &opening, 40, &mut rng);
+        let strategy = Rayon::new(NonZeroUsize::new(2).unwrap()).unwrap();
+
+        assert!(verify_with_generic_backend::<Payments>(
+            &strategy,
+            &params,
+            &[(100, commitment.clone(), fund_proof)],
+            &[(commitment.clone(), amount_commitment, transfer_proof)],
+            &[(commitment, 40, burn_proof)],
+            &mut rng
+        ));
+    }
+
+    #[cfg(feature = "simulator")]
+    #[test]
+    fn simulated_transfer_proof_verifies() {
+        fn simulate_with_generic_backend<B: Backend>(
+            params: &B::Params,
+            trapdoor: &B::Trapdoor,
+            input_commitment: &B::Commitment,
+            amount_commitment: &B::Commitment,
+            rng: &mut impl rand_core::CryptoRngCore,
+        ) -> B::TransferProof {
+            B::simulated_transfer_proof(params, trapdoor, input_commitment, amount_commitment, rng)
+        }
+
+        let mut rng = rng();
+        let (range_pk, range_vk, trapdoor) = ZkPari::<Bn254>::keygen_with_trapdoor(&mut rng);
+        let params = crate::zkpari::payments::PaymentsParams { range_pk, range_vk };
+        let (commitment, _opening, _fund_proof) = Payments::fund(&params, 100, &mut rng);
+        let (amount_commitment, _amount_opening, _transfer_proof) =
+            Payments::fund(&params, 30, &mut rng);
+        let proof = simulate_with_generic_backend::<Payments>(
+            &params,
+            &trapdoor,
+            &commitment,
+            &amount_commitment,
+            &mut rng,
+        );
+
+        assert!(Payments::batch_verify(
+            &params,
+            &[],
+            &[(commitment, amount_commitment, proof)],
             &[],
             &mut rng
         ));

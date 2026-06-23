@@ -132,6 +132,8 @@ impl Backend for MockBackend {
     type BurnProof = MockCommitment;
     type SetupInput = ();
     type SetupError = core::convert::Infallible;
+    #[cfg(feature = "simulator")]
+    type Trapdoor = ();
 
     fn setup(_input: &Self::SetupInput) -> Result<Self::Params, Self::SetupError> {
         Ok(())
@@ -169,6 +171,17 @@ impl Backend for MockBackend {
             },
             MockProof,
         )
+    }
+
+    #[cfg(feature = "simulator")]
+    fn simulated_transfer_proof(
+        _params: &Self::Params,
+        _trapdoor: &Self::Trapdoor,
+        _input_commitment: &Self::Commitment,
+        _amount_commitment: &Self::Commitment,
+        _rng: &mut impl CryptoRngCore,
+    ) -> Self::TransferProof {
+        MockProof
     }
 
     fn burn(

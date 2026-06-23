@@ -1,12 +1,49 @@
 use crate::zkpari::{
     data_structures::{Proof, VerifyingKey},
-    utils::{batch_inversion_and_mul, msm_bigint_wnaf, msm_pippenger},
+    utils::{batch_inversion_and_mul, msm_bigint_wnaf},
     ZkPari,
 };
 use ark_ec::{pairing::Pairing, VariableBaseMSM};
 use ark_ff::{FftField, Field, PrimeField, Zero};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
-use ark_std::{ops::Neg, rand::RngCore};
+use ark_std::{
+    ops::Neg,
+    rand::{rngs::StdRng, RngCore, SeedableRng},
+};
+use commonware_parallel::Strategy;
+
+struct BatchAccumulator<E: Pairing> {
+    c_tildes: Vec<E::G1>,
+    t_tilde: E::G1,
+    u_tilde: E::G1,
+    v_tilde: E::G1,
+    v_a_tilde: E::ScalarField,
+    v_r_tilde: E::ScalarField,
+}
+
+impl<E: Pairing> BatchAccumulator<E> {
+    fn zero(num_blocks: usize) -> Self {
+        Self {
+            c_tildes: vec![E::G1::zero(); num_blocks],
+            t_tilde: E::G1::zero(),
+            u_tilde: E::G1::zero(),
+            v_tilde: E::G1::zero(),
+            v_a_tilde: E::ScalarField::zero(),
+            v_r_tilde: E::ScalarField::zero(),
+        }
+    }
+
+    fn combine(&mut self, other: Self) {
+        for (lhs, rhs) in self.c_tildes.iter_mut().zip(other.c_tildes) {
+            *lhs += rhs;
+        }
+        self.t_tilde += other.t_tilde;
+        self.u_tilde += other.u_tilde;
+        self.v_tilde += other.v_tilde;
+        self.v_a_tilde += other.v_a_tilde;
+        self.v_r_tilde += other.v_r_tilde;
+    }
+}
 
 impl<E: Pairing> ZkPari<E> {
     /// Batch verification of N proofs using a random linear combination.
@@ -22,20 +59,85 @@ impl<E: Pairing> ZkPari<E> {
     where
         E::G1Affine: Neg<Output = E::G1Affine>,
     {
+        Self::batch_verify_inner(proofs_and_inputs, vk, rng)
+    }
+
+    /// Batch verification using a caller-provided parallel execution strategy.
+    ///
+    /// The proof list is split into roughly equal contiguous chunks based on
+    /// [`Strategy::parallelism_hint`]. Each worker accumulates one chunk, the
+    /// partial accumulators are reduced, and the final pairing is performed once.
+    pub fn batch_verify_with_strategy(
+        strategy: &impl Strategy,
+        proofs_and_inputs: &[(Proof<E>, Vec<E::ScalarField>)],
+        vk: &VerifyingKey<E>,
+        rng: &mut impl RngCore,
+    ) -> bool
+    where
+        E::G1Affine: Neg<Output = E::G1Affine>,
+        E::ScalarField: Send + Sync,
+        E::G1Affine: Send + Sync,
+        E::G2Affine: Send + Sync,
+        E::G2Prepared: Send + Sync,
+    {
         let n = proofs_and_inputs.len();
-        if n == 0 {
-            return true;
+        if n <= 1 {
+            return Self::batch_verify_inner(proofs_and_inputs, vk, rng);
         }
 
+        let chunks = strategy.parallelism_hint().max(1).min(n);
+        if chunks == 1 {
+            return Self::batch_verify_inner(proofs_and_inputs, vk, rng);
+        }
+
+        let base = n / chunks;
+        let extra = n % chunks;
+        let mut start = 0;
+        let mut ranges = Vec::with_capacity(chunks);
+        for chunk in 0..chunks {
+            let len = base + usize::from(chunk < extra);
+            let end = start + len;
+            let mut seed = [0u8; 32];
+            rng.fill_bytes(&mut seed);
+            ranges.push((start, end, seed));
+            start = end;
+        }
+
+        let accumulators = strategy.map_collect_vec(ranges, |(start, end, seed)| {
+            let mut rng = StdRng::from_seed(seed);
+            Self::batch_accumulate(&proofs_and_inputs[start..end], vk, &mut rng)
+        });
+
+        let num_blocks = vk.delta_h_prep.len();
+        let mut accumulator = BatchAccumulator::zero(num_blocks);
+        for partial in accumulators {
+            let Some(partial) = partial else {
+                return false;
+            };
+            accumulator.combine(partial);
+        }
+
+        Self::finish_batch_accumulation(accumulator, vk)
+    }
+
+    fn batch_accumulate(
+        proofs_and_inputs: &[(Proof<E>, Vec<E::ScalarField>)],
+        vk: &VerifyingKey<E>,
+        rng: &mut impl RngCore,
+    ) -> Option<BatchAccumulator<E>>
+    where
+        E::G1Affine: Neg<Output = E::G1Affine>,
+    {
+        let n = proofs_and_inputs.len();
         let num_blocks = vk.delta_h_prep.len();
         let instance_len = vk.succinct_index.instance_len;
         if proofs_and_inputs.iter().any(|(proof, public_input)| {
             proof.c_ci.len() != num_blocks || public_input.len() != instance_len - 1
         }) {
-            return false;
+            return None;
         }
-        if n == 1 {
-            return Self::verify(&proofs_and_inputs[0].0, vk, &proofs_and_inputs[0].1);
+        if n == 0 {
+            return Some(BatchAccumulator::zero(num_blocks));
         }
 
         let challenges: Vec<E::ScalarField> = {
@@ -73,8 +175,6 @@ impl<E: Pairing> ZkPari<E> {
             v_rs.push((x_a + proof.v_a).square());
         }
 
-        // 128-bit rhos give the standard 2^-128 batch soundness term.
-        const SMALL_SCALAR_BITS: usize = 128;
         let rhos: Vec<E::ScalarField> = (0..n)
             .map(|_| {
                 let mut bytes = [0u8; 16];
@@ -82,8 +182,6 @@ impl<E: Pairing> ZkPari<E> {
                 E::ScalarField::from_le_bytes_mod_order(&bytes)
             })
             .collect();
-        let rho_bigints: Vec<<E::ScalarField as PrimeField>::BigInt> =
-            rhos.iter().map(|rho| rho.into_bigint()).collect();
 
         let t_bases: Vec<E::G1Affine> = proofs_and_inputs
             .iter()
@@ -94,27 +192,24 @@ impl<E: Pairing> ZkPari<E> {
             .map(|(proof, _)| proof.u_g)
             .collect();
 
-        let c_tildes: Vec<E::G1Affine> = (0..num_blocks)
+        let c_tildes = (0..num_blocks)
             .map(|block| {
                 let c_bases: Vec<E::G1Affine> = proofs_and_inputs
                     .iter()
                     .map(|(proof, _)| proof.c_ci[block])
                     .collect();
-                msm_pippenger::<E::G1>(&c_bases, &rho_bigints, SMALL_SCALAR_BITS).into()
+                <E::G1 as VariableBaseMSM>::msm_unchecked(&c_bases, &rhos)
             })
             .collect();
-        let t_tilde: E::G1Affine =
-            msm_pippenger::<E::G1>(&t_bases, &rho_bigints, SMALL_SCALAR_BITS).into();
-        let u_tilde: E::G1Affine =
-            msm_pippenger::<E::G1>(&u_bases, &rho_bigints, SMALL_SCALAR_BITS).into();
+        let t_tilde = <E::G1 as VariableBaseMSM>::msm_unchecked(&t_bases, &rhos);
+        let u_tilde = <E::G1 as VariableBaseMSM>::msm_unchecked(&u_bases, &rhos);
 
         let rho_r: Vec<E::ScalarField> = rhos
             .iter()
             .zip(&challenges)
             .map(|(rho, r)| *rho * *r)
             .collect();
-        let v_tilde: E::G1Affine =
-            <E::G1 as VariableBaseMSM>::msm_unchecked(&u_bases, &rho_r).into();
+        let v_tilde = <E::G1 as VariableBaseMSM>::msm_unchecked(&u_bases, &rho_r);
 
         let v_a_tilde = rhos
             .iter()
@@ -127,17 +222,38 @@ impl<E: Pairing> ZkPari<E> {
             .zip(&v_rs)
             .fold(E::ScalarField::zero(), |acc, (rho, v_r)| acc + *rho * *v_r);
 
+        Some(BatchAccumulator {
+            c_tildes,
+            t_tilde,
+            u_tilde,
+            v_tilde,
+            v_a_tilde,
+            v_r_tilde,
+        })
+    }
+
+    fn finish_batch_accumulation(accumulator: BatchAccumulator<E>, vk: &VerifyingKey<E>) -> bool
+    where
+        E::G1Affine: Neg<Output = E::G1Affine>,
+    {
+        let v_tilde: E::G1Affine = accumulator.v_tilde.into();
         let last_left: E::G1Affine = msm_bigint_wnaf::<E::G1>(
             &[v_tilde, -vk.alpha_g, -vk.beta_g],
             &[
                 E::ScalarField::ONE.into(),
-                v_a_tilde.into(),
-                v_r_tilde.into(),
+                accumulator.v_a_tilde.into(),
+                accumulator.v_r_tilde.into(),
             ],
         )
         .into();
 
-        let mut g1_terms = c_tildes;
+        let mut g1_terms = accumulator
+            .c_tildes
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<E::G1Affine>>();
+        let t_tilde: E::G1Affine = accumulator.t_tilde.into();
+        let u_tilde: E::G1Affine = accumulator.u_tilde.into();
         g1_terms.extend([t_tilde, -u_tilde, last_left]);
         let mut g2_terms = vk.delta_h_prep.clone();
         g2_terms.extend([
@@ -147,6 +263,36 @@ impl<E: Pairing> ZkPari<E> {
         ]);
 
         E::multi_pairing(g1_terms, g2_terms).is_zero()
+    }
+
+    fn batch_verify_inner(
+        proofs_and_inputs: &[(Proof<E>, Vec<E::ScalarField>)],
+        vk: &VerifyingKey<E>,
+        rng: &mut impl RngCore,
+    ) -> bool
+    where
+        E::G1Affine: Neg<Output = E::G1Affine>,
+    {
+        let n = proofs_and_inputs.len();
+        if n == 0 {
+            return true;
+        }
+
+        let num_blocks = vk.delta_h_prep.len();
+        let instance_len = vk.succinct_index.instance_len;
+        if proofs_and_inputs.iter().any(|(proof, public_input)| {
+            proof.c_ci.len() != num_blocks || public_input.len() != instance_len - 1
+        }) {
+            return false;
+        }
+        if n == 1 {
+            return Self::verify(&proofs_and_inputs[0].0, vk, &proofs_and_inputs[0].1);
+        }
+
+        let Some(accumulator) = Self::batch_accumulate(proofs_and_inputs, vk, rng) else {
+            return false;
+        };
+        Self::finish_batch_accumulation(accumulator, vk)
     }
 
     /// Batch variant of `eval_last_lagrange_coeffs`.

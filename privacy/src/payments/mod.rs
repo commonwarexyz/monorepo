@@ -6,6 +6,7 @@
 //!
 //! The commitment scheme is assumed to be homomorphic, supporting addition and subtraction of commitments thereby, allowing in-place updates of the balance.
 
+use commonware_parallel::Strategy;
 use core::ops::{Add, Sub};
 use rand_core::CryptoRngCore;
 
@@ -45,6 +46,9 @@ pub trait Backend: Sized {
 
     /// verified using sender_commitment, amount
     type BurnProof;
+
+    #[cfg(feature = "simulator")]
+    type Trapdoor;
 
     /// Deterministic source material for [`Self::setup`]: for example a seed for a
     /// transparent (hash-derived) setup, or the location on disk of the CRS bytes for a
@@ -88,6 +92,18 @@ pub trait Backend: Sized {
         rng: &mut impl CryptoRngCore,
     ) -> (Self::Commitment, Self::Opening, Self::TransferProof);
 
+    /// simulate a transfer proof using trapdoor material
+    ///
+    /// This should only be used for testing, simulation, and trusted benchmarking.
+    #[cfg(feature = "simulator")]
+    fn simulated_transfer_proof(
+        params: &Self::Params,
+        trapdoor: &Self::Trapdoor,
+        input_commitment: &Self::Commitment,
+        amount_commitment: &Self::Commitment,
+        rng: &mut impl CryptoRngCore,
+    ) -> Self::TransferProof;
+
     /// mechanism to move funds from a private account into a public account
     /// takes as input the sender's commitment, it's opening and the amount to burn
     /// returns burn_proof
@@ -112,4 +128,17 @@ pub trait Backend: Sized {
         burns: &[(Self::Commitment, u64, Self::BurnProof)],
         rng: &mut impl CryptoRngCore,
     ) -> bool;
+
+    /// batch verify using a caller-provided parallel execution strategy
+    fn batch_verify_with_strategy(
+        strategy: &impl Strategy,
+        params: &Self::Params,
+        funds: &[(u64, Self::Commitment, Self::FundProof)],
+        transfers: &[(Self::Commitment, Self::Commitment, Self::TransferProof)],
+        burns: &[(Self::Commitment, u64, Self::BurnProof)],
+        rng: &mut impl CryptoRngCore,
+    ) -> bool {
+        let _ = strategy;
+        Self::batch_verify(params, funds, transfers, burns, rng)
+    }
 }

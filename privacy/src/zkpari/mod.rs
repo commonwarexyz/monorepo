@@ -42,6 +42,7 @@ mod generator;
 pub mod payments;
 mod prover;
 pub mod range;
+#[cfg(any(test, feature = "simulator"))]
 mod simulator;
 pub mod utils;
 mod verifier;
