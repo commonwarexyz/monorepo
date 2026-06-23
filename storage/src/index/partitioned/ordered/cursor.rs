@@ -107,7 +107,8 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
                 key,
                 run,
             } => {
-                let created = run.start == run.end; // empty run => key absent => this creates it
+                #[allow(unstable_name_collisions)]
+                let created = run.is_empty(); // empty run => key absent => this creates it
                 partition.insert_at(run.start + off, *key, value);
                 run.end += 1;
                 created
@@ -135,7 +136,8 @@ impl<K: Ord + Copy, V> Backing<'_, K, V> {
             Self::Soa { partition, run, .. } => {
                 partition.remove(run.start + off);
                 run.end -= 1;
-                run.start == run.end
+                #[allow(unstable_name_collisions)]
+                run.is_empty()
             }
             Self::Spilled {
                 spilled,
