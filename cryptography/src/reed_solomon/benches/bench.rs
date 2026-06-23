@@ -174,7 +174,7 @@ fn benchmarks_main(c: &mut Criterion) {
                             {
                                 decoder.add_recovery_shard(index, shard).unwrap();
                             }
-                            decoder.decode().unwrap();
+                            decoder.decode(false).unwrap();
                         });
                     },
                 );

@@ -17,7 +17,7 @@
 //! [`thiserror`]: https://docs.rs/thiserror
 
 pub use self::{
-    decoder_result::{DecoderResult, RecoveryDecoderResult, RestoredOriginal, RestoredRecovery},
+    decoder_result::{Decoded, DecoderResult, Originals, Recoveries},
     encoder_result::{EncoderResult, Recovery},
     engine::SHARD_CHUNK_BYTES,
     wrappers::{Decoder, Encoder},
@@ -158,8 +158,10 @@ mod tests {
         let mut decoder = Decoder::new(2, 3, 1024).unwrap();
         decoder.add_recovery_shard(0, &recovery[0]).unwrap();
         decoder.add_recovery_shard(1, &recovery[1]).unwrap();
-        let decoding = decoder.decode().unwrap();
-        let mut restored = decoding.restored_original_iter();
+        let Decoded::Reconstructed(decoding) = decoder.decode(false).unwrap() else {
+            unreachable!("no originals provided");
+        };
+        let mut restored = decoding.original_iter();
 
         assert_eq!(restored.next(), Some((0, original[0].as_slice())));
         assert_eq!(restored.next(), Some((1, original[1].as_slice())));
@@ -174,7 +176,7 @@ mod tests {
         assert_send::<DefaultEngine>();
         assert_send::<DefaultRate<DefaultEngine>>();
         assert_send::<DecoderResult<'_>>();
-        assert_send::<RecoveryDecoderResult<'_>>();
+        assert_send::<Decoded<'_>>();
         assert_send::<EncoderResult<'_>>();
         assert_send::<Error>();
     }
@@ -187,7 +189,7 @@ mod tests {
         assert_sync::<DefaultEngine>();
         assert_sync::<DefaultRate<DefaultEngine>>();
         assert_sync::<DecoderResult<'_>>();
-        assert_sync::<RecoveryDecoderResult<'_>>();
+        assert_sync::<Decoded<'_>>();
         assert_sync::<EncoderResult<'_>>();
         assert_sync::<Error>();
     }

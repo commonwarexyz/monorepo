@@ -1,7 +1,7 @@
 use crate::reed_solomon::{
     engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
-    DecoderResult, EncoderResult, Error,
+    Decoded, DecoderResult, EncoderResult, Error,
 };
 use core::marker::PhantomData;
 
@@ -168,12 +168,14 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
         self.work.add_recovery_shard(index, recovery_shard)
     }
 
-    fn decode(&mut self, reveal_recovery: bool) -> Result<DecoderResult<'_>, Error> {
+    fn decode(&mut self, compute_recovery: bool) -> Result<Decoded<'_>, Error> {
         let Some((mut work, original_count, recovery_count, received)) =
             self.work.decode_begin()?
         else {
-            // Nothing to do, original data is complete.
-            return Ok(DecoderResult::new(&mut self.work));
+            // Every original was provided: nothing to reconstruct. Clear the received state and
+            // report completion.
+            self.work.reset_received();
+            return Ok(Decoded::Complete);
         };
 
         let chunk_size = recovery_count.next_power_of_two();
@@ -245,12 +247,12 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
 
         // REVEAL ERASURES (RECOVERY)
         //
-        // Only when the caller passed `reveal_recovery = true` to `decode`. Recovery shards
+        // Only when the caller passed `compute_recovery = true` to `decode`. Recovery shards
         // live at `work[0..recovery_count]`. Un-scale the missing ones by the inverse locator so
         // they hold the canonical recovery values, mirroring the original reveal above. This lets
-        // `RecoveryDecoderResult::restored_recovery` return them without a separate re-encode.
+        // `DecoderResult::recovery` return them without a separate re-encode.
 
-        if reveal_recovery {
+        if compute_recovery {
             for i in 0..recovery_count {
                 if !received[i] {
                     self.engine.mul(&mut work[i], GF_MODULUS - erasures[i]);
@@ -261,13 +263,14 @@ impl<E: Engine> RateDecoder<E> for HighRateDecoder<E> {
         // UNDO LAST CHUNK ENCODING
 
         self.work.undo_last_chunk_encoding();
-        if reveal_recovery {
+        if compute_recovery {
             self.work.undo_last_chunk_encoding_recovery();
+            self.work.set_recovery_computed();
         }
 
         // DONE
 
-        Ok(DecoderResult::new(&mut self.work))
+        Ok(Decoded::Reconstructed(DecoderResult::new(&mut self.work)))
     }
 
     fn into_parts(self) -> (E, DecoderWork) {

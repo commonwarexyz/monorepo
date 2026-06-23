@@ -2,7 +2,7 @@ use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
+    reed_solomon::{Decoded, Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
     Digest, Hasher,
 };
 use commonware_parallel::Strategy;
@@ -544,14 +544,18 @@ mod striped {
                 .add_recovery_shard(*idx, &shard[range.clone()])
                 .map_err(Error::ReedSolomon)?;
         }
-        let decoding = decoder.decode_with_recovery().map_err(Error::ReedSolomon)?;
+        let Decoded::Reconstructed(decoding) = decoder.decode(true).map_err(Error::ReedSolomon)?
+        else {
+            // An original is missing here (recovery_needed), so a decode must run.
+            return Err(Error::Inconsistent);
+        };
 
         for (slot, &idx) in out.originals.iter_mut().zip(missing.originals) {
-            let shard = decoding.restored_original(idx).ok_or(Error::Inconsistent)?;
+            let shard = decoding.original(idx).ok_or(Error::Inconsistent)?;
             slot.copy_from_slice(shard);
         }
         for (slot, &idx) in out.recoveries.iter_mut().zip(missing.recoveries) {
-            let shard = decoding.restored_recovery(idx).ok_or(Error::Inconsistent)?;
+            let shard = decoding.recovery(idx).ok_or(Error::Inconsistent)?;
             slot.copy_from_slice(shard);
         }
 
@@ -845,20 +849,24 @@ mod sequential {
                 .add_recovery_shard(*idx, shard)
                 .map_err(Error::ReedSolomon)?;
         }
-        let decoding = decoder.decode_with_recovery().map_err(Error::ReedSolomon)?;
+        let Decoded::Reconstructed(decoding) = decoder.decode(true).map_err(Error::ReedSolomon)?
+        else {
+            // An original is missing here (recovery_needed), so a decode must run.
+            return Err(Error::Inconsistent);
+        };
 
         let mut originals: Vec<&[u8]> = vec![&[]; k];
         for &(idx, shard) in &provided_originals {
             originals[idx] = shard;
         }
-        for (idx, shard) in decoding.restored_original_iter() {
+        for (idx, shard) in decoding.original_iter() {
             originals[idx] = shard;
         }
         let mut recoveries: Vec<&[u8]> = vec![&[]; m];
         for &(idx, shard) in &provided_recoveries {
             recoveries[idx] = shard;
         }
-        for (idx, shard) in decoding.restored_recovery_iter() {
+        for (idx, shard) in decoding.recovery_iter() {
             recoveries[idx] = shard;
         }
 

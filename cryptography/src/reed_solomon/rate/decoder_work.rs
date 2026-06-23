@@ -23,6 +23,7 @@ pub struct DecoderWork {
     // May contain extra zero bits.
     received: FixedBitSet,
     shards: Shards,
+    recovery_computed: bool,
 }
 
 impl DecoderWork {
@@ -41,6 +42,7 @@ impl DecoderWork {
             recovery_received_count: 0,
             received: FixedBitSet::new(),
             shards: Shards::new(),
+            recovery_computed: false,
         }
     }
 }
@@ -164,6 +166,7 @@ impl DecoderWork {
 
         self.original_received_count = 0;
         self.recovery_received_count = 0;
+        self.recovery_computed = false;
 
         let max_received_pos = core::cmp::max(
             original_base_pos + original_count,
@@ -182,11 +185,12 @@ impl DecoderWork {
     pub(crate) fn reset_received(&mut self) {
         self.original_received_count = 0;
         self.recovery_received_count = 0;
+        self.recovery_computed = false;
         self.received.clear();
     }
 
     // This must only be called by `DecoderResult`.
-    pub(crate) fn restored_original(&self, index: usize) -> Option<&[u8]> {
+    pub(crate) fn original(&self, index: usize) -> Option<&[u8]> {
         let pos = self.original_base_pos + index;
 
         if index < self.original_count && !self.received[pos] {
@@ -196,15 +200,14 @@ impl DecoderWork {
         }
     }
 
-    // This must only be called by `RecoveryDecoderResult` (i.e. after a `decode` that requested
-    // recovery). Returns a reconstructed recovery shard, or `None` when `index` is not a missing
-    // recovery shard or no decode ran (all originals were present, so the recovery work buffers were
-    // never written). The `missing_original_count() > 0` guard is what distinguishes the latter: a
-    // recovery-revealing decode runs the reveal iff it reconstructed a missing original.
-    pub(crate) fn restored_recovery(&self, index: usize) -> Option<&[u8]> {
+    // This must only be called by `DecoderResult`. Returns a reconstructed recovery shard, or `None`
+    // when `index` is not a missing recovery shard or recovery was not computed. Recovery is computed
+    // only when `decode` ran with `compute_recovery` set; otherwise the recovery work buffers hold
+    // scaled/stale contents and must not be returned.
+    pub(crate) fn recovery(&self, index: usize) -> Option<&[u8]> {
         let pos = self.recovery_base_pos + index;
 
-        if self.missing_original_count() > 0 && index < self.recovery_count && !self.received[pos] {
+        if self.recovery_computed && index < self.recovery_count && !self.received[pos] {
             Some(&self.shards[pos].as_flattened()[..self.shard_bytes])
         } else {
             None
@@ -225,6 +228,12 @@ impl DecoderWork {
         );
     }
 
+    // Records that `decode` computed the missing recovery shards, so `recovery` may return
+    // them. Reset by `reset` / `reset_received`.
+    pub(crate) const fn set_recovery_computed(&mut self) {
+        self.recovery_computed = true;
+    }
+
     pub(crate) const fn missing_original_count(&self) -> usize {
         self.original_count - self.original_received_count
     }
@@ -237,10 +246,10 @@ impl DecoderWork {
         self.recovery_count - self.recovery_received_count
     }
 
-    // Number of recovery shards a recovery-revealing decode reconstructed. Zero when no decode ran
-    // (all originals present); otherwise the missing recovery count. Matches `restored_recovery`.
-    pub(crate) const fn restored_recovery_count(&self) -> usize {
-        if self.missing_original_count() > 0 {
+    // Number of computed recovery shards: zero unless `decode` ran with `compute_recovery`;
+    // otherwise the missing recovery count. Matches what `recovery` returns.
+    pub(crate) const fn recovery_computed_count(&self) -> usize {
+        if self.recovery_computed {
             self.missing_recovery_count()
         } else {
             0

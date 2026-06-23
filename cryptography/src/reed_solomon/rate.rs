@@ -35,7 +35,7 @@ pub use self::{
     rate_high::{HighRate, HighRateDecoder, HighRateEncoder},
     rate_low::{LowRate, LowRateDecoder, LowRateEncoder},
 };
-use crate::reed_solomon::{engine::Engine, DecoderResult, EncoderResult, Error};
+use crate::reed_solomon::{engine::Engine, Decoded, EncoderResult, Error};
 
 mod decoder_work;
 mod encoder_work;
@@ -199,11 +199,10 @@ where
         recovery_shard: T,
     ) -> Result<(), Error>;
 
-    /// Decodes the added shards into a [`DecoderResult`]. When `reveal_recovery` is set, the missing
-    /// recovery shards are also reconstructed; the public
-    /// [`Decoder::decode_with_recovery`](crate::reed_solomon::Decoder::decode_with_recovery) wraps
-    /// the result to expose them.
-    fn decode(&mut self, reveal_recovery: bool) -> Result<DecoderResult<'_>, Error>;
+    /// Like [`Decoder::decode`](crate::reed_solomon::Decoder::decode): reconstructs the missing
+    /// shards, returning [`Decoded::Complete`] if every original was already provided. When
+    /// `compute_recovery` is set, a reconstructing decode also reveals the missing recovery shards.
+    fn decode(&mut self, compute_recovery: bool) -> Result<Decoded<'_>, Error>;
 
     /// Consumes this decoder returning its [`Engine`] and [`DecoderWork`]
     /// so that they can be re-used by another decoder.
