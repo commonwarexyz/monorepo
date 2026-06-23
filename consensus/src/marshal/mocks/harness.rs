@@ -901,8 +901,8 @@ pub fn hailstorm<H: TestHarness>(
     })
 }
 
-/// Contract: `marshal.proposed(...)=true` means the block survives an
-/// immediate crash and repeated recoveries.
+/// Contract: awaiting the handle returned by `marshal.proposed(...)` means the
+/// block survives an immediate crash and repeated recoveries.
 pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
@@ -987,7 +987,7 @@ pub fn proposed_success_implies_recoverable_after_restart<H: TestHarness>(
                                 .await
                                 .unwrap_or_else(|| {
                                     panic!(
-                                        "marshal.proposed() returning true must imply \
+                                        "awaiting marshal.proposed() must imply \
                                      get_verified(round) recovers the block after restart \
                                      (seed={seed}, cycle={cycle})"
                                     )
@@ -1124,9 +1124,9 @@ pub fn verified_success_implies_recoverable_after_restart<H: TestHarness>(
 /// immediate crash and repeated recoveries.
 ///
 /// Complements [`verified_success_implies_recoverable_after_restart`] by
-/// exercising the `Message::Certified -> put_block -> put_sync` handshake.
-/// A regression that acked before syncing the notarized cache would surface
-/// here as a missing block after restart.
+/// exercising the `Message::Certified -> put_block -> sync handle` handshake.
+/// A regression that acked before the sync handle completed would surface here
+/// as a missing block after restart.
 pub fn certified_success_implies_recoverable_after_restart<H: TestHarness>(
     seeds: impl IntoIterator<Item = u64>,
 ) {
