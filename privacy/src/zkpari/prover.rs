@@ -10,9 +10,7 @@ use ark_poly::{
     univariate::DensePolynomial, DenseUVPolynomial, EvaluationDomain, Evaluations,
     GeneralEvaluationDomain, Polynomial,
 };
-use ark_std::{cfg_iter_mut, rand::RngCore, UniformRand};
-#[cfg(feature = "parallel")]
-use rayon::prelude::*;
+use ark_std::{rand::RngCore, UniformRand};
 
 type RowEvaluations<F> = (Vec<F>, Vec<F>, Vec<F>);
 
@@ -245,7 +243,8 @@ impl<E: Pairing> ZkPari<E> {
         let mut z_a = vec![E::ScalarField::zero(); domain_size];
         let mut z_b = vec![E::ScalarField::zero(); domain_size];
 
-        cfg_iter_mut!(z_a[..num_constraints])
+        z_a[..num_constraints]
+            .iter_mut()
             .zip(&mut z_b[..num_constraints])
             .zip(a_mat)
             .zip(b_mat)

@@ -7,7 +7,6 @@ use ark_ec::{pairing::Pairing, scalar_mul::BatchMulPreprocessing};
 use ark_ff::{Field, Zero};
 use ark_poly::{EvaluationDomain, Radix2EvaluationDomain};
 use ark_std::{rand::RngCore, vec::Vec, UniformRand};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
 impl<E: Pairing> ZkPari<E> {
     /// Generate proving and verifying keys for the payments range relation.
@@ -99,13 +98,13 @@ impl<E: Pairing> ZkPari<E> {
         let table = BatchMulPreprocessing::new(g, max_power + 1);
 
         let sigma_a_powers = powers_of_tau[0..domain_size + 1]
-            .par_iter()
+            .iter()
             .map(|tau_to_i| *tau_to_i * alpha)
             .collect::<Vec<_>>();
         let sigma_a = table.batch_mul(&sigma_a_powers);
 
         let sigma_r_powers = powers_of_tau[0..2 * domain_size + 2]
-            .par_iter()
+            .iter()
             .map(|tau_to_i| *tau_to_i * beta)
             .collect::<Vec<_>>();
         let sigma_r = table.batch_mul(&sigma_r_powers);
@@ -116,7 +115,7 @@ impl<E: Pairing> ZkPari<E> {
             let alpha_over_delta_j = alpha * delta_j_inverse;
             let beta_over_delta_j = beta * delta_j_inverse;
             let sigma_ci_powers = block
-                .par_iter()
+                .iter()
                 .map(|&w| {
                     a[instance_len + w] * alpha_over_delta_j
                         + b[instance_len + w] * beta_over_delta_j
@@ -129,7 +128,7 @@ impl<E: Pairing> ZkPari<E> {
         let alpha_over_delta_w = alpha * delta_w_inverse;
         let beta_over_delta_w = beta * delta_w_inverse;
         let sigma_w_powers = ordinary_indices
-            .par_iter()
+            .iter()
             .map(|&w| {
                 a[instance_len + w] * alpha_over_delta_w + b[instance_len + w] * beta_over_delta_w
             })
@@ -141,7 +140,7 @@ impl<E: Pairing> ZkPari<E> {
 
         let beta_v_k_over_delta_w = beta * v_k_at_tau * delta_w_inverse;
         let sigma_q_comm_powers = powers_of_tau[0..domain_size + 3]
-            .par_iter()
+            .iter()
             .map(|tau_to_i| *tau_to_i * beta_v_k_over_delta_w)
             .collect::<Vec<_>>();
         let sigma_q_comm = table.batch_mul(&sigma_q_comm_powers);

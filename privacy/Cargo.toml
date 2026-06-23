@@ -20,9 +20,9 @@ ark-std = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 commonware-codec = { workspace = true, optional = true }
 commonware-macros.workspace = true
+commonware-parallel.workspace = true
 merlin = { workspace = true, optional = true }
 rand_core.workspace = true
-rayon = { workspace = true, optional = true }
 
 [features]
 default = [ "std" ]
@@ -31,12 +31,8 @@ codec = [
     "dep:commonware-codec",
 ]
 mocks = []
-parallel = [
-    "ark-ec?/parallel",
-    "ark-ff?/parallel",
-    "ark-poly?/parallel",
-    "ark-std?/parallel",
-]
+parallel = [ "commonware-parallel/std" ]
+simulator = []
 zkpari = [
     "dep:ark-bn254",
     "dep:ark-ec",
@@ -45,7 +41,6 @@ zkpari = [
     "dep:ark-serialize",
     "dep:ark-std",
     "dep:merlin",
-    "dep:rayon",
     "parallel",
     "std",
 ]
@@ -59,6 +54,7 @@ std = [
     "bytes?/std",
     "commonware-codec?/std",
     "commonware-macros/std",
+    "commonware-parallel/std",
     "rand_core/std",
 ]
 
