@@ -33,7 +33,7 @@ impl Stage {
     /// result.
     pub(crate) async fn store<S: Scheme, V: Variant>(
         self,
-        marshal: &mut Mailbox<S, V>,
+        marshal: &Mailbox<S, V>,
         round: Round,
         block: V::Block,
     ) -> bool {

@@ -277,9 +277,9 @@ where
                 // This task gates the finalize vote by resolving true only after both
                 // app verification succeeds and the store is durable.
                 let store_block = block.clone();
-                let mut store_marshal = marshal.clone();
+                let store_marshal = marshal.clone();
                 let store =
-                    async move { stage.store(&mut store_marshal, round, store_block).await };
+                    async move { stage.store(&store_marshal, round, store_block).await };
                 let verify = run_app_verify(
                     runtime_context,
                     context,
