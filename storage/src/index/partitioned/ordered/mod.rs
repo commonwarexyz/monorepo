@@ -1018,6 +1018,43 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_spill_get_mut_or_insert() {
+        deterministic::Runner::default().start(|context| async move {
+            let mut index = new_index_spilling(context);
+            index.insert(&[0x10, 0x01], 1);
+            index.insert(&[0x10, 0x02], 2); // second distinct key crosses the threshold -> spills
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.keys(), 2);
+            assert_eq!(index.items(), 2);
+
+            // Existing key in a spilled partition: returns a cursor over its values; the passed
+            // value is not inserted.
+            {
+                let mut cursor = index.get_mut_or_insert(&[0x10, 0x01], 99).unwrap();
+                assert_eq!(cursor.next().copied(), Some(1));
+                assert!(cursor.next().is_none());
+            }
+            assert_eq!(index.keys(), 2);
+            assert_eq!(index.items(), 2);
+            assert_eq!(
+                index.get(&[0x10, 0x01]).copied().collect::<Vec<_>>(),
+                vec![1]
+            );
+
+            // Absent key in a spilled partition: inserts it as a new key and returns None (the
+            // partition stays spilled).
+            assert!(index.get_mut_or_insert(&[0x10, 0x03], 3).is_none());
+            assert_eq!(index.spilled_count(), 1);
+            assert_eq!(index.keys(), 3);
+            assert_eq!(index.items(), 3);
+            assert_eq!(
+                index.get(&[0x10, 0x03]).copied().collect::<Vec<_>>(),
+                vec![3]
+            );
+        });
+    }
+
+    #[test_traced]
     #[should_panic(expected = "must call Cursor::next()")]
     fn test_spill_cursor_delete_before_next_panics() {
         deterministic::Runner::default().start(|context| async move {
