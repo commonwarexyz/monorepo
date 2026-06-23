@@ -22,14 +22,13 @@
 //!   entries, `P=2` past ~33M, while `P=3`'s 16.8M partitions push this past ~8.5B (so P=3 is
 //!   effectively unreachable under honest load).
 //!
-//! The guard bounds distinct-key density only, not the length of a single key's value run. A
-//! translated key's values (hash collisions, or repeated inserts of one key) form a contiguous
-//! newest-first run in both representations -- the SoA `vals` array and a spilled key's value
-//! vector -- so inserting into a length-`L` run is O(L) either way: spilling reorganizes *across*
-//! keys (array to tree), never *within* one key's run. A long run is therefore not a target of this
-//! guard; its length is a function of the translator's collision-resistance (well-distributed keys
-//! average ~1) and is the price of this layout's density. Callers that need O(1) collision appends
-//! can use the flat `crate::index::ordered::Index`, which keeps a per-key overflow vector instead.
+//! A partition also fills when a single key collects many values -- keys that collide on the full
+//! prefix, or repeated inserts of one key. The spill covers this too: it triggers on the total
+//! value count, so these inserts stay as cheap as any other. What it cannot bound is how many
+//! values one key holds, and a lookup must scan all of them -- a key with `M` values costs O(M) per
+//! lookup. Every index that resolves collisions pays this (the flat `crate::index::ordered::Index`
+//! included); `M` stays near 1 only when the indexed `P + N`-byte prefix is well-distributed, so
+//! use enough prefix bytes and high-entropy keys.
 
 mod cursor;
 mod partition;
