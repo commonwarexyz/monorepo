@@ -94,12 +94,13 @@ fn main() {
     // Sizes come from numeric CLI args (e.g. `-- 500000000`). With none, use the default tier when
     // built with `--cfg huge_bench`; otherwise no-op, so a bare `cargo bench` (including CI's
     // full-suite run, which uses `--cfg full_bench`) does nothing.
-    // Numeric args are sizes; non-numeric args name the variants to run (default: all).
+    // Numeric args are sizes; other args name the variants to run (default: all). Flag-style args
+    // (e.g. the `--bench` that `cargo bench` injects into the harness) are ignored.
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<u64> = argv.iter().filter_map(|a| a.parse().ok()).collect();
     let only: Vec<String> = argv
         .into_iter()
-        .filter(|a| a.parse::<u64>().is_err())
+        .filter(|a| a.parse::<u64>().is_err() && !a.starts_with('-'))
         .collect();
     let sizes = if !args.is_empty() {
         args
