@@ -37,7 +37,7 @@
 
 pub use crate::banderwagon::{F, G};
 use crate::{
-    banderwagon::GVar,
+    banderwagon::{scalar_bits_le, GVar},
     bls12381::primitives::group::{Scalar, DST},
     zk::{
         bulletproofs::circuit::{zkc_to_circuit, zkc_to_circuit_and_witness, Circuit, Witness},
@@ -155,8 +155,12 @@ fn build_circuit<'ctx>(
         let (t0, t1) = point_hash(sender, receiver, msg);
         // Squared shared abscissa, representative-independent (see module docs).
         let k = receiver.scalar_mul_x_squared_bits(&x_bits);
-        let t0k = t0.scalar_mul_x_squared(ctx, &k);
-        let t1k = t1.scalar_mul_x_squared(ctx, &k);
+        let k_bits = {
+            let scalar: &Var<'ctx, Scalar> = &k;
+            scalar_bits_le(ctx, scalar)
+        };
+        let t0k = t0.scalar_mul_x_squared_bits(&k_bits);
+        let t1k = t1.scalar_mul_x_squared_bits(&k_bits);
         let out = beta.clone() * &t0k + &t1k;
         out.assert_eq(&output_vars[i]);
     }
