@@ -1,7 +1,6 @@
 use crate::reed_solomon::{
     engine::Engine,
     rate::{Rate, RateDecoder, RateEncoder},
-    Decoded,
 };
 use core::ops::Range;
 use fixedbitset::FixedBitSet;
@@ -133,10 +132,11 @@ pub(crate) fn roundtrip<R: Rate<E>, E: Engine>(
         }
     }
 
-    let decoded = decoder.decode(false).unwrap();
+    let decoded = decoder.decode(false);
     let restored: BTreeMap<_, _> = match &decoded {
-        Decoded::Complete => BTreeMap::new(),
-        Decoded::Reconstructed(result) => result.original_iter().collect(),
+        Ok(Some(result)) => result.original_iter().collect(),
+        Ok(None) => BTreeMap::new(),
+        Err(e) => panic!("decode failed: {e:?}"),
     };
 
     for i in 0..cfg.original_count {

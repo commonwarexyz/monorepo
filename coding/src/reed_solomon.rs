@@ -2,7 +2,7 @@ use crate::{Config, Scheme};
 use bytes::{Buf, BufMut, Bytes};
 use commonware_codec::{BufsMut, EncodeSize, FixedSize, RangeCfg, Read, ReadExt, Write};
 use commonware_cryptography::{
-    reed_solomon::{Decoded, Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
+    reed_solomon::{Decoder, Encoder, Error as RsError, SHARD_CHUNK_BYTES},
     Digest, Hasher,
 };
 use commonware_parallel::Strategy;
@@ -544,9 +544,8 @@ mod striped {
                 .add_recovery_shard(*idx, &shard[range.clone()])
                 .map_err(Error::ReedSolomon)?;
         }
-        let Decoded::Reconstructed(decoding) = decoder.decode(true).map_err(Error::ReedSolomon)?
-        else {
-            // An original is missing here (recovery_needed), so a decode must run.
+        let Some(decoding) = decoder.decode_with_recovery().map_err(Error::ReedSolomon)? else {
+            // recovery_needed guarantees a missing original, so a decode must run
             return Err(Error::Inconsistent);
         };
 
@@ -849,9 +848,8 @@ mod sequential {
                 .add_recovery_shard(*idx, shard)
                 .map_err(Error::ReedSolomon)?;
         }
-        let Decoded::Reconstructed(decoding) = decoder.decode(true).map_err(Error::ReedSolomon)?
-        else {
-            // An original is missing here (recovery_needed), so a decode must run.
+        let Some(decoding) = decoder.decode_with_recovery().map_err(Error::ReedSolomon)? else {
+            // recovery_needed guarantees a missing original, so a decode must run
             return Err(Error::Inconsistent);
         };
 

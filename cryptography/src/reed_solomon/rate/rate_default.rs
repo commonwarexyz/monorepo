@@ -4,7 +4,7 @@ use crate::reed_solomon::{
         DecoderWork, EncoderWork, HighRate, HighRateDecoder, HighRateEncoder, LowRate,
         LowRateDecoder, LowRateEncoder, Rate, RateDecoder, RateEncoder,
     },
-    Decoded, EncoderResult, Error,
+    DecoderResult, EncoderResult, Error,
 };
 use core::{cmp::Ordering, marker::PhantomData};
 
@@ -277,7 +277,7 @@ impl<E: Engine> RateDecoder<E> for DefaultRateDecoder<E> {
         }
     }
 
-    fn decode(&mut self, compute_recovery: bool) -> Result<Decoded<'_>, Error> {
+    fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error> {
         match &mut self.0 {
             InnerDecoder::High(high) => high.decode(compute_recovery),
             InnerDecoder::Low(low) => low.decode(compute_recovery),

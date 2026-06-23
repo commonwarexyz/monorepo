@@ -3,11 +3,12 @@ use crate::reed_solomon::rate::DecoderWork;
 // ======================================================================
 // DecoderResult - PUBLIC
 
-/// The reconstructed shards from a decode that ran, held by [`Decoded::Reconstructed`].
+/// The restored original shards from a decode that ran (an original was missing).
 ///
-/// Always exposes the restored original shards. The reconstructed recovery shards are also available
-/// when [`decode`](crate::reed_solomon::Decoder::decode) was called with `compute_recovery = true`;
-/// otherwise the recovery accessors return nothing.
+/// [`Decoder::decode`] returns `None` instead when every original shard was already provided, since
+/// there is nothing to reconstruct.
+///
+/// [`Decoder::decode`]: crate::reed_solomon::Decoder::decode
 pub struct DecoderResult<'a> {
     work: &'a mut DecoderWork,
 }
@@ -24,19 +25,6 @@ impl DecoderResult<'_> {
     /// and their indexes, ordered by indexes.
     pub const fn original_iter(&self) -> Originals<'_> {
         Originals::new(self.work)
-    }
-
-    /// Returns the reconstructed recovery shard with the given `index`, or `None` if it was
-    /// provided, `index` is out of range, or recovery was not attempted (`decode` was called with
-    /// `compute_recovery = false`).
-    pub fn recovery(&self, index: usize) -> Option<&[u8]> {
-        self.work.recovery(index)
-    }
-
-    /// Returns an iterator over the reconstructed recovery shards and their indexes, ordered by
-    /// index. Empty unless `decode` was called with `compute_recovery = true`.
-    pub const fn recovery_iter(&self) -> Recoveries<'_> {
-        Recoveries::new(self.work)
     }
 }
 
@@ -59,21 +47,49 @@ impl Drop for DecoderResult<'_> {
 }
 
 // ======================================================================
-// Decoded - PUBLIC
+// RecoveryDecoderResult - PUBLIC
 
-/// Outcome of [`Decoder::decode`](crate::reed_solomon::Decoder::decode).
+/// The restored shards from a successful [`Decoder::decode_with_recovery`], exposing both the
+/// restored original shards (like [`DecoderResult`]) and the reconstructed recovery shards.
 ///
-/// Distinguishes the two cases at the type level: when every original shard was provided there is
-/// nothing to reconstruct (and no recovery to reveal), so the restored-shard accessors only exist on
-/// the [`Reconstructed`](Decoded::Reconstructed) variant.
-pub enum Decoded<'a> {
-    /// Every original shard was provided, so no Reed-Solomon decode ran. The original data is
-    /// already complete from the inputs; nothing was reconstructed.
-    Complete,
-    /// At least one original shard was missing, so a decode reconstructed the missing shards. Access
-    /// the restored originals (and, if `compute_recovery` was set, the recovery shards) through the
-    /// [`DecoderResult`].
-    Reconstructed(DecoderResult<'a>),
+/// [`Decoder::decode_with_recovery`]: crate::reed_solomon::Decoder::decode_with_recovery
+pub struct RecoveryDecoderResult<'a> {
+    inner: DecoderResult<'a>,
+}
+
+impl RecoveryDecoderResult<'_> {
+    /// Returns the restored original shard with the given `index`, or `None` if it was provided or
+    /// `index` is out of range. See [`DecoderResult::original`].
+    pub fn original(&self, index: usize) -> Option<&[u8]> {
+        self.inner.original(index)
+    }
+
+    /// Returns an iterator over the restored original shards and their indexes, ordered by index.
+    /// See [`DecoderResult::original_iter`].
+    pub const fn original_iter(&self) -> Originals<'_> {
+        self.inner.original_iter()
+    }
+
+    /// Returns the reconstructed recovery shard with the given `index`, or `None` if it was provided
+    /// or `index` is out of range.
+    pub fn recovery(&self, index: usize) -> Option<&[u8]> {
+        self.inner.work.recovery(index)
+    }
+
+    /// Returns an iterator over the reconstructed recovery shards and their indexes, ordered by
+    /// index.
+    pub const fn recovery_iter(&self) -> Recoveries<'_> {
+        Recoveries::new(self.inner.work)
+    }
+}
+
+// ======================================================================
+// RecoveryDecoderResult - CRATE
+
+impl<'a> RecoveryDecoderResult<'a> {
+    pub(crate) const fn new(inner: DecoderResult<'a>) -> Self {
+        Self { inner }
+    }
 }
 
 // ======================================================================
@@ -139,7 +155,7 @@ impl<'a> Originals<'a> {
 
 /// Iterator over restored recovery shards and their indexes.
 ///
-/// This struct is created by [`DecoderResult::recovery_iter`].
+/// This struct is created by [`RecoveryDecoderResult::recovery_iter`].
 pub struct Recoveries<'a> {
     remaining: usize,
     next_index: usize,
@@ -185,7 +201,7 @@ impl ExactSizeIterator for Recoveries<'_> {}
 impl<'a> Recoveries<'a> {
     pub(crate) const fn new(work: &'a DecoderWork) -> Self {
         Self {
-            remaining: work.recovery_computed_count(),
+            remaining: work.missing_recovery_count(),
             next_index: 0,
             work,
         }
@@ -221,9 +237,7 @@ mod tests {
         decoder.add_recovery_shard(0, recovery[0]).unwrap();
         decoder.add_recovery_shard(1, recovery[1]).unwrap();
 
-        let Decoded::Reconstructed(result) = decoder.decode(false).unwrap() else {
-            unreachable!("an original is missing");
-        };
+        let result = decoder.decode().unwrap().unwrap();
 
         assert_eq!(result.original(0).unwrap(), original[0]);
         assert!(result.original(1).is_none());
@@ -284,9 +298,7 @@ mod tests {
         decoder.add_recovery_shard(0, recovery[0]).unwrap();
         decoder.add_recovery_shard(1, recovery[1]).unwrap();
 
-        let Decoded::Reconstructed(result) = decoder.decode(false).unwrap() else {
-            unreachable!("an original is missing");
-        };
+        let result = decoder.decode().unwrap().unwrap();
 
         let mut iter: Originals<'_> = result.original_iter();
 
@@ -324,21 +336,13 @@ mod tests {
             decoder.add_original_shard(i, original).unwrap();
         }
         decoder.add_recovery_shard(1, &recovery[1]).unwrap();
-        let Decoded::Reconstructed(decoding) = decoder.decode(true).unwrap() else {
-            unreachable!("original 0 is missing");
-        };
+        let decoding = decoder.decode_with_recovery().unwrap().unwrap();
 
-        assert_eq!(
-            decoding.original(0).unwrap(),
-            original[0].as_slice()
-        );
+        assert_eq!(decoding.original(0).unwrap(), original[0].as_slice());
         for (i, recovery) in recovery.iter().enumerate() {
             let label = format!("oc={original_count} rc={recovery_count} ss={shard_size} rec={i}");
             if i == 1 {
-                assert!(
-                    decoding.recovery(i).is_none(),
-                    "provided recovery: {label}"
-                );
+                assert!(decoding.recovery(i).is_none(), "provided recovery: {label}");
             } else {
                 assert_eq!(
                     decoding.recovery(i).unwrap(),
@@ -374,22 +378,22 @@ mod tests {
     }
 
     #[test]
-    fn decode_complete_when_all_originals_present() {
+    fn decode_none_when_all_originals_present() {
         let shard_size = SHARD_CHUNK_BYTES;
         let original = test_util::generate_original(3, shard_size, 0);
 
-        // Every original is provided, so there is nothing to reconstruct. `decode` reports
-        // `Complete` regardless of `compute_recovery`, and the recovery accessors are unreachable by
-        // construction (they live only on `Decoded::Reconstructed`).
-        for compute_recovery in [false, true] {
-            let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
-            decoder.add_original_shard(0, &original[0]).unwrap();
-            decoder.add_original_shard(1, &original[1]).unwrap();
-            decoder.add_original_shard(2, &original[2]).unwrap();
-            assert!(matches!(
-                decoder.decode(compute_recovery).unwrap(),
-                Decoded::Complete
-            ));
+        // Every original is provided, so there is nothing to reconstruct: both decode entry points
+        // return `None`.
+        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
+        for (i, shard) in original.iter().enumerate() {
+            decoder.add_original_shard(i, shard).unwrap();
         }
+        assert!(decoder.decode().unwrap().is_none());
+
+        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
+        for (i, shard) in original.iter().enumerate() {
+            decoder.add_original_shard(i, shard).unwrap();
+        }
+        assert!(decoder.decode_with_recovery().unwrap().is_none());
     }
 }

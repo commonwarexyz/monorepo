@@ -1,7 +1,7 @@
 use crate::reed_solomon::{
     engine::{self, Engine, GF_MODULUS, GF_ORDER, SHARD_CHUNK_BYTES},
     rate::{DecoderWork, EncoderWork, Rate, RateDecoder, RateEncoder},
-    Decoded, DecoderResult, EncoderResult, Error,
+    DecoderResult, EncoderResult, Error,
 };
 use core::marker::PhantomData;
 
@@ -168,14 +168,14 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         self.work.add_recovery_shard(index, recovery_shard)
     }
 
-    fn decode(&mut self, compute_recovery: bool) -> Result<Decoded<'_>, Error> {
+    fn decode(&mut self, compute_recovery: bool) -> Result<Option<DecoderResult<'_>>, Error> {
         let Some((mut work, original_count, recovery_count, received)) =
             self.work.decode_begin()?
         else {
             // Every original was provided: nothing to reconstruct. Clear the received state and
-            // report completion.
+            // report nothing.
             self.work.reset_received();
-            return Ok(Decoded::Complete);
+            return Ok(None);
         };
 
         let chunk_size = original_count.next_power_of_two();
@@ -265,12 +265,11 @@ impl<E: Engine> RateDecoder<E> for LowRateDecoder<E> {
         self.work.undo_last_chunk_encoding();
         if compute_recovery {
             self.work.undo_last_chunk_encoding_recovery();
-            self.work.set_recovery_computed();
         }
 
         // DONE
 
-        Ok(Decoded::Reconstructed(DecoderResult::new(&mut self.work)))
+        Ok(Some(DecoderResult::new(&mut self.work)))
     }
 
     fn into_parts(self) -> (E, DecoderWork) {
