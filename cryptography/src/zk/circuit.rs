@@ -26,10 +26,11 @@
 //! use commonware_math::test::F;
 //!
 //! // Constrain a witness `x` to satisfy `x^3 + x + 5 = 35`.
-//! let valued = build_with_values(|ctx| {
+//! let (valued, _) = build_with_values(|ctx| {
 //!     let x = Var::witness(ctx, |_| F::from(3u64));
 //!     let out = x.clone() * &x * &x + &x + &Var::constant(ctx, F::from(5u64));
 //!     out.assert_eq(&Var::constant(ctx, F::from(35u64)));
+//!     Vec::new()
 //! });
 //! assert!(valued.is_satisfied());
 //! ```
@@ -189,7 +190,7 @@ struct ValuesBuilder<F> {
 ///     test::F,
 /// };
 ///
-/// let valued = build_with_values(|ctx| {
+/// let (valued, _) = build_with_values(|ctx| {
 ///     let x = Var::witness(ctx, |_| F::from(3u64));
 ///     // The prover computes the inverse natively...
 ///     let inv = Var::witness(ctx, {
@@ -198,6 +199,7 @@ struct ValuesBuilder<F> {
 ///     });
 ///     // ...and the circuit checks it with a single multiplication.
 ///     (x * &inv).assert_eq(&Var::one());
+///     Vec::new()
 /// });
 /// assert!(valued.is_satisfied());
 /// ```
@@ -678,11 +680,12 @@ impl<'ctx, F: Field> Field for Var<'ctx, F> {
 /// use commonware_math::test::F;
 ///
 /// // Use a bit to choose between two values, then check the choice.
-/// let valued = build_with_values(|ctx| {
+/// let (valued, _) = build_with_values(|ctx| {
 ///     let bit = BoolVar::witness(ctx, |_| true);
 ///     let a = Var::constant(ctx, F::from(7u64));
 ///     let b = Var::constant(ctx, F::from(9u64));
 ///     bit.select(&a, &b).assert_eq(&Var::constant(ctx, F::from(7u64)));
+///     Vec::new()
 /// });
 /// assert!(valued.is_satisfied());
 /// ```
@@ -826,25 +829,46 @@ impl<'ctx, F: Ring> BitOr for BoolVar<'ctx, F> {
 /// Build a circuit without computing an assignment (verifier mode).
 ///
 /// Witness `init` closures do not run in this mode.
-pub fn build<F: Ring + PartialEq>(f: impl for<'ctx> FnOnce(Context<'ctx, F>)) -> Circuit<F> {
+///
+/// The closure returns the vars whose circuit indices the caller wants back
+/// (e.g. the committed outputs of a circuit); the returned indices are in the
+/// same order. Return an empty vec to ignore this.
+///
+/// # Panics
+///
+/// Panics if any returned var is native (not backed by the circuit).
+pub fn build<F: Ring + PartialEq>(
+    f: impl for<'ctx> FnOnce(Context<'ctx, F>) -> Vec<Var<'ctx, F>>,
+) -> (Circuit<F>, Vec<CircuitIdx>) {
     let inner = ContextInner {
         values: None,
         circuit: Mutex::new(Circuit::default()),
     };
-    f(Context {
+    let indices = f(Context {
         inner: &inner,
         _brand: PhantomData,
-    });
-    inner.circuit.into_inner()
+    })
+    .iter()
+    .map(Var::circuit_idx)
+    .collect();
+    (inner.circuit.into_inner(), indices)
 }
 
 /// Build a circuit while simultaneously computing the assignment (prover mode).
 ///
 /// Each witness's value comes from the `init` closure passed to
 /// [`Var::witness`].
+///
+/// The closure returns the vars whose circuit indices the caller wants back
+/// (e.g. the committed outputs of a circuit); the returned indices are in the
+/// same order. Return an empty vec to ignore this.
+///
+/// # Panics
+///
+/// Panics if any returned var is native (not backed by the circuit).
 pub fn build_with_values<F: Ring + PartialEq>(
-    f: impl for<'ctx> FnOnce(Context<'ctx, F>),
-) -> ValuedCircuit<F> {
+    f: impl for<'ctx> FnOnce(Context<'ctx, F>) -> Vec<Var<'ctx, F>>,
+) -> (ValuedCircuit<F>, Vec<CircuitIdx>) {
     let inner = ContextInner {
         values: Some(Mutex::new(ValuesBuilder {
             witnesses: Vec::new(),
@@ -852,17 +876,23 @@ pub fn build_with_values<F: Ring + PartialEq>(
         })),
         circuit: Mutex::new(Circuit::default()),
     };
-    f(Context {
+    let indices = f(Context {
         inner: &inner,
         _brand: PhantomData,
-    });
+    })
+    .iter()
+    .map(Var::circuit_idx)
+    .collect();
     let circuit = inner.circuit.into_inner();
     let values = inner.values.unwrap().into_inner();
-    ValuedCircuit {
-        circuit,
-        witnesses: values.witnesses,
-        nodes: values.nodes,
-    }
+    (
+        ValuedCircuit {
+            circuit,
+            witnesses: values.witnesses,
+            nodes: values.nodes,
+        },
+        indices,
+    )
 }
 
 /// Fuzzing utilities, comparing circuit satisfaction against native
@@ -997,7 +1027,9 @@ pub mod fuzz {
                     };
                     vars.push(var);
                 }
+                Vec::new()
             })
+            .0
         }
     }
 }
@@ -1021,7 +1053,9 @@ mod tests {
                 let x = Var::witness(ctx, move |_| F::from(x_value));
                 let out = x.clone() * &x * &x + &x + &Var::constant(ctx, F::from(5u64));
                 out.assert_eq(&Var::constant(ctx, F::from(35u64)));
+                Vec::new()
             })
+            .0
         };
         assert!(cubic(3).is_satisfied());
         assert!(!cubic(4).is_satisfied());
@@ -1031,24 +1065,27 @@ mod tests {
     fn test_bool_witness_enforces_booleanity() {
         // A boolean witness from a `bool` is always satisfiable.
         for b in [false, true] {
-            let valued = build_with_values(move |ctx| {
+            let (valued, _) = build_with_values(move |ctx| {
                 BoolVar::<F>::witness(ctx, move |_| b);
+                Vec::new()
             });
             assert!(valued.is_satisfied());
         }
 
         // A var that is not 0 or 1 fails the booleanity constraint.
-        let bad = build_with_values(|ctx| {
+        let (bad, _) = build_with_values(|ctx| {
             let two = Var::witness(ctx, |_| F::from(2u64));
             BoolVar::assert(two);
+            Vec::new()
         });
         assert!(!bad.is_satisfied());
 
         // 0 and 1 pass `from_var`.
         for v in [0u64, 1u64] {
-            let valued = build_with_values(move |ctx| {
+            let (valued, _) = build_with_values(move |ctx| {
                 let x = Var::witness(ctx, move |_| F::from(v));
                 BoolVar::assert(x);
+                Vec::new()
             });
             assert!(valued.is_satisfied());
         }
@@ -1058,13 +1095,14 @@ mod tests {
     fn test_bool_select() {
         // `select` returns `on_true` when the bit is set, else `on_false`.
         for b in [false, true] {
-            let valued = build_with_values(move |ctx| {
+            let (valued, _) = build_with_values(move |ctx| {
                 let bit = BoolVar::witness(ctx, move |_| b);
                 let on_true = Var::witness(ctx, |_| F::from(7u64));
                 let on_false = Var::witness(ctx, |_| F::from(9u64));
                 let selected = bit.select(&on_true, &on_false);
                 let expected = if b { F::from(7u64) } else { F::from(9u64) };
                 selected.assert_eq(&Var::constant(ctx, expected));
+                Vec::new()
             });
             assert!(valued.is_satisfied());
         }
@@ -1074,12 +1112,13 @@ mod tests {
     fn test_bool_combinators_truth_tables() {
         for a in [false, true] {
             for b in [false, true] {
-                let valued = build_with_values::<F>(move |ctx| {
+                let (valued, _) = build_with_values::<F>(move |ctx| {
                     let a_var = BoolVar::witness(ctx, move |_| a);
                     let b_var = BoolVar::witness(ctx, move |_| b);
                     (!a_var.clone()).assert_eq(&BoolVar::constant(!a));
                     (a_var.clone() & b_var.clone()).assert_eq(&BoolVar::constant(a & b));
                     (a_var | b_var).assert_eq(&BoolVar::constant(a | b));
+                    Vec::new()
                 });
                 assert!(valued.is_satisfied());
             }
@@ -1088,7 +1127,7 @@ mod tests {
 
     #[test]
     fn test_bool_constant() {
-        let valued = build_with_values(|ctx| {
+        let (valued, _) = build_with_values(|ctx| {
             // A native boolean constant folds in correctly when combined.
             let t = BoolVar::<F>::constant(true);
             let f = BoolVar::<F>::constant(false);
@@ -1096,6 +1135,7 @@ mod tests {
             t.select(&x, &Var::zero())
                 .assert_eq(&Var::constant(ctx, F::from(5u64)));
             f.select(&x, &Var::zero()).assert_eq(&Var::zero());
+            Vec::new()
         });
         assert!(valued.is_satisfied());
     }

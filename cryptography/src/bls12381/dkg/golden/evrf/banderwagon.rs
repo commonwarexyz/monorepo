@@ -112,18 +112,17 @@ pub fn vrf_recv(msg: &[u8], sender: &G, x: &F) -> Scalar {
 /// verifier mode ([`zk::build`]) the witness initializers are never run, so
 /// passing `None` is fine, and the resulting circuit matches the prover's.
 ///
-/// The `n` per-receiver outputs are allocated as the first `n` witnesses, so the
-/// committed indices are simply `Witness(0..n)`.
-fn build_circuit(
-    ctx: zk::Context<'_, Scalar>,
+/// Returns the `n` per-receiver output vars, in receiver order; the caller turns
+/// these into the committed indices (see [`zk::build`]).
+fn build_circuit<'ctx>(
+    ctx: zk::Context<'ctx, Scalar>,
     sender: &G,
     receivers: &[G],
     msg: &[u8],
     secret: Option<&F>,
     outputs: Option<&[Scalar]>,
-) {
-    // Commit slots first, so their witness indices are 0..n.
-    let output_vars: Vec<Var<'_, Scalar>> = (0..receivers.len())
+) -> Vec<Var<'ctx, Scalar>> {
+    let output_vars: Vec<Var<'ctx, Scalar>> = (0..receivers.len())
         .map(|i| {
             Var::witness(ctx, move |_| {
                 outputs.expect("prover supplies outputs")[i].clone()
@@ -161,11 +160,8 @@ fn build_circuit(
         let out = beta.clone() * &t0k + &t1k;
         out.assert_eq(&output_vars[i]);
     }
-}
 
-/// The committed witness indices for `n` receivers: `Witness(0..n)`.
-fn committed_indices(n: usize) -> Vec<zk::CircuitIdx> {
-    (0..n as u32).map(zk::CircuitIdx::Witness).collect()
+    output_vars
 }
 
 /// Compute the VRF output for each receiver, together with a circuit and witness
@@ -180,22 +176,17 @@ pub fn vrf_batch_checked(msg: &[u8], x: &F, receivers: &[G]) -> (Circuit<Scalar>
         .map(|r| vrf_send(msg, &sender, r, x))
         .collect();
 
-    let valued = zk::build_with_values(|ctx| {
-        build_circuit(ctx, &sender, receivers, msg, Some(x), Some(&outputs));
+    let (valued, committed) = zk::build_with_values(|ctx| {
+        build_circuit(ctx, &sender, receivers, msg, Some(x), Some(&outputs))
     });
-    zkc_to_circuit_and_witness(
-        None::<&mut StdRng>,
-        valued,
-        &committed_indices(receivers.len()),
-    )
+    zkc_to_circuit_and_witness(None::<&mut StdRng>, valued, &committed)
 }
 
 /// The verifier-side circuit matching [`vrf_batch_checked`].
 pub fn vrf_batch_checked_circuit(msg: &[u8], sender: &G, receivers: &[G]) -> Circuit<Scalar> {
-    let circuit = zk::build(|ctx| {
-        build_circuit(ctx, sender, receivers, msg, None, None);
-    });
-    zkc_to_circuit(circuit, &committed_indices(receivers.len()))
+    let (circuit, committed) =
+        zk::build(|ctx| build_circuit(ctx, sender, receivers, msg, None, None));
+    zkc_to_circuit(circuit, &committed)
 }
 
 #[cfg(test)]
@@ -344,7 +335,7 @@ mod tests {
             .iter()
             .map(|r| vrf_send(b"msg", &neg_sender, r, &x))
             .collect();
-        let valued = zk::build_with_values(|ctx| {
+        let (valued, _) = zk::build_with_values(|ctx| {
             build_circuit(
                 ctx,
                 &neg_sender,
@@ -352,7 +343,7 @@ mod tests {
                 b"msg",
                 Some(&x),
                 Some(&outputs),
-            );
+            )
         });
         assert!(
             !valued.is_satisfied(),

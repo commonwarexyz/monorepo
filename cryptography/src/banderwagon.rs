@@ -1318,7 +1318,7 @@ mod tests {
         let base = base.clone();
         let expected = expected.clone();
         let scalar = scalar.clone();
-        let valued = build_with_values(move |ctx| {
+        let (valued, _) = build_with_values(move |ctx| {
             let s = if witness {
                 Var::witness(ctx, move |_| scalar)
             } else {
@@ -1326,6 +1326,7 @@ mod tests {
             };
             base.scalar_mul(ctx, &s)
                 .assert_eq(&GVar::constant(&expected));
+            Vec::new()
         });
         valued.is_satisfied()
     }

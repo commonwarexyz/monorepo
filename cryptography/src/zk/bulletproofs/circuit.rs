@@ -2279,11 +2279,12 @@ mod test {
 
     #[test]
     fn test_zkc_conversion_preserves_committed_order() {
-        let valued = zk::build_with_values(|ctx| {
+        let (valued, _) = zk::build_with_values(|ctx| {
             let a = zk::Var::witness(ctx, |_| F::from(1u64));
             let b = zk::Var::witness(ctx, |_| F::from(2u64));
             let c = a * &b;
             c.assert_eq(&zk::Var::constant(ctx, F::from(2u64)));
+            Vec::new()
         });
         let (circuit, witness) = super::zkc_to_circuit_and_witness(
             Some(&mut test_rng()),
@@ -2310,12 +2311,13 @@ mod test {
         for _ in 0..DEPTH {
             expected = expected + &expected;
         }
-        let valued = zk::build_with_values(|ctx| {
+        let (valued, _) = zk::build_with_values(|ctx| {
             let mut x = zk::Var::witness(ctx, |_| F::one());
             for _ in 0..DEPTH {
                 x = x.clone() + &x;
             }
             x.assert_eq(&zk::Var::constant(ctx, expected));
+            Vec::new()
         });
         let (circuit, witness) = super::zkc_to_circuit_and_witness(
             Some(&mut test_rng()),
