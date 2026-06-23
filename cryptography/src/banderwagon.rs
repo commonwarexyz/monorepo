@@ -868,7 +868,7 @@ fn scalar_limbs(x: &Scalar) -> [u64; 4] {
 /// alias `x + p`; because the Banderwagon group order does not divide `p`, that
 /// alias scales a point to a *different* result. The canonicity check pins the
 /// decomposition to the unique integer in `[0, p)`.
-fn scalar_bits_le<'ctx>(
+pub fn scalar_bits_le<'ctx>(
     ctx: Context<'ctx, Scalar>,
     x: &Var<'ctx, Scalar>,
 ) -> Vec<BoolVar<'ctx, Scalar>> {
@@ -970,10 +970,11 @@ impl G {
         GVar::constant(self).mul_bits(bits)
     }
 
-    /// In-circuit squared affine x-coordinate of `[scalar] * self` for a
-    /// bit-given scalar; combines [`scalar_mul_bits`](Self::scalar_mul_bits) with
-    /// the representative-independent squaring of
-    /// [`scalar_mul_x_squared`](Self::scalar_mul_x_squared).
+    /// In-circuit squared affine x-coordinate of `[scalar] * self` for a scalar
+    /// supplied as bits.
+    ///
+    /// The bits may be an exponent witnessed directly by the caller, or a
+    /// canonical decomposition returned by [`scalar_bits_le`].
     pub fn scalar_mul_x_squared_bits<'ctx>(
         &self,
         bits: &[BoolVar<'ctx, Scalar>],

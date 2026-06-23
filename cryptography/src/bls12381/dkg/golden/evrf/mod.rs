@@ -45,7 +45,7 @@ const BULLETPROOFS_DST: &[u8] = b"_COMMONWARE_CRYPTOGRAPHY_GOLDEN_DKG_BULLETPROO
 // TODO: with a hand-tailored scalar-mul gadget the per-receiver constant
 // could drop to ~2.5k (Golden paper, eprint 2025/1924), letting us hit a much
 // larger receiver count with the same (or smaller) setup.
-const WIRES_PER_PLAYER: usize = 4818;
+const WIRES_PER_PLAYER: usize = 4309;
 const WIRES_BASE: usize = 1513;
 
 /// `ceil(log2(WIRES_PER_PLAYER * num_players + WIRES_BASE))`.
