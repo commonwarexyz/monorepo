@@ -2961,7 +2961,15 @@ mod tests {
                 Height::new(1),
                 100,
             );
-            let _ = marshal.verified(round, block).await;
+            // `verified` returns once the actor hands back the durable-sync handle;
+            // awaiting that handle is the caller's durability barrier. A storage
+            // sync failure must panic here (fatal), never resolve to a recoverable
+            // verdict, so we await the handle to drive the failing sync.
+            let handle = marshal
+                .verified(round, block)
+                .await
+                .expect("verified enqueued");
+            let _ = handle.await;
         });
     }
 
