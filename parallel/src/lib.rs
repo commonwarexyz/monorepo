@@ -1,4 +1,4 @@
-//! Parallelize fold operations with pluggable execution strategies..
+//! Parallelize fold operations with pluggable execution strategies.
 //!
 //! This crate provides the [`Strategy`] trait, which abstracts over sequential and parallel
 //! execution of fold operations. This allows algorithms to be written once and executed either
@@ -10,11 +10,15 @@
 //!
 //! **Core Operations:**
 //! - [`fold`](Strategy::fold): Reduces a collection to a single value
+//! - [`try_fold`](Strategy::try_fold): Like `fold`, but stops applying the fold operation after
+//!   failures
 //! - [`fold_init`](Strategy::fold_init): Like `fold`, but with per-partition initialization
 //! - [`sort_by`](Strategy::sort_by): Sorts a slice with a comparator
 //!
 //! **Convenience Methods:**
 //! - [`map_collect_vec`](Strategy::map_collect_vec): Maps elements and collects into a `Vec`
+//! - [`try_map_collect_vec`](Strategy::try_map_collect_vec): Maps fallible operations and
+//!   collects into a `Result<Vec<_>, _>`
 //! - [`map_init_collect_vec`](Strategy::map_init_collect_vec): Like `map_collect_vec` with
 //!   per-partition initialization
 //! - [`map_partition_collect_vec`](Strategy::map_partition_collect_vec): Maps elements, collecting
@@ -189,6 +193,47 @@ commonware_macros::stability_scope!(BETA {
             )
         }
 
+        /// Reduces a collection to a single value using a fallible fold operation.
+        ///
+        /// Similar to [`fold`](Self::fold), but `fold_op` may fail. Implementations may stop
+        /// applying `fold_op` after an error is observed. When more than one partition fails,
+        /// any error may be returned.
+        ///
+        /// # Arguments
+        ///
+        /// - `iter`: The collection to fold over
+        /// - `identity`: A closure that produces the identity value for the fold.
+        /// - `fold_op`: Fallibly combines an accumulator with a single item: `(acc, item) -> Result<acc, E>`
+        /// - `reduce_op`: Combines two successful accumulators: `(acc1, acc2) -> acc`.
+        fn try_fold<I, R, E, ID, F, RD>(
+            &self,
+            iter: I,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> Result<R, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            R: Send,
+            E: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.fold(
+                iter,
+                || Ok(identity()),
+                |acc, item| match acc {
+                    Ok(acc) => fold_op(acc, item),
+                    Err(error) => Err(error),
+                },
+                |a, b| match a {
+                    Ok(a) => b.map(|b| reduce_op(a, b)),
+                    Err(error) => Err(error),
+                },
+            )
+        }
+
         /// Maps each element and collects results into a `Vec`.
         ///
         /// This is a convenience method that applies `map_op` to each element and
@@ -224,6 +269,54 @@ commonware_macros::stability_scope!(BETA {
                 |mut acc, item| {
                     acc.push(map_op(item));
                     acc
+                },
+                |mut a, b| {
+                    a.extend(b);
+                    a
+                },
+            )
+        }
+
+        /// Maps each element with a fallible operation and collects results into a `Vec`.
+        ///
+        /// This is a convenience method that applies `map_op` to each element and
+        /// collects the results into a single `Result`. Output ordering on success
+        /// matches [`map_collect_vec`](Self::map_collect_vec). Implementations may stop
+        /// applying `map_op` after an error is observed. When more than one element
+        /// fails, any error may be returned.
+        ///
+        /// # Arguments
+        ///
+        /// - `iter`: The collection to map over
+        /// - `map_op`: The fallible mapping function to apply to each element
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use commonware_parallel::{Strategy, Sequential};
+        ///
+        /// let strategy = Sequential;
+        /// let data = vec![1, 2, 3, 4, 5];
+        ///
+        /// let squared: Result<Vec<i32>, ()> = strategy.try_map_collect_vec(
+        ///     &data,
+        ///     |&x| Ok(x * x),
+        /// );
+        /// assert_eq!(squared, Ok(vec![1, 4, 9, 16, 25]));
+        /// ```
+        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            self.try_fold(
+                iter,
+                Vec::new,
+                |mut acc, item| {
+                    acc.push(map_op(item)?);
+                    Ok(acc)
                 },
                 |mut a, b| {
                     a.extend(b);
@@ -448,6 +541,28 @@ commonware_macros::stability_scope!(BETA {
                 .fold(identity(), |acc, item| fold_op(acc, &mut init_val, item))
         }
 
+        fn try_fold<I, R, E, ID, F, RD>(
+            &self,
+            iter: I,
+            identity: ID,
+            fold_op: F,
+            _reduce_op: RD,
+        ) -> Result<R, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            R: Send,
+            E: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            let mut acc = identity();
+            for item in iter {
+                acc = fold_op(acc, item)?;
+            }
+            Ok(acc)
+        }
+
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -581,6 +696,69 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
             })
         }
 
+        fn map_collect_vec<I, F, T>(&self, iter: I, map_op: F) -> Vec<T>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> T + Send + Sync,
+            T: Send,
+        {
+            self.thread_pool.install(|| {
+                let items: Vec<I::Item> = iter.into_iter().collect();
+                items.into_par_iter().map(map_op).collect()
+            })
+        }
+
+        fn try_map_collect_vec<I, F, T, E>(&self, iter: I, map_op: F) -> Result<Vec<T>, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            F: Fn(I::Item) -> Result<T, E> + Send + Sync,
+            T: Send,
+            E: Send,
+        {
+            self.thread_pool.install(|| {
+                let items: Vec<I::Item> = iter.into_iter().collect();
+                items.into_par_iter().map(map_op).collect()
+            })
+        }
+
+        fn map_init_collect_vec<I, INIT, T, F, R>(&self, iter: I, init: INIT, map_op: F) -> Vec<R>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            INIT: Fn() -> T + Send + Sync,
+            T: Send,
+            F: Fn(&mut T, I::Item) -> R + Send + Sync,
+            R: Send,
+        {
+            self.thread_pool.install(|| {
+                let items: Vec<I::Item> = iter.into_iter().collect();
+                items.into_par_iter().map_init(init, map_op).collect()
+            })
+        }
+
+        fn try_fold<I, R, E, ID, F, RD>(
+            &self,
+            iter: I,
+            identity: ID,
+            fold_op: F,
+            reduce_op: RD,
+        ) -> Result<R, E>
+        where
+            I: IntoIterator<IntoIter: Send, Item: Send> + Send,
+            R: Send,
+            E: Send,
+            ID: Fn() -> R + Send + Sync,
+            F: Fn(R, I::Item) -> Result<R, E> + Send + Sync,
+            RD: Fn(R, R) -> R + Send + Sync,
+        {
+            self.thread_pool.install(|| {
+                let items: Vec<I::Item> = iter.into_iter().collect();
+                items
+                    .into_par_iter()
+                    .try_fold(&identity, &fold_op)
+                    .try_reduce(&identity, |a, b| Ok(reduce_op(a, b)))
+            })
+        }
+
         fn join<A, B, RA, RB>(&self, a: A, b: B) -> (RA, RB)
         where
             A: FnOnce() -> RA + Send,
@@ -619,6 +797,7 @@ mod test {
     use crate::{Rayon, Sequential, Strategy};
     use core::num::NonZeroUsize;
     use proptest::prelude::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn parallel_strategy() -> Rayon {
         Rayon::new(NonZeroUsize::new(4).unwrap()).unwrap()
@@ -672,6 +851,24 @@ mod test {
         }
 
         #[test]
+        fn parallel_try_fold_matches_sequential(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let sequential: Result<i32, ()> = Sequential.try_fold(
+                &data,
+                || 0i32,
+                |acc, &x| Ok(acc.wrapping_add(x)),
+                |a, b| a.wrapping_add(b),
+            );
+            let parallel: Result<i32, ()> = parallel_strategy().try_fold(
+                &data,
+                || 0i32,
+                |acc, &x| Ok(acc.wrapping_add(x)),
+                |a, b| a.wrapping_add(b),
+            );
+
+            prop_assert_eq!(sequential, parallel);
+        }
+
+        #[test]
         fn map_collect_vec_equals_fold(data in prop::collection::vec(any::<i32>(), 0..500)) {
             let s = Sequential;
             let map_op = |&x: &i32| x.wrapping_mul(3);
@@ -686,6 +883,37 @@ mod test {
             );
 
             prop_assert_eq!(via_map, via_fold);
+        }
+
+        #[test]
+        fn try_map_collect_vec_collects_successes(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let expected: Vec<i32> = data.iter().map(|x| x.wrapping_mul(5)).collect();
+
+            let sequential: Result<Vec<i32>, ()> =
+                Sequential.try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
+            prop_assert_eq!(sequential, Ok(expected.clone()));
+
+            let parallel: Result<Vec<i32>, ()> =
+                parallel_strategy().try_map_collect_vec(&data, |&x| Ok(x.wrapping_mul(5)));
+            prop_assert_eq!(parallel, Ok(expected));
+        }
+
+        #[test]
+        fn try_map_collect_vec_returns_first_error(data in prop::collection::vec(any::<i32>(), 0..500)) {
+            let expected_error = data.iter().position(|x| x % 7 == 0);
+            let result: Result<Vec<i32>, usize> =
+                Sequential.try_map_collect_vec(data.iter().enumerate(), |(i, &x)| {
+                    if x % 7 == 0 {
+                        Err(i)
+                    } else {
+                        Ok(x)
+                    }
+                });
+
+            match expected_error {
+                Some(i) => prop_assert_eq!(result, Err(i)),
+                None => prop_assert_eq!(result, Ok(data)),
+            }
         }
 
         #[test]
@@ -732,5 +960,35 @@ mod test {
             let expected_filtered: Vec<i32> = data.iter().filter(|&&x| x % 2 != 0).copied().collect();
             prop_assert_eq!(filtered, expected_filtered);
         }
+    }
+
+    #[test]
+    fn try_map_collect_vec_sequential_short_circuits() {
+        let calls = AtomicUsize::new(0);
+        let result: Result<Vec<usize>, usize> = Sequential.try_map_collect_vec(0..10, |i| {
+            calls.fetch_add(1, Ordering::Relaxed);
+            if i == 3 {
+                Err(i)
+            } else {
+                Ok(i)
+            }
+        });
+
+        assert_eq!(result, Err(3));
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+    }
+
+    #[test]
+    fn try_map_collect_vec_parallel_returns_an_error() {
+        let result: Result<Vec<usize>, usize> =
+            parallel_strategy().try_map_collect_vec(0..128, |i| {
+                if i == 17 || i == 42 {
+                    Err(i)
+                } else {
+                    Ok(i)
+                }
+            });
+
+        assert!(matches!(result, Err(17 | 42)));
     }
 }

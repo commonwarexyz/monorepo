@@ -12,8 +12,8 @@ pub use write::Write;
 mod tests {
     use super::*;
     use crate::{
-        deterministic, Blob as _, Buf, BufMut, Clock, Error, IoBufMut, IoBufs, IoBufsMut, Runner,
-        Spawner, Storage, Supervisor as _,
+        deterministic, Blob as _, Buf, BufMut, Clock, Error, Handle, IoBufMut, IoBufs, IoBufsMut,
+        Runner, Spawner, Storage, Supervisor as _,
     };
     use commonware_macros::test_traced;
     use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize};
@@ -125,6 +125,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 
@@ -248,6 +252,10 @@ mod tests {
             state.durable = state.data.clone();
             state.full_syncs += 1;
             Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            Handle::ready(self.sync().await)
         }
     }
 
