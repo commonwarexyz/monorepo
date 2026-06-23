@@ -431,7 +431,7 @@ struct DecodeCtx<'a, H: Hasher, S: Strategy> {
 ///
 /// Both decode paths reuse this per-stripe layout. With all originals present,
 /// [`decode`](striped::decode) re-encodes the recovery stripes and verifies them against the
-/// commitment. With an original missing, [`decode_restored_only`](striped::decode_restored_only)
+/// commitment. With an original missing, [`decode_reveal`](striped::decode_reveal)
 /// feeds exactly `k` shards and recovers the missing original and recovery stripes from a single
 /// Reed-Solomon decode (no re-encode).
 mod striped {
@@ -544,10 +544,10 @@ mod striped {
                 .add_recovery_shard(*idx, &shard[range.clone()])
                 .map_err(Error::ReedSolomon)?;
         }
-        let Some(decoding) = decoder.decode_with_recovery().map_err(Error::ReedSolomon)? else {
-            // recovery_needed guarantees a missing original, so a decode must run
-            return Err(Error::Inconsistent);
-        };
+        let decoding = decoder
+            .decode_with_recovery()
+            .map_err(Error::ReedSolomon)?
+            .expect("decode runs only when an original is missing");
 
         for (slot, &idx) in out.originals.iter_mut().zip(missing.originals) {
             let shard = decoding.original(idx).ok_or(Error::Inconsistent)?;
@@ -593,7 +593,7 @@ mod striped {
     }
 
     /// Decode when all `k` originals are present: re-encode the recovery shards (recovery with
-    /// missing originals uses [`decode_restored_only`]), confirm any provided recovery shards
+    /// missing originals uses [`decode_reveal`]), confirm any provided recovery shards
     /// match the canonical re-encode, and verify the rebuilt commitment against `ctx.root`.
     pub(super) fn decode<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
@@ -640,7 +640,7 @@ mod striped {
     /// here and bound by the commitment root check like any other missing shard. No
     /// provided-recovery comparison is needed: every reconstructed shard is the unique RS
     /// output for the `k` inputs, and the root check alone binds it to the commitment.
-    pub(super) fn decode_restored_only<'a, H: Hasher, S: Strategy>(
+    pub(super) fn decode_reveal<'a, H: Hasher, S: Strategy>(
         ctx: &DecodeCtx<'_, H, S>,
         ranges: Vec<Range<usize>>,
         shard_digests: Vec<Option<H::Digest>>,
@@ -831,7 +831,7 @@ mod sequential {
         // one decode (decode-reveal), so no separate re-encode is needed. The caller feeds exactly
         // `k` shards (surplus recoveries were trimmed and their digests cleared), so every
         // reconstructed shard is the unique Reed-Solomon output for those `k` inputs and the root
-        // check binds it to the commitment, like in `striped::decode_restored_only`.
+        // check binds it to the commitment, like in `striped::decode_reveal`.
         let mut decoder = Cached::take(
             &CACHED_DECODER,
             || Decoder::new(k, m, shard_len),
@@ -848,10 +848,10 @@ mod sequential {
                 .add_recovery_shard(*idx, shard)
                 .map_err(Error::ReedSolomon)?;
         }
-        let Some(decoding) = decoder.decode_with_recovery().map_err(Error::ReedSolomon)? else {
-            // recovery_needed guarantees a missing original, so a decode must run
-            return Err(Error::Inconsistent);
-        };
+        let decoding = decoder
+            .decode_with_recovery()
+            .map_err(Error::ReedSolomon)?
+            .expect("decode runs only when an original is missing");
 
         let mut originals: Vec<&[u8]> = vec![&[]; k];
         for &(idx, shard) in &provided_originals {
@@ -1013,7 +1013,7 @@ fn decode<'a, H: Hasher, S: Strategy>(
         // Recovery reads the missing originals and recoveries straight out of one decode;
         // with all originals present there is nothing to decode, so re-encode instead.
         if recovery_needed {
-            return striped::decode_restored_only::<H, S>(
+            return striped::decode_reveal::<H, S>(
                 &ctx,
                 ranges,
                 shard_digests,
@@ -1553,6 +1553,37 @@ mod tests {
         }
     }
 
+    /// All `k` originals provided under a parallel strategy must round-trip via the striped
+    /// re-encode-and-verify path (`striped::decode`), which other tests only reach in the rejection
+    /// direction.
+    #[test]
+    fn test_striped_all_originals_decode() {
+        let strategy = Rayon::new(NZUsize!(4)).unwrap();
+        let data = vec![42u8; 256 * 1024];
+        let total = 24u16;
+        let min = 8u16;
+
+        let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &strategy).unwrap();
+
+        // Assert the striped path actually engages (>= 2 stripes); otherwise this would silently
+        // exercise the sequential path.
+        let shard_len = canonical_shard_len(data.len(), min as usize);
+        assert!(
+            striped::ranges(shard_len, strategy.parallelism_hint()).map_or(0, |r| r.len()) >= 2,
+            "test must exercise >= 2 stripes (shard_len={shard_len})"
+        );
+
+        // Provide exactly the `k` original chunks (indices 0..min), so decode takes the all-originals
+        // striped re-encode path rather than reconstructing.
+        let originals = chunks
+            .into_iter()
+            .take(min as usize)
+            .map(|c| checked(root, c))
+            .collect::<Vec<_>>();
+        let decoded = decode::<Sha256, _>(total, min, &root, originals.iter(), &strategy).unwrap();
+        assert_eq!(decoded, data);
+    }
+
     /// Splitting a shard into stripes and encoding each must reproduce the single full-width
     /// encode byte-for-byte.
     #[test]
@@ -1638,7 +1669,7 @@ mod tests {
             tamper_flip_recovery,
         ),
         // Tampered recovery that IS provided and forces RS reconstruction of a missing
-        // original (exercises the striped `decode_restored_only` path).
+        // original (exercises the striped `decode_reveal` path).
         (
             "tampered_recovery_provided",
             &[0, 1, 2, 4],
@@ -1707,7 +1738,7 @@ mod tests {
         assert_adversarial_rejected(total, min, &data, &rayon);
 
         // Sanity: an untampered mixed (some originals + a recovery) set still decodes via the
-        // striped path, forcing striped::decode_restored_only to reconstruct an original.
+        // striped path, forcing striped::decode_reveal to reconstruct an original.
         let (root, chunks) = encode::<Sha256, _>(total, min, data.as_slice(), &Sequential).unwrap();
         let mixed = [0u16, 1, 2, 4]
             .into_iter()

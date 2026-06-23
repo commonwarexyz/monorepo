@@ -377,23 +377,28 @@ mod tests {
         }
     }
 
-    #[test]
-    fn decode_none_when_all_originals_present() {
+    // Every original is provided, so there is nothing to reconstruct: both decode entry points
+    // return `None`.
+    fn assert_decode_none(original_count: usize, recovery_count: usize) {
         let shard_size = SHARD_CHUNK_BYTES;
-        let original = test_util::generate_original(3, shard_size, 0);
+        let original = test_util::generate_original(original_count, shard_size, 0);
 
-        // Every original is provided, so there is nothing to reconstruct: both decode entry points
-        // return `None`.
-        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
+        let mut decoder = Decoder::new(original_count, recovery_count, shard_size).unwrap();
         for (i, shard) in original.iter().enumerate() {
             decoder.add_original_shard(i, shard).unwrap();
         }
         assert!(decoder.decode().unwrap().is_none());
 
-        let mut decoder = Decoder::new(3, 2, shard_size).unwrap();
+        let mut decoder = Decoder::new(original_count, recovery_count, shard_size).unwrap();
         for (i, shard) in original.iter().enumerate() {
             decoder.add_original_shard(i, shard).unwrap();
         }
         assert!(decoder.decode_with_recovery().unwrap().is_none());
+    }
+
+    #[test]
+    fn decode_none_when_all_originals_present() {
+        assert_decode_none(3, 2); // HighRate (original_count_pow2 >= recovery_count_pow2)
+        assert_decode_none(4, 8); // LowRate (original_count_pow2 < recovery_count_pow2)
     }
 }
