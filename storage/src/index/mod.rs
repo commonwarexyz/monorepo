@@ -260,7 +260,7 @@ mod tests {
         index::partitioned::{
             ordered::Index as PartitionedOrdered, unordered::Index as PartitionedUnordered,
         },
-        translator::{OneCap, TwoCap},
+        translator::{EightCap, OneCap, TwoCap},
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
@@ -398,6 +398,83 @@ mod tests {
                 index.spilled_count() > 0,
                 "routing battery should exercise the spilled representation"
             );
+        });
+    }
+
+    /// Verify ordered navigation returns keys in lexicographic order even when some keys are
+    /// shorter than the partition prefix (the case the partitioned router must place correctly).
+    /// Each key is inserted with its lexicographic rank as its value, and the keys have distinct
+    /// translated keys under `EightCap`, so a correct ordering yields the ranks in order with no
+    /// collision ambiguity. Run against both the flat and partitioned ordered indices below, which
+    /// must agree.
+    fn run_ordered_short_keys<I: Ordered<Value = u64>>(index: &mut I) {
+        // Lexicographically increasing keys; `[0x01]` and `[0x03]` are shorter than the 2-byte
+        // prefix and must still sort between their 2-byte neighbors.
+        let keys: [&[u8]; 5] = [
+            &[0x00, 0x05],
+            &[0x01],
+            &[0x02, 0x09, 0xAB],
+            &[0x03],
+            &[0xFF, 0xFF],
+        ];
+        for (rank, &key) in keys.iter().enumerate() {
+            index.insert(key, rank as u64);
+        }
+
+        let first: Vec<u64> = index.first_translated_key().unwrap().copied().collect();
+        let last: Vec<u64> = index.last_translated_key().unwrap().copied().collect();
+        assert_eq!(first, vec![0], "first key");
+        assert_eq!(last, vec![4], "last key");
+
+        let n = keys.len() as u64;
+        for (i, &key) in keys.iter().enumerate() {
+            let i = i as u64;
+            let (it, next_cycled) = index.next_translated_key(key).unwrap();
+            let next: Vec<u64> = it.copied().collect();
+            let (it, prev_cycled) = index.prev_translated_key(key).unwrap();
+            let prev: Vec<u64> = it.copied().collect();
+            if i + 1 < n {
+                assert_eq!(
+                    (next, next_cycled),
+                    (vec![i + 1], false),
+                    "next of rank {i}"
+                );
+            } else {
+                assert_eq!((next, next_cycled), (vec![0], true), "next wraps past last");
+            }
+            if i > 0 {
+                assert_eq!(
+                    (prev, prev_cycled),
+                    (vec![i - 1], false),
+                    "prev of rank {i}"
+                );
+            } else {
+                assert_eq!(
+                    (prev, prev_cycled),
+                    (vec![n - 1], true),
+                    "prev wraps before first"
+                );
+            }
+        }
+    }
+
+    #[test_traced]
+    fn test_ordered_short_keys_flat() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = ordered::Index::<EightCap, u64>::new(context, EightCap);
+            run_ordered_short_keys(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_short_keys_partitioned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            // P=2 with EightCap on the 6-byte remainder orders by the same (<=8-byte) full key as
+            // the flat EightCap index above, so both must produce identical navigation results.
+            let mut index = PartitionedOrdered::<EightCap, u64, 2>::new(context, EightCap);
+            run_ordered_short_keys(&mut index);
         });
     }
 
