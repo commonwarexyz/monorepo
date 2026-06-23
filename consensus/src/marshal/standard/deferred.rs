@@ -623,7 +623,7 @@ where
                     // vote, establishing durability.
                     let (durable_tx, durable_rx) = oneshot::channel();
                     verification_tasks.insert(consensus_context.round, digest, durable_rx);
-                    let verified_rx = marshal.verified(consensus_context.round, parent);
+                    let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
                     let success = tx.send_lossy(digest);
                     let Ok(handle) = verified_rx.await else {
                         return;
@@ -956,12 +956,12 @@ mod tests {
             let parent = make_raw_block(genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
 
-            marshal
-                .verified(Round::new(Epoch::new(0), View::new(1)), parent.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal
+                    .verified(Round::new(Epoch::new(0), View::new(1)), parent.clone())
+                    .await,
+                "durable: verified"
+            );
 
             // Block A at view 5 (height 2)
             let round_a = Round::new(Epoch::new(0), View::new(5));
@@ -972,12 +972,10 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a.clone(), parent_digest, Height::new(2), 200);
             let commitment_a = StandardHarness::commitment(&block_a);
-            marshal
-                .verified(round_a, block_a.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal.verified(round_a, block_a.clone()).await,
+                "durable: verified"
+            );
 
             // Block B at view 10 (height 2, different block same height)
             let round_b = Round::new(Epoch::new(0), View::new(10));
@@ -988,12 +986,10 @@ mod tests {
             };
             let block_b = B::new::<Sha256>(context_b.clone(), parent_digest, Height::new(2), 300);
             let commitment_b = StandardHarness::commitment(&block_b);
-            marshal
-                .verified(round_b, block_b.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal.verified(round_b, block_b.clone()).await,
+                "durable: verified"
+            );
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1108,13 +1104,13 @@ mod tests {
                 B::new::<Sha256>(parent_ctx.clone(), genesis.digest(), Height::new(19), 1000);
             let parent_digest = parent.digest();
 
-            marshal
-                .clone()
-                .verified(Round::new(Epoch::zero(), View::new(19)), parent.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal
+                    .clone()
+                    .verified(Round::new(Epoch::zero(), View::new(19)), parent.clone())
+                    .await,
+                "durable: verified"
+            );
 
             // Create a block at height 20 (first block in epoch 1, which is NOT supported)
             let unsupported_round = Round::new(Epoch::new(1), View::new(20));
@@ -1131,13 +1127,13 @@ mod tests {
             );
             let block_commitment = StandardHarness::commitment(&block);
 
-            marshal
-                .clone()
-                .verified(unsupported_round, block.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal
+                    .clone()
+                    .verified(unsupported_round, block.clone())
+                    .await,
+                "durable: verified"
+            );
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1208,13 +1204,13 @@ mod tests {
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_commitment = StandardHarness::commitment(&parent);
 
-            marshal
-                .clone()
-                .verified(Round::new(Epoch::zero(), View::new(1)), parent.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal
+                    .clone()
+                    .verified(Round::new(Epoch::zero(), View::new(1)), parent.clone())
+                    .await,
+                "durable: verified"
+            );
 
             // Build a block with context A (embedded in the block).
             let round_a = Round::new(Epoch::zero(), View::new(2));
@@ -1225,12 +1221,10 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(context_a, parent.digest(), Height::new(2), 200);
             let commitment_a = StandardHarness::commitment(&block_a);
-            marshal
-                .verified(round_a, block_a)
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal.verified(round_a, block_a).await,
+                "durable: verified"
+            );
 
             context.sleep(Duration::from_millis(10)).await;
 
@@ -1482,12 +1476,10 @@ mod tests {
             };
             let block_a = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 100);
             let digest_a = block_a.digest();
-            marshal
-                .verified(round, block_a.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal.verified(round, block_a.clone()).await,
+                "durable: verified"
+            );
 
             let block_b = B::new::<Sha256>(ctx.clone(), genesis.digest(), Height::new(1), 200);
             let digest_b = block_b.digest();
@@ -1555,12 +1547,10 @@ mod tests {
                 parent: (View::zero(), genesis.digest()),
             };
             let stale_block = B::new::<Sha256>(stale_ctx, genesis.digest(), Height::new(1), 100);
-            marshal
-                .verified(round, stale_block)
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal.verified(round, stale_block).await,
+                "durable: verified"
+            );
 
             // Simulate a replay where parent selection now points to a
             // different parent view than the cached block was built for.
@@ -1629,12 +1619,10 @@ mod tests {
             };
             let parent = B::new::<Sha256>(parent_ctx, genesis.digest(), Height::new(1), 100);
             let parent_digest = parent.digest();
-            marshal
-                .verified(parent_round, parent)
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                marshal.verified(parent_round, parent).await,
+                "durable: verified"
+            );
 
             // The leader builds the child via `app.propose`.
             let round = Round::new(Epoch::zero(), View::new(2));

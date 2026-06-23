@@ -25,11 +25,12 @@ pub(crate) enum Stage {
 }
 
 impl Stage {
-    /// Store `block` in the marshal cache for the provided stage.
+    /// Store `block` in the marshal cache for the provided stage, returning once it
+    /// is durably persisted (`false` if marshal could not accept it).
     ///
-    /// This only starts/awaits durability for the candidate bytes. Callers that
-    /// run this concurrently with application verification must separately gate
-    /// consensus progress on both the application verdict and this result.
+    /// Callers that run this concurrently with application verification must
+    /// separately gate consensus progress on both the application verdict and this
+    /// result.
     pub(crate) async fn store<S: Scheme, V: Variant>(
         self,
         marshal: &mut Mailbox<S, V>,
@@ -37,13 +38,7 @@ impl Stage {
         block: V::Block,
     ) -> bool {
         match self {
-            Self::Verified => match marshal.verified(round, block).await {
-                Ok(handle) => {
-                    handle.await.expect("failed to sync verified block");
-                    true
-                }
-                Err(_) => false,
-            },
+            Self::Verified => marshal.verified(round, block).await,
             Self::Certified => marshal.certified(round, block).await,
         }
     }

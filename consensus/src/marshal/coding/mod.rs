@@ -2453,12 +2453,10 @@ mod tests {
 
             // Validator 1 proposes coded_block_b (same inner block, different coding).
             // This stores it in v1's shard engine and actor cache.
-            v1_mailbox
-                .verified(round1, coded_block_b.clone())
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+            assert!(
+                v1_mailbox.verified(round1, coded_block_b.clone()).await,
+                "durable: verified"
+            );
             context.sleep(Duration::from_millis(100)).await;
 
             // Create finalization referencing commitment_a (the "correct" commitment).
@@ -2926,12 +2924,9 @@ mod tests {
             let coded_a: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(block_a.clone(), coding_config, &Sequential);
             let commitment_a = coded_a.commitment();
-            marshal
+            assert!(marshal
                 .verified(round, coded_a)
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+                .await, "durable: verified");
 
             // After restart, a fresh application would build a different
             // block for the same round.
@@ -3022,12 +3017,9 @@ mod tests {
             let stale_block = make_coding_block(stale_ctx, genesis.digest(), Height::new(1), 100);
             let stale_coded: CodedBlock<_, ReedSolomon<Sha256>, Sha256> =
                 CodedBlock::new(stale_block, coding_config, &Sequential);
-            marshal
+            assert!(marshal
                 .verified(round, stale_coded)
-                .await
-                .expect("durable: enqueue")
-                .await
-                .expect("durable: synced");
+                .await, "durable: verified");
 
             // Simulate a replay where parent selection now points to a
             // different parent commitment than the cached block was built for.

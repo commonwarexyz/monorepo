@@ -864,7 +864,17 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// Notifies the actor that a block has been verified, returning a receiver for
     /// its durable-sync handle without awaiting it. Enqueued synchronously, as with
     /// [Self::proposed].
-    pub fn verified(&self, round: Round, block: V::Block) -> oneshot::Receiver<Handle<()>> {
+    ///
+    /// This is the deferred form for the leader's propose/re-proposal paths, which
+    /// must enqueue before broadcasting the digest and await durability only at
+    /// certification (overlapping the sync with consensus voting). Verify/certify
+    /// consumers that simply need durability before proceeding should use the
+    /// blocking [Self::verified].
+    pub fn verified_deferred(
+        &self,
+        round: Round,
+        block: V::Block,
+    ) -> oneshot::Receiver<Handle<()>> {
         let (ack, receiver) = oneshot::channel();
         let _ = self.sender.enqueue(Message::Verified {
             span: info_span!("marshal.mailbox.verified", round = %round),
@@ -873,6 +883,23 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             ack: Some(ack),
         });
         receiver
+    }
+
+    /// Notifies the actor that a block has been verified.
+    ///
+    /// Returns after the block is durably persisted. Mirrors [Self::certified]: the
+    /// durable sync is awaited on the caller's task (off the actor), so the actor
+    /// never blocks on fsync. Use [Self::verified_deferred] on the propose path,
+    /// which must enqueue before broadcasting and await durability only at certify.
+    #[must_use = "callers must consider block durability before proceeding"]
+    pub async fn verified(&self, round: Round, block: V::Block) -> bool {
+        match self.verified_deferred(round, block).await {
+            Ok(handle) => {
+                handle.await.expect("failed to sync verified block");
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Notifies the actor that a block has been certified.
@@ -1246,7 +1273,7 @@ mod tests {
             drop(receiver);
 
             assert!(mailbox.proposed(round(1), block(1)).await.is_err());
-            assert!(mailbox.verified(round(2), block(2)).await.is_err());
+            assert!(!mailbox.verified(round(2), block(2)).await);
             assert!(!mailbox.certified(round(3), block(3)).await);
         });
     }

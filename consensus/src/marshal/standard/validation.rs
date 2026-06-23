@@ -102,14 +102,7 @@ where
             return Some(Decision::Complete(false));
         }
 
-        let durable = match marshal.verified(context.round, block).await {
-            Ok(handle) => {
-                handle.await.expect("failed to sync verified block");
-                true
-            }
-            Err(_) => false,
-        };
-        if !durable {
+        if !marshal.verified(context.round, block).await {
             return None;
         }
         return Some(Decision::Complete(true));
