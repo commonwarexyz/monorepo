@@ -160,3 +160,10 @@ path = "fuzz_targets/hostname.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "concurrency"
+path = "fuzz_targets/concurrency.rs"
+test = false
+doc = false
+bench = false

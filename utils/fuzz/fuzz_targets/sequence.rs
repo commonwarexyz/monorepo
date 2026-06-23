@@ -2,7 +2,7 @@
 
 use arbitrary::Arbitrary;
 use commonware_codec::{DecodeExt, Encode, EncodeFixed, FixedSize};
-use commonware_utils::sequence::{prefixed_u64::U64 as PrefixedU64, FixedBytes, U32, U64};
+use commonware_utils::sequence::{prefixed_u64::U64 as PrefixedU64, FixedBytes, VecU64, U32, U64};
 use libfuzzer_sys::fuzz_target;
 
 #[derive(Arbitrary, Debug)]
@@ -11,6 +11,7 @@ enum FuzzInput {
     TestU64 { value: u64 },
     TestU32 { value: u32 },
     TestPrefixed { prefix: u8, value: u64 },
+    TestVecU64 { value: u64, truncate: u8 },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -161,6 +162,29 @@ fn fuzz(input: FuzzInput) {
             assert_eq!(prefixed[1], value.to_be_bytes()[0]);
 
             assert_eq!(prefixed.as_ref(), &*prefixed);
+        }
+
+        FuzzInput::TestVecU64 { value, truncate } => {
+            let vec_u64 = VecU64::new(value);
+
+            let from_u64: VecU64 = value.into();
+            assert_eq!(from_u64, vec_u64);
+
+            let back_to_u64: u64 = vec_u64.into();
+            assert_eq!(back_to_u64, value);
+
+            let back_to_u64_ref: u64 = (&vec_u64).into();
+            assert_eq!(back_to_u64_ref, value);
+
+            let encoded = vec_u64.encode();
+            let decoded = VecU64::decode(encoded.clone()).unwrap();
+            assert_eq!(decoded, vec_u64);
+
+            // Truncating to keep the length prefix but drop body bytes hits the
+            // `buf.remaining() < len` error path.
+            let keep = 1 + (truncate as usize % (encoded.len() - 1));
+            let short = &encoded[..keep];
+            assert!(VecU64::decode(short).is_err());
         }
     }
 }

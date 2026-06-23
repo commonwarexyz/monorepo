@@ -1,8 +1,16 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::channel::tracked;
-use futures::executor::block_on;
+use commonware_utils::{
+    channel::{
+        fallible::{AsyncFallibleExt, FallibleExt},
+        mpsc,
+        reservation::ReservationExt,
+        ring, tracked,
+    },
+    NZUsize,
+};
+use futures::{executor::block_on, stream::FusedStream, SinkExt};
 use libfuzzer_sys::fuzz_target;
 
 const BUFFER_SIZE: usize = 1000;
@@ -26,6 +34,20 @@ enum FuzzInput {
         batch: Option<u32>,
         data: String,
     },
+    Ring {
+        capacity: u8,
+        items: Vec<u32>,
+        drop_senders_early: bool,
+    },
+    Reserve {
+        first: u32,
+        second: u32,
+    },
+    Fallible {
+        msg: u32,
+        bounded: bool,
+        disconnect: bool,
+    },
 }
 
 fn fuzz(input: FuzzInput) {
@@ -36,12 +58,15 @@ fn fuzz(input: FuzzInput) {
 
                 if let Ok(_seq) = sender.send(batch, data.clone()).await {
                     if let Some(b) = batch {
-                        let _ = sender.pending(b);
+                        // The just-sent, undelivered message counts as pending.
+                        assert_eq!(sender.pending(b), 1);
                     }
-                    let _ = sender.watermark();
+                    // Watermark never exceeds the number of messages sent.
+                    assert!(sender.watermark() <= 1);
 
                     if let Some(msg) = receiver.recv().await {
-                        let _ = msg.data;
+                        // The received payload must equal what was sent.
+                        assert_eq!(msg.data, data);
                         drop(msg.guard);
                     }
                 }
@@ -70,7 +95,8 @@ fn fuzz(input: FuzzInput) {
                     }
                 }
 
-                let _ = sender.watermark();
+                // Watermark never exceeds the number of messages enqueued.
+                assert!(sender.watermark() <= data.len() as u64);
 
                 while let Ok(msg) = receiver.try_recv() {
                     drop(msg);
@@ -93,12 +119,14 @@ fn fuzz(input: FuzzInput) {
                             guards.push(guards[0].clone());
                         }
                         drop(guards);
+                        // Dropping every guard clone marks the message delivered.
+                        if let Some(b) = batch {
+                            assert_eq!(sender.pending(b), 0);
+                        }
                     }
 
-                    let _ = sender.watermark();
-                    if let Some(b) = batch {
-                        let _ = sender.pending(b);
-                    }
+                    // Watermark never exceeds the number of messages sent.
+                    assert!(sender.watermark() <= 1);
                 }
             });
         }
@@ -107,11 +135,118 @@ fn fuzz(input: FuzzInput) {
             block_on(async {
                 let (sender, mut receiver) = tracked::bounded::<String, u32>(5);
 
-                let _ = sender.try_send(batch, data.clone());
-                let _ = sender.watermark();
+                // A fresh capacity-5 channel accepts the first try_send.
+                assert!(sender.try_send(batch, data.clone()).is_ok());
+                // Watermark never exceeds the number of messages sent.
+                assert!(sender.watermark() <= 1);
 
                 while let Ok(msg) = receiver.try_recv() {
                     drop(msg);
+                }
+            });
+        }
+
+        FuzzInput::Ring {
+            capacity,
+            items,
+            drop_senders_early,
+        } => {
+            block_on(async {
+                let cap = (capacity as usize % 8) + 1;
+                let (mut sender, mut receiver) = ring::channel::<u32>(NZUsize!(cap));
+
+                // Newly created channel: receiver alive, not terminated.
+                assert!(!sender.is_closed());
+                assert!(!receiver.is_terminated());
+
+                // try_recv on an empty channel with a live sender is Empty.
+                assert_eq!(receiver.try_recv(), Err(ring::TryRecvError::Empty));
+
+                // Send all items via the Sink (exercises poll_ready/start_send/poll_flush).
+                for &item in items.iter() {
+                    sender.send(item).await.unwrap();
+                }
+
+                // The ring keeps only the most-recent `cap` items.
+                let expected: Vec<u32> = items.iter().rev().take(cap).rev().copied().collect();
+
+                if drop_senders_early {
+                    drop(sender);
+                    // No senders remain; once buffer drains, recv yields None.
+                    let mut got = Vec::new();
+                    while let Some(v) = receiver.recv().await {
+                        got.push(v);
+                    }
+                    assert_eq!(got, expected);
+                    // All senders gone and buffer empty => terminated.
+                    assert!(receiver.is_terminated());
+                    assert_eq!(receiver.try_recv(), Err(ring::TryRecvError::Disconnected));
+                } else {
+                    let mut got = Vec::new();
+                    for _ in 0..expected.len() {
+                        got.push(receiver.recv().await.unwrap());
+                    }
+                    assert_eq!(got, expected);
+                    // Senders still alive but buffer drained.
+                    assert_eq!(receiver.try_recv(), Err(ring::TryRecvError::Empty));
+                    assert!(!receiver.is_terminated());
+
+                    // Dropping the receiver closes the channel for senders.
+                    drop(receiver);
+                    assert!(sender.is_closed());
+                    assert!(sender.send(0).await.is_err());
+                }
+            });
+        }
+
+        FuzzInput::Reserve { first, second } => {
+            block_on(async {
+                let (sender, mut receiver) = mpsc::channel::<u32>(1);
+
+                // Capacity 1: first value is sent immediately (no reservation).
+                assert!(sender.send_or_reserve(first).unwrap().is_none());
+
+                // Channel now full: second value must be reserved.
+                let reservation = sender
+                    .send_or_reserve(second)
+                    .unwrap()
+                    .expect("channel should be full");
+
+                // Drain the first value to free capacity, then deliver the reserved one.
+                assert_eq!(receiver.recv().await, Some(first));
+                reservation.await.unwrap().send();
+                assert_eq!(receiver.recv().await, Some(second));
+            });
+        }
+
+        FuzzInput::Fallible {
+            msg,
+            bounded,
+            disconnect,
+        } => {
+            block_on(async {
+                if bounded {
+                    let (tx, mut rx) = mpsc::channel::<u32>(1);
+                    if disconnect {
+                        drop(rx);
+                        // Receiver gone: lossy send reports failure, no reservation handed back.
+                        assert!(!tx.send_lossy(msg).await);
+                        assert!(tx.send_or_reserve_lossy(msg).is_none());
+                        // request_or returns the supplied default on failure.
+                        assert_eq!(tx.request_or(|_resp| msg, msg).await, msg);
+                    } else {
+                        // Empty channel: lossy send succeeds and value round-trips.
+                        assert!(tx.send_lossy(msg).await);
+                        assert_eq!(rx.recv().await, Some(msg));
+                        // Channel empty again: immediate send leaves no reservation.
+                        assert!(tx.send_or_reserve_lossy(msg).is_none());
+                        assert_eq!(rx.recv().await, Some(msg));
+                    }
+                } else {
+                    let (tx, rx) = mpsc::unbounded_channel::<u32>();
+                    drop(rx);
+                    // Unbounded sender, receiver dropped: request_or yields the default.
+                    assert_eq!(tx.request_or(|_resp| msg, msg).await, msg);
                 }
             });
         }

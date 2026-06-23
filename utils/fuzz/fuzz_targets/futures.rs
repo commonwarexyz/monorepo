@@ -1,13 +1,15 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::futures::{AbortablePool, Aborter, Pool};
+use commonware_utils::futures::{AbortablePool, Aborter, OptionFuture, Pool};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
+use std::future::Future;
 
 #[derive(Arbitrary, Debug)]
 struct FuzzInput {
     pool_type: PoolType,
+    first: Operation,
     operations: Vec<Operation>,
 }
 
@@ -24,6 +26,7 @@ enum Operation {
     CancelAll,
     CheckLen,
     CheckIsEmpty,
+    DefaultOptionFuture,
 }
 
 enum PoolWrapper {
@@ -82,7 +85,8 @@ impl PoolWrapper {
                 aborters.clear();
                 for _ in 0..num_to_abort {
                     if !pool.is_empty() {
-                        let _result = pool.next_completed().await;
+                        // Aborters were just dropped, so draining yields aborted results.
+                        assert!(pool.next_completed().await.is_err());
                     }
                 }
             }
@@ -94,11 +98,15 @@ async fn fuzz(input: FuzzInput) {
     let mut pool = PoolWrapper::new(input.pool_type);
     let mut expected_count = 0;
     let mut completed_count = 0;
+    // Multiset of pushed-but-not-yet-completed values: a completion must return a
+    // value that was actually pushed (no conjured or duplicated results).
+    let mut outstanding: Vec<i32> = Vec::new();
 
-    for op in input.operations {
+    for op in core::iter::once(input.first).chain(input.operations) {
         match op {
             Operation::Push { value } => {
                 pool.push(async move { value });
+                outstanding.push(value);
                 expected_count += 1;
                 assert_eq!(pool.len(), expected_count - completed_count);
             }
@@ -107,7 +115,12 @@ async fn fuzz(input: FuzzInput) {
                 let max_iterations = limit.min(10) as usize;
                 for _ in 0..max_iterations {
                     if expected_count > completed_count {
-                        let _result = pool.next_completed().await;
+                        let result = pool.next_completed().await;
+                        let pos = outstanding
+                            .iter()
+                            .position(|&v| v == result)
+                            .expect("completed value was never pushed");
+                        outstanding.swap_remove(pos);
                         completed_count += 1;
                     } else {
                         break;
@@ -120,12 +133,14 @@ async fn fuzz(input: FuzzInput) {
                     pool.cancel_all().await;
                     expected_count = 0;
                     completed_count = 0;
+                    outstanding.clear();
                     continue;
                 }
                 PoolWrapper::Regular(_) => {
                     pool.cancel_all().await;
                     expected_count = 0;
                     completed_count = 0;
+                    outstanding.clear();
                     assert_eq!(pool.len(), 0);
                     assert!(pool.is_empty());
                 }
@@ -138,14 +153,30 @@ async fn fuzz(input: FuzzInput) {
             Operation::CheckIsEmpty => {
                 assert_eq!(pool.is_empty(), expected_count == completed_count);
             }
+
+            Operation::DefaultOptionFuture => {
+                let option_future = OptionFuture::<std::future::Ready<i32>>::default();
+                assert!(option_future.is_none());
+
+                let waker = futures::task::noop_waker();
+                let mut cx = std::task::Context::from_waker(&waker);
+                let mut pinned = Box::pin(option_future);
+                assert!(pinned.as_mut().poll(&mut cx).is_pending());
+            }
         }
     }
 
     while expected_count > completed_count {
-        let _result = pool.next_completed().await;
+        let result = pool.next_completed().await;
+        let pos = outstanding
+            .iter()
+            .position(|&v| v == result)
+            .expect("completed value was never pushed");
+        outstanding.swap_remove(pos);
         completed_count += 1;
     }
 
+    assert!(outstanding.is_empty());
     assert_eq!(pool.len(), 0);
     assert!(pool.is_empty());
 }

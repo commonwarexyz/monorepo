@@ -2,6 +2,7 @@
 
 use arbitrary::{Arbitrary, Unstructured};
 use commonware_codec::codec::{EncodeSize, Read, Write};
+use commonware_utils::bitmap::Readable;
 use libfuzzer_sys::fuzz_target;
 
 const MAX_SIZE: usize = 100_000;
@@ -54,6 +55,10 @@ enum FuzzInput {
     OnesIter(Vec<bool>),
     /// Verify `is_unset(range)` matches the model.
     IsUnset(Vec<bool>, u64, u64),
+    /// Exercise the `Readable` trait accessors against a `Vec<bool>` model.
+    Readable(Vec<bool>, u64),
+    /// Exercise `BitMap`'s own `arbitrary` impl and basic invariants on it.
+    ArbitraryBitMap(BitMap),
 }
 
 #[derive(Debug)]
@@ -569,10 +574,67 @@ fn fuzz(input: Vec<FuzzInput>) {
                 let oracle = bools[lo as usize..hi as usize].iter().all(|&b| !b);
                 assert_eq!(v.is_unset(lo..hi), oracle);
             }
+
+            FuzzInput::Readable(bools, bit) => {
+                let v = BitMap::from(&bools);
+
+                // `len`/`is_empty` must agree with the model.
+                assert_eq!(Readable::len(&v), bools.len() as u64);
+                assert_eq!(Readable::is_empty(&v), bools.is_empty());
+
+                // A plain bitmap has nothing pruned.
+                assert_eq!(v.pruned_chunks(), 0);
+                assert_eq!(v.pruned_bits(), 0);
+
+                // `complete_chunks` counts only fully-filled chunks.
+                let expected_complete = bools.len() as u64 / BitMap::CHUNK_SIZE_BITS;
+                assert_eq!(v.complete_chunks() as u64, expected_complete);
+
+                // `get_bit` and `get_chunk` must mirror the inherent accessors.
+                if bit < Readable::len(&v) {
+                    assert_eq!(Readable::get_bit(&v, bit), v.get(bit));
+                }
+                if !v.is_empty() {
+                    // Each bit recovered from the fetched chunk must match `get`.
+                    let chunk_count = v.complete_chunks();
+                    if chunk_count > 0 {
+                        let chunk_idx = (bit % chunk_count as u64) as usize;
+                        let chunk = Readable::get_chunk(&v, chunk_idx);
+                        let base = chunk_idx as u64 * BitMap::CHUNK_SIZE_BITS;
+                        for offset in 0..BitMap::CHUNK_SIZE_BITS {
+                            let global = base + offset;
+                            let byte = (offset / 8) as usize;
+                            let from_chunk = (chunk[byte] >> (offset % 8)) & 1 == 1;
+                            assert_eq!(from_chunk, v.get(global));
+                        }
+                    }
+
+                    // `last_chunk` reports the trailing chunk and its valid bit count.
+                    let (_, bits_in_last) = Readable::last_chunk(&v);
+                    assert!(bits_in_last >= 1 && bits_in_last <= BitMap::CHUNK_SIZE_BITS);
+                }
+            }
+
+            FuzzInput::ArbitraryBitMap(v) => {
+                // Round-trip through the bit iterator to confirm internal consistency.
+                let model: Vec<bool> = v.clone().into();
+                assert_eq!(model.len() as u64, v.len());
+                assert_eq!(BitMap::from(&model), v);
+                assert_eq!(v.count_ones() + v.count_zeros(), v.len());
+            }
         }
     }
 }
 
-fuzz_target!(|input: Vec<FuzzInput>| {
-    fuzz(input);
+#[derive(Arbitrary, Debug)]
+struct Plan {
+    first: FuzzInput,
+    rest: Vec<FuzzInput>,
+}
+
+fuzz_target!(|plan: Plan| {
+    let mut ops = Vec::with_capacity(1 + plan.rest.len());
+    ops.push(plan.first);
+    ops.extend(plan.rest);
+    fuzz(ops);
 });
