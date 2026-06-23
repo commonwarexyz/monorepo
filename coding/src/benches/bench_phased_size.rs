@@ -27,7 +27,7 @@ fn bench_size<S: PhasedScheme>(name: &str) {
             };
 
             let (commitment, mut shards) =
-                S::encode(b"", &config, data.as_slice(), &STRATEGY).unwrap();
+                S::encode(b"", &config, data, &STRATEGY).unwrap();
             let strong_shard = shards.pop().unwrap();
             let my_index = config.minimum_shards.get() + config.extra_shards.get() - 1;
             let (_, _, weak_shard) =
