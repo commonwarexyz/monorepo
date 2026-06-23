@@ -12,8 +12,10 @@ use commonware_math::algebra::{
     Space,
 };
 use commonware_parallel::Strategy;
-use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-use std::array;
+use core::{
+    array,
+    ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign},
+};
 
 /// A scalar exponent for the Banderwagon group [`G`]: an element of the scalar
 /// field `Z/r`, where `r` is the prime group order.
