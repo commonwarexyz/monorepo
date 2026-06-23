@@ -611,7 +611,7 @@ fn fuzz(input: Vec<FuzzInput>) {
 
                     // `last_chunk` reports the trailing chunk and its valid bit count.
                     let (_, bits_in_last) = Readable::last_chunk(&v);
-                    assert!(bits_in_last >= 1 && bits_in_last <= BitMap::CHUNK_SIZE_BITS);
+                    assert!((1..=BitMap::CHUNK_SIZE_BITS).contains(&bits_in_last));
                 }
             }
 

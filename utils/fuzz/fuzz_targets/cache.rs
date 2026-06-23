@@ -126,7 +126,8 @@ fn run(plan: Plan) {
                 assert!(cache.len() <= cap);
             }
             Op::IsEmpty => {
-                assert_eq!(cache.is_empty(), cache.len() == 0);
+                let len = cache.len();
+                assert_eq!(cache.is_empty(), len == 0);
             }
             Op::Capacity => {
                 assert_eq!(cache.capacity(), cap);

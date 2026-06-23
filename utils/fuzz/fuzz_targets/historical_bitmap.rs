@@ -255,7 +255,7 @@ fn fuzz(input: FuzzInput) {
         let mut current_len = expected.len();
         let mut current_pruned = expected.pruned_chunks();
 
-        if commit_number % 2 == 0 {
+        if commit_number.is_multiple_of(2) {
             let mut dirty = bitmap.into_dirty();
             for op in commit {
                 apply_op(
