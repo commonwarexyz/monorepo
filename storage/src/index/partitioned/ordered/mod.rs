@@ -358,9 +358,11 @@ impl<K: Ord + Copy + Send + Sync, V: Send + Sync> CursorTrait for Cursor<'_, K, 
 }
 
 /// Sorted-array length at which a partition spills to a `BTreeMap`. Set well above any honest
-/// occupancy (even ~1B keys at P=3 averages ~60 entries per partition) so uniformly distributed
-/// keys should never spill; it exists only to bound adversarial grinding that floods a partition
-/// with distinct translated keys (see the module docs for what the guard does and does not bound).
+/// occupancy: at P=3 (16.8M partitions) the average partition holds ~N/16.8M keys, so the mean only
+/// reaches 512 near ~8.6B keys -- but with the spread across partitions the busiest one stays under
+/// 512 up to ~5B uniformly distributed keys, so honest workloads should not spill below that scale.
+/// The guard exists only to bound adversarial grinding that floods a single partition with distinct
+/// translated keys (see the module docs for what it does and does not bound).
 const SPILL_THRESHOLD: usize = 512;
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
