@@ -1,5 +1,5 @@
 use crate::{
-    bls12381::primitives::group::{Scalar, DST},
+    bls12381::primitives::group::Scalar,
     zk::circuit::{BoolVar, Context, Var},
 };
 #[cfg(not(feature = "std"))]
@@ -8,7 +8,8 @@ use blst::blst_fr;
 use bytes::{Buf, BufMut};
 use commonware_codec::{Error as CodecError, FixedSize, Read, ReadExt, Write};
 use commonware_math::algebra::{
-    msm_naive, Additive, Field, Multiplicative, Object, Random, Ring, Space,
+    msm_naive, Additive, CryptoGroup, Field, HashToGroup, Multiplicative, Object, Random, Ring,
+    Space,
 };
 use commonware_parallel::Strategy;
 use core::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
@@ -300,9 +301,11 @@ impl PartialEq for G {
 
 impl Eq for G {}
 
-impl G {
+impl CryptoGroup for G {
+    type Scalar = F;
+
     /// Returns the prime-order Bandersnatch generator in extended coordinates.
-    pub const fn generator() -> Self {
+    fn generator() -> Self {
         Self {
             // x = 0x29c132cc2c0b34c5743711777bbe42f32b79c022ad998465e1e71866a252ae18
             x: Scalar(blst_fr {
@@ -573,7 +576,8 @@ impl G {
     ///
     /// Returns `None` if `x` is not the serialization of an element of the
     /// subgroup we represent (i.e. it fails the subgroup check or lies off the
-    /// curve). This is the shared core of both [`Read`] and [`G::hash_to_curve`].
+    /// curve). This is the shared core of both [`Read`] and
+    /// [`hash_to_group`](HashToGroup::hash_to_group).
     fn from_x(x: Scalar) -> Option<Self> {
         let one = Scalar::one();
         let x_sq = {
@@ -602,7 +606,9 @@ impl G {
         let t = x.clone() * &y;
         Some(Self { x, y, t, z: one })
     }
+}
 
+impl HashToGroup for G {
     /// Hashes `(domain_separator, message)` to a Banderwagon point.
     ///
     /// Uses try-and-increment: for `counter = 0, 1, 2, ...` we derive a candidate
@@ -625,7 +631,7 @@ impl G {
     /// public and the secret scalar is only applied *afterwards* — so the
     /// data-dependent timing reveals nothing secret. A future caller that hashes
     /// secret material would instead need a constant-time map.
-    pub fn hash_to_curve(domain_separator: DST, message: &[u8]) -> Self {
+    fn hash_to_group(domain_separator: &[u8], message: &[u8]) -> Self {
         // `message || counter`, with an 8-byte big-endian counter we overwrite
         // in place each attempt.
         let mut data = Vec::with_capacity(message.len() + 8);
@@ -1082,35 +1088,40 @@ mod tests {
         assert_eq!(decoded, g);
     }
 
-    const TEST_DST: DST = b"COMMONWARE_BANDERWAGON_HASH_TO_CURVE_TEST";
+    const TEST_DST: &[u8] = b"COMMONWARE_BANDERWAGON_HASH_TO_CURVE_TEST";
 
     #[test]
-    fn test_hash_to_curve_deterministic() {
+    fn test_hash_to_group_deterministic() {
         // Same inputs always produce the same point; it round-trips through the
         // codec (so it really is a valid subgroup element).
-        let p = G::hash_to_curve(TEST_DST, b"hello");
-        let q = G::hash_to_curve(TEST_DST, b"hello");
+        let p = G::hash_to_group(TEST_DST, b"hello");
+        let q = G::hash_to_group(TEST_DST, b"hello");
         assert_eq!(p, q);
         assert_eq!(G::decode(p.encode()).unwrap(), p);
     }
 
     #[test]
-    fn test_hash_to_curve_distinct_messages() {
+    fn test_hash_to_group_distinct_messages() {
         // Different messages map to different points.
-        let p = G::hash_to_curve(TEST_DST, b"message-a");
-        let q = G::hash_to_curve(TEST_DST, b"message-b");
+        let p = G::hash_to_group(TEST_DST, b"message-a");
+        let q = G::hash_to_group(TEST_DST, b"message-b");
         assert_ne!(p, q);
     }
 
     #[test]
-    fn test_hash_to_curve_in_subgroup() {
+    fn test_hash_to_group_in_subgroup() {
         // Every output must pass the subgroup check, i.e. re-encode/decode.
         minifuzz::test(|u| {
             let msg: Vec<u8> = u.arbitrary()?;
-            let p = G::hash_to_curve(TEST_DST, &msg);
+            let p = G::hash_to_group(TEST_DST, &msg);
             assert_eq!(G::decode(p.encode()).unwrap(), p);
             Ok(())
         });
+    }
+
+    #[test]
+    fn test_hash_to_group_laws() {
+        minifuzz::test(commonware_math::algebra::test_suites::fuzz_hash_to_group::<G>);
     }
 
     #[test]

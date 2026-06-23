@@ -45,6 +45,7 @@ use crate::{
     },
 };
 use commonware_codec::Encode;
+use commonware_math::algebra::{CryptoGroup, HashToGroup};
 use rand::rngs::StdRng;
 use std::sync::LazyLock;
 
@@ -66,8 +67,8 @@ fn point_hash(sender: &G, receiver: &G, msg: &[u8]) -> (G, G) {
     let mut msg1 = prefix;
     msg1.push(1);
     (
-        G::hash_to_curve(POINT_DST, &msg0),
-        G::hash_to_curve(POINT_DST, &msg1),
+        G::hash_to_group(POINT_DST, &msg0),
+        G::hash_to_group(POINT_DST, &msg1),
     )
 }
 

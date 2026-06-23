@@ -562,7 +562,7 @@ impl Scalar {
     }
 
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
-    pub fn map(dst: DST, msg: &[u8]) -> Self {
+    pub fn map(dst: &[u8], msg: &[u8]) -> Self {
         // The BLS12-381 scalar field has a modulus of approximately 255 bits.
         // According to RFC9380, when mapping to a field element, we need to
         // generate uniform bytes with length L = ceil((ceil(log2(p)) + k) / 8),
