@@ -7,13 +7,20 @@
 //! lookup/insert speed for memory density at scale; the unordered variant ([`super::unordered`])
 //! uses hash sub-indices instead and is faster when ordering is not required.
 //!
-//! # Adversarial grinding
+//! # Spilling over-full partitions
 //!
-//! An order-preserving translator cannot randomize keys (that would break the ordering), so an
-//! attacker can grind the key suffix to flood one partition with distinct translated keys, making
-//! each sorted-array insert an O(occupancy) memmove. When a partition's array reaches
-//! `SPILL_THRESHOLD` entries it spills to a `BTreeMap` (the `spilled` field), bounding *distinct-key*
-//! grinding to O(log occupancy) per operation.
+//! Each sorted-array insert is an O(occupancy) memmove, so a partition that grows large makes
+//! inserts expensive. When a partition's array reaches `SPILL_THRESHOLD` entries it converts to a
+//! `BTreeMap` (the `spilled` field) -- a supported alternate representation whose insert, lookup,
+//! and traversal are O(log occupancy). A partition reaches that size two ways:
+//!
+//! - *Adversarial grinding.* An order-preserving translator cannot randomize keys (that would break
+//!   the ordering), so an attacker can grind the key suffix to flood one partition with distinct
+//!   translated keys. Spilling bounds flooding M keys from O(M^2) to O(M log M).
+//! - *Honest high-occupancy growth at low `P`.* With few partitions a uniform workload fills them: a
+//!   `P=1` index (256 partitions) is guaranteed to spill once it holds more than 256*511 = 130,816
+//!   entries, `P=2` past ~33M, while `P=3`'s 16.8M partitions push this past ~8.5B (so P=3 is
+//!   effectively unreachable under honest load).
 //!
 //! The guard bounds distinct-key density only, not the length of a single key's value run. A
 //! translated key's values (hash collisions, or repeated inserts of one key) form a contiguous
@@ -45,15 +52,16 @@ use std::{
     ops::Bound,
 };
 
-/// Sorted-array length at which a partition spills to a `BTreeMap`. Set well above any honest
-/// occupancy (even ~1B keys at P=3 averages ~60 entries per partition) so uniformly distributed
-/// keys should never spill; it exists only to bound adversarial grinding that floods a partition
-/// with distinct translated keys (see the module docs for what the guard does and does not bound).
+/// Sorted-array length at which a partition converts to a `BTreeMap`, bounding the O(occupancy)
+/// insert memmove to O(log occupancy). A partition reaches this from adversarial distinct-key
+/// grinding or from honest growth once partitions fill: a spill is guaranteed past 256*511 = 130,816
+/// entries at `P=1`, past ~33M at `P=2`, and only past ~8.5B at `P=3` (so P=3 effectively never
+/// spills under honest load). See the module docs.
 const SPILL_THRESHOLD: usize = 512;
 
 /// A partitioned index storing each partition as sorted struct-of-arrays, spilling an over-full
-/// partition to a `BTreeMap` to bound adversarial distinct-key grinding (see `spilled` and the
-/// module docs).
+/// partition to a `BTreeMap` to bound its O(occupancy) insert cost (see `spilled` and the module
+/// docs).
 pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     /// Translates the prefix-stripped key bytes into a partition-local key.
     translator: T,
@@ -63,9 +71,9 @@ pub struct Index<T: Translator, V: Send + Sync, const P: usize> {
     /// instead have spilled (see `spilled`).
     partitions: Box<[Partition<T::Key, V>]>,
 
-    /// Partitions that have spilled out of their sorted arrays (over-full from grinding), keyed by
-    /// partition index; each maps translated keys to their values newest-first. Typically empty
-    /// unless key distribution is non-uniform, e.g. due to grinding.
+    /// Partitions that have spilled out of their sorted arrays (reached `SPILL_THRESHOLD` entries),
+    /// keyed by partition index; each maps translated keys to their values newest-first. Empty until
+    /// a partition fills, whether from honest growth at low `P` or adversarial grinding.
     spilled: HashMap<usize, BTreeMap<T::Key, Vec<V>>>,
 
     /// Sorted-array length at which a partition spills to `spilled`; [SPILL_THRESHOLD] in

@@ -35,17 +35,16 @@ impl<K: Ord + Copy, V> Partition<K, V> {
         self.keys.is_empty()
     }
 
-    /// The number of stored entries (values, counting collisions). This is the size of the sorted
-    /// array, i.e. the cost driver of an insert memmove, so it is what the spill guard thresholds
-    /// on.
+    /// The number of stored entries (values, counting collisions).
     pub(super) const fn len(&self) -> usize {
         self.keys.len()
     }
 
     /// Move every entry out of the partition, leaving it empty, returning one `(key, values)` pair
-    /// per distinct key with the values newest-first (matching the run order: SoA stores a run's
-    /// newest at its lowest index). Used to spill an over-full partition into a `BTreeMap`.
+    /// per distinct key with its values newest-first.
     pub(super) fn drain_runs(&mut self) -> Vec<(K, Vec<V>)> {
+        // Each run is already stored newest-first (lowest index), so taking its values in array
+        // order preserves that ordering.
         let keys = std::mem::take(&mut self.keys);
         let vals = std::mem::take(&mut self.vals);
         let mut vals = vals.into_iter();
@@ -116,8 +115,7 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// Insert `(key, value)` at array index `idx`. The caller must pass an `idx` that keeps `keys`
-    /// sorted (i.e. within or adjacent to `key`'s run), as the cursor does when placing a value at
-    /// a specific position in a key's run.
+    /// sorted (i.e. within or adjacent to `key`'s run).
     pub(super) fn insert_at(&mut self, idx: usize, key: K, value: V) {
         self.keys.insert(idx, key);
         self.vals.insert(idx, value);
@@ -141,7 +139,7 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// The values of the lexicographically smallest key, newest first (None if the partition is
-    /// empty). The smallest key's run starts at index 0, so we only need to scan forward.
+    /// empty).
     pub(super) fn first_values(&self) -> Option<&[V]> {
         if self.keys.is_empty() {
             return None;
@@ -150,14 +148,14 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// The values of the lexicographically largest key, newest first (None if the partition is
-    /// empty). The largest key's run ends at the last index, so we only need to scan backward.
+    /// empty).
     pub(super) fn last_values(&self) -> Option<&[V]> {
         let last = self.keys.len().checked_sub(1)?;
         Some(&self.vals[self.run_ending_at(last)])
     }
 
     /// The values of the smallest key strictly greater than `key`, newest first (None if no such
-    /// key exists). The next key's run starts at `idx`, so we only need to scan forward.
+    /// key exists).
     pub(super) fn next_values_after(&self, key: &K) -> Option<&[V]> {
         let idx = self.keys.partition_point(|k| *k <= *key);
         if idx >= self.keys.len() {
@@ -167,7 +165,7 @@ impl<K: Ord + Copy, V> Partition<K, V> {
     }
 
     /// The values of the largest key strictly less than `key`, newest first (None if no such key
-    /// exists). The prev key's run ends at `prev`, so we only need to scan backward.
+    /// exists).
     pub(super) fn prev_values_before(&self, key: &K) -> Option<&[V]> {
         let prev = self.lower_bound(key).checked_sub(1)?;
         Some(&self.vals[self.run_ending_at(prev)])
