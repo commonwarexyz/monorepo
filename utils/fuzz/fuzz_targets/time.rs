@@ -1,9 +1,8 @@
 #![no_main]
 
 use arbitrary::Arbitrary;
-use commonware_utils::{DurationExt, SystemTimeExt};
+use commonware_utils::{DurationExt, FuzzRng, SystemTimeExt};
 use libfuzzer_sys::fuzz_target;
-use rand::{rngs::StdRng, SeedableRng};
 use std::time::{Duration, SystemTime};
 
 #[derive(Arbitrary, Debug)]
@@ -27,14 +26,49 @@ enum Operation {
         seconds_since_epoch: u64,
         jitter_secs: u64,
     },
+    FromNanosSaturating {
+        nanos: u128,
+    },
+    SaturatingAddExt {
+        seconds_since_epoch: u64,
+        delta_secs: u64,
+        delta_nanos: u32,
+    },
 }
 
 fn fuzz(input: FuzzInput) {
-    let mut rng = StdRng::seed_from_u64(input.seed);
+    let mut rng = FuzzRng::new(input.seed.to_le_bytes().to_vec());
 
     match input.operation {
         Operation::ParseDuration { input } => {
-            let _ = Duration::parse(&input);
+            let parsed = Duration::parse(&input);
+            // Independent re-derivation of the accepted grammar (suffix precedence
+            // ms, h, m, s) cross-checks the parser against an oracle.
+            let s = input.trim();
+            let oracle = if let Some(n) = s.strip_suffix("ms") {
+                n.trim().parse::<u64>().ok().map(Duration::from_millis)
+            } else if let Some(n) = s.strip_suffix('h') {
+                n.trim()
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|h| h.checked_mul(3600))
+                    .map(Duration::from_secs)
+            } else if let Some(n) = s.strip_suffix('m') {
+                n.trim()
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(|m| m.checked_mul(60))
+                    .map(Duration::from_secs)
+            } else if let Some(n) = s.strip_suffix('s') {
+                n.trim().parse::<u64>().ok().map(Duration::from_secs)
+            } else {
+                None
+            };
+            match (parsed, oracle) {
+                (Ok(d), Some(e)) => assert_eq!(d, e),
+                (Ok(d), None) => panic!("parser accepted {input:?} as {d:?}; oracle rejected"),
+                (Err(_), _) => {}
+            }
         }
 
         Operation::SystemTimeEpoch {
@@ -85,6 +119,36 @@ fn fuzz(input: FuzzInput) {
                             assert!(jittered_time <= base_time + (jitter * 2));
                         }
                     }
+                }
+            }
+        }
+
+        Operation::FromNanosSaturating { nanos } => {
+            let result = Duration::from_nanos_saturating(nanos);
+            if nanos > Duration::MAX.as_nanos() {
+                assert_eq!(result, Duration::MAX);
+            } else {
+                assert_eq!(result.as_nanos(), nanos);
+            }
+        }
+
+        Operation::SaturatingAddExt {
+            seconds_since_epoch,
+            delta_secs,
+            delta_nanos,
+        } => {
+            if let Some(base_time) =
+                SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds_since_epoch))
+            {
+                let delta = Duration::new(delta_secs, delta_nanos % 1_000_000_000);
+                let result = base_time.saturating_add_ext(delta);
+                if delta.is_zero() {
+                    assert_eq!(result, base_time);
+                } else {
+                    assert_eq!(
+                        result,
+                        base_time.checked_add(delta).unwrap_or(SystemTime::limit())
+                    );
                 }
             }
         }

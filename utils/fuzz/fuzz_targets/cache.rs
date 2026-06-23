@@ -18,10 +18,12 @@ enum Op {
     Put(u8, u16),
     GetOrInsert(u8, u16),
     GetOrInsertMut(u8, u16),
+    TryGetOrInsert(u8, u16, bool),
     Remove(u8),
     Retain(u8),
     Len,
     IsEmpty,
+    Capacity,
     Clear,
 }
 
@@ -29,6 +31,7 @@ enum Op {
 struct Plan {
     capacity: u8,
     prefill: bool,
+    first: Op,
     ops: Vec<Op>,
 }
 
@@ -43,14 +46,19 @@ fn run(plan: Plan) {
     // values); an evicted key is simply absent.
     let mut model: HashMap<u8, u16> = HashMap::new();
 
-    for op in plan.ops {
+    for op in core::iter::once(plan.first).chain(plan.ops) {
         match op {
             Op::Get(k) => {
                 let k = k % KEY_SPACE;
                 assert_eq!(cache.get(&k).copied(), cache.peek(&k).copied());
             }
             Op::Peek(k) => {
-                let _ = cache.peek(&(k % KEY_SPACE));
+                let k = k % KEY_SPACE;
+                let peeked = cache.peek(&k).copied();
+                assert_eq!(peeked.is_some(), cache.contains(&k));
+                if let Some(v) = peeked {
+                    assert_eq!(Some(v), model.get(&k).copied());
+                }
             }
             Op::Contains(k) => {
                 let k = k % KEY_SPACE;
@@ -81,6 +89,27 @@ fn run(plan: Plan) {
                 model.insert(k, v);
                 assert_eq!(cache.peek(&k).copied(), Some(v));
             }
+            Op::TryGetOrInsert(k, v, ok) => {
+                let k = k % KEY_SPACE;
+                let was_present = cache.contains(&k);
+                let prev = cache.peek(&k).copied();
+                if ok {
+                    let stored = *cache.try_get_or_insert_with::<_, ()>(k, || Ok(v)).unwrap();
+                    // On a hit f is not called, so the existing value is kept;
+                    // on a miss the freshly computed value is stored.
+                    let expected = if was_present { prev.unwrap() } else { v };
+                    assert_eq!(stored, expected);
+                    model.insert(k, stored);
+                    assert_eq!(cache.peek(&k).copied(), Some(stored));
+                } else {
+                    let res: Result<&u16, ()> = cache.try_get_or_insert_with(k, || Err(()));
+                    // A miss with an error inserts nothing; a hit ignores f and
+                    // returns the present value, so presence never changes.
+                    assert_eq!(res.is_ok(), was_present);
+                    assert_eq!(cache.contains(&k), was_present);
+                    assert_eq!(cache.peek(&k).copied(), prev);
+                }
+            }
             Op::Remove(k) => {
                 let k = k % KEY_SPACE;
                 let had = cache.contains(&k);
@@ -97,7 +126,10 @@ fn run(plan: Plan) {
                 assert!(cache.len() <= cap);
             }
             Op::IsEmpty => {
-                let _ = cache.is_empty();
+                assert_eq!(cache.is_empty(), cache.len() == 0);
+            }
+            Op::Capacity => {
+                assert_eq!(cache.capacity(), cap);
             }
             Op::Clear => {
                 cache.clear();

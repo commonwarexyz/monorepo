@@ -3,11 +3,11 @@
 use arbitrary::Arbitrary;
 use commonware_codec::{Encode, Error as CodecError, RangeCfg, Read, Write};
 use commonware_utils::{
-    vec::{Error as NonEmptyVecError, NonEmptyVec},
+    vec::{Bounded, Error as NonEmptyVecError, NonEmptyVec},
     TryFromIterator,
 };
 use libfuzzer_sys::fuzz_target;
-use std::num::NonZeroUsize;
+use std::{collections::VecDeque, num::NonZeroUsize};
 
 const MAX_OPS: usize = 32;
 const MAX_LEN: usize = 256;
@@ -24,17 +24,24 @@ enum Op {
     Mutate { swap_a: usize, swap_b: usize },
 }
 
+#[derive(Arbitrary, Debug)]
+enum BoundedOp {
+    Push(u8),
+    PopFront,
+}
+
 #[derive(Debug)]
 enum FuzzInput {
     Construct { items: Vec<u8>, array: [u8; 3] },
     Mutate { init: Vec<u8>, ops: Vec<Op> },
     Codec { items: Vec<u8> },
     Arbitrary { bytes: Vec<u8> },
+    Bounded { capacity: u8, ops: Vec<BoundedOp> },
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
     fn arbitrary(u: &mut arbitrary::Unstructured<'a>) -> arbitrary::Result<Self> {
-        match u.int_in_range(0..=3)? {
+        match u.int_in_range(0..=4)? {
             0 => Ok(Self::Construct {
                 items: arbitrary_vec_low_empty(u)?,
                 array: u.arbitrary()?,
@@ -46,8 +53,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             2 => Ok(Self::Codec {
                 items: arbitrary_vec_low_empty(u)?,
             }),
-            _ => Ok(Self::Arbitrary {
+            3 => Ok(Self::Arbitrary {
                 bytes: arbitrary_vec_low_empty(u)?,
+            }),
+            _ => Ok(Self::Bounded {
+                capacity: u.arbitrary()?,
+                ops: arbitrary_vec_non_empty(u)?,
             }),
         }
     }
@@ -60,6 +71,17 @@ fn arbitrary_vec_low_empty<'a, T: Arbitrary<'a>>(
         return Ok(Vec::new());
     }
 
+    let first = T::arbitrary(u)?;
+    let mut rest = Vec::<T>::arbitrary(u)?;
+    let mut items = Vec::with_capacity(1 + rest.len());
+    items.push(first);
+    items.append(&mut rest);
+    Ok(items)
+}
+
+fn arbitrary_vec_non_empty<'a, T: Arbitrary<'a>>(
+    u: &mut arbitrary::Unstructured<'a>,
+) -> arbitrary::Result<Vec<T>> {
     let first = T::arbitrary(u)?;
     let mut rest = Vec::<T>::arbitrary(u)?;
     let mut items = Vec::with_capacity(1 + rest.len());
@@ -262,12 +284,47 @@ fn exercise_arbitrary(bytes: &[u8]) {
     }
 }
 
+fn exercise_bounded(capacity: u8, ops: Vec<BoundedOp>) {
+    let cap = NonZeroUsize::new((capacity as usize % 8) + 1).unwrap();
+    let mut bounded = Bounded::<u8>::new(cap);
+    let mut model: VecDeque<u8> = VecDeque::new();
+
+    assert_eq!(bounded.capacity(), cap);
+
+    for op in ops {
+        match op {
+            BoundedOp::Push(value) => {
+                let evicted = bounded.push(value);
+                let expected = if model.len() == cap.get() {
+                    model.pop_front()
+                } else {
+                    None
+                };
+                model.push_back(value);
+                assert_eq!(evicted, expected);
+            }
+            BoundedOp::PopFront => {
+                assert_eq!(bounded.pop_front(), model.pop_front());
+            }
+        }
+        assert_eq!(bounded.capacity(), cap);
+        assert!(bounded.len() <= cap.get());
+        let as_ref: &VecDeque<u8> = bounded.as_ref();
+        assert_eq!(as_ref, &model);
+    }
+
+    let from: VecDeque<u8> = bounded.clone().into();
+    assert_eq!(from, model);
+    assert_eq!(bounded.into_inner(), model);
+}
+
 fn fuzz(input: FuzzInput) {
     match input {
         FuzzInput::Construct { items, array } => exercise_construct(items, array),
         FuzzInput::Mutate { init, ops } => exercise_mutate(init, ops),
         FuzzInput::Codec { items } => exercise_codec(items),
         FuzzInput::Arbitrary { bytes } => exercise_arbitrary(&bytes),
+        FuzzInput::Bounded { capacity, ops } => exercise_bounded(capacity, ops),
     }
 }
 

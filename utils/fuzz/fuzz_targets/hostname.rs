@@ -54,6 +54,7 @@ fn classify(s: &str) -> Result<(), Error> {
 struct FuzzInput {
     raw: String,
     bytes: Vec<u8>,
+    generated: Hostname,
 }
 
 impl<'a> Arbitrary<'a> for FuzzInput {
@@ -80,7 +81,12 @@ impl<'a> Arbitrary<'a> for FuzzInput {
             v.extend(rest);
             v
         };
-        Ok(Self { raw, bytes })
+        let generated = Hostname::arbitrary(u)?;
+        Ok(Self {
+            raw,
+            bytes,
+            generated,
+        })
     }
 }
 
@@ -126,6 +132,22 @@ fn fuzz(input: FuzzInput) {
             bytes
         );
     }
+
+    // 5. Accessor parity: as_ref must agree with as_str, and into_string must
+    //    yield exactly that same string without losing data.
+    let h = input.generated;
+    let view = h.as_str().to_string();
+    assert_eq!(h.as_ref(), view.as_str(), "as_ref/as_str divergence");
+    let owned = h.into_string();
+    assert_eq!(owned, view, "into_string lost data");
+
+    // 6. TryFrom parity: both String and &str conversions must succeed for the
+    //    valid generated hostname and yield the same hostname as Hostname::new.
+    let expected = Hostname::new(owned.clone()).expect("generated hostname is valid");
+    let from_string = Hostname::try_from(owned.clone()).expect("TryFrom<String> on valid hostname");
+    let from_str = Hostname::try_from(owned.as_str()).expect("TryFrom<&str> on valid hostname");
+    assert_eq!(from_string, expected, "TryFrom<String> divergence");
+    assert_eq!(from_str, expected, "TryFrom<&str> divergence");
 }
 
 fuzz_target!(|input: FuzzInput| {
