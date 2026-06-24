@@ -1343,15 +1343,6 @@ impl<B: Blob> Append<B> {
         })
     }
 
-    /// A handle that waits for `pending`'s in-flight sync, then makes the newly buffered data durable.
-    fn delayed_start_sync_handle(&self, pending: SharedSync) -> Handle<()> {
-        let append = self.clone();
-        Handle::from_future(async move {
-            pending.await;
-            append.sync().await
-        })
-    }
-
     /// Starts an async durability barrier for a just-written partial-page footer and records it as
     /// the pending sync that a later rewrite of the page must wait for.
     ///
@@ -1395,37 +1386,46 @@ impl<B: Blob> Append<B> {
     /// mutations are considered issued, so a later [`Self::sync`] without
     /// intervening writes returns immediately and does not wait for this handle.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
-        let buf_guard = self.buffer.write().await;
+        loop {
+            let buf_guard = self.buffer.write().await;
+            let logical_page_size = self.cache_ref.page_size() as usize;
 
-        // A partial page with an in-flight sync cannot be rewritten until that sync is durable. If
-        // it is still in flight, coalesce behind it, syncing this call's data once it is durable.
-        // (A failed sync would have panicked, so a completed one is always durable.)
-        if let Some(pending) = self.pending_partial_sync().await {
-            if pending.peek().is_none() {
-                drop(buf_guard);
-                return Ok(self.delayed_start_sync_handle(pending));
+            // A partial page with an in-flight sync cannot be rewritten until that sync is durable.
+            // If this call has buffered bytes that would rewrite the page, wait here before
+            // returning so the returned handle only observes a sync that has already been started.
+            // (A failed sync would have panicked, so a completed one is always durable.)
+            if let Some(pending) = self.pending_partial_sync().await {
+                if pending.peek().is_none()
+                    && self
+                        .rewrites_current_page(&buf_guard, true, logical_page_size)
+                        .await
+                {
+                    drop(buf_guard);
+                    pending.await;
+                    continue;
+                }
             }
-        }
 
-        // Flush any buffered data, including any partial page (plain writes only, so the durability
-        // barrier is started separately below). A rewrite of the current page clears the now-durable
-        // pending sync via wait_for_pending_partial_sync.
-        self.flush_internal(buf_guard, true, false).await?;
+            // Flush any buffered data, including any partial page (plain writes only, so the durability
+            // barrier is started separately below). A rewrite of the current page clears the now-durable
+            // pending sync via wait_for_pending_partial_sync.
+            self.flush_internal(buf_guard, true, false).await?;
 
-        // Start syncing pending mutations and return the completion handle. If a partial-page write
-        // is in flight, record it so a later rewrite of this page waits for it to become durable
-        // before overwriting its checksum slot.
-        let mut blob_state = self.blob_state.write().await;
-        if blob_state.needs_sync && blob_state.partial_page_state.is_some() {
-            Self::record_partial_sync(&mut blob_state).await;
-            let pending = blob_state
-                .pending_partial_sync
-                .clone()
-                .expect("record_partial_sync recorded a pending sync");
-            drop(blob_state);
-            Ok(Self::pending_partial_sync_handle(pending))
-        } else {
-            Ok(blob_state.start_sync().await)
+            // Start syncing pending mutations and return the completion handle. If a partial-page write
+            // is in flight, record it so a later rewrite of this page waits for it to become durable
+            // before overwriting its checksum slot.
+            let mut blob_state = self.blob_state.write().await;
+            if blob_state.needs_sync && blob_state.partial_page_state.is_some() {
+                Self::record_partial_sync(&mut blob_state).await;
+                let pending = blob_state
+                    .pending_partial_sync
+                    .clone()
+                    .expect("record_partial_sync recorded a pending sync");
+                drop(blob_state);
+                return Ok(Self::pending_partial_sync_handle(pending));
+            } else {
+                return Ok(blob_state.start_sync().await);
+            }
         }
     }
 
@@ -3066,54 +3066,102 @@ mod tests {
             let writes_after_first = blob.writes();
 
             append.append(b"fg").await.unwrap();
-            let second = append.start_sync().await.unwrap();
-            assert_eq!(
-                blob.writes(),
-                writes_after_first,
-                "second start_sync must not rewrite before the first partial sync completes"
-            );
-            let third = append.start_sync().await.unwrap();
-            assert_eq!(
-                blob.writes(),
-                writes_after_first,
-                "queued start_sync calls must coalesce behind the first partial sync"
-            );
-
             let completed = Arc::new(AtomicUsize::new(0));
             let completed_clone = completed.clone();
-            let waiter = context.child("second_sync").spawn(|_| async move {
-                second.await.unwrap();
+            let start_append = append.clone();
+            let starter = context.child("second_start").spawn(|_| async move {
+                let second = start_append.start_sync().await.unwrap();
                 completed_clone.fetch_add(1, Ordering::Relaxed);
-            });
-            let completed_clone = completed.clone();
-            let queued_waiter = context.child("third_sync").spawn(|_| async move {
-                third.await.unwrap();
-                completed_clone.fetch_add(1, Ordering::Relaxed);
+                second
             });
 
             crate::utils::reschedule().await;
             assert_eq!(
                 blob.writes(),
                 writes_after_first,
-                "polling the second handle must still wait for the first sync"
+                "second start_sync must not rewrite before the first partial sync completes"
             );
             assert_eq!(completed.load(Ordering::Relaxed), 0);
 
             blob.release_next_sync();
             first.await.unwrap();
             for _ in 0..5 {
-                if completed.load(Ordering::Relaxed) == 2 {
+                if completed.load(Ordering::Relaxed) == 1 {
                     break;
                 }
                 crate::utils::reschedule().await;
             }
             assert!(
                 blob.writes() > writes_after_first,
-                "queued handles should rewrite the coalesced page after the first sync completes"
+                "queued start_sync should rewrite the page after the first sync completes"
             );
-            waiter.await.unwrap();
-            queued_waiter.await.unwrap();
-            assert_eq!(completed.load(Ordering::Relaxed), 2);
+            let second = starter.await.unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), 1);
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            second.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_starts_rewrite_sync_even_if_returned_handle_is_dropped() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(b"abc").await.unwrap();
+            append.sync().await.unwrap();
+
+            append.append(b"de").await.unwrap();
+            let first = append.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+            let writes_after_first = blob.writes();
+
+            append.append(b"fg").await.unwrap();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let start_append = append.clone();
+            let starter = context.child("dropped_start").spawn(|_| async move {
+                let handle = start_append.start_sync().await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                drop(handle);
+            });
+
+            crate::utils::reschedule().await;
+            assert_eq!(
+                blob.writes(),
+                writes_after_first,
+                "start_sync must not return before the rewrite sync has started"
+            );
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+
+            blob.release_next_sync();
+            first.await.unwrap();
+            for _ in 0..5 {
+                if completed.load(Ordering::Relaxed) == 1 {
+                    break;
+                }
+                crate::utils::reschedule().await;
+            }
+            assert!(
+                blob.writes() > writes_after_first,
+                "queued start_sync should rewrite the page after the first sync completes"
+            );
+            starter.await.unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), 1);
+            assert_eq!(
+                blob.pending_syncs(),
+                1,
+                "dropping the returned handle must not prevent the sync from starting"
+            );
+
+            blob.release_next_sync();
             assert_eq!(blob.pending_syncs(), 0);
         });
     }
@@ -3155,15 +3203,40 @@ mod tests {
 
             // A further rewrite of the page must still coalesce behind the second sync.
             append.append(b"h").await.unwrap();
-            let third = append.start_sync().await.unwrap();
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let start_append = append.clone();
+            let starter = context.child("third_start").spawn(|_| async move {
+                let third = start_append.start_sync().await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+                third
+            });
+
+            crate::utils::reschedule().await;
             assert_eq!(
                 blob.writes(),
                 writes_before_late_await,
                 "rewrite must still wait for the newer pending sync after the stale handle resolved"
             );
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
 
             blob.release_next_sync();
             second.await.unwrap();
+            for _ in 0..5 {
+                if completed.load(Ordering::Relaxed) == 1 {
+                    break;
+                }
+                crate::utils::reschedule().await;
+            }
+            assert!(
+                blob.writes() > writes_before_late_await,
+                "rewrite should start after the newer pending sync completes"
+            );
+            let third = starter.await.unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), 1);
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
             third.await.unwrap();
             assert_eq!(blob.pending_syncs(), 0);
         });
