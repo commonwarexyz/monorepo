@@ -107,7 +107,7 @@ fn test_config(
             page_cache: CacheRef::from_pooler(pooler, PAGE_SIZE, NZUsize!(PAGE_CACHE_SIZE)),
         },
         translator: TwoCap,
-        init_cache_size: 1024,
+        init_cache_size: 3,
     }
 }
 
