@@ -316,14 +316,6 @@ cfg_if::cfg_if! {
                     Self::X86_64 => "amd64",
                 }
             }
-
-            /// Returns the Linux library path component for jemalloc
-            pub const fn linux_lib(&self) -> &'static str {
-                match self {
-                    Self::Arm64 => "aarch64-linux-gnu",
-                    Self::X86_64 => "x86_64-linux-gnu",
-                }
-            }
         }
 
         impl std::fmt::Display for Architecture {

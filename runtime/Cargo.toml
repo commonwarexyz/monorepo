@@ -59,6 +59,9 @@ opentelemetry-otlp = { workspace = true, features = ["http-proto"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio"] }
 tokio = { workspace = true, features = ["full"] }
 
+[target.'cfg(all(not(target_arch = "wasm32"), not(target_env = "msvc")))'.dependencies]
+tikv-jemallocator = { workspace = true, features = ["unprefixed_malloc_on_supported_platforms"], optional = true }
+
 [dev-dependencies]
 clap = { workspace = true, features = ["derive"] }
 rand = { workspace = true, features = ["small_rng"] }
@@ -75,6 +78,7 @@ arbitrary = [
 ]
 bench = [ "dep:crossbeam-queue" ]
 external = [ "pin-project" ]
+jemalloc = [ "dep:tikv-jemallocator" ]
 loom = [ "dep:loom" ]
 test-utils = []
 iouring = [ "iouring-network", "iouring-storage" ]

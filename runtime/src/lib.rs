@@ -23,6 +23,14 @@
 
 use commonware_macros::stability_scope;
 
+#[cfg(all(
+    feature = "jemalloc",
+    not(target_arch = "wasm32"),
+    not(target_env = "msvc")
+))]
+#[global_allocator]
+static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 #[macro_use]
 mod macros;
 

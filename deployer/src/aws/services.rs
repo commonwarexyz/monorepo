@@ -42,9 +42,6 @@ pub const GRAFANA_VERSION: &str = "11.5.2";
 /// Version of Samply to download and install
 pub const SAMPLY_VERSION: &str = "0.13.1";
 
-/// Version of libjemalloc2 package for Ubuntu 24.04
-pub const LIBJEMALLOC2_VERSION: &str = "5.3.0-2build1";
-
 /// Version of logrotate package for Ubuntu 24.04
 pub const LOGROTATE_VERSION: &str = "3.21.0-2build1";
 
@@ -140,13 +137,6 @@ pub(crate) fn samply_bin_s3_key(version: &str, architecture: Architecture) -> St
         Architecture::X86_64 => "x86_64",
     };
     format!("{TOOLS_BINARIES_PREFIX}/samply/{version}/linux-{arch}/samply-{arch}-unknown-linux-gnu.tar.xz")
-}
-
-pub(crate) fn libjemalloc_bin_s3_key(version: &str, architecture: Architecture) -> String {
-    format!(
-        "{TOOLS_BINARIES_PREFIX}/libjemalloc2/{version}/linux-{arch}/libjemalloc2_{version}_{arch}.deb",
-        arch = architecture.as_str()
-    )
 }
 
 pub(crate) fn logrotate_bin_s3_key(version: &str, architecture: Architecture) -> String {
@@ -383,18 +373,6 @@ pub(crate) fn samply_download_url(version: &str, architecture: Architecture) -> 
     };
     format!(
         "https://github.com/mstange/samply/releases/download/samply-v{version}/samply-{arch}-unknown-linux-gnu.tar.xz"
-    )
-}
-
-/// Returns the download URL for libjemalloc2 from Ubuntu archive
-pub(crate) fn libjemalloc_download_url(version: &str, architecture: Architecture) -> String {
-    let base = match architecture {
-        Architecture::Arm64 => UBUNTU_ARCHIVE_ARM64,
-        Architecture::X86_64 => UBUNTU_ARCHIVE_X86_64,
-    };
-    format!(
-        "{base}/universe/j/jemalloc/libjemalloc2_{version}_{arch}.deb",
-        arch = architecture.as_str()
     )
 }
 
@@ -920,7 +898,6 @@ pub struct InstanceUrls {
     pub pyroscope_script: String,
     pub pyroscope_service: String,
     pub pyroscope_timer: String,
-    pub libjemalloc_deb: String,
     pub logrotate_deb: String,
     pub unzip_deb: String,
 }
@@ -958,7 +935,7 @@ pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/promtail.zip /home/ubuntu/node_exporter.tar.gz \
-      /home/ubuntu/libjemalloc2.deb /home/ubuntu/logrotate.deb /home/ubuntu/unzip.deb
+      /home/ubuntu/logrotate.deb /home/ubuntu/unzip.deb
 rm -rf /home/ubuntu/promtail-linux-* /home/ubuntu/node_exporter-*
 
 # Unmask services in case previous attempt left them masked
@@ -978,7 +955,6 @@ sudo systemctl unmask promtail node_exporter binary 2>/dev/null || true
 {WGET} -O /home/ubuntu/pyroscope-agent.sh '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.service '{}' &
 {WGET} -O /home/ubuntu/pyroscope-agent.timer '{}' &
-{WGET} -O /home/ubuntu/libjemalloc2.deb '{}' &
 {WGET} -O /home/ubuntu/logrotate.deb '{}' &
 {WGET} -O /home/ubuntu/unzip.deb '{}' &
 wait
@@ -987,7 +963,7 @@ wait
 for f in binary config.conf hosts.yaml promtail.zip promtail.yml promtail.service \
          node_exporter.tar.gz node_exporter.service binary.service logrotate.conf \
          pyroscope-agent.sh pyroscope-agent.service pyroscope-agent.timer \
-         libjemalloc2.deb logrotate.deb unzip.deb; do
+         logrotate.deb unzip.deb; do
     if [ ! -f "/home/ubuntu/$f" ]; then
         echo "ERROR: Failed to download $f" >&2
         exit 1
@@ -1007,7 +983,6 @@ done
         urls.pyroscope_script,
         urls.pyroscope_service,
         urls.pyroscope_timer,
-        urls.libjemalloc_deb,
         urls.logrotate_deb,
         urls.unzip_deb,
     )
@@ -1113,7 +1088,6 @@ echo -e "net.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr" | sudo 
 
 # Install deb packages
 sudo dpkg -i /home/ubuntu/unzip.deb
-sudo dpkg -i /home/ubuntu/libjemalloc2.deb
 sudo dpkg -i /home/ubuntu/logrotate.deb
 
 # Install Promtail
@@ -1251,15 +1225,13 @@ pub const LOGROTATE_CONF: &str = r#"
 "#;
 
 /// Generates systemd service file content for the deployed binary
-pub(crate) fn binary_service(architecture: Architecture) -> String {
-    let lib_arch = architecture.linux_lib();
-    format!(
+pub(crate) fn binary_service() -> String {
+    String::from(
         r#"[Unit]
 Description=Deployed Binary Service
 After=network.target
 
 [Service]
-Environment="LD_PRELOAD=/usr/lib/{lib_arch}/libjemalloc.so.2"
 ExecStart=/home/ubuntu/binary --hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf
 TimeoutStopSec=60
 Restart=always
@@ -1270,7 +1242,7 @@ StandardError=append:/var/log/binary.log
 
 [Install]
 WantedBy=multi-user.target
-"#
+"#,
     )
 }
 
@@ -1406,10 +1378,6 @@ mod tests {
             "tools/binaries/promtail/3.4.2/linux-arm64/promtail-linux-arm64.zip"
         );
         assert_eq!(
-            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
-            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-arm64/libjemalloc2_5.3.0-2build1_arm64.deb"
-        );
-        assert_eq!(
             logrotate_bin_s3_key("3.21.0-2build1", arch),
             "tools/binaries/logrotate/3.21.0-2build1/linux-arm64/logrotate_3.21.0-2build1_arm64.deb"
         );
@@ -1453,10 +1421,6 @@ mod tests {
         assert_eq!(
             promtail_bin_s3_key("3.4.2", arch),
             "tools/binaries/promtail/3.4.2/linux-amd64/promtail-linux-amd64.zip"
-        );
-        assert_eq!(
-            libjemalloc_bin_s3_key("5.3.0-2build1", arch),
-            "tools/binaries/libjemalloc2/5.3.0-2build1/linux-amd64/libjemalloc2_5.3.0-2build1_amd64.deb"
         );
         assert_eq!(
             logrotate_bin_s3_key("3.21.0-2build1", arch),
