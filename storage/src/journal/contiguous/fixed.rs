@@ -109,7 +109,7 @@ use crate::{
 };
 use commonware_codec::{CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
-    buffer::paged::{self, CacheRef, Replay, Writer},
+    buffer::paged::{CacheRef, Replay, Snapshot as PagedSnapshot, Writer},
     Blob as RBlob, Buf, IoBuf,
 };
 use futures::{
@@ -298,8 +298,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         // are fixed size, so a blob ending in fewer than `CHUNK_SIZE` trailing bytes is junk
         // from an incomplete write (the page-CRC layer surfaces it as a partial logical tail).
         // The truncation is synced before `recover_bounds` queries lengths.
-        for (&blob, writer) in &pending {
-            let size = writer.size().await;
+        for (&blob, writer) in &mut pending {
+            let size = writer.size();
             let valid_size = Self::items_to_bytes(size / Self::CHUNK_SIZE_U64)?;
             if valid_size != size {
                 warn!(
@@ -323,8 +323,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
             cfg.items_per_blob.get(),
             checkpoint.boundary_hint(),
             checkpoint.watermark(),
-        )
-        .await?;
+        )?;
 
         // Persist any lowered checkpoint before applying blob repairs that move recovered state
         // backward.
@@ -348,8 +347,8 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
                 drop(pending.remove(&newest));
                 partition.remove(newest).await?;
             }
-            if let Some(writer) = pending.get(&tail_blob) {
-                if truncate_to < writer.size().await {
+            if let Some(writer) = pending.get_mut(&tail_blob) {
+                if truncate_to < writer.size() {
                     writer.resize(truncate_to).await.map_err(Error::Runtime)?;
                     writer.sync().await.map_err(Error::Runtime)?;
                 }
@@ -418,7 +417,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// A boundary hint that lags blob state is repaired from the blob boundary; a hint ahead of
     /// blob state or a watermark beyond the recovered size is corruption. The caller persists the
     /// checkpoint before applying the returned repair (see comment at the call site).
-    async fn recover_bounds(
+    fn recover_bounds(
         pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         boundary_hint: Option<u64>,
@@ -431,7 +430,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
         )?;
 
         let (size, repair) =
-            Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary).await?;
+            Self::recover_by_walking_lengths(pending, items_per_blob, pruning_boundary)?;
 
         let recovery_watermark = match watermark_hint {
             Some(watermark) if watermark > size => {
@@ -518,16 +517,15 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
     /// Classify a blob's untrusted on-disk length against its capacity. A missing blob counts
     /// as zero length, surfacing as a gap.
-    async fn classify_fill(
+    fn classify_fill(
         pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
         blob: u64,
     ) -> Result<BlobFill, Error> {
-        let len = match pending.get(&blob) {
-            Some(writer) => writer.size().await / Self::CHUNK_SIZE_U64,
-            None => 0,
-        };
+        let len = pending
+            .get(&blob)
+            .map_or(0, |writer| writer.size() / Self::CHUNK_SIZE_U64);
         // A blob's capacity is `items_per_blob`, unless the pruning boundary falls mid-blob
         // (from `init_at_size`), in which case the skipped prefix reduces it.
         let start = blob
@@ -548,7 +546,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
     /// `pruning_boundary` is trusted (already reconciled by `recover_pruning_boundary`); blob
     /// lengths are untrusted disk state. The returned size is chunk-exact and the retained
     /// prefix is contiguous.
-    async fn recover_by_walking_lengths(
+    fn recover_by_walking_lengths(
         pending: &BTreeMap<u64, Writer<E::Blob>>,
         items_per_blob: u64,
         pruning_boundary: u64,
@@ -562,7 +560,7 @@ impl<E: Context, A: CodecFixedShared> Journal<E, A> {
 
         let mut size = pruning_boundary;
         for blob in oldest..=newest {
-            let fill = Self::classify_fill(pending, items_per_blob, pruning_boundary, blob).await?;
+            let fill = Self::classify_fill(pending, items_per_blob, pruning_boundary, blob)?;
             match fill {
                 // Complete: count its items and keep walking.
                 BlobFill::Full { len } => {
@@ -1312,7 +1310,7 @@ impl<B: RBlob, A: CodecFixedShared> replay::Source for BlobReplayState<B, A> {
 
 /// Replays the writable tail through the snapshot's read handle.
 struct TailReplayState<B: RBlob, A> {
-    reader: paged::Reader<B>,
+    reader: PagedSnapshot<B>,
     /// Positions still to emit; `positions.end` is the snapshot's size.
     positions: Range<u64>,
     /// First retained position in the tail; origin for byte offsets.
@@ -1495,7 +1493,7 @@ mod tests {
         }
 
         /// Test helper: Make one blob durable (sealed history or the tail).
-        pub(crate) async fn test_sync_blob(&self, blob: u64) -> Result<(), Error> {
+        pub(crate) async fn test_sync_blob(&mut self, blob: u64) -> Result<(), Error> {
             self.blobs.sync_blob(blob).await
         }
 
@@ -2101,7 +2099,7 @@ mod tests {
                     .open(&blob_partition(&cfg), &1u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 1");
-                let append = Writer::new(blob, blob_size, 2048, cache_ref)
+                let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 1");
                 append
@@ -2217,7 +2215,7 @@ mod tests {
                 .open(&blob_partition, &u64::MAX.to_be_bytes())
                 .await
                 .unwrap();
-            let append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
+            let mut append = Writer::new(blob, blob_size, 2048, cache_ref).await.unwrap();
             let extra = test_digest(999);
             append.append(extra.as_ref()).await.unwrap();
             append.sync().await.unwrap();
@@ -2330,7 +2328,7 @@ mod tests {
                     .open(&blob_partition(&cfg), &2u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 2");
-                let append = Writer::new(blob, blob_size, 2048, cache_ref)
+                let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 2");
                 append
@@ -2671,7 +2669,7 @@ mod tests {
                     .open(&blob_partition(&cfg), &0u64.to_be_bytes())
                     .await
                     .expect("failed to open blob 0");
-                let append = Writer::new(blob, blob_size, 2048, cache_ref)
+                let mut append = Writer::new(blob, blob_size, 2048, cache_ref)
                     .await
                     .expect("failed to wrap blob 0");
                 append
@@ -4845,7 +4843,10 @@ mod tests {
         // exact hit/miss accounting over a mixed cached/uncached batch.
         let executor = deterministic::Runner::default();
         executor.start(|context| async move {
-            let cfg = test_cfg(&context, NZU64!(8));
+            let mut cfg = test_cfg(&context, NZU64!(8));
+            // Keep the whole batch resident so hit accounting is stable. Otherwise, the batch may
+            // evict a page that a later per-item probe still expects to hit.
+            cfg.page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(16));
             let mut journal = Journal::init(context.child("j"), cfg).await.unwrap();
 
             for i in 0..50u64 {

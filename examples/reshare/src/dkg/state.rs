@@ -217,7 +217,7 @@ where
         .await
         .expect("should be able to init dkg_states metadata");
 
-        let msgs = SVJournal::init(
+        let mut msgs = SVJournal::init(
             context.child("msgs"),
             SVConfig {
                 partition: format!("{partition_prefix}_msgs"),
@@ -360,7 +360,7 @@ where
             .await
             .expect("should be able to write to msgs");
         self.msgs
-            .sync(section)
+            .sync(&[section])
             .await
             .expect("should be able to sync msgs");
 
@@ -386,7 +386,7 @@ where
             .await
             .expect("should be able to write to msgs");
         self.msgs
-            .sync(section)
+            .sync(&[section])
             .await
             .expect("should be able to sync msgs");
 
@@ -410,7 +410,7 @@ where
             .await
             .expect("should be able to write to msgs");
         self.msgs
-            .sync(section)
+            .sync(&[section])
             .await
             .expect("should be able to sync msgs");
 

@@ -246,14 +246,14 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::AppendData { data } => {
-                    if let Some(ref append) = append_buffer {
+                    if let Some(append) = append_buffer.as_mut() {
                         // Limit data size and check for overflow
                         let data = if data.len() > MAX_SIZE {
                             data[..MAX_SIZE].to_vec()
                         } else {
                             data
                         };
-                        let current_size = append.size().await;
+                        let current_size = append.size();
                         if current_size.checked_add(data.len() as u64).is_some() {
                             let _ = append.append(&data).await;
                         }
@@ -261,13 +261,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::AppendResize { new_size } => {
-                    if let Some(ref append) = append_buffer {
+                    if let Some(append) = append_buffer.as_mut() {
                         let _ = append.resize(new_size as u64).await;
                     }
                 }
 
                 FuzzOperation::AppendSync => {
-                    if let Some(ref append) = append_buffer {
+                    if let Some(append) = append_buffer.as_mut() {
                         let _ = append.sync().await;
                     }
                 }
@@ -331,13 +331,13 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::AppendSize => {
-                    if let Some(ref append) = append_buffer {
-                        let _ = append.size().await;
+                    if let Some(append) = append_buffer.as_mut() {
+                        let _ = append.size();
                     }
                 }
 
                 FuzzOperation::AppendAsReader { buffer_size } => {
-                    if let Some(ref append) = append_buffer {
+                    if let Some(append) = append_buffer.as_mut() {
                         let buffer_size = NZUsize!((buffer_size as usize).clamp(1, MAX_SIZE));
                         // This fuzzer never corrupts data, so CRC validation in replay
                         // should always succeed. A failure here indicates a bug.
@@ -349,7 +349,7 @@ fn fuzz(input: FuzzInput) {
                 }
 
                 FuzzOperation::AppendReadAt { data_size, offset } => {
-                    if let Some(ref append) = append_buffer {
+                    if let Some(append) = append_buffer.as_mut() {
                         let size = (data_size as usize).clamp(0, MAX_SIZE);
                         let offset = offset as u64;
                         if offset.checked_add(size as u64).is_some() {

@@ -8,7 +8,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Buf, BufMut, Metrics, Storage,
 };
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{pin_mut, StreamExt};
 use std::collections::{BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -87,7 +87,7 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
     /// by replaying the journal.
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
         // Initialize journal
-        let journal = Journal::<E, Record<V>>::init(
+        let mut journal = Journal::<E, Record<V>>::init(
             context.child("journal"),
             JConfig {
                 partition: cfg.partition,
@@ -272,12 +272,10 @@ impl<E: Storage + Metrics, V: CodecShared> Cache<E, V> {
 
     /// Sync all pending writes.
     pub async fn sync(&mut self) -> Result<(), Error> {
-        let mut syncs = Vec::with_capacity(self.pending.len());
-        for section in self.pending.iter() {
-            syncs.push(self.journal.sync(*section));
-            self.syncs.inc();
-        }
-        try_join_all(syncs).await?;
+        self.syncs.inc_by(self.pending.len() as u64);
+        self.journal
+            .sync(&self.pending.iter().copied().collect::<Vec<_>>())
+            .await?;
         self.pending.clear();
         Ok(())
     }

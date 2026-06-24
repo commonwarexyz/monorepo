@@ -28,16 +28,18 @@ use commonware_codec::{EncodeFixed, FixedSize, Read as CodecRead, ReadExt, Write
 use commonware_cryptography::{crc32, Crc32};
 use std::num::NonZeroUsize;
 
-mod append;
 mod cache;
 mod read;
 mod sealed;
+mod snapshot;
+mod writer;
 
-pub use append::{Reader, Writer};
 pub use cache::CacheRef;
 pub use read::Replay;
 pub use sealed::Sealed;
+pub use snapshot::Snapshot;
 use tracing::{debug, error};
+pub use writer::Writer;
 
 // A checksum record contains two slots. Each slot stores one u16 length and one CRC.
 const CHECKSUM_SIZE: u64 = Checksum::SIZE as u64;
@@ -83,8 +85,8 @@ fn validate_read_many_into(
 /// cache/blob reads.
 ///
 /// `buf` holds one `item_size` slot per offset (validated by [validate_read_many_into]). `tail`
-/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] and
-/// [Reader] this is the tip buffer, for [Sealed] the partial last page. Items entirely within
+/// holds the logical bytes at `[tail_offset, tail_offset + tail.len())`; for [Writer] this is the
+/// tip buffer, for [Sealed] the partial last page. Items entirely within
 /// `tail` are copied into
 /// place. Items fully or partially below `tail_offset` are returned as `(dest_slice, offset)`
 /// pairs for the caller to read from the page cache or blob. `chunks_exact_mut` yields disjoint

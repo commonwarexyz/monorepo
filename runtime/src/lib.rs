@@ -119,6 +119,8 @@ stability_scope!(BETA {
         BlobSyncFailed(String, String, IoError),
         #[error("blob insufficient length")]
         BlobInsufficientLength,
+        #[error("blob in use")]
+        BlobInUse,
         #[error("blob corrupt: {0}/{1} reason: {2}")]
         BlobCorrupt(String, String, String),
         #[error("blob version mismatch: expected one of {expected:?}, found {found}")]

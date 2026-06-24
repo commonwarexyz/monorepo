@@ -204,7 +204,7 @@ fn fuzz(input: FuzzInput) {
                 let _ = oversized.append(section, entry, &value).await;
                 entry_id += 1;
             }
-            let _ = oversized.sync(section).await;
+            let _ = oversized.sync(&[section]).await;
         }
 
         if input.sync_before_corrupt {

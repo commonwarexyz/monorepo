@@ -249,7 +249,7 @@ impl<
     async fn sync_journal(&mut self, view: View) {
         if let Some(journal) = self.journal.as_mut() {
             journal
-                .sync(view.get())
+                .sync(&[view.get()])
                 .await
                 .expect("unable to sync journal");
         }
@@ -898,7 +898,7 @@ impl<
         let mut certificate_sender = WrappedSender::new(pool.clone(), certificate_sender);
 
         // Initialize journal
-        let journal = Journal::<_, Artifact<S, D>>::init(
+        let mut journal = Journal::<_, Artifact<S, D>>::init(
             self.context.child("journal"),
             JConfig {
                 partition: self.partition.clone(),

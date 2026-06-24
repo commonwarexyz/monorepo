@@ -23,22 +23,22 @@ pub trait SectionBuffer: Send + Sync {
     fn size(&self) -> impl Future<Output = u64> + Send;
 
     /// Ensure all pending data is durably persisted.
-    fn sync(&self) -> impl Future<Output = Result<(), RError>> + Send;
+    fn sync(&mut self) -> impl Future<Output = Result<(), RError>> + Send;
 
     /// Resize the logical size of the buffer.
-    fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+    fn resize(&mut self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for Writer<B> {
     async fn size(&self) -> u64 {
-        Self::size(self).await
+        Self::size(self)
     }
 
-    async fn sync(&self) -> Result<(), RError> {
+    async fn sync(&mut self) -> Result<(), RError> {
         Self::sync(self).await
     }
 
-    async fn resize(&self, len: u64) -> Result<(), RError> {
+    async fn resize(&mut self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
     }
 }
@@ -48,11 +48,11 @@ impl<B: Blob> SectionBuffer for Write<B> {
         Self::size(self).await
     }
 
-    async fn sync(&self) -> Result<(), RError> {
+    async fn sync(&mut self) -> Result<(), RError> {
         Self::sync(self).await
     }
 
-    async fn resize(&self, len: u64) -> Result<(), RError> {
+    async fn resize(&mut self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
     }
 }
@@ -215,21 +215,30 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         Ok(self.blobs.get_mut(&section).unwrap())
     }
 
-    /// Sync the given section to storage.
-    pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        self.prune_guard(section)?;
-        if let Some(blob) = self.blobs.get(&section) {
-            self.synced.inc();
-            blob.sync().await.map_err(Error::Runtime)?;
+    /// Sync the given `sections` to storage.
+    pub async fn sync(&mut self, sections: &[u64]) -> Result<(), Error> {
+        for &section in sections {
+            self.prune_guard(section)?;
         }
+        let futures: Vec<_> = self
+            .blobs
+            .iter_mut()
+            .filter(|(section, _)| sections.contains(section))
+            .map(|(_, blob)| blob.sync())
+            .collect();
+        let count = futures.len() as u64;
+        try_join_all(futures).await.map_err(Error::Runtime)?;
+        self.synced.inc_by(count);
         Ok(())
     }
 
     /// Sync all sections to storage.
-    pub async fn sync_all(&self) -> Result<(), Error> {
-        let futures: Vec<_> = self.blobs.values().map(|blob| blob.sync()).collect();
-        let results = try_join_all(futures).await.map_err(Error::Runtime)?;
-        self.synced.inc_by(results.len() as u64);
+    pub async fn sync_all(&mut self) -> Result<(), Error> {
+        let count = self.blobs.len() as u64;
+        try_join_all(self.blobs.values_mut().map(|b| b.sync()))
+            .await
+            .map_err(Error::Runtime)?;
+        self.synced.inc_by(count);
         Ok(())
     }
 
@@ -287,8 +296,11 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
     }
 
     /// Returns an iterator over all sections starting from `start_section`.
-    pub fn sections_from(&self, start_section: u64) -> impl Iterator<Item = (&u64, &F::Buffer)> {
-        self.blobs.range(start_section..)
+    pub fn sections_from(
+        &mut self,
+        start_section: u64,
+    ) -> impl Iterator<Item = (&u64, &mut F::Buffer)> {
+        self.blobs.range_mut(start_section..)
     }
 
     /// Returns an iterator over all section numbers.
@@ -375,7 +387,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
 
         // If the section exists, truncate it to the given size
-        if let Some(blob) = self.blobs.get(&section) {
+        if let Some(blob) = self.blobs.get_mut(&section) {
             let current_size = blob.size().await;
             if size < current_size {
                 blob.resize(size).await?;
@@ -396,7 +408,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.prune_guard(section)?;
 
         // Get the blob at the given section
-        if let Some(blob) = self.blobs.get(&section) {
+        if let Some(blob) = self.blobs.get_mut(&section) {
             // Truncate the blob to the given size
             let current = blob.size().await;
             if size < current {

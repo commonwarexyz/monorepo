@@ -14,7 +14,7 @@ use commonware_runtime::{
     Buf, BufMut, BufferPooler, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{pin_mut, StreamExt};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
 
@@ -168,7 +168,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             compression: cfg.compression,
             codec_config: cfg.codec_config,
         };
-        let oversized: Oversized<E, Record<K>, V> =
+        let mut oversized: Oversized<E, Record<K>, V> =
             Oversized::init(context.child("oversized"), oversized_cfg).await?;
 
         // Initialize keys and replay index journal (no values read!)
@@ -429,13 +429,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        // Collect pending sections and update metrics
-        let pending: Vec<u64> = self.pending.iter().copied().collect();
-        self.syncs.inc_by(pending.len() as u64);
+        // Update metrics
+        self.syncs.inc_by(self.pending.len() as u64);
 
         // Sync oversized journal (handles both index and values)
-        let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
-        try_join_all(syncs).await?;
+        self.oversized
+            .sync(&self.pending.iter().copied().collect::<Vec<_>>())
+            .await?;
 
         self.pending.clear();
         Ok(())

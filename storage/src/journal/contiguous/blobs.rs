@@ -3,7 +3,7 @@
 use crate::{journal::Error, Context};
 use commonware_formatting::hex;
 use commonware_runtime::{
-    buffer::paged::{self, CacheRef, Sealed, Writer},
+    buffer::paged::{CacheRef, Sealed, Snapshot as PagedSnapshot, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob as RBlob, Error as RError, IoBuf, IoBufMut, IoBufs,
 };
@@ -179,7 +179,7 @@ impl<E: Context> Writable<E> {
         }
         let oldest = pending.keys().next().copied();
         let mut sealed = Vec::with_capacity(pending.len());
-        let mut tail = None;
+        let mut tail: Option<Writer<E::Blob>> = None;
         let mut expected = oldest;
         for (blob, writer) in pending {
             if expected != Some(blob) {
@@ -230,9 +230,9 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index + self.sealed.len() as u64
     }
 
-    /// A write handle for the tail.
-    pub(super) const fn tail_writer(&self) -> &Writer<E::Blob> {
-        &self.tail
+    /// A mutable write handle for the tail; appends go through this.
+    pub(super) const fn tail_writer(&mut self) -> &mut Writer<E::Blob> {
+        &mut self.tail
     }
 
     /// Whether any [`Snapshot`] is alive. A new one can't be created while the
@@ -250,7 +250,7 @@ impl<E: Context> Writable<E> {
         Snapshot {
             oldest_blob_index: self.oldest_blob_index,
             sealed: self.sealed.clone(),
-            tail: self.tail.reader(),
+            tail: self.tail.snapshot(),
             bounds,
             snapshots: self.snapshots.clone(),
         }
@@ -310,7 +310,7 @@ impl<E: Context> Writable<E> {
     /// Returns [Error::BlobInUse] if there are live [`Snapshot`]s: the tail is shared mutable
     /// state, so truncating it could tear a live snapshot's reads of bytes a later append reuses.
     pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
-        let current_bytes = self.tail.size().await;
+        let current_bytes = self.tail.size();
         debug_assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
             // Refuse the in-place truncation while any snapshot is live.
@@ -358,8 +358,8 @@ impl<E: Context> Writable<E> {
         // Reopen the target as the writable tail and truncate in place. The fresh Writer
         // gets a fresh page-cache id, so pages cached under the sealed handle's id are
         // unreachable.
-        let new_writer = self.partition.open(blob).await?;
-        let current_bytes = new_writer.size().await;
+        let mut new_writer = self.partition.open(blob).await?;
+        let current_bytes = new_writer.size();
         if byte_offset < current_bytes {
             new_writer
                 .resize(byte_offset)
@@ -428,13 +428,15 @@ impl<E: Context> Writable<E> {
 /// A read handle for one blob.
 pub(super) enum Blob<'a, B: RBlob> {
     Sealed(&'a Sealed<B>),
-    Tail(paged::Reader<B>),
+    Snapshot(&'a PagedSnapshot<B>),
+    Tail(&'a Writer<B>),
 }
 
 impl<B: RBlob> Blob<'_, B> {
     pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         match self {
             Self::Sealed(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
+            Self::Snapshot(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
             Self::Tail(t) => t.read_at(offset, len).await.map_err(Error::Runtime),
         }
     }
@@ -454,6 +456,13 @@ impl<B: RBlob> Blob<'_, B> {
                 let bufs = s.read_at(offset, available).await.map_err(Error::Runtime)?;
                 Ok((bufs.coalesce(), available))
             }
+            Self::Snapshot(s) => {
+                let available = usize::try_from(s.size().saturating_sub(offset))
+                    .unwrap_or(usize::MAX)
+                    .min(len);
+                let bufs = s.read_at(offset, available).await.map_err(Error::Runtime)?;
+                Ok((bufs.coalesce(), available))
+            }
             Self::Tail(t) => {
                 let (buf, available) = t
                     .read_up_to(offset, len, IoBufMut::with_capacity(len))
@@ -464,11 +473,12 @@ impl<B: RBlob> Blob<'_, B> {
         }
     }
 
-    /// The blob's size, if it can be observed without waiting.
-    pub(super) fn try_size(&self) -> Option<u64> {
+    /// The blob's logical size, including any buffered tail bytes.
+    pub(super) fn size(&self) -> u64 {
         match self {
-            Self::Sealed(s) => Some(s.size()),
-            Self::Tail(t) => t.try_size(),
+            Self::Sealed(s) => s.size(),
+            Self::Snapshot(s) => s.size(),
+            Self::Tail(t) => t.size(),
         }
     }
 
@@ -483,6 +493,10 @@ impl<B: RBlob> Blob<'_, B> {
                 .read_many_into(buf, offsets, item_size)
                 .await
                 .map_err(Error::Runtime),
+            Self::Snapshot(s) => s
+                .read_many_into(buf, offsets, item_size)
+                .await
+                .map_err(Error::Runtime),
             Self::Tail(t) => t
                 .read_many_into(buf, offsets, item_size)
                 .await
@@ -493,6 +507,7 @@ impl<B: RBlob> Blob<'_, B> {
     pub(super) fn try_read_sync(&self, offset: u64, buf: &mut [u8]) -> bool {
         match self {
             Self::Sealed(s) => s.try_read_sync(offset, buf),
+            Self::Snapshot(s) => s.try_read_sync(offset, buf),
             Self::Tail(t) => t.try_read_sync(offset, buf),
         }
     }
@@ -510,8 +525,8 @@ pub(super) struct Snapshot<B: RBlob> {
     /// Sealed historical blobs, ascending and contiguous from `oldest_blob_index`.
     pub(super) sealed: Arc<[Sealed<B>]>,
 
-    /// Read handle for the tail, blob [`Self::tail_blob_index`].
-    pub(super) tail: paged::Reader<B>,
+    /// Owned snapshot of the tail, blob [`Self::tail_blob_index`].
+    pub(super) tail: PagedSnapshot<B>,
 
     /// The positions readable through this snapshot.
     pub(super) bounds: Range<u64>,
@@ -573,11 +588,10 @@ impl<E: Context> Blobs<'_, E> {
             Self::Writable { writable, .. } => (writable.oldest_blob_index, &*writable.sealed),
         };
         if blob == oldest + sealed.len() as u64 {
-            let tail = match self {
-                Self::Snapshot(s) => s.tail.clone(),
-                Self::Writable { writable, .. } => writable.tail.reader(),
-            };
-            return Some(Blob::Tail(tail));
+            return Some(match self {
+                Self::Snapshot(s) => Blob::Snapshot(&s.tail),
+                Self::Writable { writable, .. } => Blob::Tail(&writable.tail),
+            });
         }
         sealed
             .get(blob.checked_sub(oldest)? as usize)
@@ -597,7 +611,7 @@ mod tests {
         }
 
         /// Make one blob durable.
-        pub(crate) async fn sync_blob(&self, blob: u64) -> Result<(), Error> {
+        pub(crate) async fn sync_blob(&mut self, blob: u64) -> Result<(), Error> {
             if blob == self.tail_blob_index() {
                 return self.tail.sync().await.map_err(Error::Runtime);
             }

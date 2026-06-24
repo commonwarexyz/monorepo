@@ -162,13 +162,13 @@ impl<E: BufferPooler + Storage + Metrics, V: CodecShared> Glob<E, V> {
         Ok(value)
     }
 
-    /// Sync section to disk (flushes write buffer).
-    pub async fn sync(&self, section: u64) -> Result<(), Error> {
-        self.manager.sync(section).await
+    /// Sync the given `sections` to disk (flushes write buffers).
+    pub async fn sync(&mut self, sections: &[u64]) -> Result<(), Error> {
+        self.manager.sync(sections).await
     }
 
     /// Sync all sections to disk.
-    pub async fn sync_all(&self) -> Result<(), Error> {
+    pub async fn sync_all(&mut self) -> Result<(), Error> {
         self.manager.sync_all().await
     }
 
@@ -261,7 +261,7 @@ mod tests {
             assert_eq!(retrieved, value);
 
             // Sync and verify
-            glob.sync(1).await.expect("Failed to sync");
+            glob.sync(&[1]).await.expect("Failed to sync");
             let retrieved = glob.get(1, offset, size).await.expect("Failed to get");
             assert_eq!(retrieved, value);
 
@@ -338,7 +338,7 @@ mod tests {
                 glob.append(section, &(section as i32))
                     .await
                     .expect("Failed to append");
-                glob.sync(section).await.expect("Failed to sync");
+                glob.sync(&[section]).await.expect("Failed to sync");
             }
 
             // Prune sections < 3
@@ -368,7 +368,7 @@ mod tests {
             // Append a value
             let value: i32 = 42;
             let (offset, size) = glob.append(1, &value).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            glob.sync(&[1]).await.expect("Failed to sync");
 
             // Corrupt the data by writing directly to the underlying blob
             let writer = glob.manager.blobs.get(&1).unwrap();
@@ -402,7 +402,7 @@ mod tests {
                 let (offset, size) = glob.append(1, value).await.expect("Failed to append");
                 locations.push((offset, size));
             }
-            glob.sync(1).await.expect("Failed to sync");
+            glob.sync(&[1]).await.expect("Failed to sync");
 
             // Rewind to after the third value
             let (third_offset, third_size) = locations[2];
@@ -439,7 +439,7 @@ mod tests {
 
             let value: i32 = 42;
             let (offset, size) = glob.append(1, &value).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            glob.sync(&[1]).await.expect("Failed to sync");
             drop(glob);
 
             // Reopen and verify
@@ -463,7 +463,7 @@ mod tests {
                 .expect("Failed to init glob");
 
             let (offset, _size) = glob.append(1, &42).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            glob.sync(&[1]).await.expect("Failed to sync");
 
             // Size 0 - should fail
             assert!(glob.get(1, offset, 0).await.is_err());
@@ -490,7 +490,7 @@ mod tests {
                 .expect("Failed to init glob");
 
             let (offset, correct_size) = glob.append(1, &42).await.expect("Failed to append");
-            glob.sync(1).await.expect("Failed to sync");
+            glob.sync(&[1]).await.expect("Failed to sync");
 
             // Size too small (but >= CRC_SIZE) - checksum mismatch
             let result = glob.get(1, offset, correct_size - 1).await;

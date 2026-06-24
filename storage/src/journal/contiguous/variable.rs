@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::paged::{self, CacheRef, Replay, Writer},
+    buffer::paged::{CacheRef, Replay, Snapshot as PagedSnapshot, Writer},
     Blob as RBlob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
@@ -429,7 +429,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         let handle = self
             .data
             .get(position_to_blob(position, self.items_per_blob.get()))?;
-        let remaining = handle.try_size()?.checked_sub(offset)?;
+        let remaining = handle.size().checked_sub(offset)?;
         let header_len = usize::try_from(remaining.min(MAX_U32_VARINT_SIZE as u64)).ok()?;
         if header_len == 0 {
             return None;
@@ -1328,7 +1328,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Scan every frame in `writer`, returning the item count and valid prefix.
     async fn scan_blob(
-        writer: &Writer<E::Blob>,
+        writer: &mut Writer<E::Blob>,
         codec_config: &V::Cfg,
         compressed: bool,
     ) -> Result<BlobScan, Error> {
@@ -1374,7 +1374,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let mut items_in_newest = 0;
         let mut newest_blob = None;
         for &blob in &scanned {
-            let writer = &pending[&blob];
+            let writer = pending.get_mut(&blob).expect("blob came from pending");
             let scan = Self::scan_blob(writer, codec_config, compressed).await?;
             if scan.items > items_per_blob {
                 return Err(Error::Corruption(format!(
@@ -1620,7 +1620,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Sync data blobs backing rebuilt offsets before the offsets are made durable.
     async fn sync_data_range(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &mut BTreeMap<u64, Writer<E::Blob>>,
         start_position: u64,
         end_position: u64,
         items_per_blob: u64,
@@ -1633,7 +1633,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let end_blob = position_to_blob(end_position - 1, items_per_blob);
         futures::future::try_join_all(
             pending
-                .range(start_blob..=end_blob)
+                .range_mut(start_blob..=end_blob)
                 .map(|(_, writer)| writer.sync()),
         )
         .await
@@ -1680,7 +1680,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let mut size = anchor;
         let mut blob = start_blob;
         loop {
-            let Some(writer) = pending.get(&blob) else {
+            let Some(writer) = pending.get_mut(&blob) else {
                 if skip > 0 {
                     // The data ends before the anchor.
                     return Ok(None);
@@ -1833,7 +1833,7 @@ impl<B: RBlob, V: CodecShared> replay::Source for SealedReplayState<B, V> {
 
 /// Replays the writable tail through the snapshot's read handle.
 struct TailReplayState<B: RBlob, V: CodecShared> {
-    reader: paged::Reader<B>,
+    reader: PagedSnapshot<B>,
     /// Positions still to emit; `positions.end` is the snapshot's size.
     positions: Range<u64>,
     /// Byte offset of the next frame.
@@ -2089,13 +2089,13 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         let tail_blob = self.blobs.tail_blob_index();
         if blob == tail_blob {
             let writer = self.blobs.tail_writer();
-            let offset = writer.size().await;
+            let offset = writer.size();
             writer.append(&encoded).await.map_err(Error::Runtime)?;
             return Ok((offset, item_len));
         }
         assert!(blob > tail_blob, "cannot append to a sealed blob");
-        let writer = self.blobs.open_blob(blob).await?;
-        let offset = writer.size().await;
+        let mut writer = self.blobs.open_blob(blob).await?;
+        let offset = writer.size();
         writer.append(&encoded).await.map_err(Error::Runtime)?;
         writer.sync().await.map_err(Error::Runtime)?;
         Ok((offset, item_len))
@@ -2107,7 +2107,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Test helper: Sync one data blob.
-    pub(crate) async fn test_sync_data_blob(&self, blob: u64) -> Result<(), Error> {
+    pub(crate) async fn test_sync_data_blob(&mut self, blob: u64) -> Result<(), Error> {
         self.blobs.sync_blob(blob).await
     }
 }
@@ -3762,7 +3762,7 @@ mod tests {
 
             let mut encoded = Vec::new();
             encode_frame_into(None, &100u64, &mut encoded).unwrap();
-            pending[&0].append(&encoded).await.unwrap();
+            pending.get_mut(&0).unwrap().append(&encoded).await.unwrap();
             offsets.append(&0).await.unwrap();
 
             let result = Journal::<_, u64>::rebuild_offsets_from_anchor(
@@ -4026,7 +4026,7 @@ mod tests {
                 .open(&cfg.data_partition(), &1u64.to_be_bytes())
                 .await
                 .unwrap();
-            let writer = Writer::new(blob, size, 1024, cfg.page_cache.clone())
+            let mut writer = Writer::new(blob, size, 1024, cfg.page_cache.clone())
                 .await
                 .unwrap();
             writer.resize(offset).await.unwrap();
@@ -4078,7 +4078,7 @@ mod tests {
                     .open(&offsets_blob_partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let append = Writer::new(
+                let mut append = Writer::new(
                     blob,
                     raw_size,
                     2048,
@@ -4086,7 +4086,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                assert_eq!(append.size().await, expected_size);
+                assert_eq!(append.size(), expected_size);
                 append.resize(expected_size + 1).await.unwrap();
                 append.sync().await.unwrap();
                 drop(append);
@@ -4113,7 +4113,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(append.size().await, expected_size);
+            assert_eq!(append.size(), expected_size);
         });
     }
 
@@ -4144,7 +4144,7 @@ mod tests {
                     .open(&data_partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let append = Writer::new(
+                let mut append = Writer::new(
                     blob,
                     raw_size,
                     2048,
@@ -4152,7 +4152,7 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                let expected_size = append.size().await;
+                let expected_size = append.size();
                 append.append(&[0xFF, 0xFF]).await.unwrap();
                 append.sync().await.unwrap();
                 drop(append);
@@ -4179,7 +4179,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(append.size().await, expected_size);
+            assert_eq!(append.size(), expected_size);
         });
     }
 

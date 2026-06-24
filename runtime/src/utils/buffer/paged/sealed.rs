@@ -16,7 +16,7 @@
 //! and the page cache.
 
 use super::{read::PageReader, CacheRef, Replay, CHECKSUM_SIZE};
-use crate::{Blob, Error, IoBuf, IoBufs};
+use crate::{Blob, Error, IoBuf, IoBufMut, IoBufs};
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     num::{NonZeroU16, NonZeroUsize},
@@ -207,6 +207,32 @@ impl<B: Blob> Sealed<B> {
             .await
     }
 
+    /// Reads up to `len` bytes starting at `logical_offset`, but only as many as are available
+    /// within the sealed view.
+    ///
+    /// Returns the buffer (truncated to actual bytes read) and the number of bytes read. Returns
+    /// an error if no bytes are available at the given offset.
+    pub async fn read_up_to(
+        &self,
+        logical_offset: u64,
+        len: usize,
+        bufs: impl Into<IoBufMut> + Send,
+    ) -> Result<(IoBufMut, usize), Error> {
+        let mut bufs = bufs.into();
+        if len == 0 {
+            bufs.truncate(0);
+            return Ok((bufs, 0));
+        }
+        let available = (self.inner.size.saturating_sub(logical_offset) as usize).min(len);
+        if available == 0 {
+            return Err(Error::BlobInsufficientLength);
+        }
+        // SAFETY: read_into below fills all `available` bytes.
+        unsafe { bufs.set_len(available) };
+        self.read_into(bufs.as_mut(), logical_offset).await?;
+        Ok((bufs, available))
+    }
+
     /// Read multiple fixed-size items at sorted byte offsets into a contiguous caller buffer.
     ///
     /// `buf` must be exactly `offsets.len() * item_size` bytes. All offsets must be sorted,
@@ -327,7 +353,7 @@ mod tests {
             let blob = SyncTrackingBlob::new();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -360,23 +386,23 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"readers").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            let reader = writer.reader();
-            let reader_clone = reader.clone();
             writer.append(b"hello world").await.unwrap();
 
-            // Readers observe buffered bytes before the seal.
-            assert_eq!(reader.size().await, 11);
+            // A snapshot captures the buffered bytes as an owned, frozen read handle.
+            let reader = writer.snapshot();
+            let reader_clone = reader.clone();
+            assert_eq!(reader.size(), 11);
 
-            // Seal succeeds while readers exist.
+            // Seal succeeds while snapshots exist.
             let sealed = writer.seal().await.unwrap();
             assert_eq!(sealed.size(), 11);
 
-            // Both reader handles keep reading the frozen state and agree with the sealed view.
+            // Both snapshot handles keep reading the frozen state and agree with the sealed view.
             for r in [&reader, &reader_clone] {
-                assert_eq!(r.size().await, 11);
+                assert_eq!(r.size(), 11);
                 let via_reader = r.read_at(0, 11).await.unwrap().coalesce();
                 let via_sealed = sealed.read_at(0, 11).await.unwrap().coalesce();
                 assert_eq!(via_reader.as_ref(), b"hello world");
@@ -394,18 +420,18 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"rdr_pages").await.unwrap();
             // A single-page cache forces most full-page reads to miss and hit the blob.
             let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
-            let writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut writer = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
-            let reader = writer.reader();
 
             let page_size = PAGE_SIZE.get() as usize;
             let total = page_size * 3 + 7;
             let data: Vec<u8> = (0u8..=255).cycle().take(total).collect();
             writer.append(&data).await.unwrap();
 
+            let reader = writer.snapshot();
             let sealed = writer.seal().await.unwrap();
-            assert_eq!(reader.size().await, total as u64);
+            assert_eq!(reader.size(), total as u64);
 
             // Full range, a page-straddling range, and the partial page, each compared
             // against the sealed view.
@@ -434,7 +460,7 @@ mod tests {
             let blob = SyncTrackingBlob::new();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -511,7 +537,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"full").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -538,7 +564,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"partial").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -563,7 +589,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"straddle").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -604,7 +630,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"read_at").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -626,7 +652,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"rmany").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -662,7 +688,7 @@ mod tests {
         executor.start(|context: deterministic::Context| async move {
             let (blob, blob_size) = context.open("test_partition", b"rmany_miss").await.unwrap();
             let cache_ref = super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(1));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -696,7 +722,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"rmany_bad").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
             append.append(&[7; 32]).await.unwrap();
@@ -734,7 +760,7 @@ mod tests {
                 .unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -766,7 +792,7 @@ mod tests {
                 .unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -790,7 +816,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"trs_fail").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -812,7 +838,7 @@ mod tests {
             let (blob, blob_size) = context.open("test_partition", b"replay").await.unwrap();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -848,7 +874,7 @@ mod tests {
             let blob = SyncTrackingBlob::new();
             let cache_ref =
                 super::CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
-            let append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+            let mut append = Writer::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
                 .await
                 .unwrap();
 
@@ -892,7 +918,7 @@ mod tests {
                 .collect();
             {
                 let (blob, blob_size) = context.open("test_partition", b"reopen").await.unwrap();
-                let append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                let mut append = Writer::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
                     .await
                     .unwrap();
                 append.append(&data).await.unwrap();
