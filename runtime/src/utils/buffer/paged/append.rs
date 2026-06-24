@@ -26,7 +26,10 @@
 //! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
 //! recovery, and are not covered by [Append]'s [`Blob::write_at_sync`] fast paths.
 
-use super::read::{PageReader, Replay};
+use super::{
+    super::sync::{self, Shared},
+    read::{PageReader, Replay},
+};
 use crate::{
     buffer::{
         paged::{CacheRef, Checksum, CHECKSUM_SIZE, CHECKSUM_SLOT_SIZE},
@@ -37,11 +40,7 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
-use futures::{
-    future::{BoxFuture, Shared},
-    stream::{FuturesUnordered, StreamExt},
-    FutureExt as _,
-};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::{
     future::Future,
     num::{NonZeroU16, NonZeroUsize},
@@ -69,11 +68,6 @@ struct FlushOutcome {
     rewrote_partial_footer: bool,
 }
 
-/// The completion of an in-flight partial-page sync. Shared so the returned `start_sync` handle and
-/// any later rewrite of the page can both await the same sync. The output is `()`; failures are
-/// handled by panicking in [`Barrier::into_shared`].
-type SharedSync = Shared<BoxFuture<'static, ()>>;
-
 /// Tracks the in-flight partial-page footer sync that a rewrite of the current partial page must
 /// observe before overwriting the page's preserved checksum slot.
 ///
@@ -82,16 +76,14 @@ type SharedSync = Shared<BoxFuture<'static, ()>>;
 /// not-yet-durable checksum must be made durable (the barrier discharged) before another rewrite can
 /// replace it. `None` means no such barrier is owed.
 #[derive(Clone, Default)]
-struct Barrier(Option<SharedSync>);
+struct Barrier(Option<Shared>);
 
 impl Barrier {
     /// Wraps a sync-completion future as a shareable barrier. A failed partial-page sync is
     /// unrecoverable (the blob must not be reused), so the barrier panics rather than threading a
     /// (non-cloneable) error through the shared future. The panic carries the underlying error.
-    fn into_shared(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> SharedSync {
-        async move { fut.await.expect("partial-page sync failed") }
-            .boxed()
-            .shared()
+    fn into_shared(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> Shared {
+        sync::share(fut, "partial-page sync failed")
     }
 
     /// Records `fut` as the barrier. Observe it afterward with [`Self::pending`].
@@ -99,9 +91,14 @@ impl Barrier {
         self.0 = Some(Self::into_shared(fut));
     }
 
+    /// Records an already-started sync as the barrier.
+    fn record_shared(&mut self, sync: Shared) {
+        self.0 = Some(sync);
+    }
+
     /// The in-flight barrier, if any. Cloning a [`Shared`] is cheap and lets the caller await it
     /// after dropping its lock.
-    fn pending(&self) -> Option<SharedSync> {
+    fn pending(&self) -> Option<Shared> {
         self.0.clone()
     }
 
@@ -109,17 +106,6 @@ impl Barrier {
     /// barrier or running a full blob sync).
     fn discharge(&mut self) {
         self.0 = None;
-    }
-
-    /// A handle that resolves once `pending`'s sync is durable. It only observes the sync; the page
-    /// it covers stays tracked until a later rewrite discharges the barrier. Dropping the handle
-    /// does not stop the sync: the barrier is also held in [`BlobState`] and the underlying fsync
-    /// was already issued before the handle was created.
-    fn observe(pending: SharedSync) -> Handle<()> {
-        Handle::from_future(async move {
-            pending.await;
-            Ok(())
-        })
     }
 }
 
@@ -141,6 +127,10 @@ struct BlobState<B: Blob> {
 
     /// Whether prior plain writes or resizes must be made durable by a full sync.
     needs_sync: bool,
+
+    /// In-flight sync covering all mutations up to the last [`Self::start_sync`] call, if no newer
+    /// mutations have invalidated it.
+    syncing: Option<Shared>,
 }
 
 impl<B: Blob> BlobState<B> {
@@ -148,6 +138,7 @@ impl<B: Blob> BlobState<B> {
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.blob.write_at(offset, bufs).await?;
         self.needs_sync = true;
+        self.syncing = None;
         Ok(())
     }
 
@@ -162,7 +153,7 @@ impl<B: Blob> BlobState<B> {
     ) -> Result<(), Error> {
         if self.needs_sync {
             self.write_at(offset, bufs).await?;
-            self.sync().await
+            self.sync().await.map(|_| ())
         } else {
             // If `write_at_sync` fails, a later sync must not treat the drained
             // buffer as durable.
@@ -191,27 +182,45 @@ impl<B: Blob> BlobState<B> {
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
         self.needs_sync = true;
+        self.syncing = None;
         Ok(())
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
-    async fn sync(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
-            return Ok(());
+    async fn sync(&mut self) -> Result<bool, Error> {
+        if self.needs_sync {
+            self.blob.sync().await?;
+            self.needs_sync = false;
+            self.syncing = None;
+            return Ok(true);
         }
-        self.blob.sync().await?;
-        self.needs_sync = false;
-        Ok(())
+
+        if let Some(syncing) = self.syncing.take() {
+            syncing.await;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Start syncing the underlying blob if there are unsynced mutations, otherwise return any
+    /// in-flight sync that already covers the current state.
+    async fn start_sync_shared(&mut self) -> Option<Shared> {
+        if self.needs_sync {
+            let syncing = sync::share(self.blob.start_sync().await, "sync failed");
+            self.needs_sync = false;
+            self.syncing = Some(syncing.clone());
+            return Some(syncing);
+        }
+
+        self.syncing.clone()
     }
 
     /// Start syncing the underlying blob if there are unsynced mutations.
     async fn start_sync(&mut self) -> Handle<()> {
-        if !self.needs_sync {
-            return Handle::ready(Ok(()));
-        }
-        let handle = self.blob.start_sync().await;
-        self.needs_sync = false;
-        handle
+        self.start_sync_shared()
+            .await
+            .map(sync::observe)
+            .unwrap_or_else(|| Handle::ready(Ok(())))
     }
 }
 
@@ -308,6 +317,7 @@ impl<B: Blob> Append<B> {
                     partial_page_state: Some(crc_record),
                     barrier: Barrier::default(),
                     needs_sync,
+                    syncing: None,
                 },
                 Some(partial_page),
             ),
@@ -318,6 +328,7 @@ impl<B: Blob> Append<B> {
                     partial_page_state: None,
                     barrier: Barrier::default(),
                     needs_sync,
+                    syncing: None,
                 },
                 None,
             ),
@@ -1420,6 +1431,7 @@ impl<B: Blob> Append<B> {
         let mut blob_state = self.blob_state.write().await;
         blob_state.barrier.discharge();
         blob_state.needs_sync = false;
+        blob_state.syncing = None;
         Ok(())
     }
 
@@ -1444,8 +1456,7 @@ impl<B: Blob> Append<B> {
         // Otherwise, the flush either had no bytes to write or used plain writes. Sync only if a
         // durability barrier is still pending.
         let mut blob_state = self.blob_state.write().await;
-        let synced = blob_state.needs_sync;
-        blob_state.sync().await?;
+        let synced = blob_state.sync().await?;
         if synced {
             // A full sync makes the partial-page footer durable, discharging any pending barrier
             // (e.g. one recorded by replay) so a later rewrite need not wait on it.
@@ -1457,9 +1468,8 @@ impl<B: Blob> Append<B> {
     /// Flush buffered data and start making all pending mutations durable.
     ///
     /// The returned [`Handle`] is the durability signal: the caller must await it
-    /// to observe completion (and any failure). Once a sync is started the pending
-    /// mutations are considered issued, so a later [`Self::sync`] without
-    /// intervening writes returns immediately and does not wait for this handle.
+    /// to observe completion. A later [`Self::start_sync`] or [`Self::sync`] without
+    /// intervening writes observes the same in-flight sync.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
         // Flush any buffered data, including any partial page (plain writes only, so the durability
         // barrier is started separately below). flush_internal drains any prior partial-page
@@ -1474,14 +1484,12 @@ impl<B: Blob> Append<B> {
         // handle that only observes that barrier.
         let mut blob_state = self.blob_state.write().await;
         if outcome.rewrote_partial_footer {
-            let handle = blob_state.start_sync().await;
-            blob_state.barrier.record(handle);
-            let pending = blob_state
-                .barrier
-                .pending()
-                .expect("barrier was just recorded");
-            drop(blob_state);
-            Ok(Barrier::observe(pending))
+            let syncing = blob_state
+                .start_sync_shared()
+                .await
+                .expect("partial-page rewrite must start sync");
+            blob_state.barrier.record_shared(syncing.clone());
+            Ok(sync::observe(syncing))
         } else {
             Ok(blob_state.start_sync().await)
         }
@@ -3064,7 +3072,7 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
-    fn test_sync_after_start_sync_without_new_writes_does_not_wait() {
+    fn test_sync_after_start_sync_without_new_writes_waits_for_in_flight_sync() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
             let blob = ControlledSyncBlob::new();
@@ -3085,16 +3093,16 @@ mod tests {
                 completed_clone.fetch_add(1, Ordering::Relaxed);
             });
 
-            // sync without new writes must not wait for the in-flight start_sync handle: this
-            // resolves even though that handle is only released below.
-            while completed.load(Ordering::Relaxed) != 1 {
-                crate::utils::reschedule().await;
-            }
-            waiter.await.unwrap();
+            crate::utils::reschedule().await;
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
             assert_eq!(blob.pending_syncs(), 1);
 
             blob.release_next_sync();
             handle.await.unwrap();
+            while completed.load(Ordering::Relaxed) != 1 {
+                crate::utils::reschedule().await;
+            }
+            waiter.await.unwrap();
             assert_eq!(blob.pending_syncs(), 0);
         });
     }

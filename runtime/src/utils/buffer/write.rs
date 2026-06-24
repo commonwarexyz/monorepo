@@ -1,4 +1,8 @@
-use crate::{buffer::tip::Buffer, Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs};
+use super::{
+    sync::{self, Shared},
+    tip::Buffer,
+};
+use crate::{Blob, Buf, BufferPool, BufferPooler, Error, Handle, IoBufs};
 use commonware_utils::sync::AsyncRwLock;
 use std::{num::NonZeroUsize, sync::Arc};
 
@@ -16,6 +20,10 @@ struct State<B: Blob> {
     /// false, otherwise it must use [`Blob::sync`] to cover earlier unsynced
     /// mutations.
     needs_sync: bool,
+
+    /// In-flight sync covering all mutations up to the last [`Self::start_sync`] call, if no newer
+    /// mutations have invalidated it.
+    syncing: Option<Shared>,
 }
 
 impl<B: Blob> State<B> {
@@ -28,6 +36,7 @@ impl<B: Blob> State<B> {
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
         self.blob.write_at(offset, bufs).await?;
         self.needs_sync = true;
+        self.syncing = None;
         Ok(())
     }
 
@@ -57,27 +66,38 @@ impl<B: Blob> State<B> {
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
         self.blob.resize(len).await?;
         self.needs_sync = true;
+        self.syncing = None;
         Ok(())
     }
 
     /// Sync the underlying blob if there are unsynced mutations.
     async fn sync(&mut self) -> Result<(), Error> {
-        if !self.needs_sync {
+        if self.needs_sync {
+            self.blob.sync().await?;
+            self.needs_sync = false;
+            self.syncing = None;
             return Ok(());
         }
-        self.blob.sync().await?;
-        self.needs_sync = false;
+
+        if let Some(syncing) = self.syncing.take() {
+            syncing.await;
+        }
         Ok(())
     }
 
     /// Start syncing the underlying blob if there are unsynced mutations.
     async fn start_sync(&mut self) -> Handle<()> {
-        if !self.needs_sync {
-            return Handle::ready(Ok(()));
+        if self.needs_sync {
+            let syncing = sync::share(self.blob.start_sync().await, "sync failed");
+            self.needs_sync = false;
+            self.syncing = Some(syncing.clone());
+            return sync::observe(syncing);
         }
-        let handle = self.blob.start_sync().await;
-        self.needs_sync = false;
-        handle
+
+        self.syncing
+            .clone()
+            .map(sync::observe)
+            .unwrap_or_else(|| Handle::ready(Ok(())))
     }
 }
 
@@ -147,6 +167,7 @@ impl<B: Blob> Write<B> {
                 blob,
                 buffer: Buffer::new(size, capacity.get(), pool),
                 needs_sync: true, // ensure pending writes on the wrapped blob are synced
+                syncing: None,
             })),
         }
     }
@@ -307,10 +328,9 @@ impl<B: Blob> Write<B> {
 
     /// Flush buffered bytes and start durably syncing mutations tracked by this writer.
     ///
-    /// The returned [`Handle`] is the durability signal: the caller must await it
-    /// to observe completion (and any failure). Once a sync is started the pending
-    /// mutations are considered issued, so a later [`Self::sync`] without
-    /// intervening writes returns immediately and does not wait for this handle.
+    /// The returned [`Handle`] is the durability signal: the caller must await it to observe
+    /// completion. A later [`Self::start_sync`] or [`Self::sync`] without intervening writes observes
+    /// the same in-flight sync.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
         let mut state = self.state.write().await;
         if let Some((buf, offset)) = state.buffer.take() {
