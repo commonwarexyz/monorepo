@@ -46,14 +46,17 @@ pub(crate) enum State {
 }
 
 impl State {
+    /// Returns a state that requires a full blob sync.
     pub(crate) const fn dirty() -> Self {
         Self::Dirty
     }
 
+    /// Returns whether a full sync still needs to be issued.
     pub(crate) const fn is_dirty(&self) -> bool {
         matches!(self, Self::Dirty)
     }
 
+    /// Records that an issued mutation must be covered by a future full sync.
     pub(crate) fn mark_dirty(&mut self) {
         *self = Self::Dirty;
     }
@@ -66,10 +69,18 @@ impl State {
         std::mem::replace(self, Self::Dirty)
     }
 
+    /// Restores the state saved before a successful range sync.
+    ///
+    /// If the range sync fails, callers should leave the conservative dirty state installed by
+    /// [`Self::prepare_range_sync`].
     pub(crate) fn restore(&mut self, previous: Self) {
         *self = previous;
     }
 
+    /// Ensures mutations represented by this state are durable.
+    ///
+    /// Returns `true` when this call issues or observes a sync, and `false` when the state was
+    /// already clean.
     pub(crate) async fn sync<B: Blob>(&mut self, blob: &B) -> Result<bool, Error> {
         match self {
             Self::Clean => Ok(false),
@@ -86,7 +97,7 @@ impl State {
         }
     }
 
-    /// Observe an in-flight sync without clearing it early if this observer is dropped.
+    /// Observes any in-flight sync without clearing it early if this observer is dropped.
     pub(crate) async fn observe_in_flight(&mut self) {
         let Self::InFlight(syncing) = self else {
             return;
@@ -95,6 +106,9 @@ impl State {
         *self = Self::Clean;
     }
 
+    /// Starts a full blob sync or returns the in-flight sync that already covers this state.
+    ///
+    /// Returns `None` when no issued mutation requires a sync.
     pub(crate) async fn start<B: Blob>(
         &mut self,
         blob: &B,
