@@ -4,7 +4,8 @@ use crate::aws::{
     deployer_directory,
     ec2::{self, *},
     s3::{
-        self, delete_prefix, get_bucket_name, is_no_such_bucket_error, Region, DEPLOYMENTS_PREFIX,
+        self, delete_prefix, get_bucket_name_if_exists, is_no_such_bucket_error, Region,
+        DEPLOYMENTS_PREFIX,
     },
     Config, Error, Metadata, DESTROYED_FILE_NAME, LOGS_PORT, METADATA_FILE_NAME, MONITORING_REGION,
     PROFILES_PORT, TRACES_PORT,
@@ -60,32 +61,37 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
         return Ok(());
     }
 
-    // Clean up S3 deployment data (preserves cached tools)
-    let bucket_name = get_bucket_name();
-    info!(
-        bucket = bucket_name.as_str(),
-        "cleaning up S3 deployment data"
-    );
-    let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
-    let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, &tag);
-    match delete_prefix(&s3_client, &bucket_name, &deployment_prefix).await {
-        Ok(()) => {
-            info!(
-                bucket = bucket_name.as_str(),
-                prefix = deployment_prefix.as_str(),
-                "deleted S3 deployment data"
-            );
-        }
-        Err(e) => {
-            if is_no_such_bucket_error(&e) {
+    // Clean up S3 deployment data (preserves cached tools). Use the persisted bucket name only:
+    // minting a fresh one here would target a non-existent bucket and leave the real deployment
+    // data behind, so skip S3 cleanup (and warn) when the config is missing.
+    if let Some(bucket_name) = get_bucket_name_if_exists() {
+        info!(
+            bucket = bucket_name.as_str(),
+            "cleaning up S3 deployment data"
+        );
+        let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
+        let deployment_prefix = format!("{}/{}/", DEPLOYMENTS_PREFIX, &tag);
+        match delete_prefix(&s3_client, &bucket_name, &deployment_prefix).await {
+            Ok(()) => {
                 info!(
                     bucket = bucket_name.as_str(),
-                    "bucket does not exist, skipping S3 cleanup"
+                    prefix = deployment_prefix.as_str(),
+                    "deleted S3 deployment data"
                 );
-            } else {
-                warn!(bucket = bucket_name.as_str(), %e, "failed to delete S3 deployment data, continuing with destroy");
+            }
+            Err(e) => {
+                if is_no_such_bucket_error(&e) {
+                    info!(
+                        bucket = bucket_name.as_str(),
+                        "bucket does not exist, skipping S3 cleanup"
+                    );
+                } else {
+                    warn!(bucket = bucket_name.as_str(), %e, "failed to delete S3 deployment data, continuing with destroy");
+                }
             }
         }
+    } else {
+        warn!("no bucket config found, skipping S3 deployment-data cleanup");
     }
 
     // First pass: Delete instances, security groups, subnets, route tables, peering, IGWs, and key pairs

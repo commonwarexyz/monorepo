@@ -3,6 +3,7 @@
 use crate::aws::{
     deployer_directory,
     ec2::{self, *},
+    images,
     s3::{self, *},
     services::*,
     utils::*,
@@ -28,24 +29,11 @@ use tracing::info;
 /// Maximum number of instance IDs per DescribeInstances API call
 const MAX_DESCRIBE_BATCH: usize = 1000;
 
-/// Pre-signed URLs for observability tools per architecture
+/// Pre-signed URLs for tools per architecture
 struct ToolUrls {
-    prometheus: String,
-    grafana: String,
-    loki: String,
-    pyroscope: String,
-    tempo: String,
-    node_exporter: String,
-    promtail: String,
+    docker: String,
     libjemalloc: String,
     logrotate: String,
-    fonts_dejavu_mono: String,
-    fonts_dejavu_core: String,
-    fontconfig_config: String,
-    libfontconfig: String,
-    unzip: String,
-    adduser: String,
-    musl: String,
 }
 
 /// Represents a deployed instance with its configuration and public IP
@@ -246,14 +234,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         architectures_needed.insert(arch);
     }
 
-    // Setup S3 bucket and cache observability tools
+    // Setup S3 bucket and cache tools
     let bucket_name = get_bucket_name();
     info!(bucket = bucket_name.as_str(), "setting up S3 bucket");
     let s3_client = s3::create_client(Region::new(MONITORING_REGION)).await;
     ensure_bucket_exists(&s3_client, &bucket_name, MONITORING_REGION).await?;
 
-    // Cache observability tools for each architecture needed
-    info!("uploading observability tools to S3");
+    // Cache tools for each architecture needed
+    info!("uploading tools to S3");
     let cache_tool = |s3_key: String, download_url: String| {
         let tag_directory = tag_directory.clone();
         let s3_client = s3_client.clone();
@@ -282,73 +270,85 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         }
     };
 
-    // Cache arch-independent packages once before the loop
-    let adduser_url = cache_tool(
-        adduser_bin_s3_key(ADDUSER_VERSION),
-        adduser_download_url(ADDUSER_VERSION),
-    )
-    .await?;
-    let fonts_dejavu_mono_url = cache_tool(
-        fonts_dejavu_mono_bin_s3_key(FONTS_DEJAVU_MONO_VERSION),
-        fonts_dejavu_mono_download_url(FONTS_DEJAVU_MONO_VERSION),
-    )
-    .await?;
-    let fonts_dejavu_core_url = cache_tool(
-        fonts_dejavu_core_bin_s3_key(FONTS_DEJAVU_CORE_VERSION),
-        fonts_dejavu_core_download_url(FONTS_DEJAVU_CORE_VERSION),
-    )
-    .await?;
     let node_exporter_dashboard_url = cache_tool(
         grafana_node_exporter_dashboard_s3_key(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
         grafana_node_exporter_dashboard_download_url(GRAFANA_NODE_EXPORTER_DASHBOARD_VERSION),
     )
     .await?;
-    // Cache tools for each architecture and store URLs per-architecture
     let mut tool_urls_by_arch: HashMap<Architecture, ToolUrls> = HashMap::new();
     for arch in &architectures_needed {
-        let [prometheus_url, grafana_url, loki_url, pyroscope_url, tempo_url, node_exporter_url, promtail_url,
-             libjemalloc_url, logrotate_url, fontconfig_config_url, libfontconfig_url, unzip_url, musl_url]: [String; 13] =
-            try_join_all([
-                cache_tool(prometheus_bin_s3_key(PROMETHEUS_VERSION, *arch), prometheus_download_url(PROMETHEUS_VERSION, *arch)),
-                cache_tool(grafana_bin_s3_key(GRAFANA_VERSION, *arch), grafana_download_url(GRAFANA_VERSION, *arch)),
-                cache_tool(loki_bin_s3_key(LOKI_VERSION, *arch), loki_download_url(LOKI_VERSION, *arch)),
-                cache_tool(pyroscope_bin_s3_key(PYROSCOPE_VERSION, *arch), pyroscope_download_url(PYROSCOPE_VERSION, *arch)),
-                cache_tool(tempo_bin_s3_key(TEMPO_VERSION, *arch), tempo_download_url(TEMPO_VERSION, *arch)),
-                cache_tool(node_exporter_bin_s3_key(NODE_EXPORTER_VERSION, *arch), node_exporter_download_url(NODE_EXPORTER_VERSION, *arch)),
-                cache_tool(promtail_bin_s3_key(PROMTAIL_VERSION, *arch), promtail_download_url(PROMTAIL_VERSION, *arch)),
-                cache_tool(libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch), libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch)),
-                cache_tool(logrotate_bin_s3_key(LOGROTATE_VERSION, *arch), logrotate_download_url(LOGROTATE_VERSION, *arch)),
-                cache_tool(fontconfig_config_bin_s3_key(FONTCONFIG_CONFIG_VERSION, *arch), fontconfig_config_download_url(FONTCONFIG_CONFIG_VERSION, *arch)),
-                cache_tool(libfontconfig_bin_s3_key(LIBFONTCONFIG1_VERSION, *arch), libfontconfig_download_url(LIBFONTCONFIG1_VERSION, *arch)),
-                cache_tool(unzip_bin_s3_key(UNZIP_VERSION, *arch), unzip_download_url(UNZIP_VERSION, *arch)),
-                cache_tool(musl_bin_s3_key(MUSL_VERSION, *arch), musl_download_url(MUSL_VERSION, *arch)),
-            ])
-            .await?
-            .try_into()
-            .unwrap();
+        let [docker_url, libjemalloc_url, logrotate_url]: [String; 3] = try_join_all([
+            cache_tool(
+                docker_bin_s3_key(DOCKER_VERSION, *arch),
+                docker_download_url(DOCKER_VERSION, *arch),
+            ),
+            cache_tool(
+                libjemalloc_bin_s3_key(LIBJEMALLOC2_VERSION, *arch),
+                libjemalloc_download_url(LIBJEMALLOC2_VERSION, *arch),
+            ),
+            cache_tool(
+                logrotate_bin_s3_key(LOGROTATE_VERSION, *arch),
+                logrotate_download_url(LOGROTATE_VERSION, *arch),
+            ),
+        ])
+        .await?
+        .try_into()
+        .unwrap();
         tool_urls_by_arch.insert(
             *arch,
             ToolUrls {
-                prometheus: prometheus_url,
-                grafana: grafana_url,
-                loki: loki_url,
-                pyroscope: pyroscope_url,
-                tempo: tempo_url,
-                node_exporter: node_exporter_url,
-                promtail: promtail_url,
+                docker: docker_url,
                 libjemalloc: libjemalloc_url,
                 logrotate: logrotate_url,
-                fonts_dejavu_mono: fonts_dejavu_mono_url.clone(),
-                fonts_dejavu_core: fonts_dejavu_core_url.clone(),
-                fontconfig_config: fontconfig_config_url,
-                libfontconfig: libfontconfig_url,
-                unzip: unzip_url,
-                adduser: adduser_url.clone(),
-                musl: musl_url,
             },
         );
     }
-    info!("observability tools uploaded");
+    info!("tools uploaded");
+
+    // Cache required container images as `docker save` tarballs in S3 (one per architecture).
+    // Instances `docker load` these via pre-signed URLs, so they never authenticate against a
+    // registry. Distinct images are cached concurrently, but a single image's architectures are
+    // cached sequentially: `docker pull --platform`/`docker save` share docker's per-tag local
+    // image store, so caching two architectures of the same image at once would corrupt the save.
+    info!("caching container images in S3");
+    let mut arches_by_image: HashMap<&'static str, HashSet<Architecture>> = HashMap::new();
+    for image in monitoring_images() {
+        arches_by_image
+            .entry(image)
+            .or_default()
+            .insert(monitoring_architecture);
+    }
+    for instance in &config.instances {
+        let arch = arch_by_instance_type[&instance.instance_type];
+        for image in binary_images() {
+            arches_by_image.entry(image).or_default().insert(arch);
+        }
+    }
+    let cached = try_join_all(arches_by_image.into_iter().map(|(image, arches)| {
+        let s3_client = s3_client.clone();
+        let bucket_name = bucket_name.clone();
+        let tag_directory = tag_directory.clone();
+        async move {
+            let mut urls = Vec::new();
+            for arch in arches {
+                let url =
+                    images::cache_image(&s3_client, &bucket_name, &tag_directory, image, arch)
+                        .await?;
+                urls.push((arch, image, url));
+            }
+            Ok::<_, Error>(urls)
+        }
+    }))
+    .await?;
+    let mut image_urls_by_arch: HashMap<Architecture, HashMap<&'static str, String>> =
+        HashMap::new();
+    for (arch, image, url) in cached.into_iter().flatten() {
+        image_urls_by_arch
+            .entry(arch)
+            .or_default()
+            .insert(image, url);
+    }
+    info!("container images cached in S3");
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)
     info!("uploading unique binaries and configs to S3");
@@ -833,28 +833,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         loki_yml_url,
         pyroscope_yml_url,
         tempo_yml_url,
-        prometheus_service_url,
-        loki_service_url,
-        pyroscope_service_url,
-        tempo_service_url,
-        monitoring_node_exporter_service_url,
-        promtail_service_url,
-        logrotate_conf_url,
         pyroscope_agent_service_url,
         pyroscope_agent_timer_url,
-    ]: [String; 14] = try_join_all([
+    ]: [String; 7] = try_join_all([
         cache_and_presign(&s3_client, &bucket_name, &grafana_datasources_s3_key(), UploadSource::Static(DATASOURCES_YML.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &grafana_dashboards_s3_key(), UploadSource::Static(ALL_YML.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &loki_config_s3_key(), UploadSource::Static(LOKI_CONFIG.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &pyroscope_config_s3_key(), UploadSource::Static(PYROSCOPE_CONFIG.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &tempo_config_s3_key(), UploadSource::Static(TEMPO_CONFIG.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &prometheus_service_s3_key(), UploadSource::Static(PROMETHEUS_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &loki_service_s3_key(), UploadSource::Static(LOKI_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &pyroscope_service_s3_key(), UploadSource::Static(PYROSCOPE_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &tempo_service_s3_key(), UploadSource::Static(TEMPO_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &node_exporter_service_s3_key(), UploadSource::Static(NODE_EXPORTER_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &promtail_service_s3_key(), UploadSource::Static(PROMTAIL_SERVICE.as_bytes()), PRESIGN_DURATION),
-        cache_and_presign(&s3_client, &bucket_name, &logrotate_config_s3_key(), UploadSource::Static(LOGROTATE_CONF.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_service_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_SERVICE.as_bytes()), PRESIGN_DURATION),
         cache_and_presign(&s3_client, &bucket_name, &pyroscope_agent_timer_s3_key(), UploadSource::Static(PYROSCOPE_AGENT_TIMER.as_bytes()), PRESIGN_DURATION),
     ])
@@ -1046,7 +1032,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         },
     )?;
 
-    // Build instance URLs map (using architecture-specific tool URLs)
+    // Build instance URLs map with architecture-specific tool URLs
     let mut instance_urls_map: HashMap<String, (InstanceUrls, Architecture)> = HashMap::new();
     for deployment in &deployments {
         let name = &deployment.instance.name;
@@ -1062,19 +1048,17 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     binary: instance_binary_urls[name].clone(),
                     config: instance_config_urls[name].clone(),
                     hosts: hosts_url.clone(),
-                    promtail_bin: tool_urls.promtail.clone(),
                     promtail_config: promtail_digest_to_url[promtail_digest].clone(),
-                    promtail_service: promtail_service_url.clone(),
-                    node_exporter_bin: tool_urls.node_exporter.clone(),
-                    node_exporter_service: monitoring_node_exporter_service_url.clone(),
                     binary_service: binary_service_urls_by_arch[&arch].clone(),
-                    logrotate_conf: logrotate_conf_url.clone(),
                     pyroscope_script: pyroscope_digest_to_url[pyroscope_digest].clone(),
                     pyroscope_service: pyroscope_agent_service_url.clone(),
                     pyroscope_timer: pyroscope_agent_timer_url.clone(),
+                    docker_tgz: tool_urls.docker.clone(),
                     libjemalloc_deb: tool_urls.libjemalloc.clone(),
                     logrotate_deb: tool_urls.logrotate.clone(),
-                    unzip_deb: tool_urls.unzip.clone(),
+                    images: binary_images()
+                        .map(|image| (image, image_urls_by_arch[&arch][image].clone()))
+                        .collect(),
                 },
                 arch,
             ),
@@ -1082,22 +1066,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     info!("uploaded config files to S3");
 
-    // Build monitoring URLs struct for SSH configuration (using monitoring architecture)
+    // Build monitoring URLs struct for SSH configuration
     let tool_urls = &tool_urls_by_arch[&monitoring_architecture];
     let monitoring_urls = MonitoringUrls {
-        prometheus_bin: tool_urls.prometheus.clone(),
-        grafana_bin: tool_urls.grafana.clone(),
-        loki_bin: tool_urls.loki.clone(),
-        pyroscope_bin: tool_urls.pyroscope.clone(),
-        tempo_bin: tool_urls.tempo.clone(),
-        node_exporter_bin: tool_urls.node_exporter.clone(),
-        fonts_dejavu_mono_deb: tool_urls.fonts_dejavu_mono.clone(),
-        fonts_dejavu_core_deb: tool_urls.fonts_dejavu_core.clone(),
-        fontconfig_config_deb: tool_urls.fontconfig_config.clone(),
-        libfontconfig_deb: tool_urls.libfontconfig.clone(),
-        unzip_deb: tool_urls.unzip.clone(),
-        adduser_deb: tool_urls.adduser.clone(),
-        musl_deb: tool_urls.musl.clone(),
+        docker_tgz: tool_urls.docker.clone(),
         prometheus_config: prometheus_config_url,
         datasources_yml: datasources_url,
         all_yml: all_yml_url,
@@ -1106,11 +1078,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         loki_yml: loki_yml_url,
         pyroscope_yml: pyroscope_yml_url,
         tempo_yml: tempo_yml_url,
-        prometheus_service: prometheus_service_url,
-        loki_service: loki_service_url,
-        pyroscope_service: pyroscope_service_url,
-        tempo_service: tempo_service_url,
-        node_exporter_service: monitoring_node_exporter_service_url.clone(),
+        images: monitoring_images()
+            .map(|image| {
+                (
+                    image,
+                    image_urls_by_arch[&monitoring_architecture][image].clone(),
+                )
+            })
+            .collect(),
     };
 
     // Prepare binary instance configuration futures
@@ -1154,9 +1129,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
 
             let start_time = Instant::now();
-            poll_service_active(private_key, &ip, "promtail").await?;
-            poll_service_active(private_key, &ip, "node_exporter").await?;
             poll_service_active(private_key, &ip, "binary").await?;
+            for service in binary_image_services() {
+                poll_service_active(private_key, &ip, service).await?;
+            }
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
             info!(
@@ -1196,12 +1172,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
 
             let setup_start = Instant::now();
-            ssh_execute(
-                private_key,
-                &monitoring_ip,
-                &install_monitoring_setup_cmd(PROMETHEUS_VERSION, monitoring_architecture),
-            )
-            .await?;
+            ssh_execute(private_key, &monitoring_ip, &install_monitoring_setup_cmd()).await?;
             ssh_execute(
                 private_key,
                 &monitoring_ip,
@@ -1211,15 +1182,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
 
             let start_time = Instant::now();
-            poll_service_active(private_key, &monitoring_ip, "node_exporter").await?;
-            poll_service_active(private_key, &monitoring_ip, "prometheus").await?;
-            poll_service_active(private_key, &monitoring_ip, "loki").await?;
-            poll_service_active(private_key, &monitoring_ip, "pyroscope").await?;
-            poll_service_active(private_key, &monitoring_ip, "tempo").await?;
-            for service in docker_tool_services() {
+            for service in monitoring_image_services() {
                 poll_service_active(private_key, &monitoring_ip, service).await?;
             }
-            poll_service_active(private_key, &monitoring_ip, "grafana-server").await?;
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
             info!(

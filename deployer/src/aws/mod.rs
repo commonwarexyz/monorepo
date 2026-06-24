@@ -57,12 +57,12 @@
 //!
 //! * Deployed in `us-east-1` with a configurable instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64) and storage (e.g., 10GB gp2). Architecture is auto-detected from the instance type.
 //! * Runs:
-//!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
+//!     * **Prometheus**: Scrapes binary metrics at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
 //!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
-//!     * **Tempo**: Listens at `:4318`, storing traces in `/var/lib/tempo`.
+//!     * **Tempo**: Listens at `:4318`, storing traces in `/tempo`.
 //!     * **Grafana**: Hosted at `:3000`, provisioned with Prometheus, Loki, and Tempo datasources and a custom dashboard.
-//!     * **Tracer**: Hosted at `:8080` (as a Docker container), rendering multi-instance trace flamegraphs from the local Tempo.
+//!     * **Tracer**: Hosted at `:8080`, rendering multi-instance trace flamegraphs from the local Tempo.
 //! * Ingress:
 //!     * Allows deployer IP access (TCP 0-65535).
 //!     * Binary instance traffic to Loki (TCP 3100) and Tempo (TCP 4318).
@@ -120,16 +120,17 @@
 //! 1. Validates configuration and generates an SSH key pair, stored in `$HOME/.commonware_deployer/{tag}/id_rsa_{tag}`.
 //! 2. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
 //!    This enables `destroy --tag` cleanup if creation fails.
-//! 3. Ensures the shared S3 bucket exists and caches observability tools (Prometheus, Grafana, Loki, etc.) if not already present.
-//! 4. Uploads deployment-specific files (binaries, configs) to S3.
-//! 5. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
-//! 6. Establishes VPC peering between the monitoring region and binary regions.
-//! 7. Launches the monitoring instance.
-//! 8. Launches binary instances.
-//! 9. Caches all static config files and uploads per-instance configs (hosts.yaml, promtail, pyroscope) to S3.
-//! 10. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
-//! 11. Updates the monitoring security group to allow telemetry traffic from binary instances.
-//! 12. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
+//! 3. Ensures the shared S3 bucket exists and caches tools if not already present.
+//! 4. Caches required container images as `docker save` tarballs in S3 (one per architecture) if not already present.
+//! 5. Uploads deployment-specific files (binaries, configs) to S3.
+//! 6. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
+//! 7. Establishes VPC peering between the monitoring region and binary regions.
+//! 8. Launches the monitoring instance.
+//! 9. Launches binary instances.
+//! 10. Caches all static config files and uploads per-instance configs (hosts.yaml, Promtail, Pyroscope) to S3.
+//! 11. Configures monitoring and binary instances in parallel via SSH (BBR, service installation, service startup).
+//! 12. Updates the monitoring security group to allow telemetry traffic from binary instances.
+//! 13. Marks completion with `$HOME/.commonware_deployer/{tag}/created`.
 //!
 //! ## `aws update`
 //!
@@ -158,12 +159,12 @@
 //!
 //! 1. Terminates all instances across regions.
 //! 2. Deletes security groups, subnets, route tables, VPC peering connections, internet gateways, key pairs, and VPCs in dependency order.
-//! 3. Deletes deployment-specific data from S3 (cached tools remain for future deployments).
+//! 3. Deletes deployment-specific data from S3 (cached tools and images remain for future deployments).
 //! 4. Marks destruction with `$HOME/.commonware_deployer/{tag}/destroyed`, retaining the directory to prevent tag reuse.
 //!
 //! ## `aws clean`
 //!
-//! 1. Deletes the shared S3 bucket and all its contents (cached tools and any remaining deployment data).
+//! 1. Deletes the shared S3 bucket and all its contents (cached tools, image tarballs, and any remaining deployment data).
 //! 2. Use this to fully clean up when you no longer need the deployer cache.
 //!
 //! ## `aws list`
@@ -233,13 +234,12 @@
 //!
 //! ## S3 Caching
 //!
-//! A shared S3 bucket (`commonware-deployer-cache`) is used to cache deployment artifacts. The bucket
-//! uses a fixed name intentionally so that all users within the same AWS account share the cache. This
-//! design provides two benefits:
+//! A shared S3 cache avoids repeated downloads from upstream sources. The cache name is stored in
+//! `$HOME/.commonware_deployer/bucket` and reused by later deployments.
 //!
-//! 1. **Faster deployments**: Observability tools (Prometheus, Grafana, Loki, etc.) are downloaded from
-//!    upstream sources once and cached in S3. Subsequent deployments by any user skip the download and
-//!    use pre-signed URLs to fetch directly from S3.
+//! 1. **Faster deployments**: Tools are downloaded from upstream sources once and cached in S3.
+//!    Required container images are saved (via `docker save`) as per-architecture tarballs once and
+//!    `docker load`ed during instance setup, so instances never authenticate against a registry.
 //!
 //! 2. **Reduced bandwidth**: Instead of requiring the deployer to push binaries to each instance,
 //!    unique binaries are uploaded once to S3 and then pulled from there.
@@ -248,14 +248,14 @@
 //! conflicts between concurrent deployments.
 //!
 //! The bucket stores:
-//!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Tool binaries (e.g., prometheus, grafana)
+//!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Tool binaries and packages
+//!   * `tools/binaries/images/{image}/{platform}/image.tar.gz` - Cached container image tarballs
 //!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and service files
-//!   * `deployments/{tag}/` - Deployment-specific files:
-//!     * `monitoring/` - Prometheus config, dashboard
-//!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script
+//!   * `deployments/{tag}/{kind}/{digest}` - Deployment-specific files, deduplicated by content
+//!     digest (kinds: `binaries`, `configs`, `hosts`, `promtail`, `pyroscope`, `monitoring`)
 //!
-//! Tool binaries are namespaced by tool version and platform. Static configs are namespaced by deployer
-//! version to ensure cache invalidation when the deployer is updated.
+//! Cached packages and images are namespaced by version and platform. Static configs are namespaced
+//! by deployer version to ensure cache invalidation when the deployer is updated.
 //!
 //! # Example Configuration
 //!
@@ -345,6 +345,7 @@ cfg_if::cfg_if! {
 
         mod create;
         pub mod ec2;
+        mod images;
         pub mod services;
         pub use create::create;
         mod update;
@@ -550,6 +551,8 @@ cfg_if::cfg_if! {
             IpAddrNotV4(std::net::IpAddr),
             #[error("download failed: {0}")]
             DownloadFailed(String),
+            #[error("command failed: {command}: {stderr}")]
+            CommandFailed { command: String, stderr: String },
             #[error("S3 presigning config error: {0}")]
             S3PresigningConfig(#[from] aws_sdk_s3::presigning::PresigningConfigError),
             #[error("S3 presigning failed: {0}")]
