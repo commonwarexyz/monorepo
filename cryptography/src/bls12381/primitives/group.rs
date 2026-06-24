@@ -929,6 +929,7 @@ impl Field for Scalar {
 }
 
 impl Random for Scalar {
+    /// Returns a random **non-zero** scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
         rng.fill_bytes(ikm.as_mut());
