@@ -2898,10 +2898,9 @@ mod tests {
         }
     }
 
-    // A failed durable sync is fatal. The page buffer issues the partial-page footer sync eagerly,
-    // so the fault surfaces from the runtime barrier ("partial-page sync failed") before the
-    // marshal's own "failed to sync verified" context; either way the verdict is never a recoverable
-    // one.
+    // The page buffer issues the partial-page footer sync eagerly, so a sync fault surfaces from the
+    // runtime barrier ("partial-page sync failed") before the marshal's own "failed to sync verified"
+    // context. Both are fatal; match the message that actually fires.
     #[test_traced("WARN")]
     #[should_panic(expected = "partial-page sync failed")]
     fn test_mailbox_verified_sync_failure_panics() {
