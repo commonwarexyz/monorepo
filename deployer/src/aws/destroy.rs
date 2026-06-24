@@ -91,7 +91,7 @@ pub async fn destroy(config: Option<&PathBuf>, tag: Option<&str>) -> Result<(), 
             }
         }
     } else {
-        warn!("no bucket config found, skipping S3 deployment-data cleanup");
+        warn!("no bucket config found, skipping S3 cleanup");
     }
 
     // First pass: Delete instances, security groups, subnets, route tables, peering, IGWs, and key pairs
