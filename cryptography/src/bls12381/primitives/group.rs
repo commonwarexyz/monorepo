@@ -240,7 +240,7 @@ pub struct Scalar(pub(crate) blst_fr);
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
-        Ok(Private::from_ikm(&ikm).expose_unwrap())
+        Ok(Self::from_ikm(&ikm))
     }
 }
 
@@ -519,20 +519,6 @@ impl Private {
     pub fn expose_unwrap(self) -> Scalar {
         self.scalar.expose_unwrap()
     }
-
-    /// Creates a private key from input key material.
-    ///
-    /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
-    fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
-        let mut sc = blst_scalar::default();
-        let mut ret = blst_fr::default();
-        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
-        unsafe {
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
-        }
-        Self::new(Scalar(ret))
-    }
 }
 
 impl Write for Private {
@@ -558,15 +544,14 @@ impl Random for Private {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
         rng.fill_bytes(ikm.as_mut());
-        Self::from_ikm(&ikm)
+        Self::new(Scalar::from_ikm(&ikm))
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Private {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
-        Ok(Self::from_ikm(&ikm))
+        Ok(Self::new(u.arbitrary::<Scalar>()?))
     }
 }
 
@@ -574,6 +559,20 @@ impl arbitrary::Arbitrary<'_> for Private {
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
+    /// Creates a scalar from input key material.
+    ///
+    /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
+    fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
+        let mut sc = blst_scalar::default();
+        let mut ret = blst_fr::default();
+        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
+        unsafe {
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+        Self(ret)
+    }
+
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
     pub fn map(dst: &[u8], msg: &[u8]) -> Self {
         // The BLS12-381 scalar field has a modulus of approximately 255 bits.
@@ -935,7 +934,7 @@ impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
         rng.fill_bytes(ikm.as_mut());
-        Private::from_ikm(&ikm).expose_unwrap()
+        Self::from_ikm(&ikm)
     }
 }
 
