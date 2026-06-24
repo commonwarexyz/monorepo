@@ -1,5 +1,5 @@
 use crate::{
-    bls12381::primitives::group::Scalar,
+    bls12381::primitives::group::{Scalar, ScalarReadCfg},
     zk::circuit::{BoolVar, Context, Var},
 };
 #[cfg(not(feature = "std"))]
@@ -700,10 +700,9 @@ impl Read for G {
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, CodecError> {
         let bytes = <[u8; 32]>::read(buf)?;
-        let x = Scalar::from_canonical_bytes(&bytes).ok_or(CodecError::Invalid(
-            "Banderwagon",
-            "x not a canonical field element",
-        ))?;
+        let mut bytes = bytes.as_ref();
+        let x = Scalar::read_cfg(&mut bytes, &ScalarReadCfg::AllowZero)
+            .map_err(|_| CodecError::Invalid("Banderwagon", "x not a canonical field element"))?;
         Self::from_x(x).ok_or(CodecError::Invalid("Banderwagon", "point not in subgroup"))
     }
 }
