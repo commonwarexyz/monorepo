@@ -167,7 +167,7 @@ const MONITORING_IMAGE_SERVICES: &[ImageService] = &[
         env: &[],
         volumes: &[
             "/etc/tempo/tempo.yml:/etc/tempo/tempo.yml:ro",
-            "/tempo:/tempo",
+            "/tempo:/var/tempo",
         ],
         args: &["-config.file=/etc/tempo/tempo.yml"],
         options: &[],
@@ -610,9 +610,9 @@ storage:
   trace:
     backend: local
     local:
-      path: /tempo/traces
+      path: /var/tempo/traces
     wal:
-      path: /tempo/wal
+      path: /var/tempo/wal
 ingester:
   max_block_duration: 1h
 compactor:
@@ -1477,6 +1477,12 @@ mod tests {
             "--env TEMPO_URL=http://127.0.0.1:3200 {TRACER_IMAGE}"
         )));
         assert!(setup.contains("--network host"));
+        assert!(setup.contains("--volume /tempo:/var/tempo"));
+        assert!(!setup.contains("--volume /tempo:/tempo"));
+
+        assert!(TEMPO_CONFIG.contains("path: /var/tempo/traces"));
+        assert!(TEMPO_CONFIG.contains("path: /var/tempo/wal"));
+        assert!(!TEMPO_CONFIG.contains("path: /tempo/"));
     }
 
     #[test]
