@@ -46,8 +46,11 @@ use super::{
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
-use commonware_runtime::{BufferPooler, Metrics, Storage};
-use futures::{future::try_join, stream::Stream};
+use commonware_runtime::{BufferPooler, Handle, Metrics, Storage};
+use futures::{
+    future::{join, try_join},
+    stream::Stream,
+};
 use std::{collections::HashSet, num::NonZeroUsize};
 use tracing::{debug, warn};
 
@@ -343,6 +346,21 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         try_join(self.index.sync(section), self.values.sync(section))
             .await
             .map(|_| ())
+    }
+
+    /// Start syncing both journals for given section.
+    pub async fn start_sync(&self, section: u64) -> Result<Handle<()>, Error> {
+        let (index, values) = try_join(
+            self.index.start_sync(section),
+            self.values.start_sync(section),
+        )
+        .await?;
+        Ok(Handle::from_future(async move {
+            let (index, values) = join(index, values).await;
+            index?;
+            values?;
+            Ok(())
+        }))
     }
 
     /// Sync all sections.
