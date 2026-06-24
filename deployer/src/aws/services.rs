@@ -8,6 +8,8 @@ use crate::aws::{
 // Binary artifacts and user SSH state live under this directory. NVMe-backed instances mount
 // instance-store storage here so existing binary configs use NVMe without extra configuration.
 const HOME_DIRECTORY: &str = "/home/ubuntu";
+
+// Install path for the Docker static binary.
 const DOCKER_BIN: &str = "/usr/local/bin/docker";
 
 /// Deployer version used to namespace static configs in S3
