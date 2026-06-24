@@ -167,3 +167,10 @@ path = "fuzz_targets/concurrency.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "sync"
+path = "fuzz_targets/sync.rs"
+test = false
+doc = false
+bench = false
