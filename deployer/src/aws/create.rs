@@ -867,7 +867,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
 
     // Upload deployment-specific monitoring config files (deduplicated by digest)
-    let instances: Vec<(&str, &str, &str, &str, bool)> = deployments
+    let instances: Vec<(&str, &str, &str, &str)> = deployments
         .iter()
         .map(|d| {
             let arch = instance_architectures[&d.instance.name];
@@ -876,7 +876,6 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                 d.ip.as_str(),
                 d.instance.region.as_str(),
                 arch.as_str(),
-                d.instance.metrics,
             )
         })
         .collect();
@@ -1446,7 +1445,6 @@ mod tests {
             storage_throughput: None,
             binary: "binary".to_string(),
             config: "config.yaml".to_string(),
-            metrics: true,
             profiling: false,
         }
     }

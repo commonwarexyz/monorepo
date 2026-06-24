@@ -1111,7 +1111,7 @@ scrape_configs:
 }
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
-pub fn generate_prometheus_config(instances: &[(&str, &str, &str, &str, bool)]) -> String {
+pub fn generate_prometheus_config(instances: &[(&str, &str, &str, &str)]) -> String {
     let mut config = String::from(
         r#"
 global:
@@ -1122,10 +1122,9 @@ scrape_configs:
       - targets: ['localhost:9100']
 "#,
     );
-    for (name, ip, region, arch, metrics) in instances {
-        if *metrics {
-            config.push_str(&format!(
-                r#"
+    for (name, ip, region, arch) in instances {
+        config.push_str(&format!(
+            r#"
   - job_name: '{name}_binary'
     static_configs:
       - targets: ['{ip}:9090']
@@ -1135,8 +1134,7 @@ scrape_configs:
           deployer_region: '{region}'
           deployer_arch: '{arch}'
 "#
-            ));
-        }
+        ));
         config.push_str(&format!(
             r#"
   - job_name: '{name}_system'
@@ -1496,10 +1494,10 @@ mod tests {
     }
 
     #[test]
-    fn test_prometheus_config_skips_binary_metrics_when_disabled() {
+    fn test_prometheus_config_scrapes_binary_metrics_for_all_instances() {
         let config = generate_prometheus_config(&[
-            ("validator", "10.0.0.1", "us-east-1", "arm64", true),
-            ("spammer", "10.0.0.2", "us-east-1", "arm64", false),
+            ("validator", "10.0.0.1", "us-east-1", "arm64"),
+            ("spammer", "10.0.0.2", "us-east-1", "arm64"),
         ]);
 
         assert!(config.contains("job_name: 'validator_binary'"));
@@ -1507,8 +1505,8 @@ mod tests {
         assert!(config.contains("job_name: 'validator_system'"));
         assert!(config.contains("targets: ['10.0.0.1:9100']"));
 
-        assert!(!config.contains("job_name: 'spammer_binary'"));
-        assert!(!config.contains("targets: ['10.0.0.2:9090']"));
+        assert!(config.contains("job_name: 'spammer_binary'"));
+        assert!(config.contains("targets: ['10.0.0.2:9090']"));
         assert!(config.contains("job_name: 'spammer_system'"));
         assert!(config.contains("targets: ['10.0.0.2:9100']"));
     }
