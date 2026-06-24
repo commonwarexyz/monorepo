@@ -26,9 +26,7 @@ impl<B: Blob> State<B> {
 
     /// Write bytes to the underlying blob and mark them as needing sync.
     async fn write_at(&mut self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
-        self.blob.write_at(offset, bufs).await?;
-        self.sync.mark_dirty();
-        Ok(())
+        self.sync.write_at(&self.blob, offset, bufs).await
     }
 
     /// Write bytes to the underlying blob and make them durable.
@@ -41,25 +39,12 @@ impl<B: Blob> State<B> {
         offset: u64,
         bufs: impl Into<IoBufs> + Send,
     ) -> Result<(), Error> {
-        if self.sync.is_dirty() {
-            self.write_at(offset, bufs).await?;
-            self.sync().await
-        } else {
-            // If `write_at_sync` fails, a later sync must not treat the drained
-            // buffer as durable.
-            let previous = self.sync.prepare_range_sync();
-            self.blob.write_at_sync(offset, bufs).await?;
-            self.sync.restore(previous);
-            self.sync.observe_in_flight().await?;
-            Ok(())
-        }
+        self.sync.write_at_sync(&self.blob, offset, bufs).await
     }
 
     /// Resize the underlying blob and mark the resize as needing sync.
     async fn resize(&mut self, len: u64) -> Result<(), Error> {
-        self.blob.resize(len).await?;
-        self.sync.mark_dirty();
-        Ok(())
+        self.sync.resize(&self.blob, len).await
     }
 
     /// Sync the underlying blob if there are unsynced mutations.

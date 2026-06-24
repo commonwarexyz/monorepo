@@ -1,6 +1,6 @@
 //! Shared sync observation and durability bookkeeping for buffered blob wrappers.
 
-use crate::{Blob, Error, Handle};
+use crate::{Blob, Error, Handle, IoBufs};
 use futures::{
     future::{join_all, BoxFuture, Shared as FuturesShared},
     FutureExt as _,
@@ -74,6 +74,64 @@ impl State {
     /// Records that an issued mutation must be covered by a future full sync.
     pub(crate) fn mark_dirty(&mut self) {
         *self = Self::Dirty;
+    }
+
+    /// Writes bytes to `blob` and records that they need a future full sync.
+    pub(crate) async fn write_at<B: Blob>(
+        &mut self,
+        blob: &B,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        blob.write_at(offset, bufs).await?;
+        self.mark_dirty();
+        Ok(())
+    }
+
+    /// Writes bytes to `blob` and makes them durable.
+    ///
+    /// Uses [`Blob::write_at_sync`] when no earlier mutation requires a new full sync. Any
+    /// in-flight sync for earlier plain mutations is observed before returning. Otherwise, writes
+    /// the bytes and then syncs the blob.
+    pub(crate) async fn write_at_sync<B: Blob>(
+        &mut self,
+        blob: &B,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+    ) -> Result<(), Error> {
+        if self.is_dirty() {
+            self.write_at(blob, offset, bufs).await?;
+            self.sync(blob).await.map(|_| ())
+        } else {
+            // If `write_at_sync` fails, a later sync must not treat the drained
+            // buffer as durable.
+            let previous = self.prepare_range_sync();
+            blob.write_at_sync(offset, bufs).await?;
+            self.restore(previous);
+            self.observe_in_flight().await
+        }
+    }
+
+    /// Writes bytes to `blob`, optionally making them durable.
+    pub(crate) async fn write_at_maybe_sync<B: Blob>(
+        &mut self,
+        blob: &B,
+        offset: u64,
+        bufs: impl Into<IoBufs> + Send,
+        sync: bool,
+    ) -> Result<(), Error> {
+        if sync {
+            self.write_at_sync(blob, offset, bufs).await
+        } else {
+            self.write_at(blob, offset, bufs).await
+        }
+    }
+
+    /// Resizes `blob` and records that the resize needs a future full sync.
+    pub(crate) async fn resize<B: Blob>(&mut self, blob: &B, len: u64) -> Result<(), Error> {
+        blob.resize(len).await?;
+        self.mark_dirty();
+        Ok(())
     }
 
     /// Marks the blob dirty while a range sync is in progress.
