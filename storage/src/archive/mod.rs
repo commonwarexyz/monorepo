@@ -7,6 +7,7 @@
 //! return any of the associated values.
 
 use commonware_codec::Codec;
+use commonware_runtime::Handle;
 use commonware_utils::Array;
 use std::future::Future;
 use thiserror::Error;
@@ -73,6 +74,33 @@ pub trait Archive: Send {
         async move {
             self.put(index, key, value).await?;
             self.sync().await
+        }
+    }
+
+    /// Flush pending writes and begin making them durable, returning a [Handle] the caller awaits
+    /// later to observe completion (and any failure).
+    ///
+    /// This lets a caller overlap the durability fsync with subsequent work instead of blocking on
+    /// [Archive::sync]. The default implementation syncs synchronously and returns an
+    /// already-resolved handle (no overlap); implementations that support overlapping fsyncs should
+    /// override it.
+    fn start_sync(&mut self) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.sync().await?;
+            Ok(Handle::ready(Ok(())))
+        }
+    }
+
+    /// Perform a [Archive::put] and [Archive::start_sync] in a single operation.
+    fn put_start_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.put(index, key, value).await?;
+            self.start_sync().await
         }
     }
 
@@ -159,6 +187,19 @@ pub trait MultiArchive: Archive {
         async move {
             self.put_multi(index, key, value).await?;
             self.sync().await
+        }
+    }
+
+    /// Perform a [MultiArchive::put_multi] and [Archive::start_sync] in a single operation.
+    fn put_multi_start_sync(
+        &mut self,
+        index: u64,
+        key: Self::Key,
+        value: Self::Value,
+    ) -> impl Future<Output = Result<Handle<()>, Error>> + Send {
+        async move {
+            self.put_multi(index, key, value).await?;
+            self.start_sync().await
         }
     }
 }
@@ -1179,12 +1220,14 @@ mod tests {
         T::Value: Clone,
     {
         assert_send(archive.put(1, key.clone(), value.clone()));
-        assert_send(archive.put_sync(2, key.clone(), value));
+        assert_send(archive.put_sync(2, key.clone(), value.clone()));
+        assert_send(archive.put_start_sync(3, key.clone(), value));
         assert_send(archive.get(Identifier::Index(1)));
         assert_send(archive.get(Identifier::Key(&key)));
         assert_send(archive.has(Identifier::Index(1)));
         assert_send(archive.has(Identifier::Key(&key)));
         assert_send(archive.sync());
+        assert_send(archive.start_sync());
     }
 
     #[allow(dead_code)]
@@ -1204,7 +1247,8 @@ mod tests {
         assert_archive_futures_are_send(archive, key.clone(), value.clone());
         assert_send(archive.get_all(1));
         assert_send(archive.put_multi(1, key.clone(), value.clone()));
-        assert_send(archive.put_multi_sync(2, key, value));
+        assert_send(archive.put_multi_sync(2, key.clone(), value.clone()));
+        assert_send(archive.put_multi_start_sync(3, key, value));
     }
 
     #[allow(dead_code)]

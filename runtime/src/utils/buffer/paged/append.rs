@@ -56,6 +56,19 @@ enum ProtectedCrc {
     Second,
 }
 
+/// The result of a [`Append::flush_internal`] call.
+struct FlushOutcome {
+    /// Whether the flush made its writes durable, so no additional sync is needed.
+    made_durable: bool,
+
+    /// Whether the flush plainly wrote a not-yet-durable checksum into the current partial page's
+    /// footer. When true, a [`Barrier`] is owed: a later rewrite of that page must make this footer
+    /// durable before overwriting its preserved checksum slot (see [`Barrier`]). This is the single
+    /// source of truth for "did this flush create a partial-page barrier obligation?", replacing the
+    /// predicate that callers used to re-derive independently.
+    rewrote_partial_footer: bool,
+}
+
 /// The completion of an in-flight partial-page sync. Shared so the returned `start_sync` handle and
 /// any later rewrite of the page can both await the same sync. The output is `()`; failures are
 /// handled by panicking in [`Barrier::into_shared`].
@@ -81,21 +94,15 @@ impl Barrier {
             .shared()
     }
 
-    /// Records an eagerly-issued sync `handle` as the barrier and returns a clone for the caller to
-    /// observe. Used by `start_sync`, whose durability barrier is issued up front so it overlaps
-    /// with later work.
-    fn record(&mut self, handle: Handle<()>) -> SharedSync {
-        let barrier = Self::into_shared(handle);
-        self.0 = Some(barrier.clone());
-        barrier
-    }
-
-    /// Records a lazy barrier that issues a fresh `blob.sync()` only when first awaited. Used by
-    /// `replay`, which writes the partial-page footer plainly and must stay non-durable until a
-    /// later rewrite (or an explicit `sync`) forces the barrier before overwriting the preserved
-    /// slot.
-    fn record_lazy<B: Blob>(&mut self, blob: B) {
-        self.0 = Some(Self::into_shared(async move { blob.sync().await }));
+    /// Records `fut` as the barrier. Observe it afterward with [`Self::pending`].
+    ///
+    /// Whether the barrier is "eager" or "lazy" is the caller's choice of `fut`, not a property of
+    /// the barrier: `start_sync` passes an already-issued [`Handle`] so its fsync overlaps with
+    /// later work, while `replay` passes an unstarted `blob.sync()` future that stays non-durable
+    /// until a later rewrite (or an explicit `sync`) first awaits it. A [`Shared`] future is not
+    /// polled until awaited, so the lazy property follows from passing an unstarted future.
+    fn record(&mut self, fut: impl Future<Output = Result<(), Error>> + Send + 'static) {
+        self.0 = Some(Self::into_shared(fut));
     }
 
     /// The in-flight barrier, if any. Cloning a [`Shared`] is cheap and lets the caller await it
@@ -552,13 +559,14 @@ impl<B: Blob> Append<B> {
     /// (below) this method briefly releases and re-acquires `buf_guard`; that is safe for the same
     /// reason, since mutable operations are serialized and only readers can run in the meantime.
     ///
-    /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
+    /// Returns a [`FlushOutcome`] reporting whether the flush made its writes durable and whether it
+    /// left a partial-page barrier obligation for the caller to record.
     async fn flush_internal<'a>(
         &'a self,
         mut buf_guard: AsyncRwLockWriteGuard<'a, Buffer>,
         write_partial_page: bool,
         sync: bool,
-    ) -> Result<bool, Error> {
+    ) -> Result<FlushOutcome, Error> {
         // If this flush rewrites the current partial page, drain any prior in-flight sync first so
         // the page's preserved checksum slot is not overwritten before it is durable (see
         // [`Barrier`]).
@@ -601,9 +609,20 @@ impl<B: Blob> Append<B> {
             old_partial_page_state.as_ref(),
         );
 
+        // A barrier is owed iff this flush plainly wrote a trailing partial-page footer (a new
+        // checksum that is not yet durable). `to_physical_pages` returns `None` for the partial
+        // state whenever it writes no such footer (empty flush, full-page-only flush, or an
+        // unchanged partial page), so this single predicate matches every recording path: it is
+        // false on the early-return below, on `sync` flushes (which make writes durable), and on
+        // appends (`write_partial_page == false`).
+        let rewrote_partial_footer = write_partial_page && !sync && partial_page_state.is_some();
+
         // If there's nothing to write, return early.
         if physical_pages.is_empty() {
-            return Ok(false);
+            return Ok(FlushOutcome {
+                made_durable: false,
+                rewrote_partial_footer,
+            });
         }
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
@@ -686,7 +705,10 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_second_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            made_durable: sync,
+                            rewrote_partial_footer,
+                        });
                     }
                 } else {
                     // Skip the protected first page bytes when they are fully covered.
@@ -704,11 +726,17 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_first_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            made_durable: sync,
+                            rewrote_partial_footer,
+                        });
                     }
                 }
 
-                Ok(false)
+                Ok(FlushOutcome {
+                    made_durable: false,
+                    rewrote_partial_footer,
+                })
             }
             Some((prefix_len, ProtectedCrc::Second)) => {
                 // Protected CRC is second: [page_size+6..page_size+12].
@@ -732,7 +760,10 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_second_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            made_durable: sync,
+                            rewrote_partial_footer,
+                        });
                     }
                 } else {
                     // Skip the fully protected first segment when no bytes from it need update.
@@ -750,18 +781,27 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_first_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            made_durable: sync,
+                            rewrote_partial_footer,
+                        });
                     }
                 }
 
-                Ok(false)
+                Ok(FlushOutcome {
+                    made_durable: false,
+                    rewrote_partial_footer,
+                })
             }
             None => {
                 // No protected regions, write everything in one operation
                 blob_state
                     .write_at_maybe_sync(write_at_offset, physical_pages, sync)
                     .await?;
-                Ok(sync)
+                Ok(FlushOutcome {
+                    made_durable: sync,
+                    rewrote_partial_footer,
+                })
             }
         }
     }
@@ -1314,16 +1354,13 @@ impl<B: Blob> Append<B> {
         // overwriting its checksum slot.
         {
             let buf_guard = self.buffer.write().await;
-            let rewrote_partial_page = self
-                .rewrites_current_page(&buf_guard, true, logical_page_size as usize)
-                .await;
-            self.flush_internal(buf_guard, true, false).await?;
-            if rewrote_partial_page {
+            let outcome = self.flush_internal(buf_guard, true, false).await?;
+            if outcome.rewrote_partial_footer {
+                // Lazy barrier: the fsync is not issued until a later rewrite (or `sync`) first
+                // awaits it, keeping replay non-durable as documented.
                 let mut blob_state = self.blob_state.write().await;
-                if blob_state.partial_page_state.is_some() {
-                    let blob = blob_state.blob.clone();
-                    blob_state.barrier.record_lazy(blob);
-                }
+                let blob = blob_state.blob.clone();
+                blob_state.barrier.record(async move { blob.sync().await });
             }
         }
 
@@ -1395,7 +1432,7 @@ impl<B: Blob> Append<B> {
         let buf_guard = self.buffer.write().await;
 
         // A single emitted write can be made durable directly during the flush.
-        if self.flush_internal(buf_guard, true, true).await? {
+        if self.flush_internal(buf_guard, true, true).await?.made_durable {
             return Ok(());
         }
 
@@ -1424,15 +1461,17 @@ impl<B: Blob> Append<B> {
         // barrier itself, releasing the buffer lock across the wait, so a rewrite never overwrites a
         // not-yet-durable checksum slot.
         let buf_guard = self.buffer.write().await;
-        self.flush_internal(buf_guard, true, false).await?;
+        let outcome = self.flush_internal(buf_guard, true, false).await?;
 
-        // Start syncing pending mutations and return the completion handle. If a partial-page write
-        // is in flight, record it so a later rewrite of this page waits for it to become durable
-        // before overwriting its checksum slot, and return a handle that only observes that barrier.
+        // Start syncing pending mutations and return the completion handle. If this flush wrote a
+        // partial-page footer, record the in-flight sync as the barrier so a later rewrite of this
+        // page waits for it to become durable before overwriting its checksum slot, and return a
+        // handle that only observes that barrier.
         let mut blob_state = self.blob_state.write().await;
-        if blob_state.needs_sync && blob_state.partial_page_state.is_some() {
+        if outcome.rewrote_partial_footer {
             let handle = blob_state.start_sync().await;
-            let pending = blob_state.barrier.record(handle);
+            blob_state.barrier.record(handle);
+            let pending = blob_state.barrier.pending().expect("barrier was just recorded");
             drop(blob_state);
             Ok(Barrier::observe(pending))
         } else {
