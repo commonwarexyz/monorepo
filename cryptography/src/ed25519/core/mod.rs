@@ -11,6 +11,9 @@
 //! - Adapted code to `commonware`'s clippy rules.
 //! - The batch verifier accepts pre-decompressed [`VerificationKey`] values and reuses their
 //!   cached point decompression state.
+//! - A batch of one signature is verified with the single-signature cofactored check.
+//! - Batch verification shards signatures (not verification keys) across cores, splitting
+//!   large per-key groups so that batches dominated by a few signers still parallelize.
 //!
 //! [`ed25519_consensus`]: https://crates.io/crates/ed25519-consensus
 //! [`ed25519_zebra`]: https://crates.io/crates/ed25519-zebra
@@ -19,6 +22,7 @@
 
 pub mod batch;
 mod error;
+mod native;
 mod signature;
 mod signing_key;
 mod verification_key;
