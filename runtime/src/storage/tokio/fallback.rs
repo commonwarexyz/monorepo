@@ -56,7 +56,7 @@ impl Blob {
     async fn sync_inner(file: &fs::File, partition: &str, name: &[u8]) -> Result<(), Error> {
         file.sync_all()
             .await
-            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e))
+            .map_err(|e| Error::BlobSyncFailed(partition.to_string(), hex(name), e.into()))
     }
 }
 
@@ -128,7 +128,7 @@ impl crate::Blob for Blob {
             .ok_or(Error::OffsetOverflow)?;
         file.set_len(len)
             .await
-            .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e))?;
+            .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into()))?;
         Ok(())
     }
 

@@ -300,6 +300,14 @@ mod tests {
             let _ = sender.send(());
         }
 
+        fn fail_next_sync(&self) {
+            self.state
+                .lock()
+                .pending_syncs
+                .pop_front()
+                .expect("pending sync missing");
+        }
+
         fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
             let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
             let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
@@ -1721,6 +1729,26 @@ mod tests {
                 crate::utils::reschedule().await;
             }
             waiter.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced]
+    fn test_write_start_sync_returns_in_flight_sync_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let blob = ControlledSyncBlob::new();
+            let writer = Write::from_pooler(&context, blob.clone(), 0, NZUsize!(8));
+
+            writer.write_at(0, b"abc").await.unwrap();
+            let first = writer.start_sync().await.unwrap();
+            let second = writer.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.fail_next_sync();
+            assert!(matches!(first.await, Err(Error::Closed)));
+            assert!(matches!(second.await, Err(Error::Closed)));
+            assert!(matches!(writer.sync().await, Err(Error::Closed)));
             assert_eq!(blob.pending_syncs(), 0);
         });
     }

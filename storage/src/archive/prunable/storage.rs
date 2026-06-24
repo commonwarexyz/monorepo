@@ -11,12 +11,37 @@ use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{future::try_join_all, pin_mut, StreamExt};
+use futures::{
+    future::{join_all, try_join_all, BoxFuture, Shared as FuturesShared},
+    pin_mut, FutureExt as _, StreamExt,
+};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
+
+type SharedSync = FuturesShared<BoxFuture<'static, Result<(), RError>>>;
+
+fn share_sync(handle: Handle<()>) -> SharedSync {
+    handle.boxed().shared()
+}
+
+fn observe_syncs(syncs: Vec<SharedSync>) -> Handle<()> {
+    Handle::from_future(async move {
+        for result in join_all(syncs).await {
+            result?;
+        }
+        Ok(())
+    })
+}
+
+async fn wait_syncs(syncs: Vec<SharedSync>) -> Result<(), Error> {
+    for result in join_all(syncs).await {
+        result.map_err(crate::journal::Error::Runtime)?;
+    }
+    Ok(())
+}
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -109,6 +134,7 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     oversized: Oversized<E, Record<K>, V>,
 
     pending: BTreeSet<u64>,
+    syncing: BTreeMap<u64, Vec<SharedSync>>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -219,6 +245,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             items_per_section: cfg.items_per_section.get(),
             oversized,
             pending: BTreeSet::new(),
+            syncing: BTreeMap::new(),
             oldest_allowed: None,
             indices,
             extra_indices,
@@ -379,6 +406,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
             };
             self.pending.remove(&next);
         }
+        self.syncing.retain(|section, _| *section >= min);
 
         // Remove all indices that are less than min
         loop {
@@ -408,6 +436,19 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let pending = std::mem::take(&mut self.pending);
         self.syncs.inc_by(pending.len() as u64);
         pending
+    }
+
+    /// Remove in-flight syncs that have already completed successfully.
+    fn prune_completed_syncs(&mut self) {
+        self.syncing.retain(|_, syncs| {
+            syncs.retain(|sync| !matches!(sync.clone().now_or_never(), Some(Ok(()))));
+            !syncs.is_empty()
+        });
+    }
+
+    /// Return observers for every in-flight sync that still matters for a later durability barrier.
+    fn in_flight_syncs(&self) -> Vec<SharedSync> {
+        self.syncing.values().flatten().cloned().collect()
     }
 }
 
@@ -439,14 +480,25 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
         // Start syncing the oversized journal (handles both index and values) and return a handle
         // that resolves once every section's sync is durable.
+        self.prune_completed_syncs();
+        let mut observers = self.in_flight_syncs();
         let pending = self.take_pending();
         let syncs = pending.iter().map(|s| self.oversized.start_sync(*s));
         let handles = try_join_all(syncs).await?;
-        Ok(Handle::join(handles))
+        for (section, handle) in pending.into_iter().zip(handles) {
+            let sync = share_sync(handle);
+            self.syncing.entry(section).or_default().push(sync.clone());
+            observers.push(sync);
+        }
+        Ok(observe_syncs(observers))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
+        self.prune_completed_syncs();
+        let in_flight = self.in_flight_syncs();
         let pending = self.take_pending();
+        wait_syncs(in_flight).await?;
+        self.prune_completed_syncs();
         let syncs = pending.iter().map(|s| self.oversized.sync(*s));
         try_join_all(syncs).await?;
         Ok(())

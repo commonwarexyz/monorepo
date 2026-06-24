@@ -8,25 +8,16 @@ use futures::{
 use std::future::Future;
 
 /// A cloneable observer for an issued sync.
-pub(crate) type Shared = FuturesShared<BoxFuture<'static, ()>>;
+pub(crate) type Shared = FuturesShared<BoxFuture<'static, Result<(), Error>>>;
 
 /// Converts a sync future into a shared completion.
-///
-/// Sync failures are fatal for these buffered wrappers, so observers panic with the supplied
-/// message instead of cloning and returning the underlying error.
-pub(crate) fn share(
-    fut: impl Future<Output = Result<(), Error>> + Send + 'static,
-    message: &'static str,
-) -> Shared {
-    async move { fut.await.expect(message) }.boxed().shared()
+pub(crate) fn share(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> Shared {
+    fut.boxed().shared()
 }
 
 /// Returns a handle that observes a shared sync completion.
 pub(crate) fn observe(sync: Shared) -> Handle<()> {
-    Handle::from_future(async move {
-        sync.await;
-        Ok(())
-    })
+    Handle::from_future(async move { sync.await })
 }
 
 /// Durability state for mutations already issued to the underlying blob.
@@ -90,7 +81,7 @@ impl State {
                 Ok(true)
             }
             Self::InFlight(syncing) => {
-                syncing.clone().await;
+                syncing.clone().await?;
                 *self = Self::Clean;
                 Ok(true)
             }
@@ -98,12 +89,13 @@ impl State {
     }
 
     /// Observes any in-flight sync without clearing it early if this observer is dropped.
-    pub(crate) async fn observe_in_flight(&mut self) {
+    pub(crate) async fn observe_in_flight(&mut self) -> Result<(), Error> {
         let Self::InFlight(syncing) = self else {
-            return;
+            return Ok(());
         };
-        syncing.clone().await;
+        syncing.clone().await?;
         *self = Self::Clean;
+        Ok(())
     }
 
     /// Starts a full blob sync or returns the in-flight sync that already covers this state.
@@ -112,12 +104,11 @@ impl State {
     pub(crate) async fn start<B: Blob>(
         &mut self,
         blob: &B,
-        message: &'static str,
     ) -> Option<Shared> {
         match self {
             Self::Clean => None,
             Self::Dirty => {
-                let syncing = share(blob.start_sync().await, message);
+                let syncing = share(blob.start_sync().await);
                 *self = Self::InFlight(syncing.clone());
                 Some(syncing)
             }

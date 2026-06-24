@@ -469,7 +469,7 @@ impl Handle {
         self.start_sync(file)
             .await
             .await
-            .map_err(|_| Error::Io(std::io::Error::other("failed to read result")))?
+            .map_err(|_| Error::Io(std::io::Error::other("failed to read result").into()))?
     }
 
     /// Begin a logical fsync request, returning the completion receiver without waiting.
@@ -490,7 +490,7 @@ impl Handle {
             };
             let _ = request
                 .sender
-                .send(Err(Error::Io(std::io::Error::other("failed to send work"))));
+                .send(Err(Error::Io(std::io::Error::other("failed to send work").into())));
         }
         rx
     }

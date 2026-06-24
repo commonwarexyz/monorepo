@@ -50,7 +50,7 @@ impl<B: Blob> State<B> {
             let previous = self.sync.prepare_range_sync();
             self.blob.write_at_sync(offset, bufs).await?;
             self.sync.restore(previous);
-            self.sync.observe_in_flight().await;
+            self.sync.observe_in_flight().await?;
             Ok(())
         }
     }
@@ -70,7 +70,7 @@ impl<B: Blob> State<B> {
     /// Start syncing the underlying blob if there are unsynced mutations.
     async fn start_sync(&mut self) -> Handle<()> {
         self.sync
-            .start(&self.blob, "sync failed")
+            .start(&self.blob)
             .await
             .map(sync::observe)
             .unwrap_or_else(|| Handle::ready(Ok(())))

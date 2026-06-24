@@ -79,11 +79,9 @@ struct Flushed {
 struct Barrier(Option<Shared>);
 
 impl Barrier {
-    /// Wraps a sync-completion future as a shareable barrier. A failed partial-page sync is
-    /// unrecoverable (the blob must not be reused), so the barrier panics rather than threading a
-    /// (non-cloneable) error through the shared future. The panic carries the underlying error.
+    /// Wraps a sync-completion future as a shareable barrier.
     fn into_shared(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> Shared {
-        sync::share(fut, "partial-page sync failed")
+        sync::share(fut)
     }
 
     /// Records `fut` as the barrier. Observe it afterward with [`Self::pending`].
@@ -156,7 +154,7 @@ impl<B: Blob> BlobState<B> {
             let previous = self.sync.prepare_range_sync();
             self.blob.write_at_sync(offset, bufs).await?;
             self.sync.restore(previous);
-            self.sync.observe_in_flight().await;
+            self.sync.observe_in_flight().await?;
             Ok(())
         }
     }
@@ -190,7 +188,7 @@ impl<B: Blob> BlobState<B> {
     /// Start syncing the underlying blob if there are unsynced mutations, otherwise return any
     /// in-flight sync that already covers the current state.
     async fn start_sync_shared(&mut self) -> Option<Shared> {
-        self.sync.start(&self.blob, "sync failed").await
+        self.sync.start(&self.blob).await
     }
 
     /// Start syncing the underlying blob if there are unsynced mutations.
@@ -1409,7 +1407,7 @@ impl<B: Blob> Append<B> {
         let Some(pending) = self.blob_state.read().await.barrier.pending() else {
             return Ok(());
         };
-        pending.await;
+        pending.await?;
         let mut blob_state = self.blob_state.write().await;
         blob_state.barrier.discharge();
         blob_state.sync = SyncState::Clean;
@@ -1803,6 +1801,14 @@ mod tests {
                 .pop_front()
                 .expect("pending sync missing");
             let _ = sender.send(());
+        }
+
+        fn fail_next_sync(&self) {
+            self.state
+                .lock()
+                .pending_syncs
+                .pop_front()
+                .expect("pending sync missing");
         }
 
         fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
@@ -3128,6 +3134,29 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_start_sync_returns_in_flight_sync_errors() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(b"abc").await.unwrap();
+            let first = append.start_sync().await.unwrap();
+            let second = append.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.fail_next_sync();
+            assert!(matches!(first.await, Err(Error::Closed)));
+            assert!(matches!(second.await, Err(Error::Closed)));
+            assert!(matches!(append.sync().await, Err(Error::Closed)));
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_overlapped_start_sync_waits_before_rewriting_partial_page() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -3445,7 +3474,9 @@ mod tests {
                     .write_at(offset, bytes.slice(..partial_len))
                     .await?;
                 self.inner.sync().await?;
-                return Err(Error::Io(std::io::Error::other("injected partial write")));
+                return Err(Error::Io(
+                    std::io::Error::other("injected partial write").into(),
+                ));
             }
 
             self.inner.write_at(offset, bufs).await
@@ -3465,7 +3496,9 @@ mod tests {
                 self.inner
                     .write_at_sync(offset, bytes.slice(..partial_len))
                     .await?;
-                return Err(Error::Io(std::io::Error::other("injected partial write")));
+                return Err(Error::Io(
+                    std::io::Error::other("injected partial write").into(),
+                ));
             }
 
             self.inner.write_at_sync(offset, bufs).await
