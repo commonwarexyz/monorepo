@@ -1,7 +1,7 @@
 mod banderwagon;
 
 use crate::{
-    bls12381::primitives::group::{Scalar, G1},
+    bls12381::primitives::group::{Scalar, ScalarReadCfg, G1},
     transcript::{Summary, Transcript},
     zk::{
         bulletproofs::circuit::{self, prove, verify},
@@ -531,11 +531,15 @@ impl Read for Proof {
 
     fn read_cfg(buf: &mut impl Buf, max_players: &Self::Cfg) -> Result<Self, CodecError> {
         let max_proof_len = 1usize << lg_len_for_players(max_players.get());
-        let circuit_proof =
-            circuit::Proof::<Scalar, G1>::read_cfg(buf, &(max_proof_len, ((), ())))?;
+        let circuit_proof = circuit::Proof::<Scalar, G1>::read_cfg(
+            buf,
+            &(max_proof_len, ((), ScalarReadCfg::AllowZero)),
+        )?;
         let range = commonware_codec::RangeCfg::new(0..=max_players.get() as usize);
-        let pedersen_to_plain =
-            Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(buf, &(range, ((), ())))?;
+        let pedersen_to_plain = Vec::<pedersen_to_plain::Proof<Scalar, G1>>::read_cfg(
+            buf,
+            &(range, ((), ScalarReadCfg::AllowZero)),
+        )?;
         Ok(Self {
             circuit_proof,
             pedersen_to_plain,

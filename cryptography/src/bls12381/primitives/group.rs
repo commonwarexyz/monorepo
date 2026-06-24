@@ -26,7 +26,7 @@ use blst::{
     blst_p2_is_inf, blst_p2_mult, blst_p2_to_affine, blst_p2_uncompress, blst_p2s_mult_pippenger,
     blst_p2s_mult_pippenger_scratch_sizeof, blst_p2s_tile_pippenger, blst_p2s_to_affine,
     blst_scalar, blst_scalar_fr_check, blst_scalar_from_be_bytes, blst_scalar_from_bendian,
-    blst_scalar_from_fr, blst_sk_check, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
+    blst_scalar_from_fr, Pairing, BLS12_381_G1, BLS12_381_G2, BLST_ERROR,
 };
 use bytes::{Buf, BufMut};
 use commonware_codec::{
@@ -213,6 +213,15 @@ where
 /// Reference: <https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-05#name-ciphersuites>
 pub type DST = &'static [u8];
 
+/// Configuration for [`Scalar`]'s [`Read`] implementation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScalarReadCfg {
+    /// Accept any in-range scalar, including zero.
+    AllowZero,
+    /// Reject the zero scalar.
+    RejectZero,
+}
+
 /// Wrapper around [blst_fr] that represents an element of the BLS12‑381
 /// scalar field `F_r`.
 ///
@@ -231,7 +240,7 @@ pub struct Scalar(pub(crate) blst_fr);
 impl arbitrary::Arbitrary<'_> for Scalar {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
         let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
-        Ok(Self::from_ikm(&ikm))
+        Ok(Private::from_ikm(&ikm).expose_unwrap())
     }
 }
 
@@ -259,6 +268,9 @@ const SMALL_SCALAR_LENGTH: usize = 16;
 
 /// Number of bytes of input key material for BLS key generation.
 const IKM_LENGTH: usize = 64;
+
+/// Number of bytes sampled before reducing into the BLS12-381 scalar field.
+const SCALAR_SAMPLE_LENGTH: usize = SCALAR_LENGTH + 128 / 8;
 
 /// Minimum number of points required to use parallel MSM.
 const MIN_PARALLEL_POINTS: usize = 32;
@@ -510,6 +522,20 @@ impl Private {
     pub fn expose_unwrap(self) -> Scalar {
         self.scalar.expose_unwrap()
     }
+
+    /// Creates a private key from input key material.
+    ///
+    /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
+    fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
+        let mut sc = blst_scalar::default();
+        let mut ret = blst_fr::default();
+        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
+        unsafe {
+            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
+            blst_fr_from_scalar(&mut ret, &sc);
+        }
+        Self::new(Scalar(ret))
+    }
 }
 
 impl Write for Private {
@@ -522,7 +548,7 @@ impl Read for Private {
     type Cfg = ();
 
     fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
-        let scalar = Scalar::read(buf)?;
+        let scalar = Scalar::read_cfg(buf, &ScalarReadCfg::RejectZero)?;
         Ok(Self::new(scalar))
     }
 }
@@ -531,16 +557,91 @@ impl FixedSize for Private {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
+impl Object for Private {}
+
+impl<'a> AddAssign<&'a Self> for Private {
+    fn add_assign(&mut self, rhs: &'a Self) {
+        let mut out = self.expose(|scalar| scalar.clone());
+        rhs.expose(|rhs| out += rhs);
+        *self = Self::new(out);
+    }
+}
+
+impl<'a> Add<&'a Self> for Private {
+    type Output = Self;
+
+    fn add(self, rhs: &'a Self) -> Self::Output {
+        let mut out = self.expose_unwrap();
+        rhs.expose(|rhs| out += rhs);
+        Self::new(out)
+    }
+}
+
+impl<'a> SubAssign<&'a Self> for Private {
+    fn sub_assign(&mut self, rhs: &'a Self) {
+        let mut out = self.expose(|scalar| scalar.clone());
+        rhs.expose(|rhs| out -= rhs);
+        *self = Self::new(out);
+    }
+}
+
+impl<'a> Sub<&'a Self> for Private {
+    type Output = Self;
+
+    fn sub(self, rhs: &'a Self) -> Self::Output {
+        let mut out = self.expose_unwrap();
+        rhs.expose(|rhs| out -= rhs);
+        Self::new(out)
+    }
+}
+
+impl Neg for Private {
+    type Output = Self;
+
+    fn neg(self) -> Self::Output {
+        Self::new(-self.expose_unwrap())
+    }
+}
+
+impl Additive for Private {
+    fn zero() -> Self {
+        Self::new(Scalar::zero())
+    }
+}
+
+impl<'a> MulAssign<&'a Scalar> for Private {
+    fn mul_assign(&mut self, rhs: &'a Scalar) {
+        let mut out = self.expose(|scalar| scalar.clone());
+        out *= rhs;
+        *self = Self::new(out);
+    }
+}
+
+impl<'a> Mul<&'a Scalar> for Private {
+    type Output = Self;
+
+    fn mul(self, rhs: &'a Scalar) -> Self::Output {
+        let mut out = self.expose_unwrap();
+        out *= rhs;
+        Self::new(out)
+    }
+}
+
+impl Space<Scalar> for Private {}
+
 impl Random for Private {
-    fn random(rng: impl CryptoRngCore) -> Self {
-        Self::new(Scalar::random(rng))
+    fn random(mut rng: impl CryptoRngCore) -> Self {
+        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
+        rng.fill_bytes(ikm.as_mut());
+        Self::from_ikm(&ikm)
     }
 }
 
 #[cfg(feature = "arbitrary")]
 impl arbitrary::Arbitrary<'_> for Private {
     fn arbitrary(u: &mut arbitrary::Unstructured<'_>) -> arbitrary::Result<Self> {
-        Ok(Self::new(u.arbitrary::<Scalar>()?))
+        let ikm = u.arbitrary::<[u8; IKM_LENGTH]>()?;
+        Ok(Self::from_ikm(&ikm))
     }
 }
 
@@ -548,15 +649,14 @@ impl arbitrary::Arbitrary<'_> for Private {
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    /// Creates a scalar from input key material.
-    /// Uses IETF BLS KeyGen which loops internally until a non-zero value is produced.
-    fn from_ikm(ikm: &[u8; IKM_LENGTH]) -> Self {
-        let mut sc = blst_scalar::default();
+    /// Creates a scalar by reducing a wide big-endian integer modulo `r`.
+    fn reduce_bytes(bytes: &[u8; SCALAR_SAMPLE_LENGTH]) -> Self {
         let mut ret = blst_fr::default();
-        // SAFETY: ikm is a valid 64-byte buffer; blst_keygen handles null key_info.
+        // SAFETY: bytes points to a valid byte buffer of the provided length.
         unsafe {
-            blst_keygen(&mut sc, ikm.as_ptr(), ikm.len(), ptr::null(), 0);
-            blst_fr_from_scalar(&mut ret, &sc);
+            let mut scalar = blst_scalar::default();
+            blst_scalar_from_be_bytes(&mut scalar, bytes.as_ptr(), bytes.len());
+            blst_fr_from_scalar(&mut ret, &scalar);
         }
         Self(ret)
     }
@@ -639,25 +739,6 @@ impl Scalar {
         // SAFETY: Both pointers are valid and properly aligned.
         unsafe { blst_scalar_from_fr(&mut scalar, &self.0) };
         scalar
-    }
-
-    /// Parses a scalar from its canonical 32-byte big-endian encoding.
-    ///
-    /// Returns `None` if `bytes` is not a canonical representative (i.e. encodes
-    /// an integer `>= r`). Unlike the [`Read`] implementation, this accepts zero.
-    pub fn from_canonical_bytes(bytes: &[u8; SCALAR_LENGTH]) -> Option<Self> {
-        let mut scalar = blst_scalar::default();
-        let mut fr = blst_fr::default();
-        // SAFETY: `bytes` is a valid 32-byte buffer. `blst_scalar_fr_check`
-        // validates that the value is in `[0, r)`; we only convert once it passes.
-        unsafe {
-            blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_scalar_fr_check(&scalar) {
-                return None;
-            }
-            blst_fr_from_scalar(&mut fr, &scalar);
-        }
-        Some(Self(fr))
     }
 
     /// Returns the canonical sign of the scalar.
@@ -753,27 +834,30 @@ impl Write for Scalar {
 }
 
 impl Read for Scalar {
-    type Cfg = ();
+    type Cfg = ScalarReadCfg;
 
-    fn read_cfg(buf: &mut impl Buf, _: &()) -> Result<Self, Error> {
+    fn read_cfg(buf: &mut impl Buf, cfg: &ScalarReadCfg) -> Result<Self, Error> {
         let bytes = Zeroizing::new(<[u8; Self::SIZE]>::read(buf)?);
         let mut ret = blst_fr::default();
-        // SAFETY: bytes is a valid 32-byte array. blst_sk_check validates non-zero and in-range.
-        // We use blst_sk_check instead of blst_scalar_fr_check because it also checks non-zero
-        // per IETF BLS12-381 spec (Draft 4+).
+        // SAFETY: bytes is a valid 32-byte array. blst_scalar_fr_check validates in-range.
         //
-        // References:
+        // For private key material, callers pass `RejectZero` to preserve the
+        // IETF BLS non-zero secret-key requirement:
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-03#section-2.3
         // * https://datatracker.ietf.org/doc/html/draft-irtf-cfrg-bls-signature-04#section-2.3
         unsafe {
             let mut scalar = blst_scalar::default();
             blst_scalar_from_bendian(&mut scalar, bytes.as_ptr());
-            if !blst_sk_check(&scalar) {
+            if !blst_scalar_fr_check(&scalar) {
                 return Err(Invalid("Scalar", "Invalid"));
             }
             blst_fr_from_scalar(&mut ret, &scalar);
         }
-        Ok(Self(ret))
+        let out = Self(ret);
+        if *cfg == ScalarReadCfg::RejectZero && out == Self::zero() {
+            return Err(Invalid("Scalar", "Invalid"));
+        }
+        Ok(out)
     }
 }
 
@@ -935,11 +1019,10 @@ impl Field for Scalar {
 }
 
 impl Random for Scalar {
-    /// Returns a random non-zero scalar.
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
-        rng.fill_bytes(ikm.as_mut());
-        Self::from_ikm(&ikm)
+        let mut bytes = Zeroizing::new([0u8; SCALAR_SAMPLE_LENGTH]);
+        rng.fill_bytes(bytes.as_mut());
+        Self::reduce_bytes(&bytes)
     }
 }
 
@@ -1901,7 +1984,7 @@ impl HashToGroup for G2 {
 mod tests {
     use super::*;
     use crate::bls12381::primitives::group::Scalar;
-    use commonware_codec::{DecodeExt, Encode, EncodeFixed};
+    use commonware_codec::{Decode, DecodeExt, Encode, EncodeFixed};
     use commonware_invariants::minifuzz;
     use commonware_macros::test_group;
     use commonware_math::algebra::{test_suites, Random};
@@ -1963,8 +2046,25 @@ mod tests {
         let original = Scalar::random(&mut test_rng());
         let mut encoded = original.encode();
         assert_eq!(encoded.len(), Scalar::SIZE);
-        let decoded = Scalar::decode(&mut encoded).unwrap();
+        let decoded = Scalar::decode_cfg(&mut encoded, &ScalarReadCfg::RejectZero).unwrap();
         assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_scalar_codec_zero_cfg() {
+        let encoded = Scalar::zero().encode();
+
+        assert_eq!(
+            Scalar::decode_cfg(encoded.clone(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::zero()
+        );
+        assert!(Scalar::decode_cfg(encoded, &ScalarReadCfg::RejectZero).is_err());
+    }
+
+    #[test]
+    fn test_private_decode_rejects_zero_scalar() {
+        let encoded = Scalar::zero().encode();
+        assert!(Private::decode(encoded).is_err());
     }
 
     #[test]
@@ -2022,17 +2122,22 @@ mod tests {
     }
 
     #[test]
-    fn test_scalar_from_canonical_bytes() {
+    fn test_scalar_read_cfg_accepts_canonical_zero() {
         // Round-trips canonical encodings, including zero.
         let s = Scalar::random(&mut test_rng());
         let bytes = s.encode_fixed::<{ Scalar::SIZE }>();
-        assert_eq!(Scalar::from_canonical_bytes(&bytes), Some(s));
         assert_eq!(
-            Scalar::from_canonical_bytes(&[0u8; Scalar::SIZE]),
-            Some(Scalar::zero())
+            Scalar::decode_cfg(bytes.as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            s
+        );
+        assert_eq!(
+            Scalar::decode_cfg([0u8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).unwrap(),
+            Scalar::zero()
         );
         // Non-canonical encodings (>= r) are rejected.
-        assert_eq!(Scalar::from_canonical_bytes(&[0xffu8; Scalar::SIZE]), None);
+        assert!(
+            Scalar::decode_cfg([0xffu8; Scalar::SIZE].as_ref(), &ScalarReadCfg::AllowZero).is_err()
+        );
     }
 
     #[test]
