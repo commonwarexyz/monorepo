@@ -242,16 +242,14 @@ impl<E: Context> Writable<E> {
         self.snapshots.load(Ordering::Acquire) != 0
     }
 
-    /// Capture an owned [`Snapshot`] of the current blobs, readable within `bounds`. The
-    /// snapshot counts itself in `snapshots` until dropped, gating in-place truncation during
-    /// rewind.
-    pub(super) fn to_snapshot(&self, bounds: Range<u64>) -> Snapshot<E::Blob> {
+    /// Capture an owned [`Snapshot`] of the current blobs. The snapshot counts itself in
+    /// `snapshots` until dropped, gating in-place truncation during rewind.
+    pub(super) fn to_snapshot(&self) -> Snapshot<E::Blob> {
         self.snapshots.fetch_add(1, Ordering::Relaxed);
         Snapshot {
             oldest_blob_index: self.oldest_blob_index,
             sealed: self.sealed.clone(),
             tail: self.tail.reader(),
-            bounds,
             snapshots: self.snapshots.clone(),
         }
     }
@@ -498,11 +496,11 @@ impl<B: RBlob> Blob<'_, B> {
     }
 }
 
-/// An owned copy of the journal's blob handles and bounds, captured by [`Writable::to_snapshot`].
-/// Later appends, seals, and prunes are invisible to it: it serves the positions in its frozen
-/// `bounds` from the handles retained at capture, so even pruned blobs stay readable. A rewind
-/// would mutate the tail (shared with the writer) or a sealed blob in place, so it counts itself
-/// in `snapshots` for its lifetime and rewind refuses ([Error::BlobInUse]) while the count is nonzero.
+/// An owned copy of the journal's blob handles, captured by [`Writable::to_snapshot`]. Later
+/// appends, seals, and prunes are invisible to it: it serves reads from the handles retained at
+/// capture, so even pruned blobs stay readable. A rewind would mutate the tail (shared with the
+/// writer) or a sealed blob in place, so it counts itself in `snapshots` for its lifetime and
+/// rewind refuses ([Error::BlobInUse]) while the count is nonzero.
 pub(super) struct Snapshot<B: RBlob> {
     /// Index of the first blob in [Self::sealed].
     pub(super) oldest_blob_index: u64,
@@ -510,23 +508,13 @@ pub(super) struct Snapshot<B: RBlob> {
     /// Sealed historical blobs, ascending and contiguous from `oldest_blob_index`.
     pub(super) sealed: Arc<[Sealed<B>]>,
 
-    /// Read handle for the tail, blob [`Self::tail_blob_index`].
+    /// Read handle for the tail (the newest blob).
     pub(super) tail: paged::Reader<B>,
-
-    /// The positions readable through this snapshot.
-    pub(super) bounds: Range<u64>,
 
     /// The journal's live-reader count, shared with [`Writable`]. Incremented at capture and
     /// decremented on drop; a nonzero count blocks in-place truncation of the tail and of
     /// sealed blobs during rewind.
     snapshots: Arc<AtomicUsize>,
-}
-
-impl<B: RBlob> Snapshot<B> {
-    /// Index of the newest blob.
-    pub(super) fn tail_blob_index(&self) -> u64 {
-        self.oldest_blob_index + self.sealed.len() as u64
-    }
 }
 
 impl<B: RBlob> Drop for Snapshot<B> {
@@ -535,10 +523,13 @@ impl<B: RBlob> Drop for Snapshot<B> {
     }
 }
 
-/// Resolves a blob index to a blob, over either a [`Snapshot`] or the live [`Writable`]
-/// (borrowed). The per-position read logic is written once against this.
+/// Resolves a blob index to a blob within a frozen `bounds`, over either a [`Snapshot`] or the
+/// live [`Writable`] (borrowed). The per-position read logic is written once against this.
 pub(super) enum Blobs<'a, E: Context> {
-    Snapshot(Snapshot<E::Blob>),
+    Snapshot {
+        snapshot: Snapshot<E::Blob>,
+        bounds: Range<u64>,
+    },
     Writable {
         writable: &'a Writable<E>,
         bounds: Range<u64>,
@@ -561,27 +552,49 @@ impl<E: Context> Blobs<'_, E> {
     /// The readable position range `[start, end)`.
     pub(super) fn bounds(&self) -> Range<u64> {
         match self {
-            Self::Snapshot(s) => s.bounds.clone(),
-            Self::Writable { bounds, .. } => bounds.clone(),
+            Self::Snapshot { bounds, .. } | Self::Writable { bounds, .. } => bounds.clone(),
         }
     }
 
     /// Resolve the read handle for `blob`, if retained.
     pub(super) fn get(&self, blob: u64) -> Option<Blob<'_, E::Blob>> {
-        let (oldest, sealed) = match self {
-            Self::Snapshot(s) => (s.oldest_blob_index, &*s.sealed),
-            Self::Writable { writable, .. } => (writable.oldest_blob_index, &*writable.sealed),
-        };
+        let oldest = self.oldest_blob_index();
+        let sealed = self.sealed();
         if blob == oldest + sealed.len() as u64 {
-            let tail = match self {
-                Self::Snapshot(s) => s.tail.clone(),
-                Self::Writable { writable, .. } => writable.tail.reader(),
-            };
-            return Some(Blob::Tail(tail));
+            return Some(Blob::Tail(self.tail_reader()));
         }
         sealed
             .get(blob.checked_sub(oldest)? as usize)
             .map(Blob::Sealed)
+    }
+
+    /// Index of the first sealed blob.
+    pub(super) const fn oldest_blob_index(&self) -> u64 {
+        match self {
+            Self::Snapshot { snapshot, .. } => snapshot.oldest_blob_index,
+            Self::Writable { writable, .. } => writable.oldest_blob_index,
+        }
+    }
+
+    /// Index of the newest blob (the tail).
+    pub(super) fn tail_blob_index(&self) -> u64 {
+        self.oldest_blob_index() + self.sealed().len() as u64
+    }
+
+    /// Sealed historical blobs, ascending and contiguous from [`Self::oldest_blob_index`].
+    pub(super) fn sealed(&self) -> &[Sealed<E::Blob>] {
+        match self {
+            Self::Snapshot { snapshot, .. } => &snapshot.sealed,
+            Self::Writable { writable, .. } => &writable.sealed,
+        }
+    }
+
+    /// A read handle for the tail blob.
+    pub(super) fn tail_reader(&self) -> paged::Reader<E::Blob> {
+        match self {
+            Self::Snapshot { snapshot, .. } => snapshot.tail.clone(),
+            Self::Writable { writable, .. } => writable.tail.reader(),
+        }
     }
 }
 

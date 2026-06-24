@@ -4,7 +4,7 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
-    blobs::{Blob, Blobs, Partition, Snapshot, Writable},
+    blobs::{Blob, Blobs, Partition, Writable},
     fixed,
     metrics::VariableMetrics as Metrics,
     replay::{self, Source as _},
@@ -482,16 +482,15 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         .ok()
     }
 
-    /// Build the replay stream over `snapshot`, starting at `start_pos`. The stream owns its
-    /// handles, so it borrows neither `snapshot` nor `self` (hence `use<E, V>`).
+    /// Build the replay stream over [`Self::data`], starting at `start_pos`. The stream owns its
+    /// handles, so it borrows neither `self.data` nor `self` (hence `use<E, V>`).
     async fn replay_from(
         &self,
-        snapshot: &Snapshot<E::Blob>,
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send + use<E, V>, Error> {
         let items_per_blob = self.items_per_blob.get();
-        let bounds = snapshot.bounds.clone();
+        let bounds = self.data.bounds();
         if start_pos > bounds.end {
             return Err(Error::ItemOutOfRange(start_pos));
         }
@@ -500,7 +499,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         }
 
         let start_blob = position_to_blob(start_pos, items_per_blob);
-        let tail_blob = snapshot.tail_blob_index();
+        let tail_blob = self.data.tail_blob_index();
 
         // The byte offset of the first replayed item; later blobs start at byte 0 (a data blob's
         // first item is at byte 0 even when the pruning boundary is mid-blob).
@@ -511,15 +510,16 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
         };
 
         // Seed each sealed blob's `Replay` upfront so the returned stream borrows nothing from
-        // `snapshot`. The tail is streamed through the snapshot's read handle instead: a `Replay`
-        // reads physical pages from the blob and would miss the tail's buffered bytes.
+        // `self.data`. The tail is streamed through its read handle instead: a `Replay` reads
+        // physical pages from the blob and would miss the tail's buffered bytes.
         //
         // Each entry is (first position to emit, one past the last position, replay).
         let mut per_blob_replays: Vec<(u64, u64, Replay<E::Blob>)> = Vec::new();
         let end_blob = tail_blob.min(position_to_blob(bounds.end, items_per_blob));
+        let sealed_blobs = self.data.sealed();
         for blob in start_blob..end_blob {
-            let idx = (blob - snapshot.oldest_blob_index) as usize;
-            let sealed = &snapshot.sealed[idx];
+            let idx = (blob - self.data.oldest_blob_index()) as usize;
+            let sealed = &sealed_blobs[idx];
             let mut replay = sealed.replay(buffer).map_err(Error::Runtime)?;
             let first_pos = if blob == start_blob {
                 if start_byte > sealed.size() {
@@ -560,7 +560,7 @@ impl<E: Context, V: CodecShared> Reader<'_, E, V> {
             blob_first_position(tail_blob, items_per_blob)?.max(bounds.start)
         };
         let tail_batches = TailReplayState::<E::Blob, V> {
-            reader: snapshot.tail.clone(),
+            reader: self.data.tail_reader(),
             positions: tail_first..bounds.end,
             byte_offset: if start_blob == tail_blob {
                 start_byte
@@ -714,15 +714,7 @@ impl<E: Context, V: CodecShared> super::Contiguous for Reader<'_, E, V> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        // `replay` returns a stream that outlives this call, so it reads from an owned snapshot
-        // whose Arc-shared handles the stream owns. A snapshot already has one.
-        match &self.data {
-            Blobs::Snapshot(snapshot) => self.replay_from(snapshot, buffer, start_pos).await,
-            Blobs::Writable { writable, bounds } => {
-                self.replay_from(&writable.to_snapshot(bounds.clone()), buffer, start_pos)
-                    .await
-            }
-        }
+        self.replay_from(buffer, start_pos).await
     }
 }
 
@@ -1183,7 +1175,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// into its range is refused ([Error::BlobInUse]) while it is alive.
     pub fn snapshot(&self) -> Reader<'static, E, V> {
         Reader {
-            data: Blobs::Snapshot(self.blobs.to_snapshot(self.bounds.clone())),
+            data: Blobs::Snapshot {
+                snapshot: self.blobs.to_snapshot(),
+                bounds: self.bounds.clone(),
+            },
             offsets: self.offsets.snapshot(),
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
@@ -1831,10 +1826,10 @@ impl<B: RBlob, V: CodecShared> replay::Source for SealedReplayState<B, V> {
     }
 }
 
-/// Replays the writable tail through the snapshot's read handle.
+/// Replays the writable tail through a cloned tail read handle.
 struct TailReplayState<B: RBlob, V: CodecShared> {
     reader: paged::Reader<B>,
-    /// Positions still to emit; `positions.end` is the snapshot's size.
+    /// Positions still to emit; `positions.end` is the view's end bound.
     positions: Range<u64>,
     /// Byte offset of the next frame.
     byte_offset: u64,
@@ -1896,7 +1891,7 @@ impl<B: RBlob, V: CodecShared> replay::Source for TailReplayState<B, V> {
         }
 
         // No whole frame fit in the chunk: either the item is larger than the chunk, or the tail
-        // ended before the snapshot's bounds (corruption). A decodable header for a frame that
+        // ended before the view's bounds (corruption). A decodable header for a frame that
         // extends past the chunk identifies the former.
         let mut cursor = Cursor::new(chunk);
         let header = decode_length_prefix(&mut cursor)
@@ -1957,13 +1952,7 @@ impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
         buffer: NonZeroUsize,
         start_pos: u64,
     ) -> Result<impl Stream<Item = Result<(u64, V), Error>> + Send, Error> {
-        self.reader()
-            .replay_from(
-                &self.blobs.to_snapshot(self.bounds.clone()),
-                buffer,
-                start_pos,
-            )
-            .await
+        self.reader().replay_from(buffer, start_pos).await
     }
 }
 
