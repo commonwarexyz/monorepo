@@ -121,7 +121,7 @@
 //! 2. Persists deployment metadata (tag, regions, instance names) to `$HOME/.commonware_deployer/{tag}/metadata.yaml`.
 //!    This enables `destroy --tag` cleanup if creation fails.
 //! 3. Ensures the shared S3 bucket exists and caches tools if not already present.
-//! 4. Mirrors required images into shared ECR repositories in the monitoring region if not already present.
+//! 4. Caches required container images as `docker save` tarballs in S3 (one per architecture) if not already present.
 //! 5. Uploads deployment-specific files (binaries, configs) to S3.
 //! 6. Creates VPCs, subnets, internet gateways, route tables, and security groups per region (concurrently).
 //! 7. Establishes VPC peering between the monitoring region and binary regions.
@@ -164,9 +164,8 @@
 //!
 //! ## `aws clean`
 //!
-//! 1. Deletes the shared S3 bucket and all its contents (cached support packages and any remaining deployment data).
-//! 2. Deletes the shared ECR image cache.
-//! 3. Use this to fully clean up when you no longer need the deployer cache.
+//! 1. Deletes the shared S3 bucket and all its contents (cached tools, image tarballs, and any remaining deployment data).
+//! 2. Use this to fully clean up when you no longer need the deployer cache.
 //!
 //! ## `aws list`
 //!
@@ -233,15 +232,14 @@
 //! * The deployment state is tracked via these files, ensuring operations respect prior create/destroy actions.
 //! * The `metadata.yaml` file enables `aws destroy --tag` and `aws list` to work without the original config file.
 //!
-//! ## S3 and ECR Caching
+//! ## S3 Caching
 //!
-//! Shared S3 and ECR caches are used to avoid repeated downloads from upstream sources. The cache
-//! name is stored in `$HOME/.commonware_deployer/bucket` and reused by later deployments. ECR
-//! repositories are created in the monitoring region under the same cache name.
+//! A shared S3 cache avoids repeated downloads from upstream sources. The cache name is stored in
+//! `$HOME/.commonware_deployer/bucket` and reused by later deployments.
 //!
-//! 1. **Faster deployments**: Tools are downloaded from upstream sources once
-//!    and cached in S3. Required images are mirrored into ECR once and pulled from ECR during
-//!    instance setup.
+//! 1. **Faster deployments**: Tools are downloaded from upstream sources once and cached in S3.
+//!    Required container images are saved (via `docker save`) as per-architecture tarballs once and
+//!    `docker load`ed during instance setup, so instances never authenticate against a registry.
 //!
 //! 2. **Reduced bandwidth**: Instead of requiring the deployer to push binaries to each instance,
 //!    unique binaries are uploaded once to S3 and then pulled from there.
@@ -251,13 +249,13 @@
 //!
 //! The bucket stores:
 //!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Tool binaries and packages
+//!   * `tools/binaries/images/{image}/{platform}/image.tar.gz` - Cached container image tarballs
 //!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and service files
-//!   * `deployments/{tag}/` - Deployment-specific files:
-//!     * `monitoring/` - Prometheus config, dashboard
-//!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script
+//!   * `deployments/{tag}/{kind}/{digest}` - Deployment-specific files, deduplicated by content
+//!     digest (kinds: `binaries`, `configs`, `hosts`, `promtail`, `pyroscope`, `monitoring`)
 //!
-//! Cached packages are namespaced by tool version and platform. Static configs are namespaced by
-//! deployer version to ensure cache invalidation when the deployer is updated.
+//! Cached packages and images are namespaced by version and platform. Static configs are namespaced
+//! by deployer version to ensure cache invalidation when the deployer is updated.
 //!
 //! # Example Configuration
 //!
@@ -347,7 +345,7 @@ cfg_if::cfg_if! {
 
         mod create;
         pub mod ec2;
-        pub mod ecr;
+        mod images;
         pub mod services;
         pub use create::create;
         mod update;
@@ -485,13 +483,6 @@ cfg_if::cfg_if! {
             AwsDescribeInstances(
                 #[from] aws_sdk_ec2::operation::describe_instances::DescribeInstancesError,
             ),
-            #[error("ECR operation failed: {operation}")]
-            AwsEcr {
-                operation: &'static str,
-                repository: Option<String>,
-                #[source]
-                source: Box<aws_sdk_ecr::Error>,
-            },
             #[error("S3 operation failed: {operation} on bucket '{bucket}'")]
             AwsS3 {
                 bucket: String,
@@ -560,22 +551,8 @@ cfg_if::cfg_if! {
             IpAddrNotV4(std::net::IpAddr),
             #[error("download failed: {0}")]
             DownloadFailed(String),
-            #[error("Docker command failed: {command}: {stderr}")]
-            DockerCommandFailed { command: String, stderr: String },
-            #[error("Docker stdin unavailable")]
-            DockerStdinUnavailable,
-            #[error("invalid image reference: {0}")]
-            InvalidImage(String),
-            #[error("unsupported image registry for ECR cache: {0}")]
-            UnsupportedImageRegistry(String),
-            #[error("ECR authorization token missing")]
-            EcrAuthorizationTokenMissing,
-            #[error("ECR authorization token is invalid")]
-            EcrAuthorizationTokenInvalid,
-            #[error("ECR proxy endpoint missing")]
-            EcrProxyEndpointMissing,
-            #[error("base64 decode error: {0}")]
-            Base64(#[from] base64::DecodeError),
+            #[error("command failed: {command}: {stderr}")]
+            CommandFailed { command: String, stderr: String },
             #[error("S3 presigning config error: {0}")]
             S3PresigningConfig(#[from] aws_sdk_s3::presigning::PresigningConfigError),
             #[error("S3 presigning failed: {0}")]

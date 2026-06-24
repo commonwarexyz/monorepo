@@ -4,7 +4,6 @@ use crate::aws::{
     s3::{DEPLOYMENTS_PREFIX, TOOLS_BINARIES_PREFIX, TOOLS_CONFIGS_PREFIX, WGET},
     Architecture,
 };
-use std::collections::HashMap;
 
 // Binary artifacts and user SSH state live under this directory. NVMe-backed instances mount
 // instance-store storage here so existing binary configs use NVMe without extra configuration.
@@ -61,17 +60,6 @@ pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
 
 /// Image for Tracer trace viewing
 pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.1.1";
-
-const IMAGES: &[&str] = &[
-    PROMETHEUS_IMAGE,
-    PROMTAIL_IMAGE,
-    NODE_EXPORTER_IMAGE,
-    LOKI_IMAGE,
-    TEMPO_IMAGE,
-    PYROSCOPE_IMAGE,
-    GRAFANA_IMAGE,
-    TRACER_IMAGE,
-];
 
 #[derive(Clone, Copy)]
 struct ImageService {
@@ -255,7 +243,7 @@ const BINARY_IMAGE_SERVICES: &[ImageService] = &[
 ];
 
 impl ImageService {
-    fn service_file(self, image: &str) -> String {
+    fn service_file(self) -> String {
         let after = self.after.join(" ");
         let mut run_options = String::new();
         if self.network_host {
@@ -316,69 +304,46 @@ WantedBy=multi-user.target
             after_line = after_line,
             docker_bin = DOCKER_BIN,
             run_options = run_options,
-            image = image,
+            image = self.image,
             args = args,
         )
     }
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct ImageCache {
-    registry: String,
-    password: Option<String>,
-    images: HashMap<&'static str, String>,
+/// Returns the on-instance filename for an image tarball (e.g. `prom_prometheus_v3.2.0.tar.gz`).
+pub(crate) fn image_file_name(image: &str) -> String {
+    format!("{}.tar.gz", image.replace(['/', ':'], "_"))
 }
 
-impl ImageCache {
-    pub(crate) fn new(
-        registry: String,
-        password: String,
-        images: impl IntoIterator<Item = (&'static str, String)>,
-    ) -> Self {
-        Self {
-            registry,
-            password: Some(password),
-            images: images.into_iter().collect(),
+/// Returns the S3 key for a cached image tarball (`docker save` output, per architecture).
+pub fn image_s3_key(image: &str, architecture: Architecture) -> String {
+    format!(
+        "{TOOLS_BINARIES_PREFIX}/images/{name}/linux-{arch}/image.tar.gz",
+        name = image.replace(['/', ':'], "_"),
+        arch = architecture.as_str(),
+    )
+}
+
+/// Returns the distinct images required by the monitoring instance.
+pub(crate) fn monitoring_images() -> impl Iterator<Item = &'static str> {
+    distinct_images(MONITORING_IMAGE_SERVICES)
+}
+
+/// Returns the distinct images required by binary instances.
+pub(crate) fn binary_images() -> impl Iterator<Item = &'static str> {
+    distinct_images(BINARY_IMAGE_SERVICES)
+}
+
+fn distinct_images(services: &'static [ImageService]) -> impl Iterator<Item = &'static str> {
+    let mut seen = Vec::new();
+    services.iter().filter_map(move |service| {
+        if seen.contains(&service.image) {
+            None
+        } else {
+            seen.push(service.image);
+            Some(service.image)
         }
-    }
-
-    #[cfg(test)]
-    fn public() -> Self {
-        Self {
-            registry: String::new(),
-            password: None,
-            images: required_images()
-                .iter()
-                .map(|image| (*image, (*image).to_string()))
-                .collect(),
-        }
-    }
-
-    pub(crate) fn image(&self, upstream: &'static str) -> &str {
-        self.images
-            .get(upstream)
-            .map(String::as_str)
-            .expect("all required images must be cached")
-    }
-
-    fn login_cmd(&self) -> String {
-        let Some(password) = &self.password else {
-            return String::new();
-        };
-        format!(
-            "printf %s {} | sudo docker login --username AWS --password-stdin {}\n",
-            shell_quote(password),
-            self.registry
-        )
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', r#"'\''"#))
-}
-
-pub(crate) const fn required_images() -> &'static [&'static str] {
-    IMAGES
+    })
 }
 
 pub(crate) fn docker_bin_s3_key(version: &str, architecture: Architecture) -> String {
@@ -675,11 +640,43 @@ pub struct MonitoringUrls {
     pub loki_yml: String,
     pub pyroscope_yml: String,
     pub tempo_yml: String,
+    pub images: Vec<(&'static str, String)>,
+}
+
+/// Builds the concurrent download + verify block for the per-architecture image tarballs.
+fn image_download_block(images: &[(&'static str, String)]) -> String {
+    if images.is_empty() {
+        return String::new();
+    }
+    let mut cmd = String::from(
+        "\n# Download container image tarballs from S3 concurrently via pre-signed URLs\nmkdir -p /home/ubuntu/images\nrm -f /home/ubuntu/images/*.tar.gz\n",
+    );
+    let mut files = Vec::new();
+    for (image, url) in images {
+        let file = image_file_name(image);
+        cmd.push_str(WGET);
+        cmd.push_str(" -O /home/ubuntu/images/");
+        cmd.push_str(&file);
+        cmd.push_str(" '");
+        cmd.push_str(url);
+        cmd.push_str("' &\n");
+        files.push(file);
+    }
+    cmd.push_str("wait\n");
+    cmd.push_str("for f in");
+    for file in &files {
+        cmd.push(' ');
+        cmd.push_str(file);
+    }
+    cmd.push_str(
+        "; do\n    if [ ! -f \"/home/ubuntu/images/$f\" ]; then\n        echo \"ERROR: Failed to download image $f\" >&2\n        exit 1\n    fi\ndone\n",
+    );
+    cmd
 }
 
 /// Phase 1: Download files from S3 on monitoring instance
 pub(crate) fn install_monitoring_download_cmd(urls: &MonitoringUrls) -> String {
-    format!(
+    let mut cmd = format!(
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/prometheus.yml /home/ubuntu/datasources.yml /home/ubuntu/all.yml \
@@ -719,10 +716,12 @@ done
         urls.loki_yml,
         urls.pyroscope_yml,
         urls.tempo_yml,
-    )
+    );
+    cmd.push_str(&image_download_block(&urls.images));
+    cmd
 }
 
-fn install_image_services_cmd(services: &[ImageService], image_cache: &ImageCache) -> String {
+fn install_image_services_cmd(services: &[ImageService]) -> String {
     if services.is_empty() {
         return String::new();
     }
@@ -761,17 +760,23 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now docker
 "#,
     );
-    cmd.push_str(&image_cache.login_cmd());
+    // Load the container images from the tarballs downloaded from S3 (deduplicated by image).
+    let mut loaded: Vec<&str> = Vec::new();
+    for service in services {
+        if loaded.contains(&service.image) {
+            continue;
+        }
+        loaded.push(service.image);
+        cmd.push_str("gunzip -c /home/ubuntu/images/");
+        cmd.push_str(&image_file_name(service.image));
+        cmd.push_str(" | sudo docker load\n");
+    }
 
     for service in services {
-        let image = image_cache.image(service.image);
-        cmd.push_str("sudo docker pull ");
-        cmd.push_str(image);
-        cmd.push('\n');
         cmd.push_str("sudo tee /etc/systemd/system/");
         cmd.push_str(service.service);
         cmd.push_str(".service >/dev/null <<'EOF'\n");
-        cmd.push_str(&service.service_file(image));
+        cmd.push_str(&service.service_file());
         cmd.push_str("EOF\n");
     }
 
@@ -789,8 +794,8 @@ pub(crate) fn binary_image_services() -> impl Iterator<Item = &'static str> {
 }
 
 /// Phase 2: Setup services on monitoring instance (does not start them)
-pub(crate) fn install_monitoring_setup_cmd(image_cache: &ImageCache) -> String {
-    let image_services = install_image_services_cmd(MONITORING_IMAGE_SERVICES, image_cache);
+pub(crate) fn install_monitoring_setup_cmd() -> String {
+    let image_services = install_image_services_cmd(MONITORING_IMAGE_SERVICES);
     format!(
         r#"set -e
 
@@ -860,6 +865,7 @@ pub struct InstanceUrls {
     pub docker_tgz: String,
     pub libjemalloc_deb: String,
     pub logrotate_deb: String,
+    pub images: Vec<(&'static str, String)>,
 }
 
 /// Phase 1 (optional): Install apt packages on binary instances
@@ -891,7 +897,7 @@ sudo DEBIAN_FRONTEND=noninteractive apt-get install -y {}
 
 /// Phase 2: Download files from S3 on binary instances
 pub(crate) fn install_binary_download_cmd(urls: &InstanceUrls) -> String {
-    format!(
+    let mut cmd = format!(
         r#"
 # Clean up any previous download artifacts (allows retries to re-download fresh copies)
 rm -f /home/ubuntu/binary /home/ubuntu/config.conf /home/ubuntu/hosts.yaml \
@@ -938,7 +944,9 @@ done
         urls.docker_tgz,
         urls.libjemalloc_deb,
         urls.logrotate_deb,
-    )
+    );
+    cmd.push_str(&image_download_block(&urls.images));
+    cmd
 }
 
 /// Returns a command that mounts EC2 NVMe instance-store storage at the binary working directory.
@@ -1015,12 +1023,8 @@ sudo chown -R ubuntu:ubuntu "$NVME_MOUNT"
 }
 
 /// Phase 3: Setup and start services on binary instances
-pub(crate) fn install_binary_setup_cmd(
-    profiling: bool,
-    _architecture: Architecture,
-    image_cache: &ImageCache,
-) -> String {
-    let image_services = install_image_services_cmd(BINARY_IMAGE_SERVICES, image_cache);
+pub(crate) fn install_binary_setup_cmd(profiling: bool, _architecture: Architecture) -> String {
+    let image_services = install_image_services_cmd(BINARY_IMAGE_SERVICES);
     let perf_setup = if profiling {
         r#"
 # Setup pyroscope agent (perf symlink must be created after linux-tools installed via apt)
@@ -1290,6 +1294,9 @@ mod tests {
             loki_yml: "loki-config".to_string(),
             pyroscope_yml: "pyroscope-config".to_string(),
             tempo_yml: "tempo-config".to_string(),
+            images: monitoring_images()
+                .map(|image| (image, format!("image-url-{image}")))
+                .collect(),
         }
     }
 
@@ -1306,23 +1313,10 @@ mod tests {
             docker_tgz: "docker".to_string(),
             libjemalloc_deb: "libjemalloc".to_string(),
             logrotate_deb: "logrotate".to_string(),
+            images: binary_images()
+                .map(|image| (image, format!("image-url-{image}")))
+                .collect(),
         }
-    }
-
-    fn ecr_image_cache() -> ImageCache {
-        ImageCache::new(
-            "123456789012.dkr.ecr.us-east-1.amazonaws.com".to_string(),
-            "password".to_string(),
-            required_images().iter().map(|image| {
-                (
-                    *image,
-                    format!(
-                        "123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/{}",
-                        image.replace(['/', ':'], "_")
-                    ),
-                )
-            }),
-        )
     }
 
     #[test]
@@ -1422,8 +1416,7 @@ mod tests {
         assert!(download.contains("node-exporter-dashboard"));
         assert!(download.contains("node-exporter-full.json"));
 
-        let image_cache = ImageCache::public();
-        let setup = install_monitoring_setup_cmd(&image_cache);
+        let setup = install_monitoring_setup_cmd();
         assert!(setup.contains(
             "sudo mv /home/ubuntu/dashboard.json /var/lib/grafana/dashboards/dashboard.json"
         ));
@@ -1438,9 +1431,17 @@ mod tests {
         assert!(!download.contains("prometheus.tar.gz"));
         assert!(!download.contains("grafana.deb"));
         assert!(!download.contains("node_exporter.tar.gz"));
+        // Image tarballs are downloaded from S3 (no registry pull on the instance).
+        assert!(download.contains(&format!(
+            "-O /home/ubuntu/images/{}",
+            image_file_name(TRACER_IMAGE)
+        )));
+        assert!(download.contains(&format!(
+            "-O /home/ubuntu/images/{}",
+            image_file_name(PROMETHEUS_IMAGE)
+        )));
 
-        let image_cache = ImageCache::public();
-        let setup = install_monitoring_setup_cmd(&image_cache);
+        let setup = install_monitoring_setup_cmd();
         assert!(setup.contains("# Install Docker services"));
         assert!(setup.contains("tar xzf /home/ubuntu/docker.tgz -C /home/ubuntu"));
         assert!(
@@ -1450,6 +1451,9 @@ mod tests {
         assert!(setup.contains("ExecStart=/usr/local/bin/docker run --rm --name tracer"));
         assert!(!setup.contains("/usr/bin/docker"));
         assert!(!setup.contains("apt-get install -y docker.io"));
+        // Images are loaded from tarballs, never pulled or authenticated against a registry.
+        assert!(!setup.contains("docker pull"));
+        assert!(!setup.contains("docker login"));
         for image in [
             PROMETHEUS_IMAGE,
             LOKI_IMAGE,
@@ -1459,9 +1463,11 @@ mod tests {
             NODE_EXPORTER_IMAGE,
             TRACER_IMAGE,
         ] {
-            assert!(setup.contains(&format!("sudo docker pull {image}")));
+            assert!(setup.contains(&format!(
+                "gunzip -c /home/ubuntu/images/{} | sudo docker load",
+                image_file_name(image)
+            )));
         }
-        assert!(setup.contains(&format!("sudo docker pull {TRACER_IMAGE}")));
         assert!(setup.contains("sudo tee /etc/systemd/system/tracer.service"));
         assert!(setup.contains("sudo tee /etc/systemd/system/grafana.service"));
 
@@ -1486,11 +1492,26 @@ mod tests {
         assert!(download.contains("-O /home/ubuntu/logrotate.deb"));
         assert!(!download.contains("promtail.zip"));
         assert!(!download.contains("node_exporter.tar.gz"));
+        assert!(download.contains(&format!(
+            "-O /home/ubuntu/images/{}",
+            image_file_name(PROMTAIL_IMAGE)
+        )));
+        assert!(download.contains(&format!(
+            "-O /home/ubuntu/images/{}",
+            image_file_name(NODE_EXPORTER_IMAGE)
+        )));
 
-        let image_cache = ImageCache::public();
-        let setup = install_binary_setup_cmd(false, Architecture::Arm64, &image_cache);
-        assert!(setup.contains(&format!("sudo docker pull {PROMTAIL_IMAGE}")));
-        assert!(setup.contains(&format!("sudo docker pull {NODE_EXPORTER_IMAGE}")));
+        let setup = install_binary_setup_cmd(false, Architecture::Arm64);
+        assert!(setup.contains(&format!(
+            "gunzip -c /home/ubuntu/images/{} | sudo docker load",
+            image_file_name(PROMTAIL_IMAGE)
+        )));
+        assert!(setup.contains(&format!(
+            "gunzip -c /home/ubuntu/images/{} | sudo docker load",
+            image_file_name(NODE_EXPORTER_IMAGE)
+        )));
+        assert!(!setup.contains("docker pull"));
+        assert!(!setup.contains("docker login"));
         assert!(setup.contains("sudo tee /etc/systemd/system/promtail.service"));
         assert!(setup.contains("sudo tee /etc/systemd/system/node_exporter.service"));
         assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f promtail"));
@@ -1517,19 +1538,6 @@ mod tests {
 
         let promtail = promtail_config("10.0.0.1", "worker", "10.0.1.2", "us-east-1", "arm64");
         assert!(promtail.contains("filename: /var/lib/promtail/positions.yaml"));
-    }
-
-    #[test]
-    fn test_image_setup_uses_ecr_cache() {
-        let image_cache = ecr_image_cache();
-        let setup = install_monitoring_setup_cmd(&image_cache);
-
-        assert!(setup.contains("sudo docker login --username AWS --password-stdin 123456789012.dkr.ecr.us-east-1.amazonaws.com"));
-        assert!(setup.contains("sudo docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/prom_prometheus_v3.2.0"));
-        assert!(!setup.contains("sudo docker pull prom/prometheus:v3.2.0"));
-        assert!(setup.contains(
-            "--env TEMPO_URL=http://127.0.0.1:3200 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/ghcr.io_clabby_tracer-web_0.1.1"
-        ));
     }
 
     #[test]

@@ -3,7 +3,7 @@
 use crate::aws::{
     deployer_directory,
     ec2::{self, *},
-    ecr,
+    images,
     s3::{self, *},
     services::*,
     utils::*,
@@ -305,17 +305,34 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     info!("tools uploaded");
 
-    // Cache images in ECR so instances pull from a registry owned by this AWS account.
-    info!(region = MONITORING_REGION, "caching images in ECR");
-    let ecr_client = ecr::create_client(Region::new(MONITORING_REGION)).await;
-    let image_cache = ecr::cache_images(
-        &ecr_client,
-        MONITORING_REGION,
-        &bucket_name,
-        required_images(),
-    )
-    .await?;
-    info!("images cached in ECR");
+    // Cache required container images as gzipped `docker save` tarballs in S3 (one per
+    // architecture). Instances `docker load` these via pre-signed URLs, so they never
+    // authenticate against a registry.
+    info!("caching container images in S3");
+    let mut images_by_arch: HashMap<Architecture, HashSet<&'static str>> = HashMap::new();
+    images_by_arch
+        .entry(monitoring_architecture)
+        .or_default()
+        .extend(monitoring_images());
+    for instance in &config.instances {
+        let arch = arch_by_instance_type[&instance.instance_type];
+        images_by_arch
+            .entry(arch)
+            .or_default()
+            .extend(binary_images());
+    }
+    let mut image_urls_by_arch: HashMap<Architecture, HashMap<&'static str, String>> =
+        HashMap::new();
+    for (arch, image_set) in &images_by_arch {
+        let mut urls = HashMap::new();
+        for &image in image_set {
+            let url =
+                images::cache_image(&s3_client, &bucket_name, &tag_directory, image, *arch).await?;
+            urls.insert(image, url);
+        }
+        image_urls_by_arch.insert(*arch, urls);
+    }
+    info!("container images cached in S3");
 
     // Upload unique binaries and configs to S3 (deduplicated by digest)
     info!("uploading unique binaries and configs to S3");
@@ -1023,6 +1040,9 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
                     docker_tgz: tool_urls.docker.clone(),
                     libjemalloc_deb: tool_urls.libjemalloc.clone(),
                     logrotate_deb: tool_urls.logrotate.clone(),
+                    images: binary_images()
+                        .map(|image| (image, image_urls_by_arch[&arch][image].clone()))
+                        .collect(),
                 },
                 arch,
             ),
@@ -1042,6 +1062,14 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
         loki_yml: loki_yml_url,
         pyroscope_yml: pyroscope_yml_url,
         tempo_yml: tempo_yml_url,
+        images: monitoring_images()
+            .map(|image| {
+                (
+                    image,
+                    image_urls_by_arch[&monitoring_architecture][image].clone(),
+                )
+            })
+            .collect(),
     };
 
     // Prepare binary instance configuration futures
@@ -1055,21 +1083,11 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let ip = deployment.ip.clone();
             let nvme = nvme_supported_by_instance_type[&instance.instance_type];
             let (urls, arch) = instance_urls_map.remove(&instance.name).unwrap();
-            let image_cache = image_cache.clone();
-            (
-                instance,
-                deployment_id,
-                ec2_client,
-                ip,
-                urls,
-                arch,
-                nvme,
-                image_cache,
-            )
+            (instance, deployment_id, ec2_client, ip, urls, arch, nvme)
         })
         .collect();
     let binary_futures = binary_configs.into_iter().map(
-        |(instance, deployment_id, ec2_client, ip, urls, arch, nvme, image_cache)| async move {
+        |(instance, deployment_id, ec2_client, ip, urls, arch, nvme)| async move {
             let start = Instant::now();
 
             wait_for_instances_ready(&ec2_client, slice::from_ref(&deployment_id)).await?;
@@ -1089,7 +1107,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             ssh_execute(
                 private_key,
                 &ip,
-                &install_binary_setup_cmd(instance.profiling, arch, &image_cache),
+                &install_binary_setup_cmd(instance.profiling, arch),
             )
             .await?;
             let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
@@ -1138,12 +1156,7 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let download = format!("{:.1}s", download_start.elapsed().as_secs_f64());
 
             let setup_start = Instant::now();
-            ssh_execute(
-                private_key,
-                &monitoring_ip,
-                &install_monitoring_setup_cmd(&image_cache),
-            )
-            .await?;
+            ssh_execute(private_key, &monitoring_ip, &install_monitoring_setup_cmd()).await?;
             ssh_execute(
                 private_key,
                 &monitoring_ip,
