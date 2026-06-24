@@ -500,6 +500,91 @@ mod tests {
     }
 
     #[test_traced]
+    fn test_start_sync_after_interleaved_put_starts_new_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let pending = Arc::new(Mutex::new(Vec::new()));
+            let context = DelayedSyncContext {
+                inner: context,
+                pending: pending.clone(),
+            };
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            let first = archive
+                .put_start_sync(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to start sync");
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "one section sync should start both index and value syncs"
+            );
+
+            archive
+                .put(2, test_key("bbb"), 20)
+                .await
+                .expect("interleaved put should succeed");
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "interleaved put should not be covered by the already-started sync"
+            );
+
+            let second_started = Arc::new(AtomicUsize::new(0));
+            let second_started_clone = second_started.clone();
+            let starter = context.inner.child("second_start").spawn(|_| async move {
+                let second = archive
+                    .start_sync()
+                    .await
+                    .expect("Failed to start second sync");
+                second_started_clone.fetch_add(1, Ordering::Relaxed);
+                second
+            });
+
+            reschedule().await;
+            assert_eq!(
+                second_started.load(Ordering::Relaxed),
+                0,
+                "second start_sync should wait before rewriting the in-flight partial page"
+            );
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "second start_sync should not reuse the already-started sync for new writes"
+            );
+
+            release_pending_syncs(&pending);
+            first.await.expect("first sync handle should complete");
+            while second_started.load(Ordering::Relaxed) != 1 {
+                reschedule().await;
+            }
+            let second = starter.await.expect("second start_sync should return");
+            assert_eq!(
+                pending.lock().len(),
+                2,
+                "second start_sync should start a new index and value sync"
+            );
+
+            release_pending_syncs(&pending);
+            second.await.expect("second sync handle should complete");
+        });
+    }
+
+    #[test_traced]
     fn test_archive_compression_then_none() {
         // Initialize the deterministic context
         let executor = deterministic::Runner::default();
