@@ -251,7 +251,7 @@
 //!
 //! The bucket stores:
 //!   * `tools/binaries/{tool}/{version}/{platform}/{filename}` - Tool binaries and packages
-//!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and native helper service files
+//!   * `tools/configs/{deployer-version}/{component}/{file}` - Static configs and service files
 //!   * `deployments/{tag}/` - Deployment-specific files:
 //!     * `monitoring/` - Prometheus config, dashboard
 //!     * `instances/{name}/` - Binary, config, hosts.yaml, promtail config, pyroscope script

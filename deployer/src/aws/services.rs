@@ -9,6 +9,7 @@ use std::collections::HashMap;
 // Binary artifacts and user SSH state live under this directory. NVMe-backed instances mount
 // instance-store storage here so existing binary configs use NVMe without extra configuration.
 const HOME_DIRECTORY: &str = "/home/ubuntu";
+const DOCKER_BIN: &str = "/usr/local/bin/docker";
 
 /// Deployer version used to namespace static configs in S3
 const DEPLOYER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -303,8 +304,8 @@ Wants=network-online.target
 Requires=docker.service
 
 [Service]
-ExecStartPre=-/usr/bin/docker rm -f {service}
-ExecStart=/usr/bin/docker run --rm --name {service}{docker_options} {image}{args}
+ExecStartPre=-{docker_bin} rm -f {service}
+ExecStart={docker_bin} run --rm --name {service}{docker_options} {image}{args}
 TimeoutStopSec=60
 Restart=always
 
@@ -314,6 +315,7 @@ WantedBy=multi-user.target
             service = self.service,
             description = self.description,
             after_line = after_line,
+            docker_bin = DOCKER_BIN,
             docker_options = docker_options,
             image = image,
             args = args,
@@ -770,12 +772,14 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-ExecStartPre=-/usr/bin/docker rm -f binary_log_truncate
-ExecStart=/usr/bin/docker run --rm --name binary_log_truncate --volume /var/log:/var/log {image} sh -c ': > /var/log/binary.log'
+ExecStartPre=-{docker_bin} rm -f binary_log_truncate
+ExecStart={docker_bin} run --rm --name binary_log_truncate --volume /var/log:/var/log {image} sh -c ': > /var/log/binary.log'
 
 [Install]
 WantedBy=multi-user.target
-"#
+"#,
+        docker_bin = DOCKER_BIN,
+        image = image,
     )
 }
 
@@ -1443,6 +1447,9 @@ mod tests {
         assert!(
             setup.contains("ExecStart=/usr/local/bin/dockerd --host=unix:///var/run/docker.sock")
         );
+        assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f tracer"));
+        assert!(setup.contains("ExecStart=/usr/local/bin/docker run --rm --name tracer"));
+        assert!(!setup.contains("/usr/bin/docker"));
         assert!(!setup.contains("apt-get install -y docker.io"));
         for image in [
             PROMETHEUS_IMAGE,
@@ -1489,6 +1496,13 @@ mod tests {
         assert!(setup.contains("sudo tee /etc/systemd/system/node_exporter.service"));
         assert!(setup.contains("sudo tee /etc/systemd/system/binary-log-truncate.service"));
         assert!(setup.contains("sudo tee /etc/systemd/system/binary-log-truncate.timer"));
+        assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f promtail"));
+        assert!(setup.contains("ExecStart=/usr/local/bin/docker run --rm --name promtail"));
+        assert!(setup.contains("ExecStartPre=-/usr/local/bin/docker rm -f binary_log_truncate"));
+        assert!(
+            setup.contains("ExecStart=/usr/local/bin/docker run --rm --name binary_log_truncate")
+        );
+        assert!(!setup.contains("/usr/bin/docker"));
         assert!(setup.contains("sudo systemctl enable --now binary"));
         assert!(setup.contains("sudo systemctl enable --now binary-log-truncate.timer"));
         assert!(setup.contains("sudo systemctl enable --now node_exporter"));

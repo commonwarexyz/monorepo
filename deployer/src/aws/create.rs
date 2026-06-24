@@ -1088,10 +1088,10 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
             let setup = format!("{:.1}s", setup_start.elapsed().as_secs_f64());
 
             let start_time = Instant::now();
+            poll_service_active(private_key, &ip, "binary").await?;
             for service in binary_docker_services() {
                 poll_service_active(private_key, &ip, service).await?;
             }
-            poll_service_active(private_key, &ip, "binary").await?;
             let start_dur = format!("{:.1}s", start_time.elapsed().as_secs_f64());
 
             info!(
