@@ -26,10 +26,11 @@
 //! use commonware_math::test::F;
 //!
 //! // Constrain a witness `x` to satisfy `x^3 + x + 5 = 35`.
-//! let valued = build_with_values(|ctx| {
+//! let (valued, _) = build_with_values(|ctx| {
 //!     let x = Var::witness(ctx, |_| F::from(3u64));
 //!     let out = x.clone() * &x * &x + &x + &Var::constant(ctx, F::from(5u64));
 //!     out.assert_eq(&Var::constant(ctx, F::from(35u64)));
+//!     Vec::new()
 //! });
 //! assert!(valued.is_satisfied());
 //! ```
@@ -55,7 +56,10 @@ use commonware_utils::sync::Mutex;
 use std::{
     fmt,
     marker::PhantomData,
-    ops::{Add, AddAssign, Index, Mul, MulAssign, Neg, Sub, SubAssign},
+    ops::{
+        Add, AddAssign, BitAnd, BitOr, Div, DivAssign, Index, Mul, MulAssign, Neg, Not, Sub,
+        SubAssign,
+    },
 };
 
 /// Identifies a value in a [`Circuit`]: a constant, a witness, or the
@@ -186,7 +190,7 @@ struct ValuesBuilder<F> {
 ///     test::F,
 /// };
 ///
-/// let valued = build_with_values(|ctx| {
+/// let (valued, _) = build_with_values(|ctx| {
 ///     let x = Var::witness(ctx, |_| F::from(3u64));
 ///     // The prover computes the inverse natively...
 ///     let inv = Var::witness(ctx, {
@@ -195,15 +199,24 @@ struct ValuesBuilder<F> {
 ///     });
 ///     // ...and the circuit checks it with a single multiplication.
 ///     (x * &inv).assert_eq(&Var::one());
+///     Vec::new()
 /// });
 /// assert!(valued.is_satisfied());
 /// ```
-#[derive(Clone, Copy)]
 pub struct Values<'a, F> {
     constants: &'a [F],
     witnesses: &'a [F],
     nodes: &'a [F],
 }
+
+// Manual `Copy`/`Clone` so they hold for any `F`: the derived versions would
+// add a spurious `F: Copy`/`F: Clone` bound, but `Values` only holds slices.
+impl<F> Clone for Values<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<F> Copy for Values<'_, F> {}
 
 #[doc(hidden)]
 impl<'a, F> Index<CircuitIdx> for Values<'a, F> {
@@ -391,6 +404,19 @@ impl<'ctx, F> Var<'ctx, F> {
         }
     }
 
+    /// Create a "native" var holding a value outside any circuit.
+    ///
+    /// Like the vars produced by [`Additive::zero`] and [`Ring::one`], a
+    /// native var lives outside the circuit until it is combined with a
+    /// circuit-backed var, at which point it is folded in as a constant. This
+    /// is convenient for fixed constants (such as curve parameters) that are
+    /// the same in every circuit and so do not need a [`Context`] to create.
+    pub const fn native(value: F) -> Self {
+        Self {
+            inner: VarInner::Native(value),
+        }
+    }
+
     /// Create a var with a fixed, public value.
     pub fn constant(ctx: Context<'ctx, F>, value: F) -> Self {
         Self {
@@ -552,6 +578,43 @@ impl<'ctx, F: Multiplicative> MulAssign<&Self> for Var<'ctx, F> {
     }
 }
 
+/// Division by `rhs`, computed as a single multiplication constraint.
+///
+/// Rather than inverting `rhs` and multiplying (which costs two
+/// multiplications), the prover supplies the quotient `q = self / rhs` as a
+/// witness and the circuit constrains `q * rhs == self`.
+///
+/// # Caveats
+///
+/// Like [`Field::inv`] on a circuit-backed var, this deviates from the
+/// `inv(0) = 0` field contract: dividing by a circuit-backed `rhs` of zero
+/// adds an unsatisfiable constraint when `self != 0`. Worse, `0 / 0`
+/// constrains `q * 0 == 0`, which holds for *any* `q`, leaving the quotient
+/// unconstrained. Only use `/` where `rhs` is known to be nonzero.
+impl<'ctx, F: Field> Div<&Self> for Var<'ctx, F> {
+    type Output = Self;
+
+    fn div(self, rhs: &Self) -> Self {
+        let &ctx = match (&self.inner, &rhs.inner) {
+            (VarInner::Native(a), VarInner::Native(b)) => {
+                return Self {
+                    inner: VarInner::Native(a.clone() * &b.inv()),
+                }
+            }
+            (VarInner::Circuit { ctx, .. }, _) | (_, VarInner::Circuit { ctx, .. }) => ctx,
+        };
+        let q = { Self::witness(ctx, |v| self.value(v) * &rhs.value(v).inv()) };
+        (q.clone() * rhs).assert_eq(&self);
+        q
+    }
+}
+
+impl<'ctx, F: Field> DivAssign<&Self> for Var<'ctx, F> {
+    fn div_assign(&mut self, rhs: &Self) {
+        *self = self.clone() / rhs;
+    }
+}
+
 impl<'ctx, F: Additive + Ring> Additive for Var<'ctx, F> {
     fn zero() -> Self {
         Self {
@@ -589,28 +652,223 @@ impl<'ctx, F: Field> Field for Var<'ctx, F> {
     }
 }
 
+/// A circuit value constrained to be `0` or `1`.
+///
+/// A `BoolVar` wraps a [`Var`] together with a guarantee that it holds a
+/// boolean: every constructor either produces a value that is boolean by
+/// construction, or adds the constraint `b * (1 - b) == 0` enforcing it.
+/// Holding that guarantee in the type lets later operations skip
+/// re-checking: [`Self::select`] and the boolean combinators below are sound
+/// precisely because their inputs are already known to be boolean.
+///
+/// The motivating use is scalar multiplication in a circuit, where a scalar
+/// is decomposed into bits (each a `BoolVar`) and a point is accumulated by
+/// conditionally adding with [`Self::select`].
+///
+/// # Native Vars
+///
+/// Like [`Var`], a `BoolVar` built from a native value (see
+/// [`Self::constant`]) lives outside the circuit until combined with a
+/// circuit-backed value. [`Self::assert`] on a native, non-boolean var
+/// therefore panics rather than recording an unsatisfiable constraint, in
+/// keeping with the native-var semantics described on [`Var`].
+///
+/// # Example
+///
+/// ```
+/// use commonware_cryptography::zk::circuit::{build_with_values, BoolVar, Var};
+/// use commonware_math::test::F;
+///
+/// // Use a bit to choose between two values, then check the choice.
+/// let (valued, _) = build_with_values(|ctx| {
+///     let bit = BoolVar::witness(ctx, |_| true);
+///     let a = Var::constant(ctx, F::from(7u64));
+///     let b = Var::constant(ctx, F::from(9u64));
+///     bit.select(&a, &b).assert_eq(&Var::constant(ctx, F::from(7u64)));
+///     Vec::new()
+/// });
+/// assert!(valued.is_satisfied());
+/// ```
+#[derive(Clone)]
+pub struct BoolVar<'ctx, F> {
+    var: Var<'ctx, F>,
+}
+
+impl<F: fmt::Debug> fmt::Debug for BoolVar<'_, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("BoolVar").field(&self.var).finish()
+    }
+}
+
+impl<'ctx, F> BoolVar<'ctx, F> {
+    /// The underlying [`Var`], whose value is `0` or `1`.
+    pub const fn var(&self) -> &Var<'ctx, F> {
+        &self.var
+    }
+
+    /// Consume this `BoolVar`, returning the underlying [`Var`].
+    #[allow(clippy::missing_const_for_fn)]
+    pub fn into_var(self) -> Var<'ctx, F> {
+        self.var
+    }
+}
+
+impl<'ctx, F: Ring> BoolVar<'ctx, F> {
+    /// Create a boolean constant with a fixed, public value.
+    ///
+    /// Like [`Var::native`], the value lives outside the circuit until it is
+    /// combined with a circuit-backed var. No constraint is added: the value
+    /// is boolean by construction.
+    pub fn constant(value: bool) -> Self {
+        Self {
+            var: Var::native(if value { F::one() } else { F::zero() }),
+        }
+    }
+
+    /// Assert that this var equals `other`.
+    pub fn assert_eq(&self, other: &Self) {
+        self.var.assert_eq(other.var());
+    }
+}
+
+impl<'ctx, F: Ring + PartialEq> BoolVar<'ctx, F> {
+    /// Allocate a fresh boolean witness, constrained to be `0` or `1`.
+    ///
+    /// In prover mode, `init` receives the values assigned so far and must
+    /// return the bit's value. In verifier mode, `init` does not run. The
+    /// constraint `b * (1 - b) == 0` is added in both modes.
+    ///
+    /// `init` must not use the [`Context`]: doing so deadlocks. See
+    /// [`Values`].
+    pub fn witness(
+        ctx: Context<'ctx, F>,
+        init: impl for<'a> FnOnce(Values<'a, F>) -> bool,
+    ) -> Self {
+        let var = Var::witness(ctx, |v| if init(v) { F::one() } else { F::zero() });
+        Self::enforce(&var);
+        Self { var }
+    }
+
+    /// Constrain an arbitrary var to be boolean and wrap it.
+    ///
+    /// Adds the constraint `var * (1 - var) == 0`, which holds exactly when
+    /// `var` is `0` or `1`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `var` is a native var whose value is not `0` or `1`, since
+    /// there is no circuit to record the failed constraint in. See
+    /// [`Var::assert_eq`].
+    pub fn assert(var: Var<'ctx, F>) -> Self {
+        Self::enforce(&var);
+        Self { var }
+    }
+
+    /// Add the booleanity constraint `var * var == var` (equivalently
+    /// `var * (1 - var) == 0`).
+    fn enforce(var: &Var<'ctx, F>) {
+        (var.clone() * var).assert_eq(var);
+    }
+}
+
+impl<'ctx, F: Ring> BoolVar<'ctx, F> {
+    /// Select between two vars based on this bit.
+    ///
+    /// Returns `on_true` when the bit is `1` and `on_false` when it is `0`,
+    /// computed as `on_false + b * (on_true - on_false)` with a single
+    /// multiplication.
+    pub fn select(&self, on_true: &Var<'ctx, F>, on_false: &Var<'ctx, F>) -> Var<'ctx, F> {
+        on_false.clone() + &(self.var.clone() * &(on_true.clone() - on_false))
+    }
+}
+
+impl<'ctx, F: Ring> Not for BoolVar<'ctx, F> {
+    type Output = Self;
+
+    fn not(self) -> Self::Output {
+        Self {
+            var: Var::one() - &self.var,
+        }
+    }
+}
+
+impl<'ctx, F: Ring> BitAnd for BoolVar<'ctx, F> {
+    type Output = Self;
+
+    // Over 0/1, boolean `and` IS multiplication, so `self.var * &rhs.var` is
+    // correct. But clippy's `suspicious_arithmetic_impl` lint assumes any
+    // operator impl that uses a *different* operator internally (here, `*` inside
+    // `BitAnd`) is a copy-paste typo. That heuristic is wrong: it has no notion
+    // of the algebra, so it flags correct code and forces this `#[allow]`. The
+    // lint gives confident, authoritative advice that is simply false, which is
+    // why its designer now resides in the Eighth Circle of Hell,
+    // among the fraudulent counselors (Inferno XXVI) who misused their cleverness
+    // to advise others into error, each concealed within a tongue of flame.
+    #[allow(clippy::suspicious_arithmetic_impl)]
+    fn bitand(self, rhs: Self) -> Self::Output {
+        Self {
+            var: self.var * &rhs.var,
+        }
+    }
+}
+
+impl<'ctx, F: Ring> BitOr for BoolVar<'ctx, F> {
+    type Output = Self;
+
+    // Boolean `or` over 0/1 is `a + b - a * b`, which is correct. Same lint, same
+    // false alarm over the `+`/`-`/`*`, same `#[allow]`. See `bitand` above for
+    // why the lint's designer is doing time in the Eighth Circle of Hell.
+    #[allow(clippy::suspicious_arithmetic_impl)]
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self {
+            var: self.var.clone() + &rhs.var - &(self.var * &rhs.var),
+        }
+    }
+}
+
 /// Build a circuit without computing an assignment (verifier mode).
 ///
 /// Witness `init` closures do not run in this mode.
-pub fn build<F: Ring + PartialEq>(f: impl for<'ctx> FnOnce(Context<'ctx, F>)) -> Circuit<F> {
+///
+/// The closure returns the vars whose circuit indices the caller wants back
+/// (e.g. the committed outputs of a circuit); the returned indices are in the
+/// same order. Return an empty vec to ignore this.
+///
+/// # Panics
+///
+/// Panics if any returned var is native (not backed by the circuit).
+pub fn build<F: Ring + PartialEq>(
+    f: impl for<'ctx> FnOnce(Context<'ctx, F>) -> Vec<Var<'ctx, F>>,
+) -> (Circuit<F>, Vec<CircuitIdx>) {
     let inner = ContextInner {
         values: None,
         circuit: Mutex::new(Circuit::default()),
     };
-    f(Context {
+    let indices = f(Context {
         inner: &inner,
         _brand: PhantomData,
-    });
-    inner.circuit.into_inner()
+    })
+    .iter()
+    .map(Var::circuit_idx)
+    .collect();
+    (inner.circuit.into_inner(), indices)
 }
 
 /// Build a circuit while simultaneously computing the assignment (prover mode).
 ///
 /// Each witness's value comes from the `init` closure passed to
 /// [`Var::witness`].
+///
+/// The closure returns the vars whose circuit indices the caller wants back
+/// (e.g. the committed outputs of a circuit); the returned indices are in the
+/// same order. Return an empty vec to ignore this.
+///
+/// # Panics
+///
+/// Panics if any returned var is native (not backed by the circuit).
 pub fn build_with_values<F: Ring + PartialEq>(
-    f: impl for<'ctx> FnOnce(Context<'ctx, F>),
-) -> ValuedCircuit<F> {
+    f: impl for<'ctx> FnOnce(Context<'ctx, F>) -> Vec<Var<'ctx, F>>,
+) -> (ValuedCircuit<F>, Vec<CircuitIdx>) {
     let inner = ContextInner {
         values: Some(Mutex::new(ValuesBuilder {
             witnesses: Vec::new(),
@@ -618,17 +876,23 @@ pub fn build_with_values<F: Ring + PartialEq>(
         })),
         circuit: Mutex::new(Circuit::default()),
     };
-    f(Context {
+    let indices = f(Context {
         inner: &inner,
         _brand: PhantomData,
-    });
+    })
+    .iter()
+    .map(Var::circuit_idx)
+    .collect();
     let circuit = inner.circuit.into_inner();
     let values = inner.values.unwrap().into_inner();
-    ValuedCircuit {
-        circuit,
-        witnesses: values.witnesses,
-        nodes: values.nodes,
-    }
+    (
+        ValuedCircuit {
+            circuit,
+            witnesses: values.witnesses,
+            nodes: values.nodes,
+        },
+        indices,
+    )
 }
 
 /// Fuzzing utilities, comparing circuit satisfaction against native
@@ -763,7 +1027,9 @@ pub mod fuzz {
                     };
                     vars.push(var);
                 }
+                Vec::new()
             })
+            .0
         }
     }
 }
@@ -787,9 +1053,90 @@ mod tests {
                 let x = Var::witness(ctx, move |_| F::from(x_value));
                 let out = x.clone() * &x * &x + &x + &Var::constant(ctx, F::from(5u64));
                 out.assert_eq(&Var::constant(ctx, F::from(35u64)));
+                Vec::new()
             })
+            .0
         };
         assert!(cubic(3).is_satisfied());
         assert!(!cubic(4).is_satisfied());
+    }
+
+    #[test]
+    fn test_bool_witness_enforces_booleanity() {
+        // A boolean witness from a `bool` is always satisfiable.
+        for b in [false, true] {
+            let (valued, _) = build_with_values(move |ctx| {
+                BoolVar::<F>::witness(ctx, move |_| b);
+                Vec::new()
+            });
+            assert!(valued.is_satisfied());
+        }
+
+        // A var that is not 0 or 1 fails the booleanity constraint.
+        let (bad, _) = build_with_values(|ctx| {
+            let two = Var::witness(ctx, |_| F::from(2u64));
+            BoolVar::assert(two);
+            Vec::new()
+        });
+        assert!(!bad.is_satisfied());
+
+        // 0 and 1 pass `from_var`.
+        for v in [0u64, 1u64] {
+            let (valued, _) = build_with_values(move |ctx| {
+                let x = Var::witness(ctx, move |_| F::from(v));
+                BoolVar::assert(x);
+                Vec::new()
+            });
+            assert!(valued.is_satisfied());
+        }
+    }
+
+    #[test]
+    fn test_bool_select() {
+        // `select` returns `on_true` when the bit is set, else `on_false`.
+        for b in [false, true] {
+            let (valued, _) = build_with_values(move |ctx| {
+                let bit = BoolVar::witness(ctx, move |_| b);
+                let on_true = Var::witness(ctx, |_| F::from(7u64));
+                let on_false = Var::witness(ctx, |_| F::from(9u64));
+                let selected = bit.select(&on_true, &on_false);
+                let expected = if b { F::from(7u64) } else { F::from(9u64) };
+                selected.assert_eq(&Var::constant(ctx, expected));
+                Vec::new()
+            });
+            assert!(valued.is_satisfied());
+        }
+    }
+
+    #[test]
+    fn test_bool_combinators_truth_tables() {
+        for a in [false, true] {
+            for b in [false, true] {
+                let (valued, _) = build_with_values::<F>(move |ctx| {
+                    let a_var = BoolVar::witness(ctx, move |_| a);
+                    let b_var = BoolVar::witness(ctx, move |_| b);
+                    (!a_var.clone()).assert_eq(&BoolVar::constant(!a));
+                    (a_var.clone() & b_var.clone()).assert_eq(&BoolVar::constant(a & b));
+                    (a_var | b_var).assert_eq(&BoolVar::constant(a | b));
+                    Vec::new()
+                });
+                assert!(valued.is_satisfied());
+            }
+        }
+    }
+
+    #[test]
+    fn test_bool_constant() {
+        let (valued, _) = build_with_values(|ctx| {
+            // A native boolean constant folds in correctly when combined.
+            let t = BoolVar::<F>::constant(true);
+            let f = BoolVar::<F>::constant(false);
+            let x = Var::witness(ctx, |_| F::from(5u64));
+            t.select(&x, &Var::zero())
+                .assert_eq(&Var::constant(ctx, F::from(5u64)));
+            f.select(&x, &Var::zero()).assert_eq(&Var::zero());
+            Vec::new()
+        });
+        assert!(valued.is_satisfied());
     }
 }
