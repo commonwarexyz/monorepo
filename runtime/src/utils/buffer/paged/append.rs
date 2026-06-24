@@ -531,8 +531,11 @@ impl<B: Blob> Append<B> {
 
         // Prepare the *physical* pages corresponding to the data in the buffer.
         // Pass the old partial page state so the CRC record is constructed correctly.
-        let (mut physical_pages, partial_page_state) =
-            self.to_physical_pages(&*buffer, write_partial_page, old_partial_page_state.as_ref());
+        let (mut physical_pages, partial_page_state) = self.to_physical_pages(
+            &*buffer,
+            write_partial_page,
+            old_partial_page_state.as_ref(),
+        );
 
         // If there's nothing to write, return early.
         if physical_pages.is_empty() {
