@@ -1764,7 +1764,7 @@ where
             return;
         }
 
-        let handle = self.cache.put_block(round, digest, block).await;
+        let handle = self.cache.put_notarized(round, digest, block).await;
         observe_sync(handle.await, round, "notarized");
     }
 
@@ -1785,7 +1785,7 @@ where
             return handle;
         }
 
-        self.cache.put_block(round, digest, block).await
+        self.cache.put_notarized(round, digest, block).await
     }
 
     /// Folds any pending notarization-certificate sync for `round` into the

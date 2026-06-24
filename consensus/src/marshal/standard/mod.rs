@@ -1256,7 +1256,7 @@ mod tests {
                     (),
                 )
                 .await;
-                mgr.put_block(round, digest, block.clone())
+                mgr.put_notarized(round, digest, block.clone())
                     .await
                     .await
                     .expect("failed to sync block");
@@ -2898,8 +2898,11 @@ mod tests {
         }
     }
 
+    // The page buffer issues the partial-page footer sync eagerly, so a sync fault surfaces from the
+    // runtime barrier ("partial-page sync failed") before the marshal's own "failed to sync verified"
+    // context. Both are fatal; match the message that actually fires.
     #[test_traced("WARN")]
-    #[should_panic(expected = "failed to sync verified")]
+    #[should_panic(expected = "partial-page sync failed")]
     fn test_mailbox_verified_sync_failure_panics() {
         let runner = deterministic::Runner::timed(Duration::from_secs(30));
         runner.start(|mut context| async move {

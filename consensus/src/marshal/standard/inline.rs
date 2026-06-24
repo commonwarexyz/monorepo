@@ -44,7 +44,7 @@
 
 use crate::{
     marshal::{
-        application::verification_tasks::VerificationTasks,
+        application::certification_gates::{gate_verdict, CertificationGates},
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
             validation::{
@@ -142,7 +142,7 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    verification_tasks: VerificationTasks<B::Digest>,
+    certification_gates: CertificationGates<B::Digest>,
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
@@ -163,7 +163,7 @@ where
             application: self.application.clone(),
             marshal: self.marshal.clone(),
             epocher: self.epocher.clone(),
-            verification_tasks: self.verification_tasks.clone(),
+            certification_gates: self.certification_gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
             ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
@@ -207,7 +207,7 @@ where
             application,
             marshal,
             epocher,
-            verification_tasks: VerificationTasks::new(),
+            certification_gates: CertificationGates::new(),
             build_duration,
             proposal_parent_fetch_duration,
             ancestor_fetch_duration,
@@ -242,7 +242,7 @@ where
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let verification_tasks = self.verification_tasks.clone();
+        let certification_gates = self.certification_gates.clone();
         let build_duration = self.build_duration.clone();
         let proposal_parent_fetch_duration = self.proposal_parent_fetch_duration.clone();
         let ancestor_fetch_duration = self.ancestor_fetch_duration.clone();
@@ -328,21 +328,17 @@ where
                     // Enqueue the persist before publishing the digest (so a later
                     // `forward` is ordered after it), then let `certify` await the
                     // returned sync handle before the finalize vote.
-                    let (durable_tx, durable_rx) = oneshot::channel();
-                    verification_tasks.insert(consensus_context.round, digest, durable_rx);
-                    let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
-                    let success = tx.send_lossy(digest);
-                    let Ok(handle) = verified_rx.await else {
-                        return;
-                    };
-                    handle.await.expect("failed to sync re-proposed block");
-                    durable_tx.send_lossy(true);
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?digest,
-                        success,
-                        "re-proposed parent block at epoch boundary"
-                    );
+                    let persist = marshal.verified_deferred(consensus_context.round, parent);
+                    if certification_gates
+                        .persist_and_defer(consensus_context.round, digest, tx, persist)
+                        .await
+                    {
+                        debug!(
+                            round = ?consensus_context.round,
+                            ?digest,
+                            "re-proposed parent block at epoch boundary"
+                        );
+                    }
                     return;
                 }
 
@@ -391,21 +387,17 @@ where
                 // Enqueue the persist before publishing the digest (so a later
                 // `forward` is ordered after it), then let `certify` await the
                 // returned sync handle before the finalize vote.
-                let (durable_tx, durable_rx) = oneshot::channel();
-                verification_tasks.insert(consensus_context.round, digest, durable_rx);
-                let proposed_rx = marshal.proposed(consensus_context.round, built_block);
-                let success = tx.send_lossy(digest);
-                let Ok(handle) = proposed_rx.await else {
-                    return;
-                };
-                handle.await.expect("failed to sync proposed block");
-                durable_tx.send_lossy(true);
-                debug!(
-                    round = ?consensus_context.round,
-                    ?digest,
-                    success,
-                    "proposed new block"
-                );
+                let persist = marshal.proposed(consensus_context.round, built_block);
+                if certification_gates
+                    .persist_and_defer(consensus_context.round, digest, tx, persist)
+                    .await
+                {
+                    debug!(
+                        round = ?consensus_context.round,
+                        ?digest,
+                        "proposed new block"
+                    );
+                }
             }
             .instrument(span)
         });
@@ -422,7 +414,7 @@ where
     ///
     /// The notarize vote is cast as soon as application verification completes. The block's
     /// durable sync is deferred (it runs concurrently with consensus voting) and its
-    /// completion is registered in `verification_tasks` for [`Self::certify`] to await before
+    /// completion is registered in `certification_gates` for [`Self::certify`] to await before
     /// the finalize vote.
     #[allow(clippy::async_yields_async)]
     #[tracing::instrument(name = "marshal.inline.verify", level = "info", skip_all, fields(round = %context.round, digest = %digest))]
@@ -437,7 +429,7 @@ where
         // sender means verification did not complete and certification should use recovery fetch.
         let round = context.round;
         let (durable_tx, durable_rx) = oneshot::channel();
-        self.verification_tasks.insert(round, digest, durable_rx);
+        self.certification_gates.insert(round, digest, durable_rx);
 
         let mut marshal = self.marshal.clone();
         let mut application = self.application.clone();
@@ -528,14 +520,7 @@ where
                     valid
                 };
                 let (verdict, durable) = futures::join!(verify_then_vote, store);
-                if let Some(valid) = verdict {
-                    // A false app verdict is a live rejection; only a true verdict
-                    // requires a completed durable store. `durable` is false only when
-                    // the marshal actor is gone (its mailbox closed at shutdown); a real
-                    // sync failure is fatal and panics rather than returning false.
-                    if valid && !durable {
-                        return;
-                    }
+                if let Some(valid) = gate_verdict(verdict, durable) {
                     durable_tx.send_lossy(valid);
                 }
             }
@@ -562,7 +547,7 @@ where
         // once the block's sync handle completes. Awaiting it here is the durability barrier
         // for the finalize vote, and it lets the sync overlap consensus voting
         // instead of freezing certify with a fresh fsync.
-        let task = self.verification_tasks.take(round, digest);
+        let task = self.certification_gates.take(round, digest);
         let marshal = self.marshal.clone();
         let (mut tx, rx) = oneshot::channel();
         let context = self
@@ -656,7 +641,7 @@ where
     /// Forwards consensus activity to the wrapped application reporter.
     fn report(&mut self, update: Self::Activity) -> Feedback {
         if let Update::Tip(tip_round, _, _) = &update {
-            self.verification_tasks.retain_after(tip_round);
+            self.certification_gates.retain_after(tip_round);
         }
         self.application.report(update)
     }

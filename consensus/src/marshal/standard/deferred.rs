@@ -73,8 +73,8 @@
 use crate::{
     marshal::{
         application::{
+            certification_gates::{drive_certify_gate, gate_verdict, CertificationGates},
             validation::{is_inferred_reproposal_at_certify, Stage},
-            verification_tasks::VerificationTasks,
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{
@@ -152,7 +152,7 @@ where
     application: A,
     marshal: Mailbox<S, Standard<B>>,
     epocher: ES,
-    verification_tasks: VerificationTasks<<B as Digestible>::Digest>,
+    certification_gates: CertificationGates<<B as Digestible>::Digest>,
 
     build_duration: Timed,
     proposal_parent_fetch_duration: Timed,
@@ -173,7 +173,7 @@ where
             application: self.application.clone(),
             marshal: self.marshal.clone(),
             epocher: self.epocher.clone(),
-            verification_tasks: self.verification_tasks.clone(),
+            certification_gates: self.certification_gates.clone(),
             build_duration: self.build_duration.clone(),
             proposal_parent_fetch_duration: self.proposal_parent_fetch_duration.clone(),
             ancestor_fetch_duration: self.ancestor_fetch_duration.clone(),
@@ -215,7 +215,7 @@ where
             application,
             marshal,
             epocher,
-            verification_tasks: VerificationTasks::new(),
+            certification_gates: CertificationGates::new(),
 
             build_duration,
             proposal_parent_fetch_duration,
@@ -291,21 +291,12 @@ where
                 );
                 let (verdict, durable) = futures::join!(verify, store);
 
-                // Certify the block only when it is both valid and durable. App-invalid
+                // Publish only when the block is both valid and durable. App-invalid
                 // candidates may already be in the cache from the concurrent store above,
-                // so the returned verdict is the authority for consensus progress.
-                let Some(application_valid) = verdict else {
-                    return;
-                };
-
-                // A false app verdict is a live rejection; only a true verdict
-                // requires a completed durable store. `durable` is false only when
-                // the marshal actor is gone (its mailbox closed at shutdown); a real
-                // sync failure is fatal and panics rather than returning false.
-                if application_valid && !durable {
-                    return;
+                // so the gate verdict is the authority for consensus progress.
+                if let Some(application_valid) = gate_verdict(verdict, durable) {
+                    tx.send_lossy(application_valid);
                 }
-                tx.send_lossy(application_valid);
             }
             .instrument(span)
         });
@@ -412,6 +403,7 @@ where
         rx
     }
 
+    #[allow(clippy::async_yields_async)]
     async fn certify_from_existing_task(
         &mut self,
         round: Round,
@@ -424,8 +416,10 @@ where
         // variant, the digest is also the variant commitment.
         self.marshal.hint_notarized(round, digest);
 
+        // A completed gate is a live local verdict. After an unclean restart the
+        // in-memory task is gone, so recover via the embedded-context fetch path.
         let mut marshaled = self.clone();
-        let (mut tx, rx) = oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         let context = self
             .context
             .lock()
@@ -433,48 +427,9 @@ where
             .child("certify_existing")
             .with_attribute("round", round);
         context.spawn(move |_| {
-            async move {
-            let result = select! {
-                _ = tx.closed() => {
-                    debug!(
-                        reason = "consensus dropped receiver",
-                        "skipping certification"
-                    );
-                    return;
-                },
-                result = task => result,
-            };
-
-            // A completed `false` is a live local verdict. After an unclean
-            // restart the in-memory task is gone, so `certify` enters the
-            // embedded-context fetch path instead.
-            match result {
-                Ok(result) => {
-                    tx.send_lossy(result);
-                }
-                Err(_) => {
-                    debug!(
-                        ?round,
-                        ?digest,
-                        "certification gate task closed before certification, falling back to embedded context"
-                    );
-                    let fallback = marshaled.certify_from_embedded_context(round, digest).await;
-                    let result = select! {
-                        _ = tx.closed() => {
-                            debug!(
-                                reason = "consensus dropped receiver",
-                                "skipping certification"
-                            );
-                            return;
-                        },
-                        result = fallback => result,
-                    };
-                    if let Ok(result) = result {
-                        tx.send_lossy(result);
-                    }
-                }
-            }
-            }
+            drive_certify_gate(tx, task, round, digest, move || async move {
+                marshaled.certify_from_embedded_context(round, digest).await
+            })
             .instrument(info_span!(
                 "marshal.deferred.certify.existing",
                 round = %round,
@@ -517,7 +472,7 @@ where
         let marshal = self.marshal.clone();
         let mut application = self.application.clone();
         let epocher = self.epocher.clone();
-        let verification_tasks = self.verification_tasks.clone();
+        let certification_gates = self.certification_gates.clone();
 
         // Metrics
         let build_duration = self.build_duration.clone();
@@ -620,21 +575,17 @@ where
                     // Enqueue the persist before publishing the digest (so a later
                     // `forward` is ordered after it), then let `certify` await the
                     // returned sync handle before the finalize vote.
-                    let (durable_tx, durable_rx) = oneshot::channel();
-                    verification_tasks.insert(consensus_context.round, digest, durable_rx);
-                    let verified_rx = marshal.verified_deferred(consensus_context.round, parent);
-                    let success = tx.send_lossy(digest);
-                    let Ok(handle) = verified_rx.await else {
-                        return;
-                    };
-                    handle.await.expect("failed to sync re-proposed block");
-                    durable_tx.send_lossy(true);
-                    debug!(
-                        round = ?consensus_context.round,
-                        ?digest,
-                        success,
-                        "re-proposed parent block at epoch boundary"
-                    );
+                    let persist = marshal.verified_deferred(consensus_context.round, parent);
+                    if certification_gates
+                        .persist_and_defer(consensus_context.round, digest, tx, persist)
+                        .await
+                    {
+                        debug!(
+                            round = ?consensus_context.round,
+                            ?digest,
+                            "re-proposed parent block at epoch boundary"
+                        );
+                    }
                     return;
                 }
 
@@ -683,21 +634,17 @@ where
                 // Enqueue the persist before publishing the digest (so a later
                 // `forward` is ordered after it), then let `certify` await the
                 // returned sync handle before the finalize vote.
-                let (durable_tx, durable_rx) = oneshot::channel();
-                verification_tasks.insert(consensus_context.round, digest, durable_rx);
-                let proposed_rx = marshal.proposed(consensus_context.round, built_block);
-                let success = tx.send_lossy(digest);
-                let Ok(handle) = proposed_rx.await else {
-                    return;
-                };
-                handle.await.expect("failed to sync proposed block");
-                durable_tx.send_lossy(true);
-                debug!(
-                    round = ?consensus_context.round,
-                    ?digest,
-                    success,
-                    "proposed new block"
-                );
+                let persist = marshal.proposed(consensus_context.round, built_block);
+                if certification_gates
+                    .persist_and_defer(consensus_context.round, digest, tx, persist)
+                    .await
+                {
+                    debug!(
+                        round = ?consensus_context.round,
+                        ?digest,
+                        "proposed new block"
+                    );
+                }
             }
             .instrument(span)
         });
@@ -720,7 +667,7 @@ where
         // This lets `certify` take the task and bump a round-bound notarized fetch
         // via `hint_notarized`.
         let (task_tx, task_rx) = oneshot::channel();
-        self.verification_tasks.insert(round, digest, task_rx);
+        self.certification_gates.insert(round, digest, task_rx);
 
         let (mut tx, rx) = oneshot::channel();
         let runtime_context = self
@@ -835,7 +782,7 @@ where
     #[tracing::instrument(name = "marshal.deferred.certify", level = "info", skip_all, fields(round = %round, digest = %digest))]
     async fn certify(&mut self, round: Round, digest: Self::Digest) -> oneshot::Receiver<bool> {
         // Attempt to retrieve the existing certification gate task for this round/digest.
-        let task = self.verification_tasks.take(round, digest);
+        let task = self.certification_gates.take(round, digest);
         if let Some(task) = task {
             return self.certify_from_existing_task(round, digest, task).await;
         }
@@ -880,7 +827,7 @@ where
     fn report(&mut self, update: Self::Activity) -> Feedback {
         // Clean up certification gate tasks for rounds <= the finalized round.
         if let Update::Tip(round, _, _) = &update {
-            self.verification_tasks.retain_after(round);
+            self.certification_gates.retain_after(round);
         }
         self.application.report(update)
     }

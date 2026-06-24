@@ -893,13 +893,13 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
     /// which must enqueue before broadcasting and await durability only at certify.
     #[must_use = "callers must consider block durability before proceeding"]
     pub async fn verified(&self, round: Round, block: V::Block) -> bool {
-        match self.verified_deferred(round, block).await {
-            Ok(handle) => {
-                handle.await.expect("failed to sync verified block");
-                true
-            }
-            Err(_) => false,
-        }
+        let Ok(handle) = self.verified_deferred(round, block).await else {
+            return false;
+        };
+        // A real sync failure panics at the driver (the fatal policy), so a handle
+        // error here only means the marshal actor was dropped at shutdown. Report
+        // not-durable rather than panicking.
+        handle.await.is_ok()
     }
 
     /// Notifies the actor that a block has been certified.
@@ -914,13 +914,12 @@ impl<S: Scheme, V: Variant> Mailbox<S, V> {
             block,
             ack: Some(ack),
         });
-        match receiver.await {
-            Ok(handle) => {
-                handle.await.expect("failed to sync certified block");
-                true
-            }
-            Err(_) => false,
-        }
+        let Ok(handle) = receiver.await else {
+            return false;
+        };
+        // See [`Self::verified`]: a handle error means the actor is gone (shutdown),
+        // not a sync failure (which panics at the driver), so report not-durable.
+        handle.await.is_ok()
     }
 
     /// Attempts to set the sync starting point from a finalized commitment.
