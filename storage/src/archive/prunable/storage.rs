@@ -401,6 +401,14 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let _ = self.items_tracked.try_set(self.indices.len());
         Ok(())
     }
+
+    /// Drain the set of sections with unsynced writes, recording them in the sync metric. The caller
+    /// is responsible for syncing the returned sections (via the synchronous or overlapping path).
+    fn take_pending(&mut self) -> BTreeSet<u64> {
+        let pending = std::mem::take(&mut self.pending);
+        self.syncs.inc_by(pending.len() as u64);
+        pending
+    }
 }
 
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
@@ -429,21 +437,18 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn start_sync(&mut self) -> Result<Handle<()>, Error> {
-        // Collect pending sections and update metrics
-        let pending: Vec<u64> = self.pending.iter().copied().collect();
-        self.syncs.inc_by(pending.len() as u64);
-
-        // Start syncing the oversized journal (handles both index and values)
+        // Start syncing the oversized journal (handles both index and values) and return a handle
+        // that resolves once every section's sync is durable.
+        let pending = self.take_pending();
         let syncs = pending.iter().map(|s| self.oversized.start_sync(*s));
         let handles = try_join_all(syncs).await?;
-        self.pending.clear();
-
         Ok(Handle::join(handles))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
-        let handle = self.start_sync().await?;
-        handle.await.map_err(crate::journal::Error::from)?;
+        let pending = self.take_pending();
+        let syncs = pending.iter().map(|s| self.oversized.sync(*s));
+        try_join_all(syncs).await?;
         Ok(())
     }
 
