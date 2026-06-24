@@ -553,7 +553,7 @@ impl<B: Blob> Append<B> {
             drop(buf_guard);
             self.drain_barrier().await?;
             buf_guard = self.buffer.write().await;
-            debug_assert!(
+            assert!(
                 self.rewrites_current_page(&buf_guard, write_partial_page, logical_page_size)
                     .await,
                 "serialized mutation invariant: flush must still rewrite the partial page after \
