@@ -34,15 +34,31 @@ const UBUNTU_ARCHIVE_ARM64: &str = "http://ports.ubuntu.com/ubuntu-ports/pool";
 /// Ubuntu package archive base URL for x86_64
 const UBUNTU_ARCHIVE_X86_64: &str = "http://archive.ubuntu.com/ubuntu/pool";
 
+/// Docker image for Prometheus metrics storage and querying
 pub const PROMETHEUS_IMAGE: &str = "prom/prometheus:v3.2.0";
+
+/// Docker image for Promtail log forwarding
 pub const PROMTAIL_IMAGE: &str = "grafana/promtail:3.4.2";
+
+/// Docker image for Node Exporter system metrics
 pub const NODE_EXPORTER_IMAGE: &str = "prom/node-exporter:v1.9.0";
+
+/// Docker image for Loki log storage and querying
 pub const LOKI_IMAGE: &str = "grafana/loki:3.4.2";
+
+/// Docker image for Tempo trace storage and querying
 pub const TEMPO_IMAGE: &str = "grafana/tempo:2.7.1";
+
+/// Docker image for Pyroscope profile storage and querying
 pub const PYROSCOPE_IMAGE: &str = "grafana/pyroscope:1.12.0";
+
+/// Docker image for Grafana dashboards
 pub const GRAFANA_IMAGE: &str = "grafana/grafana:11.5.2";
-pub const TRACER_IMAGE: &str =
-    "ghcr.io/clabby/tracer-web@sha256:254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703";
+
+/// Docker image for Tracer trace viewing
+pub const TRACER_IMAGE: &str = "ghcr.io/clabby/tracer-web:0.1.1";
+
+/// Docker image for truncating deployed binary logs
 pub const BUSYBOX_IMAGE: &str = "busybox:1.37.0";
 
 const DOCKER_IMAGES: &[&str] = &[
@@ -1307,7 +1323,7 @@ mod tests {
                     *image,
                     format!(
                         "123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/{}",
-                        image.replace(['/', ':', '@'], "_")
+                        image.replace(['/', ':'], "_")
                     ),
                 )
             }),
@@ -1491,7 +1507,7 @@ mod tests {
         assert!(setup.contains("sudo docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/prom_prometheus_v3.2.0"));
         assert!(!setup.contains("sudo docker pull prom/prometheus:v3.2.0"));
         assert!(setup.contains(
-            "--env TEMPO_URL=http://127.0.0.1:3200 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/ghcr.io_clabby_tracer-web_sha256_254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703"
+            "--env TEMPO_URL=http://127.0.0.1:3200 123456789012.dkr.ecr.us-east-1.amazonaws.com/cache/ghcr.io_clabby_tracer-web_0.1.1"
         ));
     }
 

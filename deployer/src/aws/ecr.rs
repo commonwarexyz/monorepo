@@ -298,49 +298,32 @@ fn cached_image(
 }
 
 fn image_name_and_tag(upstream: &str) -> Result<(&str, String), Error> {
-    if let Some((name, digest)) = upstream.rsplit_once('@') {
-        if name.is_empty() || !digest.starts_with("sha256:") {
-            return Err(Error::InvalidDockerImage(upstream.to_string()));
-        }
-        return Ok((name, digest.replace(':', "-")));
-    }
-
     let (name, tag) = upstream
         .rsplit_once(':')
         .ok_or_else(|| Error::InvalidDockerImage(upstream.to_string()))?;
-    if name.is_empty() || tag.is_empty() {
+    if name.is_empty() || tag.is_empty() || upstream.contains('@') {
         return Err(Error::InvalidDockerImage(upstream.to_string()));
     }
     Ok((name, tag.to_string()))
 }
 
 fn repository_path(name: &str) -> Result<(&'static str, String), Error> {
-    let mut parts = name.split('/');
+    let mut parts = name.splitn(2, '/');
     let first = parts
         .next()
         .ok_or_else(|| Error::InvalidDockerImage(name.to_string()))?;
-    let has_registry = first.contains('.') || first.contains(':') || first == "localhost";
-
-    if has_registry {
-        let path = parts.collect::<Vec<_>>().join("/");
-        if path.is_empty() {
-            return Err(Error::InvalidDockerImage(name.to_string()));
+    let path = parts.next();
+    match path {
+        Some(path) if path.is_empty() => Err(Error::InvalidDockerImage(name.to_string())),
+        Some(path) if first == "ghcr.io" => Ok(("ghcr", path.to_string())),
+        Some(_) if first.contains('.') || first.contains(':') || first == "localhost" => {
+            Err(Error::UnsupportedDockerRegistry(first.to_string()))
         }
-        return match first {
-            "docker.io" | "registry-1.docker.io" => Ok(("docker-hub", docker_hub_path(&path))),
-            "ghcr.io" => Ok(("ghcr", path)),
-            registry => Err(Error::UnsupportedDockerRegistry(registry.to_string())),
-        };
-    }
-
-    Ok(("docker-hub", docker_hub_path(name)))
-}
-
-fn docker_hub_path(path: &str) -> String {
-    if path.contains('/') {
-        path.to_string()
-    } else {
-        format!("library/{path}")
+        Some(_) => Ok(("docker-hub", name.to_string())),
+        None if first.contains('.') || first.contains(':') || first == "localhost" => {
+            Err(Error::InvalidDockerImage(name.to_string()))
+        }
+        None => Ok(("docker-hub", format!("library/{name}"))),
     }
 }
 
@@ -386,24 +369,21 @@ mod tests {
     }
 
     #[test]
-    fn test_cached_digest_image() {
+    fn test_cached_ghcr_image() {
         let image = cached_image(
             "123.dkr.ecr.us-east-1.amazonaws.com",
             "commonware-deployer-cache",
-            "ghcr.io/clabby/tracer-web@sha256:254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703",
+            "ghcr.io/clabby/tracer-web:0.1.1",
         )
         .unwrap();
         assert_eq!(
             image.repository,
             "commonware-deployer-cache/ghcr/clabby/tracer-web"
         );
-        assert_eq!(
-            image.tag,
-            "sha256-254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703"
-        );
+        assert_eq!(image.tag, "0.1.1");
         assert_eq!(
             image.reference,
-            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-deployer-cache/ghcr/clabby/tracer-web:sha256-254efac6315b9b2f71786243ae4334b1276e44e26188d398911a6d93f484e703"
+            "123.dkr.ecr.us-east-1.amazonaws.com/commonware-deployer-cache/ghcr/clabby/tracer-web:0.1.1"
         );
     }
 
