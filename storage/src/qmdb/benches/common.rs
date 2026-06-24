@@ -9,7 +9,10 @@ use commonware_storage::{
     merkle::{self, full::Config as MerkleConfig, Family},
     qmdb::{
         any::{
-            ordered::{fixed::Db as OFixed, variable::Db as OVariable},
+            ordered::{
+                fixed::{partitioned::p256::Db as OFixP256, Db as OFixed},
+                variable::Db as OVariable,
+            },
             traits::{DbAny, UnmerkleizedBatch},
             unordered::{fixed::Db as UFixed, variable::Db as UVariable},
             FixedConfig as AnyFixedConfig, VariableConfig as AnyVariableConfig,
@@ -46,6 +49,9 @@ pub const WRITE_BUFFER_SIZE: NonZeroUsize = NZUsize!(2 * 1024 * 1024);
 
 pub type AnyUFixDb<F> = UFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 pub type AnyOFixDb<F> = OFixed<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
+/// Ordered "any" DB with a partitioned snapshot index (256 partitions, P=1). Exercises the
+/// partitioned ordered index's cursor (get_mut/find/update) on apply.
+pub type AnyOFixP256Db<F> = OFixP256<F, Context, Digest, Digest, Sha256, EightCap, Rayon>;
 pub type CurUFixDb<F> = UCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 pub type CurOFixDb<F> = OCFixed<F, Context, Digest, Digest, Sha256, EightCap, CHUNK_SIZE, Rayon>;
 
