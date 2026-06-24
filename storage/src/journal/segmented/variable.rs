@@ -608,6 +608,8 @@ impl<E: Storage + Metrics, V: CodecShared> Journal<E, V> {
     }
 
     /// Ensures the given `sections` are synced to the underlying store.
+    ///
+    /// If the `section` does not exist, no error will be returned.
     pub async fn sync(&mut self, sections: &[u64]) -> Result<(), Error> {
         self.manager.sync(sections).await
     }

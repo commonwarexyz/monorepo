@@ -3700,9 +3700,11 @@ mod tests {
             let snapshot_clone = snapshot.clone();
             let snapshot_size = snapshot.size();
 
+            // Growing appends after the snapshot's frozen range, so it cannot invalidate it.
             append.resize(snapshot_size + 3).await.unwrap();
             assert_eq!(append.size(), snapshot_size + 3);
 
+            // Shrinking could let later appends reuse bytes still visible to the snapshot.
             let err = append.resize(snapshot_size - 1).await.unwrap_err();
             assert!(matches!(err, crate::Error::BlobInUse));
             assert_eq!(append.size(), snapshot_size + 3);
@@ -3714,6 +3716,7 @@ mod tests {
             let err = append.resize(snapshot_size - 1).await.unwrap_err();
             assert!(matches!(err, crate::Error::BlobInUse));
 
+            // Every snapshot clone must be gone before the writer can shrink in place.
             drop(snapshot_clone);
             append.resize(snapshot_size - 1).await.unwrap();
             assert_eq!(append.size(), snapshot_size - 1);
@@ -3747,6 +3750,7 @@ mod tests {
                 (page_size + 5) as u64,
                 (page_size * 3 + 2) as u64,
             ];
+            // Cover page-aligned, boundary-crossing, and copied-tail reads in one batch.
             let mut batch = vec![0u8; offsets.len() * item_size];
             snapshot
                 .read_many_into(&mut batch, &offsets, NZUsize!(item_size))
@@ -3787,6 +3791,7 @@ mod tests {
             let snapshot = append.snapshot();
 
             let poison = vec![0xBB; page_size];
+            // If the snapshot consulted the page cache for its copied tail, this would leak in.
             assert_eq!(
                 append.cache_ref.cache(append.id, &poison, page_size as u64),
                 0

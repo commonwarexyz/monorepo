@@ -230,7 +230,7 @@ impl<E: Context> Writable<E> {
         self.oldest_blob_index + self.sealed.len() as u64
     }
 
-    /// A mutable write handle for the tail; appends go through this.
+    /// A write handle for the tail.
     pub(super) const fn tail_writer(&mut self) -> &mut Writer<E::Blob> {
         &mut self.tail
     }
