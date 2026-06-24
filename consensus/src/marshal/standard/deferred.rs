@@ -73,8 +73,8 @@
 use crate::{
     marshal::{
         application::{
-            validation::{is_inferred_reproposal_at_certify, Stage},
             certification_gates::{drive_certify_gate, gate_verdict, CertificationGates},
+            validation::{is_inferred_reproposal_at_certify, Stage},
         },
         core::{CommitmentFallback, DigestFallback, Mailbox},
         standard::{

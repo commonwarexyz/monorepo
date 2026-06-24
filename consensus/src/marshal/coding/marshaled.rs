@@ -81,8 +81,8 @@
 use crate::{
     marshal::{
         application::{
-            validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
             certification_gates::{drive_certify_gate, gate_verdict, CertificationGates},
+            validation::{is_inferred_reproposal_at_certify, is_valid_reproposal_at_verify, Stage},
         },
         coding::{
             shards,
@@ -620,7 +620,9 @@ where
             .with_attribute("round", round);
         context.spawn(move |_| {
             drive_certify_gate(tx, task, round, payload, move || async move {
-                marshaled.certify_from_embedded_context(round, payload).await
+                marshaled
+                    .certify_from_embedded_context(round, payload)
+                    .await
             })
             .instrument(info_span!(
                 "marshal.coding.certify.existing",
@@ -799,7 +801,11 @@ where
                         .persist_and_defer(round, commitment, tx, persist)
                         .await
                     {
-                        debug!(?round, ?commitment, "re-proposed parent block at epoch boundary");
+                        debug!(
+                            ?round,
+                            ?commitment,
+                            "re-proposed parent block at epoch boundary"
+                        );
                     }
                     return;
                 }
