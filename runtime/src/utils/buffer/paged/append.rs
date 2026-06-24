@@ -95,12 +95,6 @@ impl Barrier {
     }
 
     /// Records `fut` as the barrier. Observe it afterward with [`Self::pending`].
-    ///
-    /// Whether the barrier is "eager" or "lazy" is the caller's choice of `fut`, not a property of
-    /// the barrier: `start_sync` passes an already-issued [`Handle`] so its fsync overlaps with
-    /// later work, while `replay` passes an unstarted `blob.sync()` future that stays non-durable
-    /// until a later rewrite (or an explicit `sync`) first awaits it. A [`Shared`] future is not
-    /// polled until awaited, so the lazy property follows from passing an unstarted future.
     fn record(&mut self, fut: impl Future<Output = Result<(), Error>> + Send + 'static) {
         self.0 = Some(Self::into_shared(fut));
     }
