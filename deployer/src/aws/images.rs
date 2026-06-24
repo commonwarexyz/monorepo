@@ -5,7 +5,7 @@
 
 use crate::aws::{
     s3::{cache_and_presign, object_exists, presign_url, UploadSource, PRESIGN_DURATION},
-    services::image_s3_key,
+    services::{image_s3_key, sanitize_image},
     Architecture, Error,
 };
 use aws_sdk_s3::Client as S3Client;
@@ -29,11 +29,7 @@ pub(crate) async fn cache_image(
     }
 
     info!(image, architecture = %architecture, "caching image to S3");
-    let stem = format!(
-        "{}-{}",
-        image.replace(['/', ':'], "_"),
-        architecture.as_str()
-    );
+    let stem = format!("{}-{}", sanitize_image(image), architecture.as_str());
     let tar_path = tag_directory.join(format!("{stem}.tar"));
     let gz_path = tag_directory.join(format!("{stem}.tar.gz"));
     let tar_str = tar_path.to_string_lossy().into_owned();

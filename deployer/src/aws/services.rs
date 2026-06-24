@@ -273,9 +273,7 @@ impl ImageService {
         let args = if self.args.is_empty() {
             String::new()
         } else {
-            let mut args = String::from(" ");
-            args.push_str(&self.args.join(" "));
-            args
+            format!(" {}", self.args.join(" "))
         };
         let after_line = if after.is_empty() {
             "After=network-online.target docker.service".to_string()
@@ -301,25 +299,27 @@ WantedBy=multi-user.target
 "#,
             service = self.service,
             description = self.description,
-            after_line = after_line,
             docker_bin = DOCKER_BIN,
-            run_options = run_options,
             image = self.image,
-            args = args,
         )
     }
 }
 
+/// Maps an upstream image reference to a filesystem- and S3-safe token (e.g. `prom_prometheus_v3.2.0`).
+pub(crate) fn sanitize_image(image: &str) -> String {
+    image.replace(['/', ':'], "_")
+}
+
 /// Returns the on-instance filename for an image tarball (e.g. `prom_prometheus_v3.2.0.tar.gz`).
 pub(crate) fn image_file_name(image: &str) -> String {
-    format!("{}.tar.gz", image.replace(['/', ':'], "_"))
+    format!("{}.tar.gz", sanitize_image(image))
 }
 
 /// Returns the S3 key for a cached image tarball (`docker save` output, per architecture).
 pub fn image_s3_key(image: &str, architecture: Architecture) -> String {
     format!(
         "{TOOLS_BINARIES_PREFIX}/images/{name}/linux-{arch}/image.tar.gz",
-        name = image.replace(['/', ':'], "_"),
+        name = sanitize_image(image),
         arch = architecture.as_str(),
     )
 }
@@ -669,7 +669,7 @@ fn image_download_block(images: &[(&'static str, String)]) -> String {
         cmd.push_str(file);
     }
     cmd.push_str(
-        "; do\n    if [ ! -f \"/home/ubuntu/images/$f\" ]; then\n        echo \"ERROR: Failed to download image $f\" >&2\n        exit 1\n    fi\ndone\n",
+        "; do\n    if [ ! -s \"/home/ubuntu/images/$f\" ]; then\n        echo \"ERROR: Failed to download image $f\" >&2\n        exit 1\n    fi\ndone\n",
     );
     cmd
 }
@@ -721,7 +721,7 @@ done
     cmd
 }
 
-fn install_image_services_cmd(services: &[ImageService]) -> String {
+fn install_image_services_cmd(services: &'static [ImageService]) -> String {
     if services.is_empty() {
         return String::new();
     }
@@ -760,16 +760,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now docker
 "#,
     );
-    // Load the container images from the tarballs downloaded from S3 (deduplicated by image).
-    let mut loaded: Vec<&str> = Vec::new();
-    for service in services {
-        if loaded.contains(&service.image) {
-            continue;
-        }
-        loaded.push(service.image);
-        cmd.push_str("gunzip -c /home/ubuntu/images/");
-        cmd.push_str(&image_file_name(service.image));
-        cmd.push_str(" | sudo docker load\n");
+    // Load the container images from the tarballs downloaded from S3 (`docker load` auto-detects
+    // the gzip compression).
+    for image in distinct_images(services) {
+        cmd.push_str("sudo docker load -i /home/ubuntu/images/");
+        cmd.push_str(&image_file_name(image));
+        cmd.push('\n');
     }
 
     for service in services {
@@ -1464,7 +1460,7 @@ mod tests {
             TRACER_IMAGE,
         ] {
             assert!(setup.contains(&format!(
-                "gunzip -c /home/ubuntu/images/{} | sudo docker load",
+                "sudo docker load -i /home/ubuntu/images/{}",
                 image_file_name(image)
             )));
         }
@@ -1503,11 +1499,11 @@ mod tests {
 
         let setup = install_binary_setup_cmd(false, Architecture::Arm64);
         assert!(setup.contains(&format!(
-            "gunzip -c /home/ubuntu/images/{} | sudo docker load",
+            "sudo docker load -i /home/ubuntu/images/{}",
             image_file_name(PROMTAIL_IMAGE)
         )));
         assert!(setup.contains(&format!(
-            "gunzip -c /home/ubuntu/images/{} | sudo docker load",
+            "sudo docker load -i /home/ubuntu/images/{}",
             image_file_name(NODE_EXPORTER_IMAGE)
         )));
         assert!(!setup.contains("docker pull"));

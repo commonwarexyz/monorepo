@@ -305,32 +305,48 @@ pub async fn create(config: &PathBuf, concurrency: usize) -> Result<(), Error> {
     }
     info!("tools uploaded");
 
-    // Cache required container images as gzipped `docker save` tarballs in S3 (one per
-    // architecture). Instances `docker load` these via pre-signed URLs, so they never
-    // authenticate against a registry.
+    // Cache required container images as `docker save` tarballs in S3 (one per architecture).
+    // Instances `docker load` these via pre-signed URLs, so they never authenticate against a
+    // registry. Distinct images are cached concurrently, but a single image's architectures are
+    // cached sequentially: `docker pull --platform`/`docker save` share docker's per-tag local
+    // image store, so caching two architectures of the same image at once would corrupt the save.
     info!("caching container images in S3");
-    let mut images_by_arch: HashMap<Architecture, HashSet<&'static str>> = HashMap::new();
-    images_by_arch
-        .entry(monitoring_architecture)
-        .or_default()
-        .extend(monitoring_images());
+    let mut arches_by_image: HashMap<&'static str, HashSet<Architecture>> = HashMap::new();
+    for image in monitoring_images() {
+        arches_by_image
+            .entry(image)
+            .or_default()
+            .insert(monitoring_architecture);
+    }
     for instance in &config.instances {
         let arch = arch_by_instance_type[&instance.instance_type];
-        images_by_arch
-            .entry(arch)
-            .or_default()
-            .extend(binary_images());
+        for image in binary_images() {
+            arches_by_image.entry(image).or_default().insert(arch);
+        }
     }
+    let cached = try_join_all(arches_by_image.into_iter().map(|(image, arches)| {
+        let s3_client = s3_client.clone();
+        let bucket_name = bucket_name.clone();
+        let tag_directory = tag_directory.clone();
+        async move {
+            let mut urls = Vec::new();
+            for arch in arches {
+                let url =
+                    images::cache_image(&s3_client, &bucket_name, &tag_directory, image, arch)
+                        .await?;
+                urls.push((arch, image, url));
+            }
+            Ok::<_, Error>(urls)
+        }
+    }))
+    .await?;
     let mut image_urls_by_arch: HashMap<Architecture, HashMap<&'static str, String>> =
         HashMap::new();
-    for (arch, image_set) in &images_by_arch {
-        let mut urls = HashMap::new();
-        for &image in image_set {
-            let url =
-                images::cache_image(&s3_client, &bucket_name, &tag_directory, image, *arch).await?;
-            urls.insert(image, url);
-        }
-        image_urls_by_arch.insert(*arch, urls);
+    for (arch, image, url) in cached.into_iter().flatten() {
+        image_urls_by_arch
+            .entry(arch)
+            .or_default()
+            .insert(image, url);
     }
     info!("container images cached in S3");
 
