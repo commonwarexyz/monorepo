@@ -35,8 +35,12 @@ pub(crate) async fn cache_image(
     let tar_str = tar_path.to_string_lossy().into_owned();
     let platform = format!("linux/{}", architecture.as_str());
 
-    // Pull the requested architecture explicitly so the deployer can build tarballs for any
-    // target regardless of its own architecture (pull/save do not run the image).
+    // Remove any local copy first so the store holds exactly the platform we pull, then `docker
+    // save` exports that platform regardless of the deployer's image store type (the containerd
+    // store can otherwise keep several platforms under one tag and save the wrong one). Pulling the
+    // platform explicitly also lets the deployer build tarballs for any target architecture; pull
+    // and save never run the image, so the deployer's own architecture is irrelevant.
+    let _ = run_command("docker", &["image", "rm", "-f", image]).await;
     run_command("docker", &["pull", "--platform", &platform, image]).await?;
     run_command("docker", &["save", image, "-o", tar_str.as_str()]).await?;
     // `gzip -f` replaces the tar with `{tar}.gz` (== gz_path).

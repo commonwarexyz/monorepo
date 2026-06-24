@@ -742,7 +742,7 @@ Type=notify
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ExecStart=/usr/local/bin/dockerd --host=unix:///var/run/docker.sock
 ExecReload=/bin/kill -s HUP $MAINPID
-TimeoutStartSec=0
+TimeoutStartSec=120
 Restart=always
 RestartSec=2
 Delegate=yes
