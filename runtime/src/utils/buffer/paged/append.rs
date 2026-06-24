@@ -800,6 +800,13 @@ impl<B: Blob> Append<B> {
         }
     }
 
+    /// Whether flushing `buffer` would overwrite the current partial page's footer, so a pending
+    /// [`Barrier`] on that page must be drained first.
+    ///
+    /// True when the buffer holds at least a full page (its first page completes the current partial
+    /// page, rewriting that footer) or when a partial-page flush would change the committed partial
+    /// length. An empty buffer, an append that skips the partial footer (`write_partial_page` is
+    /// false), or a partial page whose length is unchanged writes no new footer and returns false.
     async fn rewrites_current_page(
         &self,
         buffer: &Buffer,
