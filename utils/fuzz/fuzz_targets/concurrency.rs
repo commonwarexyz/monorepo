@@ -1,15 +1,14 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::concurrency::{KeyedLimiter, KeyedReservation, Limiter, Reservation};
 use libfuzzer_sys::fuzz_target;
 use std::{collections::HashSet, num::NonZeroU32};
 
-/// Keys are confined to a small space so the keyed limiter sees duplicate-key
-/// reservations and saturation, exercising both rejection branches.
-const KEY_SPACE: u8 = 8;
+const MIN_OPERATIONS: usize = 4;
+const MAX_OPERATIONS: usize = 64;
 
-#[derive(Arbitrary, Debug)]
+#[derive(Debug)]
 enum Op {
     AcquireLimiter,
     DropLimiter(u8),
@@ -17,18 +16,48 @@ enum Op {
     DropKey(u8),
 }
 
-/// `first` guarantees the op list is never empty.
-#[derive(Arbitrary, Debug)]
+/// Keys are confined to `[0, keyed_max]` so distinct acquisitions reach
+/// saturation and repeats collide, exercising both `try_acquire` rejection
+/// branches.
+#[derive(Debug)]
 struct Plan {
-    limiter_max: u8,
-    keyed_max: u8,
-    first: Op,
-    rest: Vec<Op>,
+    limiter_max: u32,
+    keyed_max: u32,
+    ops: Vec<Op>,
+}
+
+impl<'a> Arbitrary<'a> for Plan {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let limiter_max: u32 = u.int_in_range(1..=8)?;
+        let keyed_max: u32 = u.int_in_range(1..=4)?;
+        let key_space = keyed_max as u8 + 1;
+
+        let num_operations = u.int_in_range(MIN_OPERATIONS..=MAX_OPERATIONS)?;
+        let mut ops = Vec::with_capacity(num_operations);
+        for _ in 0..num_operations {
+            // AcquireKey is variant 0 so the zero-padded tail of an exhausted
+            // input keeps acquiring key 0, driving the repeated keyed
+            // acquisitions that reach the saturation and duplicate rejections.
+            let op = match u8::arbitrary(u)? % 4 {
+                0 => Op::AcquireKey(u8::arbitrary(u)? % key_space),
+                1 => Op::AcquireLimiter,
+                2 => Op::DropKey(u8::arbitrary(u)?),
+                _ => Op::DropLimiter(u8::arbitrary(u)?),
+            };
+            ops.push(op);
+        }
+
+        Ok(Plan {
+            limiter_max,
+            keyed_max,
+            ops,
+        })
+    }
 }
 
 fn run(plan: Plan) {
-    let limiter_max = (plan.limiter_max % 8) as u32 + 1;
-    let keyed_max = (plan.keyed_max % 8) as u32 + 1;
+    let limiter_max = plan.limiter_max;
+    let keyed_max = plan.keyed_max;
     let limiter = Limiter::new(NonZeroU32::new(limiter_max).unwrap());
     let keyed: KeyedLimiter<u8> = KeyedLimiter::new(NonZeroU32::new(keyed_max).unwrap());
 
@@ -37,7 +66,7 @@ fn run(plan: Plan) {
     let mut held_keyed: Vec<(u8, KeyedReservation<u8>)> = Vec::new();
     let mut keys: HashSet<u8> = HashSet::new();
 
-    for op in core::iter::once(plan.first).chain(plan.rest) {
+    for op in plan.ops {
         match op {
             Op::AcquireLimiter => {
                 let reservation = limiter.try_acquire();
@@ -55,7 +84,6 @@ fn run(plan: Plan) {
                 }
             }
             Op::AcquireKey(key) => {
-                let key = key % KEY_SPACE;
                 let reservation = keyed.try_acquire(key);
                 let expected = (keys.len() as u32) < keyed_max && !keys.contains(&key);
                 assert_eq!(reservation.is_some(), expected);
