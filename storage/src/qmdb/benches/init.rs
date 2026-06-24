@@ -41,7 +41,18 @@ async fn populate_and_sync<F: Family, C: DbAny<F, Key = Digest>>(
     operations: u64,
     make_value: impl Fn(&mut rand::rngs::StdRng) -> C::Value,
 ) {
-    gen_random_kv::<F, _>(db, elements, operations, Some(COMMIT_FREQUENCY), make_value).await;
+    gen_random_kv::<F, _>(
+        db,
+        elements,
+        operations,
+        Some(COMMIT_FREQUENCY),
+        None, // seed_batch
+        None, // prune_frequency
+        None, // key_zipf_exponent (uniform churn)
+        None, // keyspace (all keys seeded)
+        make_value,
+    )
+    .await;
     db.prune(db.sync_boundary().await).await.unwrap();
     db.sync().await.unwrap();
 }
