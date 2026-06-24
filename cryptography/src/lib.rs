@@ -39,7 +39,6 @@ pub mod ed25519;
 pub mod secp256r1;
 
 commonware_macros::stability_scope!(ALPHA {
-    // Depends on the std-only `zk::circuit` builder.
     #[cfg(feature = "std")]
     pub mod banderwagon;
     pub mod bloomfilter;
