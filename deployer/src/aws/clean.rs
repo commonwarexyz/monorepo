@@ -36,7 +36,7 @@ pub async fn clean() -> Result<(), Error> {
         }
     }
 
-    // Delete the shared Docker image cache in ECR.
+    // Delete the shared Docker image cache in ECR
     let ecr_client = ecr::create_client(Region::new(MONITORING_REGION)).await;
     ecr::delete_cache(&ecr_client, &bucket_name).await?;
     info!("cleaned ECR Docker image cache");
