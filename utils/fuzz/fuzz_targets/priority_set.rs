@@ -1,15 +1,46 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::PrioritySet;
 use libfuzzer_sys::fuzz_target;
 use std::collections::HashSet;
 
-#[derive(Arbitrary, Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+const MIN_OPERATIONS: usize = 4;
+const MAX_OPERATIONS: usize = 64;
+const ITEM_SPACE: u32 = 16;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct Item(u32);
+
+// Items are confined to a small space so operations collide on the same key,
+// exercising the present-key branches (get/remove/contains after put).
+impl<'a> Arbitrary<'a> for Item {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        Ok(Item(u32::from(u8::arbitrary(u)?) % ITEM_SPACE))
+    }
+}
 
 #[derive(Arbitrary, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Priority(u32);
+
+/// `int_in_range(MIN..=MAX)` keeps the op list non-empty and dense even for
+/// short inputs; Put is `FuzzInput` variant 0, so an exhausted input's
+/// zero-padded tail keeps inserting, building state for later operations.
+#[derive(Debug)]
+struct Plan {
+    ops: Vec<FuzzInput>,
+}
+
+impl<'a> Arbitrary<'a> for Plan {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let num_operations = u.int_in_range(MIN_OPERATIONS..=MAX_OPERATIONS)?;
+        let mut ops = Vec::with_capacity(num_operations);
+        for _ in 0..num_operations {
+            ops.push(FuzzInput::arbitrary(u)?);
+        }
+        Ok(Plan { ops })
+    }
+}
 
 #[derive(Arbitrary, Debug)]
 enum FuzzInput {
@@ -160,7 +191,10 @@ fn fuzz(input: Vec<FuzzInput>) {
             }
 
             FuzzInput::PartialCmp => {
-                set.iter().partial_cmp(PrioritySet::new().iter());
+                assert_eq!(
+                    set.iter().partial_cmp(set.iter()),
+                    Some(std::cmp::Ordering::Equal)
+                );
             }
 
             FuzzInput::PutSamePriority { items, priority } => {
@@ -201,6 +235,6 @@ fn fuzz(input: Vec<FuzzInput>) {
     assert_eq!(update_set.len(), 1);
 }
 
-fuzz_target!(|input: Vec<FuzzInput>| {
-    fuzz(input);
+fuzz_target!(|plan: Plan| {
+    fuzz(plan.ops);
 });

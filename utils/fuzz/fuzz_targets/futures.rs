@@ -1,16 +1,36 @@
 #![no_main]
 
-use arbitrary::Arbitrary;
+use arbitrary::{Arbitrary, Unstructured};
 use commonware_utils::futures::{AbortablePool, Aborter, OptionFuture, Pool};
 use futures::executor::block_on;
 use libfuzzer_sys::fuzz_target;
 use std::future::Future;
 
-#[derive(Arbitrary, Debug)]
+const MIN_OPERATIONS: usize = 4;
+const MAX_OPERATIONS: usize = 64;
+
+#[derive(Debug)]
 struct FuzzInput {
     pool_type: PoolType,
-    first: Operation,
     operations: Vec<Operation>,
+}
+
+/// `int_in_range(MIN..=MAX)` keeps the op list non-empty and dense even for
+/// short inputs; Push is `Operation` variant 0, so an exhausted input's
+/// zero-padded tail keeps pushing futures for later completions to drain.
+impl<'a> Arbitrary<'a> for FuzzInput {
+    fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
+        let pool_type = PoolType::arbitrary(u)?;
+        let num_operations = u.int_in_range(MIN_OPERATIONS..=MAX_OPERATIONS)?;
+        let mut operations = Vec::with_capacity(num_operations);
+        for _ in 0..num_operations {
+            operations.push(Operation::arbitrary(u)?);
+        }
+        Ok(FuzzInput {
+            pool_type,
+            operations,
+        })
+    }
 }
 
 #[derive(Arbitrary, Debug)]
@@ -27,6 +47,7 @@ enum Operation {
     CheckLen,
     CheckIsEmpty,
     DefaultOptionFuture,
+    ReadyOptionFuture { value: i32 },
 }
 
 enum PoolWrapper {
@@ -102,7 +123,7 @@ async fn fuzz(input: FuzzInput) {
     // value that was actually pushed (no conjured or duplicated results).
     let mut outstanding: Vec<i32> = Vec::new();
 
-    for op in core::iter::once(input.first).chain(input.operations) {
+    for op in input.operations {
         match op {
             Operation::Push { value } => {
                 pool.push(async move { value });
@@ -162,6 +183,16 @@ async fn fuzz(input: FuzzInput) {
                 let mut cx = std::task::Context::from_waker(&waker);
                 let mut pinned = Box::pin(option_future);
                 assert!(pinned.as_mut().poll(&mut cx).is_pending());
+            }
+
+            Operation::ReadyOptionFuture { value } => {
+                let option_future = OptionFuture::from(Some(std::future::ready(value)));
+                assert!(option_future.is_some());
+
+                let waker = futures::task::noop_waker();
+                let mut cx = std::task::Context::from_waker(&waker);
+                let mut pinned = Box::pin(option_future);
+                assert_eq!(pinned.as_mut().poll(&mut cx), std::task::Poll::Ready(value));
             }
         }
     }

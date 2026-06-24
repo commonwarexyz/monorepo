@@ -7,7 +7,7 @@ use std::{collections::HashMap, num::NonZeroUsize};
 
 /// Keys are confined to a small space so a small-capacity cache churns and
 /// evicts heavily, exercising the CLOCK sweep and slot reuse.
-const KEY_SPACE: u8 = 24;
+const KEY_SPACE: u8 = 8;
 
 #[derive(Arbitrary, Debug)]
 enum Op {
@@ -36,7 +36,7 @@ struct Plan {
 }
 
 fn run(plan: Plan) {
-    let cap = (plan.capacity % 16) as usize + 1;
+    let cap = (plan.capacity % 4) as usize + 1;
     let mut cache: Clock<u8, u16> = Clock::new(NonZeroUsize::new(cap).unwrap());
     if plan.prefill {
         cache.prefill(|| 0u16);
@@ -141,6 +141,7 @@ fn run(plan: Plan) {
 
         // Global invariants after every op. All keys live in `KEY_SPACE`, so the
         // present-count over that range must equal `len`.
+        assert_eq!(cache.capacity(), cap);
         assert!(cache.len() <= cap);
         let mut present = 0usize;
         for k in 0..KEY_SPACE {
