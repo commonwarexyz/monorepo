@@ -126,9 +126,9 @@ impl crate::Blob for Blob {
         let len = len
             .checked_add(Header::SIZE_U64)
             .ok_or(Error::OffsetOverflow)?;
-        file.set_len(len)
-            .await
-            .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into()))?;
+        file.set_len(len).await.map_err(|e| {
+            Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
+        })?;
         Ok(())
     }
 

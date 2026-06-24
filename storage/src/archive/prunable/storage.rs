@@ -10,38 +10,14 @@ use crate::{
 use commonware_codec::{CodecShared, FixedSize, Read, ReadExt, Write};
 use commonware_macros::boxed;
 use commonware_runtime::{
+    buffer::sync::{self, Shared},
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
-    Buf, BufMut, BufferPooler, Error as RError, Handle, Metrics, Storage,
+    Buf, BufMut, BufferPooler, Handle, Metrics, Storage,
 };
 use commonware_utils::Array;
-use futures::{
-    future::{join_all, try_join_all, BoxFuture, Shared as FuturesShared},
-    pin_mut, FutureExt as _, StreamExt,
-};
+use futures::{future::try_join_all, pin_mut, StreamExt};
 use std::collections::{btree_map, BTreeMap, BTreeSet};
 use tracing::debug;
-
-type SharedSync = FuturesShared<BoxFuture<'static, Result<(), RError>>>;
-
-fn share_sync(handle: Handle<()>) -> SharedSync {
-    handle.boxed().shared()
-}
-
-fn observe_syncs(syncs: Vec<SharedSync>) -> Handle<()> {
-    Handle::from_future(async move {
-        for result in join_all(syncs).await {
-            result?;
-        }
-        Ok(())
-    })
-}
-
-async fn wait_syncs(syncs: Vec<SharedSync>) -> Result<(), Error> {
-    for result in join_all(syncs).await {
-        result.map_err(crate::journal::Error::Runtime)?;
-    }
-    Ok(())
-}
 
 /// Index entry for the archive.
 #[derive(Debug, Clone, PartialEq)]
@@ -134,7 +110,7 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     oversized: Oversized<E, Record<K>, V>,
 
     pending: BTreeSet<u64>,
-    syncing: BTreeMap<u64, Vec<SharedSync>>,
+    syncing: BTreeMap<u64, Vec<Shared>>,
 
     /// Oldest allowed section to read from. Updated when `prune` is called.
     oldest_allowed: Option<u64>,
@@ -441,13 +417,13 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     /// Remove in-flight syncs that have already completed successfully.
     fn prune_completed_syncs(&mut self) {
         self.syncing.retain(|_, syncs| {
-            syncs.retain(|sync| !matches!(sync.clone().now_or_never(), Some(Ok(()))));
+            syncs.retain(|sync| !sync::completed_successfully(sync));
             !syncs.is_empty()
         });
     }
 
     /// Return observers for every in-flight sync that still matters for a later durability barrier.
-    fn in_flight_syncs(&self) -> Vec<SharedSync> {
+    fn in_flight_syncs(&self) -> Vec<Shared> {
         self.syncing.values().flatten().cloned().collect()
     }
 }
@@ -486,18 +462,20 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         let syncs = pending.iter().map(|s| self.oversized.start_sync(*s));
         let handles = try_join_all(syncs).await?;
         for (section, handle) in pending.into_iter().zip(handles) {
-            let sync = share_sync(handle);
+            let sync = sync::share_handle(handle);
             self.syncing.entry(section).or_default().push(sync.clone());
             observers.push(sync);
         }
-        Ok(observe_syncs(observers))
+        Ok(sync::observe_all(observers))
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
         self.prune_completed_syncs();
         let in_flight = self.in_flight_syncs();
         let pending = self.take_pending();
-        wait_syncs(in_flight).await?;
+        sync::wait_all(in_flight)
+            .await
+            .map_err(crate::journal::Error::Runtime)?;
         self.prune_completed_syncs();
         let syncs = pending.iter().map(|s| self.oversized.sync(*s));
         try_join_all(syncs).await?;

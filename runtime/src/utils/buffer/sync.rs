@@ -1,23 +1,47 @@
-//! Shared durability bookkeeping for buffered blob wrappers.
+//! Shared sync observation and durability bookkeeping for buffered blob wrappers.
 
 use crate::{Blob, Error, Handle};
 use futures::{
-    future::{BoxFuture, Shared as FuturesShared},
+    future::{join_all, BoxFuture, Shared as FuturesShared},
     FutureExt as _,
 };
 use std::future::Future;
 
 /// A cloneable observer for an issued sync.
-pub(crate) type Shared = FuturesShared<BoxFuture<'static, Result<(), Error>>>;
+pub type Shared = FuturesShared<BoxFuture<'static, Result<(), Error>>>;
 
 /// Converts a sync future into a shared completion.
-pub(crate) fn share(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> Shared {
+pub fn share(fut: impl Future<Output = Result<(), Error>> + Send + 'static) -> Shared {
     fut.boxed().shared()
 }
 
+/// Converts a sync handle into a shared completion.
+pub fn share_handle(handle: Handle<()>) -> Shared {
+    handle.boxed().shared()
+}
+
 /// Returns a handle that observes a shared sync completion.
-pub(crate) fn observe(sync: Shared) -> Handle<()> {
+pub fn observe(sync: Shared) -> Handle<()> {
     Handle::from_future(async move { sync.await })
+}
+
+/// Returns a handle that observes all shared sync completions.
+pub fn observe_all(syncs: impl IntoIterator<Item = Shared>) -> Handle<()> {
+    let syncs = syncs.into_iter().collect();
+    Handle::from_future(async move { wait_all(syncs).await })
+}
+
+/// Waits for all shared sync completions.
+pub async fn wait_all(syncs: Vec<Shared>) -> Result<(), Error> {
+    for result in join_all(syncs).await {
+        result?;
+    }
+    Ok(())
+}
+
+/// Returns whether a shared sync has already completed successfully.
+pub fn completed_successfully(sync: &Shared) -> bool {
+    matches!(sync.clone().now_or_never(), Some(Ok(())))
 }
 
 /// Durability state for mutations already issued to the underlying blob.
@@ -101,10 +125,7 @@ impl State {
     /// Starts a full blob sync or returns the in-flight sync that already covers this state.
     ///
     /// Returns `None` when no issued mutation requires a sync.
-    pub(crate) async fn start<B: Blob>(
-        &mut self,
-        blob: &B,
-    ) -> Option<Shared> {
+    pub(crate) async fn start<B: Blob>(&mut self, blob: &B) -> Option<Shared> {
         match self {
             Self::Clean => None,
             Self::Dirty => {

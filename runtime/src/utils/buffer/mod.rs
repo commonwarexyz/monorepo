@@ -2,7 +2,7 @@
 
 pub mod paged;
 mod read;
-mod sync;
+pub mod sync;
 mod tip;
 mod write;
 

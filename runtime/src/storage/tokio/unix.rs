@@ -202,7 +202,9 @@ impl crate::Blob for Blob {
             .await
             .map_err(|e| e.into())
             .and_then(|r| r)
-            .map_err(|e| Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into()))?;
+            .map_err(|e| {
+                Error::BlobResizeFailed(self.partition.clone(), hex(&self.name), e.into())
+            })?;
         Ok(())
     }
 
