@@ -263,6 +263,23 @@ impl Buffer {
     pub(super) const fn clear(&mut self) {
         self.len = 0;
     }
+
+    /// Releases an oversized backing allocation by copying the buffered bytes into a right-sized
+    /// pooled buffer.
+    ///
+    /// [Self::drop_prefix] leaves a trailing partial page as a view into the original
+    /// (write-buffer-sized) backing, which keeps the whole allocation alive. Once a blob is no
+    /// longer the active append tip its small remainder no longer needs that capacity, so copying
+    /// it into a fresh buffer lets the large backing be reclaimed.
+    pub(super) fn compact(&mut self) {
+        if self.len == 0 {
+            self.data = IoBuf::default();
+            return;
+        }
+        let mut fresh = self.pool.alloc(self.len);
+        fresh.put_slice(&self.data.as_ref()[..self.len]);
+        self.data = fresh.freeze();
+    }
 }
 
 impl AsRef<[u8]> for Buffer {

@@ -294,4 +294,17 @@ impl<B: Blob> Write<B> {
 
         state.sync().await
     }
+
+    /// Releases the buffer backing once this blob is no longer the active append tip.
+    ///
+    /// Buffered bytes are drained to the blob (without an extra sync); [`Buffer::take`] resets the
+    /// tip to a detached, empty state so no write-buffer backing is retained. The drained bytes are
+    /// still made durable by a later [`Self::sync`].
+    pub async fn seal(&self) -> Result<(), Error> {
+        let mut state = self.state.write().await;
+        if let Some((buf, offset)) = state.buffer.take() {
+            state.write_at(offset, buf).await?;
+        }
+        Ok(())
+    }
 }

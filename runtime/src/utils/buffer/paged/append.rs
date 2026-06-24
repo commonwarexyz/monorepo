@@ -1235,6 +1235,21 @@ impl<B: Blob> Append<B> {
         blob_state.sync().await
     }
 
+    /// Releases the oversized write-buffer backing once this blob is no longer the active append
+    /// tip.
+    ///
+    /// Full pages are drained to the blob (without an extra sync) so only a sub-page remainder is
+    /// left buffered, then that remainder is copied into a right-sized allocation, freeing the
+    /// write-buffer-sized backing it would otherwise pin. The buffered bytes are preserved and are
+    /// still made durable by a later [Self::sync]; only surplus pooled capacity is reclaimed.
+    pub async fn seal(&self) -> Result<(), Error> {
+        let buf_guard = self.buffer.write().await;
+        self.flush_internal(buf_guard, false, false).await?;
+        let mut buffer = self.buffer.write().await;
+        buffer.compact();
+        Ok(())
+    }
+
     /// Resize the blob to the provided logical `size`.
     ///
     /// This truncates the blob to contain only `size` logical bytes. The physical blob size will
@@ -1472,6 +1487,45 @@ mod tests {
             let mut buf = vec![0u8; data.len()];
             assert!(append.try_read_sync(0, &mut buf));
             assert_eq!(buf, data);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_seal_preserves_data_across_pages() {
+        // Sealing a blob that is no longer the active tip must release its surplus backing while
+        // preserving every buffered byte: full pages already drained to the blob plus the trailing
+        // partial page kept in the (now compacted) tip.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context.open("test_partition", b"seal").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            // More than two pages so the tip holds full pages plus a trailing partial page.
+            let data: Vec<u8> = (0..250u32).map(|i| i as u8).collect();
+            append.append(&data).await.unwrap();
+            let size = append.size().await;
+            assert_eq!(size, data.len() as u64);
+
+            // Sealing keeps the logical size and all bytes readable.
+            append.seal().await.unwrap();
+            assert_eq!(append.size().await, size);
+            let read = append.read_at(0, data.len()).await.unwrap();
+            assert_eq!(read.coalesce().as_ref(), &data[..]);
+
+            // Durability is unaffected: after a sync and reopen the data is intact on disk.
+            append.sync().await.unwrap();
+            drop(append);
+            let (blob, blob_size) = context.open("test_partition", b"seal").await.unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let reopened = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(reopened.size().await, size);
+            let read = reopened.read_at(0, data.len()).await.unwrap();
+            assert_eq!(read.coalesce().as_ref(), &data[..]);
         });
     }
 

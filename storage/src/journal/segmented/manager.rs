@@ -27,6 +27,9 @@ pub trait SectionBuffer: Clone + Send + Sync {
 
     /// Resize the logical size of the buffer.
     fn resize(&self, len: u64) -> impl Future<Output = Result<(), RError>> + Send;
+
+    /// Release surplus write-buffer capacity once this section is no longer the active append tip.
+    fn seal(&self) -> impl Future<Output = Result<(), RError>> + Send;
 }
 
 impl<B: Blob> SectionBuffer for Append<B> {
@@ -41,6 +44,10 @@ impl<B: Blob> SectionBuffer for Append<B> {
     async fn resize(&self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
     }
+
+    async fn seal(&self) -> Result<(), RError> {
+        Self::seal(self).await
+    }
 }
 
 impl<B: Blob> SectionBuffer for Write<B> {
@@ -54,6 +61,10 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn resize(&self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
+    }
+
+    async fn seal(&self) -> Result<(), RError> {
+        Self::seal(self).await
     }
 }
 
@@ -205,6 +216,15 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         self.prune_guard(section)?;
 
         if !self.blobs.contains_key(&section) {
+            // Advancing past the current tip section: it will never be appended to again, so
+            // release its oversized write buffer (keeping only its partial-page remainder) instead
+            // of pinning a full write-buffer allocation per retained section until it is pruned.
+            if let Some((&prev, prev_buf)) = self.blobs.last_key_value() {
+                if section > prev {
+                    prev_buf.seal().await.map_err(Error::Runtime)?;
+                }
+            }
+
             let name = section.to_be_bytes();
             let (blob, size) = self.context.open(&self.partition, &name).await?;
             let buffer = self.factory.create(blob, size).await?;
