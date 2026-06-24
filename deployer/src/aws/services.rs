@@ -765,10 +765,15 @@ sudo systemctl enable --now docker
 "#,
     );
     // Load the container images from the tarballs downloaded from S3 (`docker load` auto-detects
-    // the gzip compression).
+    // the gzip compression), then delete each tarball so the loaded Docker layers and the archive
+    // don't both occupy the (small) root volume.
     for image in distinct_images(services) {
+        let file = image_file_name(image);
         cmd.push_str("sudo docker load -i /home/ubuntu/images/");
-        cmd.push_str(&image_file_name(image));
+        cmd.push_str(&file);
+        cmd.push('\n');
+        cmd.push_str("sudo rm -f /home/ubuntu/images/");
+        cmd.push_str(&file);
         cmd.push('\n');
     }
 
@@ -1077,8 +1082,9 @@ sudo systemctl enable binary
 sudo systemctl start node_exporter
 sudo systemctl start promtail
 
-# Don't abort provisioning if the caller-provided binary fails to start; the deployer
-# polls the service afterwards and reports an unhealthy binary (see poll_service_active).
+# Don't abort the setup script if the caller-provided binary fails to start; the deployer
+# polls the service afterwards and warns on an unhealthy binary (see poll_service_active)
+# so create can still complete and the binary can be fixed with a later update.
 sudo systemctl start binary || true{pyroscope_enable}"#
     )
 }
@@ -1470,6 +1476,10 @@ mod tests {
         ] {
             assert!(setup.contains(&format!(
                 "sudo docker load -i /home/ubuntu/images/{}",
+                image_file_name(image)
+            )));
+            assert!(setup.contains(&format!(
+                "sudo rm -f /home/ubuntu/images/{}",
                 image_file_name(image)
             )));
         }
