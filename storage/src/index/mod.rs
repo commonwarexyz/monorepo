@@ -25,7 +25,7 @@ pub mod unordered;
 /// A mutable iterator over the values associated with a translated key, allowing in-place
 /// modifications.
 ///
-/// The [Cursor] provides a way to traverse and modify the linked list of values associated with a
+/// The [Cursor] provides a way to traverse and modify the chain of values associated with a
 /// translated key by an index while maintaining its structure. It supports:
 ///
 /// - Iteration via `next()` to access values.
@@ -33,11 +33,11 @@ pub mod unordered;
 /// - Insertion via `insert()` to add new values.
 /// - Deletion via `delete()` to remove values.
 ///
-/// # Safety
+/// # Usage
 ///
 /// - Must call `next()` before `update()`, `insert()`, or `delete()` to establish a valid position.
 /// - Once `next()` returns `None`, only `insert()` can be called.
-/// - The cursor mutates the linked list in place. If the sole element is deleted, dropping the
+/// - The cursor mutates the chain of values in place. If the sole element is deleted, dropping the
 ///   cursor removes the map entry.
 ///
 /// _If you don't need advanced functionality, just use `insert()`, `insert_and_retain()`, or
@@ -53,7 +53,7 @@ pub trait Cursor: Send + Sync {
     /// If after `insert()`, the next active item is the item after the inserted item. If after
     /// `delete()`, the next active item is the item after the deleted item.
     ///
-    /// Advances through cursor states and adjusts for deletions. Returns `None` when the list is
+    /// Advances through cursor states and adjusts for deletions. Returns `None` when the chain is
     /// exhausted. It is safe to call `next()` even after it returns `None`.
     #[allow(clippy::should_implement_trait)]
     fn next(&mut self) -> Option<&Self::Value>;
@@ -61,7 +61,7 @@ pub trait Cursor: Send + Sync {
     /// Inserts a new value at the current position.
     fn insert(&mut self, value: Self::Value);
 
-    /// Deletes the current value, adjusting the list structure.
+    /// Deletes the current value, adjusting the chain structure.
     fn delete(&mut self);
 
     /// Updates the value at the current position in the iteration.
@@ -260,7 +260,7 @@ mod tests {
         index::partitioned::{
             ordered::Index as PartitionedOrdered, unordered::Index as PartitionedUnordered,
         },
-        translator::{OneCap, TwoCap},
+        translator::{EightCap, OneCap, TwoCap},
     };
     use commonware_macros::test_traced;
     use commonware_runtime::{deterministic, Runner, Supervisor as _};
@@ -332,6 +332,150 @@ mod tests {
     ) -> PartitionedOrdered<OneCap, u64, 1> {
         // Same translator choice as the unordered variant to keep collision behavior consistent.
         PartitionedOrdered::new(context, OneCap)
+    }
+
+    /// A partitioned ordered index with a tiny spill threshold, so partitions convert to the
+    /// spilled `BTreeMap` representation almost immediately. Routing the generic battery through
+    /// this fixture re-validates every behavior against the spilled cursor / nav / value paths.
+    fn new_partitioned_ordered_spilling(
+        context: deterministic::Context,
+    ) -> PartitionedOrdered<OneCap, u64, 1> {
+        PartitionedOrdered::with_threshold(context, OneCap, 2)
+    }
+
+    /// Run the generic index battery against the spilling fixture, so the spilled-partition
+    /// representation is exercised by the same assertions as the inline (SoA) representation.
+    #[test_traced]
+    fn test_partitioned_ordered_spilling() {
+        let runner = deterministic::Runner::default();
+        runner.start(|mut context| async move {
+            macro_rules! spilled {
+                ($($h:ident),+ $(,)?) => {$(
+                    $h(&mut new_partitioned_ordered_spilling(
+                        context.child(concat!("spill_", stringify!($h))),
+                    ));
+                )+};
+            }
+            spilled!(
+                run_index_basic,
+                run_index_get_many,
+                run_index_cursor_find,
+                run_index_key_lengths_and_metrics,
+                run_index_value_order,
+                run_index_remove_specific,
+                run_index_empty_key,
+                run_index_mutate_through_iterator,
+                run_index_mutate_middle_of_four,
+                run_index_remove_through_iterator,
+                run_index_insert_through_iterator,
+                run_index_cursor_insert_after_done_appends,
+                run_index_remove_to_nothing_then_add,
+                run_index_insert_and_remove_cursor,
+                run_index_insert_and_retain_vacant,
+                run_index_insert_and_retain_vacant_not_retained,
+                run_index_insert_and_retain_replace_one,
+                run_index_insert_and_retain_dead_insert,
+                run_index_insert_and_retain_single_value,
+                run_index_remove_middle_then_next,
+                run_index_remove_to_nothing,
+                run_index_cursor_insert_with_next,
+                run_index_cursor_delete_last_then_next,
+                run_index_delete_in_middle_then_continue,
+                run_index_delete_first,
+                run_index_delete_first_and_insert,
+                run_index_insert_at_entry_then_next,
+                run_index_delete_last_then_insert_while_done,
+                run_index_drop_mid_iteration_preserves_chain,
+                run_index_entry_replacement_not_a_collision,
+                run_index_large_collision_chain,
+            );
+
+            let mut index = new_partitioned_ordered_spilling(context.child("spill_many_keys"));
+            run_index_many_keys(&mut index, |bytes| context.fill(bytes));
+
+            // Make sure that the final test in this suite actually exercises spilling.
+            assert!(
+                index.spilled_count() > 0,
+                "routing battery should exercise the spilled representation"
+            );
+        });
+    }
+
+    /// Verify ordered navigation returns keys in lexicographic order even when some keys are
+    /// shorter than the partition prefix (the case the partitioned router must place correctly).
+    /// Each key is inserted with its lexicographic rank as its value, and the keys have distinct
+    /// translated keys under `EightCap`, so a correct ordering yields the ranks in order with no
+    /// collision ambiguity. Run against both the flat and partitioned ordered indices below, which
+    /// must agree.
+    fn run_ordered_short_keys<I: Ordered<Value = u64>>(index: &mut I) {
+        // Lexicographically increasing keys; `[0x01]` and `[0x03]` are shorter than the 2-byte
+        // prefix and must still sort between their 2-byte neighbors.
+        let keys: [&[u8]; 5] = [
+            &[0x00, 0x05],
+            &[0x01],
+            &[0x02, 0x09, 0xAB],
+            &[0x03],
+            &[0xFF, 0xFF],
+        ];
+        for (rank, &key) in keys.iter().enumerate() {
+            index.insert(key, rank as u64);
+        }
+
+        let first: Vec<u64> = index.first_translated_key().unwrap().copied().collect();
+        let last: Vec<u64> = index.last_translated_key().unwrap().copied().collect();
+        assert_eq!(first, vec![0], "first key");
+        assert_eq!(last, vec![4], "last key");
+
+        let n = keys.len() as u64;
+        for (i, &key) in keys.iter().enumerate() {
+            let i = i as u64;
+            let (it, next_cycled) = index.next_translated_key(key).unwrap();
+            let next: Vec<u64> = it.copied().collect();
+            let (it, prev_cycled) = index.prev_translated_key(key).unwrap();
+            let prev: Vec<u64> = it.copied().collect();
+            if i + 1 < n {
+                assert_eq!(
+                    (next, next_cycled),
+                    (vec![i + 1], false),
+                    "next of rank {i}"
+                );
+            } else {
+                assert_eq!((next, next_cycled), (vec![0], true), "next wraps past last");
+            }
+            if i > 0 {
+                assert_eq!(
+                    (prev, prev_cycled),
+                    (vec![i - 1], false),
+                    "prev of rank {i}"
+                );
+            } else {
+                assert_eq!(
+                    (prev, prev_cycled),
+                    (vec![n - 1], true),
+                    "prev wraps before first"
+                );
+            }
+        }
+    }
+
+    #[test_traced]
+    fn test_ordered_short_keys_flat() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = ordered::Index::<EightCap, u64>::new(context, EightCap);
+            run_ordered_short_keys(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_short_keys_partitioned() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            // P=2 with EightCap on the 6-byte remainder orders by the same (<=8-byte) full key as
+            // the flat EightCap index above, so both must produce identical navigation results.
+            let mut index = PartitionedOrdered::<EightCap, u64, 2>::new(context, EightCap);
+            run_ordered_short_keys(&mut index);
+        });
     }
 
     #[test_traced]
@@ -1359,6 +1503,62 @@ mod tests {
         });
     }
 
+    /// Exercises `insert_and_retain` on single-value (collision-free) keys, covering each
+    /// combination of retaining the existing and new values.
+    fn run_index_insert_and_retain_single_value<I: Unordered<Value = u64>>(index: &mut I) {
+        // Retain both: the new value joins the chain after the existing one.
+        index.insert(b"both", 1u64);
+        index.insert_and_retain(b"both", 2u64, |_| true);
+        assert_eq!(index.get(b"both").copied().collect::<Vec<_>>(), vec![1, 2]);
+
+        // Retain the existing value, drop the new one: a no-op.
+        index.insert(b"keep", 1u64);
+        index.insert_and_retain(b"keep", 2u64, |v| *v == 1);
+        assert_eq!(index.get(b"keep").copied().collect::<Vec<_>>(), vec![1]);
+
+        // Drop both: the key is removed.
+        index.insert(b"drop", 1u64);
+        index.insert_and_retain(b"drop", 2u64, |_| false);
+        assert!(index.get(b"drop").next().is_none());
+
+        assert_eq!(index.keys(), 2); // "both" and "keep" remain
+        assert_eq!(index.items(), 3); // both -> [1, 2], keep -> [1]
+        assert_eq!(index.pruned(), 1); // the dropped "drop" value
+    }
+
+    #[test_traced]
+    fn test_hash_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_unordered(context);
+            run_index_insert_and_retain_single_value(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_ordered_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            let mut index = new_ordered(context);
+            run_index_insert_and_retain_single_value(&mut index);
+        });
+    }
+
+    #[test_traced]
+    fn test_partitioned_index_insert_and_retain_single_value() {
+        let runner = deterministic::Runner::default();
+        runner.start(|context| async move {
+            {
+                let mut index = new_partitioned_unordered(context.child("unordered"));
+                run_index_insert_and_retain_single_value(&mut index);
+            }
+            {
+                let mut index = new_partitioned_ordered(context.child("ordered"));
+                run_index_insert_and_retain_single_value(&mut index);
+            }
+        });
+    }
+
     fn run_index_cursor_across_threads<I>(index: Arc<Mutex<I>>)
     where
         I: Unordered<Value = u64> + Send + 'static,
@@ -2366,50 +2566,44 @@ mod tests {
         });
     }
 
-    fn run_index_large_collision_chain_stack_overflow<I: Unordered<Value = u64>>(index: &mut I) {
-        cfg_if::cfg_if! {
-            if #[cfg(miri)] {
-                // The full native test stresses stack depth, while miri is mainly checking the
-                // same iterative drop path for memory safety.
-                const ITEMS: usize = 5_000;
-            } else {
-                const ITEMS: usize = 50_000;
-            }
-        }
+    /// Exercises a single translated key holding a very large overflow chain, ensuring inserts and
+    /// the resulting `Vec` overflow stay correct at scale.
+    fn run_index_large_collision_chain<I: Unordered<Value = u64>>(index: &mut I) {
+        const ITEMS: usize = 50_000;
         for i in 0..ITEMS {
             index.insert(b"", i as u64);
         }
     }
 
     #[test_traced]
-    fn test_hash_index_large_collision_chain_stack_overflow() {
+    fn test_hash_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_unordered(context);
-            run_index_large_collision_chain_stack_overflow(&mut index);
+            run_index_large_collision_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_ordered_index_large_collision_chain_stack_overflow() {
+    fn test_ordered_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             let mut index = new_ordered(context);
-            run_index_large_collision_chain_stack_overflow(&mut index);
+            run_index_large_collision_chain(&mut index);
         });
     }
 
     #[test_traced]
-    fn test_partitioned_index_large_collision_chain_stack_overflow() {
+    fn test_partitioned_index_large_collision_chain() {
         let runner = deterministic::Runner::default();
         runner.start(|context| async move {
             {
                 let mut index = new_partitioned_unordered(context.child("unordered"));
-                run_index_large_collision_chain_stack_overflow(&mut index);
+                run_index_large_collision_chain(&mut index);
             }
             {
                 let mut index = new_partitioned_ordered(context.child("ordered"));
-                run_index_large_collision_chain_stack_overflow(&mut index);
+                run_index_large_collision_chain(&mut index);
             }
         });
     }

@@ -299,7 +299,7 @@
 
 use crate::{
     bls12381::primitives::{
-        group::{Private, Scalar, Share},
+        group::{Private, Scalar, ScalarReadCfg, Share},
         sharing::{Mode, ModeVersion, Sharing},
         variant::Variant,
     },
@@ -819,7 +819,10 @@ impl Read for DealerPrivMsg {
         buf: &mut impl bytes::Buf,
         _cfg: &Self::Cfg,
     ) -> Result<Self, commonware_codec::Error> {
-        Ok(Self::new(ReadExt::read(buf)?))
+        Ok(Self::new(Scalar::read_cfg(
+            buf,
+            &ScalarReadCfg::RejectZero,
+        )?))
     }
 }
 
@@ -2983,7 +2986,6 @@ mod test {
     use anyhow::anyhow;
     use arbitrary::{Arbitrary, Unstructured};
     use commonware_invariants::minifuzz;
-    use commonware_math::algebra::Random;
     use commonware_utils::{test_rng, test_rng_seeded, Faults, N3f1};
     use core::num::NonZeroI32;
 
@@ -3634,6 +3636,22 @@ mod test {
         let msg = DealerPrivMsg::new(Scalar::random(&mut rng));
         let debug = format!("{:?}", msg);
         assert!(debug.contains("REDACTED"));
+    }
+
+    #[test]
+    fn test_dealer_priv_msg_decode_rejects_zero_scalar() {
+        let mut encoded = Scalar::zero().encode();
+        let decoded = DealerPrivMsg::read_cfg(&mut encoded, &());
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn test_dealer_pub_msg_decode_rejects_zero_commitment() {
+        let mut rng = test_rng();
+        let commitment = Poly::commit(Poly::new_with_constant(&mut rng, 0, Scalar::zero()));
+        let mut encoded = DealerPubMsg::<MinPk> { commitment }.encode();
+        let decoded = DealerPubMsg::<MinPk>::read_cfg(&mut encoded, &NZU32!(1));
+        assert!(decoded.is_err());
     }
 
     #[cfg(feature = "arbitrary")]

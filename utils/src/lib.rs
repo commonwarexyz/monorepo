@@ -31,6 +31,7 @@ commonware_macros::stability_scope!(BETA {
     pub use hostname::Hostname;
 
     pub mod bitmap;
+    pub mod cache;
     pub mod ordered;
     pub mod range;
 

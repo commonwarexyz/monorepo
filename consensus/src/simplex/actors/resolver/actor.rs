@@ -1,5 +1,6 @@
 use super::{
     ingress::{Handler, HandlerMessage, Mailbox, MailboxMessage},
+    state::{Effect, FetchReason},
     Config,
 };
 use crate::{
@@ -18,12 +19,15 @@ use commonware_cryptography::Digest;
 use commonware_macros::select_loop;
 use commonware_p2p::{utils::StaticProvider, Blocker, Receiver, Sender};
 use commonware_parallel::Strategy;
-use commonware_resolver::p2p;
-use commonware_runtime::{spawn_cell, BufferPooler, Clock, ContextCell, Handle, Metrics, Spawner};
+use commonware_resolver::{p2p, Fetch, Resolver as _};
+use commonware_runtime::{
+    spawn_cell, telemetry::traces::TracedExt as _, BufferPooler, Clock, ContextCell, Handle,
+    Metrics, Spawner,
+};
 use commonware_utils::{channel::fallible::OneshotExt, ordered::Quorum, sequence::U64};
 use rand_core::CryptoRngCore;
 use std::{num::NonZeroUsize, time::Duration};
-use tracing::debug;
+use tracing::{debug, info_span};
 
 /// Requests are made concurrently to multiple peers.
 pub struct Actor<
@@ -129,13 +133,23 @@ impl<
                 break;
             },
             Some(message) = self.mailbox_receiver.recv() else break => {
+                let span = info_span!(
+                    parent: message.span(),
+                    "simplex.resolver.process",
+                    operation = message.name(),
+                    epoch = self.epoch.traced(),
+                    view = message.view().traced()
+                );
+                let _guard = span.entered();
                 match message {
-                    MailboxMessage::Certificate(certificate) => {
+                    MailboxMessage::Certificate { certificate, .. } => {
                         // Certificates from mailbox have no associated request view
-                        self.state.handle(certificate, None, &mut resolver);
+                        let effects = self.state.handle(certificate, None);
+                        self.apply_effects(&mut resolver, effects);
                     }
-                    MailboxMessage::Certified { view, success } => {
-                        self.state.handle_certified(view, success, &mut resolver)
+                    MailboxMessage::Certified { round, success, .. } => {
+                        let effects = self.state.handle_certified(round.view(), success);
+                        self.apply_effects(&mut resolver, effects);
                     }
                 }
             },
@@ -146,6 +160,54 @@ impl<
                 self.handle_resolver(message, &mut voter, &mut resolver);
             },
         }
+    }
+
+    /// Applies the side effects requested by [super::state::State] to the resolver.
+    fn apply_effects(
+        &mut self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        effects: Vec<Effect>,
+    ) {
+        for effect in effects {
+            match effect {
+                Effect::Fetch {
+                    view,
+                    cause,
+                    reason,
+                } => self.fetch(resolver, view, cause, reason),
+                Effect::Remove(view) => {
+                    let key = U64::from(view);
+                    let _ = resolver.retain(move |candidate, _| *candidate != key);
+                }
+                Effect::RetainAbove(floor) => {
+                    let floor = U64::from(floor);
+                    let _ = resolver.retain(move |candidate, _| *candidate > floor);
+                }
+            }
+        }
+    }
+
+    /// Issues a resolver fetch for `view`, attaching a span that records why the
+    /// fetch was needed and which view's processing caused it.
+    fn fetch(
+        &self,
+        resolver: &mut p2p::Mailbox<U64, S::PublicKey>,
+        view: View,
+        cause: View,
+        reason: FetchReason,
+    ) {
+        let span = info_span!(
+            "simplex.resolver.fetch",
+            epoch = self.epoch.traced(),
+            cause = cause.traced(),
+            view = view.traced(),
+            reason = reason.as_str()
+        );
+        let _ = resolver.fetch(Fetch {
+            key: U64::from(view),
+            subscriber: (),
+            span,
+        });
     }
 
     /// Validates an incoming message, returning the parsed message if valid.
@@ -240,12 +302,26 @@ impl<
     ) {
         match message {
             HandlerMessage::Deliver {
+                span,
                 view,
                 data,
                 response,
             } => {
+                let span = info_span!(
+                    parent: span,
+                    "simplex.resolver.deliver",
+                    epoch = self.epoch.traced(),
+                    view = view.traced()
+                );
+                let _guard = span.entered();
+
                 // Validate incoming message
-                let Some(parsed) = self.validate(view, data) else {
+                let validate = info_span!(
+                    "simplex.resolver.validate",
+                    epoch = self.epoch.traced(),
+                    view = view.traced()
+                );
+                let Some(parsed) = validate.in_scope(|| self.validate(view, data)) else {
                     // Resolver will block any peers that send invalid responses, so
                     // we don't need to do again here
                     response.send_lossy(false);
@@ -254,12 +330,26 @@ impl<
                 response.send_lossy(true);
 
                 // Notify voter as soon as possible
-                voter.resolved(parsed.clone());
+                let resolved = info_span!(
+                    "simplex.resolver.resolved",
+                    epoch = self.epoch.traced(),
+                    view = view.traced(),
+                    certificate_view = parsed.view().traced()
+                );
+                resolved.in_scope(|| voter.resolved(parsed.clone()));
 
                 // Process message with the request view for tracking
-                self.state.handle(parsed, Some(view), resolver);
+                let effects = self.state.handle(parsed, Some(view));
+                self.apply_effects(resolver, effects);
             }
             HandlerMessage::Produce { view, response } => {
+                let span = info_span!(
+                    "simplex.resolver.produce",
+                    epoch = self.epoch.traced(),
+                    view = view.traced()
+                );
+                let _guard = span.entered();
+
                 // Produce message for view
                 let Some(certificate) = self.state.get(view) else {
                     // If we drop the response channel, the resolver will automatically

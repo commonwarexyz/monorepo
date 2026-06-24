@@ -13,6 +13,7 @@
 commonware_macros::stability_scope!(ALPHA {
     extern crate alloc;
 
+    pub mod bmt;
     pub mod merkle;
     pub use merkle::{mmb, mmr};
 });
@@ -20,9 +21,10 @@ commonware_macros::stability_scope!(ALPHA, cfg(feature = "std") {
     mod bitmap;
     pub mod qmdb;
     pub use crate::bitmap::{BitMap as AuthenticatedBitMap, MerkleizedBitMap, UnmerkleizedBitMap};
-    pub mod bmt;
     pub mod cache;
     pub mod queue;
+    #[cfg(any(test, feature = "test-utils"))]
+    pub mod utils;
 });
 commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
     pub mod archive;
@@ -46,7 +48,6 @@ commonware_macros::stability_scope!(BETA, cfg(feature = "std") {
         > Context for T
     {
     }
-
 });
 commonware_macros::stability_scope!(BETA {
     pub mod translator;

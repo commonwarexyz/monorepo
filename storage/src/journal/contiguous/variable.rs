@@ -14,7 +14,7 @@ use crate::{
 };
 use commonware_codec::{Codec, CodecShared};
 use commonware_macros::boxed;
-use commonware_runtime::buffer::paged::CacheRef;
+use commonware_runtime::{buffer::paged::CacheRef, IoBuf};
 use commonware_utils::{
     sync::{AsyncMutex, AsyncRwLock, AsyncRwLockReadGuard},
     NZUsize,
@@ -822,6 +822,8 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             return Err(Error::EmptyAppend);
         }
 
+        let encoded = IoBuf::from(encoded);
+
         let _op_guard = self.op_lock.lock().await;
 
         // Mutating operations are serialized by taking the write guard.
@@ -850,7 +852,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             // into absolute offsets.
             let base_offset = inner
                 .data
-                .append_raw(section, &encoded[batch_start..batch_end])
+                .append_raw(section, encoded.slice(batch_start..batch_end))
                 .await?;
 
             let absolute_offsets = item_starts[written..written + batch_count]
@@ -956,13 +958,15 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(())
     }
 
-    /// Persist dirty data and offsets sections so committed data survives a crash.
+    /// Persist dirty data sections so committed data survives a crash.
+    ///
+    /// Does not advance the recovery watermark, so reopen may need to replay entries beyond
+    /// the previous `sync()`.
     pub async fn commit(&self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         let _op_guard = self.op_lock.lock().await;
         self.flush_dirty_data().await?;
-        self.offsets.commit().await?;
         let mut inner = self.inner.write().await;
         inner.dirty_from_section = None;
         Ok(())
@@ -1585,6 +1589,60 @@ mod tests {
             assert_eq!(last, 4);
             for (pos, item) in items.iter().enumerate() {
                 assert_eq!(journal.read(pos as u64).await.unwrap(), *item);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_append_many_exceeding_write_buffer() {
+        // A batch much larger than the write buffer takes the direct blob-write path, spanning
+        // multiple sections so append_raw receives interior slices of the encoded batch buffer.
+        // The returned base offsets feed the offsets journal, so every position must remain
+        // readable by random access after the direct writes.
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "append-many-direct".into(),
+                items_per_section: NZU64!(25),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, SMALL_PAGE_SIZE, NZUsize!(2)),
+                write_buffer: NZUsize!(1024),
+            };
+            let journal = Journal::<_, FixedBytes<64>>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+
+            // Start mid-page with single appends so the batch begins unaligned.
+            let item = |i: usize| {
+                let mut bytes = [0u8; 64];
+                bytes[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                FixedBytes::new(bytes)
+            };
+            journal.append(&item(0)).await.unwrap();
+            journal.append(&item(1)).await.unwrap();
+
+            // ~6.5KB encoded, far above the 1KB write buffer, crossing section boundaries.
+            let items: Vec<_> = (2..102).map(item).collect();
+            let last = journal.append_many(Many::Flat(&items)).await.unwrap();
+            assert_eq!(last, 101);
+
+            // Every item is readable before any sync.
+            for pos in 0..102u64 {
+                assert_eq!(journal.read(pos).await.unwrap(), item(pos as usize));
+            }
+
+            journal.sync().await.unwrap();
+            drop(journal);
+
+            let journal = Journal::<_, FixedBytes<64>>::init(context.child("second"), cfg)
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..102);
+            for pos in 0..102u64 {
+                assert_eq!(journal.read(pos).await.unwrap(), item(pos as usize));
             }
 
             journal.destroy().await.unwrap();
@@ -3623,6 +3681,42 @@ mod tests {
             // Data should be intact and offsets rebuilt
             assert_eq!(journal.size().await, 15);
             for i in 0..15u64 {
+                assert_eq!(journal.read(i).await.unwrap(), i * 100);
+            }
+
+            journal.destroy().await.unwrap();
+        });
+    }
+
+    #[test_traced]
+    fn test_variable_commit_only_durability_across_sections() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let cfg = Config {
+                partition: "commit-only-durability".into(),
+                items_per_section: NZU64!(5),
+                compression: None,
+                codec_config: (),
+                page_cache: CacheRef::from_pooler(&context, LARGE_PAGE_SIZE, NZUsize!(10)),
+                write_buffer: NZUsize!(1024),
+            };
+
+            // Append items one commit at a time, never syncing, spanning several sections.
+            let journal = Journal::<_, u64>::init(context.child("first"), cfg.clone())
+                .await
+                .unwrap();
+            for i in 0..23u64 {
+                journal.append(&(i * 100)).await.unwrap();
+                journal.commit().await.unwrap();
+            }
+            drop(journal);
+
+            // Reopen recovers every committed item by rebuilding offsets from the data journal.
+            let journal = Journal::<_, u64>::init(context.child("second"), cfg.clone())
+                .await
+                .unwrap();
+            assert_eq!(journal.bounds().await, 0..23);
+            for i in 0..23u64 {
                 assert_eq!(journal.read(i).await.unwrap(), i * 100);
             }
 

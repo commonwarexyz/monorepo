@@ -39,11 +39,15 @@ pub mod ed25519;
 pub mod secp256r1;
 
 commonware_macros::stability_scope!(ALPHA {
+    #[cfg(feature = "std")]
+    pub mod banderwagon;
     pub mod bloomfilter;
     pub use crate::bloomfilter::BloomFilter;
 
     pub mod lthash;
     pub use crate::lthash::LtHash;
+
+    pub mod reed_solomon;
 
     pub mod zk;
 });

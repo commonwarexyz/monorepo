@@ -599,18 +599,24 @@ pub mod tests {
     }
 
     /// Commit a set of writes as a single batch.
-    async fn commit_writes<F: merkle::Graftable, C: DbAny<F>>(
-        db: &mut C,
-        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)>,
-    ) -> Result<(), Error<F>> {
-        let mut batch = db.new_batch();
-        for (k, v) in writes {
-            batch = batch.write(k, v);
-        }
-        let merkleized = batch.merkleize(db, None).await?;
-        db.apply_batch(merkleized).await?;
-        db.commit().await?;
-        Ok(())
+    ///
+    /// Returns a boxed future so the merkleize/apply/commit chain does not inflate the futures
+    /// (and poll frames) of every test composing commits, which overflow the stack on platforms
+    /// with small defaults.
+    fn commit_writes<'a, F: merkle::Graftable, C: DbAny<F>>(
+        db: &'a mut C,
+        writes: impl IntoIterator<Item = (C::Key, Option<<C as DbAny<F>>::Value>)> + 'a,
+    ) -> std::pin::Pin<Box<dyn Future<Output = Result<(), Error<F>>> + 'a>> {
+        Box::pin(async move {
+            let mut batch = db.new_batch();
+            for (k, v) in writes {
+                batch = batch.write(k, v);
+            }
+            let merkleized = batch.merkleize(db, None).await?;
+            db.apply_batch(merkleized).await?;
+            db.commit().await?;
+            Ok(())
+        })
     }
 
     /// Apply random operations to the given db, committing them (randomly and at the end) only if
@@ -740,7 +746,7 @@ pub mod tests {
     {
         let mut open_db_clone = open_db.clone();
         let partition = "commit-after-sync".to_string();
-        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
         let key0 = <<C as DbAny<M>>::Key as TestKey>::from_seed(0);
         let key1 = <<C as DbAny<M>>::Key as TestKey>::from_seed(1);
         let value0 = <C as DbAny<M>>::Value::from_seed(100);
@@ -760,7 +766,7 @@ pub mod tests {
         let committed_size = db.size().await;
         drop(db);
 
-        let db: C = open_db(context.child("second"), partition).await;
+        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.size().await, committed_size);
         assert_eq!(db.get(&key0).await.unwrap(), Some(value0));
@@ -786,7 +792,7 @@ pub mod tests {
 
         let partition = "build-random-fail-commit".to_string();
         let rng_seed = context.next_u64();
-        let mut db: C = open_db(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db(context.child("first"), partition.clone())).await;
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
             .await
             .unwrap();
@@ -803,10 +809,10 @@ pub mod tests {
         // SCENARIO #1: Simulate a crash that happens before any writes. Upon reopening, the
         // state of the DB should be as of the last commit.
         drop(db);
-        let db: C = open_db(
+        let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 1),
             partition.clone(),
-        )
+        ))
         .await;
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.bounds().await.end, committed_op_count);
@@ -824,17 +830,17 @@ pub mod tests {
 
         // We should be able to recover, so the root should differ from the previous commit, and
         // the op count should be greater than before.
-        let db: C = open_db(
+        let db: C = Box::pin(open_db(
             context.child("scenario").with_attribute("index", 2),
             partition.clone(),
-        )
+        ))
         .await;
         let scenario_2_root = db.root();
 
         // To confirm the second committed hash is correct we'll re-build the DB in a new
         // partition, but without any failures. They should have the exact same state.
         let fresh_partition = "build-random-fail-commit-fresh".to_string();
-        let mut db: C = open_db(context.child("fresh"), fresh_partition.clone()).await;
+        let mut db: C = Box::pin(open_db(context.child("fresh"), fresh_partition.clone())).await;
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
             .await
             .unwrap();
@@ -869,9 +875,13 @@ pub mod tests {
 
         let mut open_db_clone = open_db.clone();
         // Create two databases that are identical other than how they are pruned.
-        let mut db_no_pruning: C =
-            open_db_clone(context.child("no_pruning"), "no-pruning-test".into()).await;
-        let mut db_pruning: C = open_db(context.child("pruning"), "pruning-test".into()).await;
+        let mut db_no_pruning: C = Box::pin(open_db_clone(
+            context.child("no_pruning"),
+            "no-pruning-test".into(),
+        ))
+        .await;
+        let mut db_pruning: C =
+            Box::pin(open_db(context.child("pruning"), "pruning-test".into())).await;
 
         // Apply identical operations to both databases, but only prune one.
         // Accumulate writes between commits.
@@ -943,7 +953,7 @@ pub mod tests {
         let mut open_db_clone = open_db.clone();
         let partition = "sync-bitmap-pruning".to_string();
         let rng_seed = context.next_u64();
-        let mut db: C = open_db_clone(context.child("first"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), partition.clone())).await;
 
         // Apply random operations with commits to advance the inactivity floor.
         db = apply_random_ops::<M, C>(ELEMENTS, true, rng_seed, db)
@@ -977,7 +987,7 @@ pub mod tests {
         drop(db);
 
         // Reopen the database.
-        let db: C = open_db(context.child("second"), partition).await;
+        let db: C = Box::pin(open_db(context.child("second"), partition)).await;
 
         // The pruned bits count should match. If sync() didn't persist the bitmap pruned
         // state, this would be 0.
@@ -1012,7 +1022,7 @@ pub mod tests {
         const ELEMENTS: u64 = 1000;
 
         let mut open_db_clone = open_db.clone();
-        let mut db: C = open_db_clone(context.child("first"), "build-big".into()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("first"), "build-big".into())).await;
 
         let mut map = std::collections::HashMap::<C::Key, <C as DbAny<M>>::Value>::default();
 
@@ -1061,7 +1071,7 @@ pub mod tests {
         drop(db);
 
         // Reopen the db and verify it has exactly the same state.
-        let db: C = open_db(context.child("second"), "build-big".into()).await;
+        let db: C = Box::pin(open_db(context.child("second"), "build-big".into())).await;
         assert_eq!(root, db.root());
 
         // Confirm the db's state matches that of the separate map we computed independently.
@@ -1090,7 +1100,11 @@ pub mod tests {
         F: FnMut(Context, String) -> Fut,
         Fut: Future<Output = C>,
     {
-        let mut db: C = open_db(context.child("db"), "stale-side-effect-free".into()).await;
+        let mut db: C = Box::pin(open_db(
+            context.child("db"),
+            "stale-side-effect-free".into(),
+        ))
+        .await;
 
         let key1 = <C::Key as TestKey>::from_seed(1);
         let key2 = <C::Key as TestKey>::from_seed(2);
@@ -1338,6 +1352,112 @@ pub mod tests {
         32,
         Sequential,
     >;
+
+    // Regression test for a forged exclusion proof against the ordered partitioned index with
+    // variable-length keys shorter than the partition prefix. The buggy router zero-padded a short
+    // key into the lowest partition, so its `next_key` wrapped around the whole keyspace and the
+    // resulting authenticated span covered a live key, letting a prover forge that key's exclusion.
+    // Order-preserving routing keeps the key in lexicographic position, so the span no longer covers
+    // it.
+    #[test_traced]
+    fn test_partitioned_ordered_short_key_exclusion_not_forgeable() {
+        type ForgedExclusionDb = ordered::variable::partitioned::Db<
+            mmr::Family,
+            Context,
+            Vec<u8>,
+            Vec<u8>,
+            Sha256,
+            OneCap,
+            2,
+            32,
+            Sequential,
+        >;
+
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let hasher = qmdb::hasher::<Sha256>();
+            let page_cache = CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE);
+            let cfg = VariableConfig {
+                merkle_config: MerkleConfig {
+                    journal_partition: "forged-exclusion-journal".to_string(),
+                    metadata_partition: "forged-exclusion-metadata".to_string(),
+                    items_per_blob: NZU64!(11),
+                    write_buffer: NZUsize!(1024),
+                    strategy: Sequential,
+                    page_cache: page_cache.clone(),
+                },
+                journal_config: VConfig {
+                    partition: "forged-exclusion-log".to_string(),
+                    items_per_section: NZU64!(7),
+                    compression: None,
+                    codec_config: (((0..=8).into(), ()), ((0..=8).into(), ())),
+                    page_cache,
+                    write_buffer: NZUsize!(1024),
+                },
+                grafted_metadata_partition: "forged-exclusion-grafted".to_string(),
+                translator: OneCap,
+            };
+            let mut db = ForgedExclusionDb::init(context.child("db"), cfg)
+                .await
+                .unwrap();
+
+            // `b` is shorter than the 2-byte prefix and lexicographically falls between `a` and `c`
+            // (`b` is a proper prefix of `c`). The bug routed `b` to partition 0x0001 instead of
+            // 0x0100, below `a` at 0x0080.
+            let a = vec![0x00u8, 0x80];
+            let b = vec![0x01u8];
+            let c = vec![0x01u8, 0x00];
+            let (va, vb, vc) = (vec![0x0au8], vec![0x0bu8], vec![0x0cu8]);
+
+            // Commit `a` and `b` (ring a -> b -> a), then `c` in a later batch.
+            let merkleized = db
+                .new_batch()
+                .write(a.clone(), Some(va.clone()))
+                .write(b.clone(), Some(vb.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let merkleized = db
+                .new_batch()
+                .write(c.clone(), Some(vc.clone()))
+                .merkleize(&db, None)
+                .await
+                .unwrap();
+            db.apply_batch(merkleized).await.unwrap();
+            let root = db.root();
+
+            // All three keys are live.
+            assert_eq!(db.get(&a).await.unwrap(), Some(va));
+            assert_eq!(db.get(&b).await.unwrap(), Some(vb));
+            assert_eq!(db.get(&c).await.unwrap(), Some(vc));
+
+            // Root cause: the ring must link keys in lexicographic order, so `b`'s successor is `c`
+            // (pre-fix it wrapped around to `a`).
+            let (_, span_b) = db.get_span(&b).await.unwrap().unwrap();
+            assert_eq!(
+                span_b.next_key, c,
+                "b.next_key must be c, not the wrapped-around a"
+            );
+
+            // Honest exclusion proving refuses a live key.
+            assert!(matches!(
+                db.exclusion_proof(&hasher, &c).await,
+                Err(Error::KeyExists)
+            ));
+
+            // Forge attempt: package `b`'s authenticated update as an exclusion proof for `c`. The
+            // span [b, c) does not cover `c`, so the verifier rejects it (pre-fix the span was
+            // [b, a), which cyclically covered `c` and verified).
+            let kvp = db.key_value_proof(&hasher, b.clone()).await.unwrap();
+            let forged = ordered::ExclusionProof::KeyValue(kvp.proof, span_b);
+            assert!(!ForgedExclusionDb::verify_exclusion_proof(
+                &hasher, &c, &forged, &root
+            ));
+
+            db.destroy().await.unwrap();
+        });
+    }
 
     // Helper macro to create an open_db closure for a specific variant.
     macro_rules! open_db_fn {
@@ -2651,7 +2771,7 @@ pub mod tests {
         // 260 writes + 1 CommitFloor = 261 operations, completing one chunk with 5 ops in the
         // next partial chunk. This ensures the grafted root computation must handle the
         // newly completed chunk.
-        let mut db: C = open_db_clone(context.child("init"), partition.clone()).await;
+        let mut db: C = Box::pin(open_db_clone(context.child("init"), partition.clone())).await;
         let mut batch = db.new_batch();
         for i in 0..260 {
             batch = batch.write(TestKey::from_seed(i), Some(TestValue::from_seed(i + 1000)));
@@ -2664,7 +2784,7 @@ pub mod tests {
         db.sync().await.unwrap();
         drop(db);
 
-        let db: C = open_db(context.child("reopen"), partition).await;
+        let db: C = Box::pin(open_db(context.child("reopen"), partition)).await;
         assert_eq!(db.root(), speculative_root);
 
         db.destroy().await.unwrap();

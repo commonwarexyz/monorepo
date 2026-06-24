@@ -119,14 +119,15 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         )
         .await?;
 
-        // Get checkpoint
+        // Metadata is the commit record for lower-layer storage. If no checkpoint was committed,
+        // Freezer::init treats existing freezer blobs as uncommitted and starts empty.
         let freezer_key = U64::new(FREEZER_PREFIX, 0);
         let checkpoint = metadata.get(&freezer_key).map(|freezer| *freezer.freezer());
 
         // Initialize table
         //
         // TODO (#1227): Use sharded metadata to provide consistency
-        let freezer = Freezer::init_with_checkpoint(
+        let freezer = Freezer::init(
             context.child("freezer"),
             freezer::Config {
                 key_partition: cfg.freezer_key_partition,
@@ -147,7 +148,8 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         )
         .await?;
 
-        // Collect sections
+        // Collect committed ordinal sections. Ordinal::init removes stored sections that are not
+        // present in this map, so an empty map represents a committed empty ordinal.
         let sections = metadata
             .keys()
             .filter(|k| k.prefix() == ORDINAL_PREFIX)
@@ -165,7 +167,7 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         // Initialize ordinal
         //
         // TODO (#1227): Use sharded metadata to provide consistency
-        let ordinal = Ordinal::init_with_bits(
+        let ordinal = Ordinal::init(
             context.child("ordinal"),
             ordinal::Config {
                 partition: cfg.ordinal_partition,

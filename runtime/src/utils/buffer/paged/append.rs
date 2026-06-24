@@ -17,9 +17,10 @@
 //! # Blob Semantics
 //!
 //! [Append] owns the physical page layout, read cache, and durability bookkeeping for the wrapped
-//! [Blob]. Cloned [Append] handles share that state and are safe to use concurrently. Raw [Blob]
-//! handles cloned before wrapping operate on physical bytes, including checksum records, rather
-//! than [Append]'s logical view, and they do not observe buffered data until it is flushed.
+//! [Blob]. Cloned [Append] handles share that state; reads may run concurrently with anything,
+//! but mutable operations (append, resize) must be serialized by the caller. Raw [Blob] handles
+//! cloned before wrapping operate on physical bytes, including checksum records, rather than
+//! [Append]'s logical view, and they do not observe buffered data until it is flushed.
 //!
 //! Raw [Blob] handles must not be used to write, resize, or otherwise mutate the blob while an
 //! [Append] exists. Those mutations bypass the buffer and page cache, can invalidate checksum
@@ -146,19 +147,44 @@ pub struct Append<B: Blob> {
     buffer: Arc<AsyncRwLock<Buffer>>,
 }
 
-/// Returns the capacity with a floor applied to ensure it can hold at least one full page of new
-/// data even when caching a nearly-full page of already written data.
-fn capacity_with_floor(capacity: usize, page_size: u64) -> usize {
-    let floor = page_size as usize * 2;
-    if capacity < floor {
+/// Adjusts a requested write-buffer `capacity` upward to the value the buffer actually uses,
+/// applying two upward adjustments:
+///
+/// - Rounds up to a whole multiple of `page_size`, so the buffer always holds an exact number of
+///   pages. Callers can then drain and bulk-cache full pages without re-rounding the capacity.
+/// - Raises the result to a floor of two pages, so the buffer can hold at least one full page of
+///   new data even while caching a nearly-full page of already written data.
+fn adjusted_capacity(capacity: usize, page_size: u64) -> usize {
+    let page_size = page_size as usize;
+    let rounded = capacity.next_multiple_of(page_size);
+    let floor = page_size * 2;
+    if rounded < floor {
         warn!(
             floor,
             "requested buffer capacity is too low, increasing it to floor"
         );
-        floor
-    } else {
-        capacity
     }
+    rounded.max(floor)
+}
+
+/// Returns whether appending `append_len` bytes should bypass the write buffer and write whole
+/// pages directly: the append would overflow capacity, and at least one whole page remains to
+/// write after filling the current page up to a boundary.
+///
+/// Larger appends bypass the buffer, so a buffered append exceeds `capacity` by less than one
+/// page (given `capacity` is a whole number of pages; see [adjusted_capacity]). The write
+/// buffer's peak size therefore stays under `capacity + logical_page_size`.
+const fn too_big_for_buffer(
+    buffer_len: usize,
+    buffer_capacity: usize,
+    append_len: usize,
+    logical_page_size: usize,
+) -> bool {
+    let fill = buffer_len.next_multiple_of(logical_page_size) - buffer_len;
+    let overflows_capacity = buffer_len + append_len > buffer_capacity;
+    let has_full_page_after_fill = append_len >= fill + logical_page_size;
+
+    overflows_capacity && has_full_page_after_fill
 }
 
 impl<B: Blob> Append<B> {
@@ -185,7 +211,7 @@ impl<B: Blob> Append<B> {
             blob.sync().await?;
         }
 
-        let capacity = capacity_with_floor(capacity, cache_ref.page_size());
+        let capacity = adjusted_capacity(capacity, cache_ref.page_size());
         let needs_sync = !invalid_data_found; // ensure pending writes on the wrapped blob are synced
 
         let (blob_state, partial_data) = match partial_page_state {
@@ -292,17 +318,131 @@ impl<B: Blob> Append<B> {
         Ok((None, 0, invalid_data_found))
     }
 
-    /// Append all bytes in `buf` to the tip of the blob.
-    pub async fn append(&self, buf: &[u8]) -> Result<(), Error> {
-        let mut buffer = self.buffer.write().await;
+    /// Append all bytes in `buf` to the tip of the blob, returning the logical offset at which
+    /// the first byte was written.
+    pub async fn append(&self, buf: &[u8]) -> Result<u64, Error> {
+        let logical_page_size = self.cache_ref.page_size() as usize;
+        let mut buf_guard = self.buffer.write().await;
 
-        if !buffer.append(buf) {
-            return Ok(());
+        // Bypass the append buffer and write whole pages directly when `buf` is large.
+        if too_big_for_buffer(
+            buf_guard.len(),
+            buf_guard.capacity,
+            buf.len(),
+            logical_page_size,
+        ) {
+            drop(buf_guard);
+            return self.append_owned(IoBuf::copy_from_slice(buf)).await;
         }
 
-        // Buffer is over capacity, so we need to write data to the blob.
-        self.flush_internal(buffer, false, false).await?;
-        Ok(())
+        let offset = buf_guard.size();
+        if buf_guard.append(buf) {
+            self.flush_internal(buf_guard, false, false).await?;
+        }
+        Ok(offset)
+    }
+
+    /// Append all bytes in `buf` to the tip of the blob, writing whole pages directly to the
+    /// underlying blob instead of staging them in the write buffer when `buf` is large.
+    pub async fn append_owned(&self, buf: IoBuf) -> Result<u64, Error> {
+        let logical_page_size = self.cache_ref.page_size() as usize;
+        let mut buf_guard = self.buffer.write().await;
+        let offset = buf_guard.size();
+
+        // Buffer the append unless `buf` is too big for the buffer.
+        if !too_big_for_buffer(
+            buf_guard.len(),
+            buf_guard.capacity,
+            buf.len(),
+            logical_page_size,
+        ) {
+            if buf_guard.append(buf.as_ref()) {
+                self.flush_internal(buf_guard, false, false).await?;
+            }
+            return Ok(offset);
+        }
+
+        // Bytes needed to fill current page to a page boundary (0 if already aligned).
+        let fill = buf_guard.len().next_multiple_of(logical_page_size) - buf_guard.len();
+
+        // Top up the tip to a page boundary so its contents flush as full pages, leaving any
+        // partial-page CRC handling to the regular flush path.
+        if fill > 0 {
+            buf_guard.append(&buf.as_ref()[..fill]);
+        }
+        let boundary = buf_guard.size();
+        if !buf_guard.is_empty() {
+            self.flush_internal(buf_guard, false, false).await?;
+
+            // The flush releases the buffer lock during blob I/O. Concurrent mutable operations
+            // (other appends, resize) are not supported while the direct path is in flight, so
+            // nothing may claim the boundary in the meantime.
+            buf_guard = self.buffer.write().await;
+            assert!(
+                buf_guard.size() == boundary && buf_guard.is_empty(),
+                "concurrent mutable operation raced a direct-path append"
+            );
+        }
+
+        // Prepare physical pages for the whole pages remaining in `buf` without copying them.
+        let bulk_len = (buf.len() - fill) / logical_page_size * logical_page_size;
+        let bulk = buf.slice(fill..fill + bulk_len);
+        let mut physical_pages = IoBufs::default();
+        self.append_full_pages(&bulk, None, &mut physical_pages);
+
+        // Acquire a write lock on the blob state so nobody tries to read or modify the blob
+        // while we're writing to it. Everything below up to the write mutates shared state
+        // without an intervening await, so a future dropped before the write leaves no trace;
+        // one dropped during the write is covered by the fatal-failure convention.
+        let mut blob_state = self.blob_state.write().await;
+        debug_assert!(
+            blob_state.partial_page_state.is_none(),
+            "an empty tip implies no partial page state"
+        );
+
+        // Cache the pages before `replace` publishes the new size and the tip lock is released, so
+        // reads of the bulk range are served from the cache while the blob write is still in
+        // flight. Insert in write-buffer-sized chunks so the cache lock is not held across the
+        // entire copy. The capacity is a whole number of pages (see [adjusted_capacity]), so each
+        // chunk is page-aligned.
+        let chunk_len = buf_guard.capacity;
+        let mut cache_offset = boundary;
+        for chunk in bulk.as_ref().chunks(chunk_len) {
+            let remaining = self.cache_ref.cache(self.id, chunk, cache_offset);
+            assert_eq!(remaining, 0, "cached bulk pages must be page-aligned");
+            cache_offset += chunk.len() as u64;
+        }
+
+        // Update state before writing, seeding the tip with the partial-page suffix of `buf`.
+        // The suffix (less than one page) is copied: a sub-page tip is never drained by flush,
+        // so seeding it with a view of `buf` would pin the entire backing allocation until the
+        // next append to this blob (or forever, if there is none).
+        blob_state.current_page += (bulk_len / logical_page_size) as u64;
+        let suffix = buf.slice(fill + bulk_len..);
+        let suffix = if suffix.is_empty() {
+            suffix
+        } else {
+            let mut copied = self.cache_ref.pool().alloc(suffix.len());
+            copied.put_slice(suffix.as_ref());
+            copied.freeze()
+        };
+        buf_guard.replace(boundary + bulk_len as u64, suffix);
+
+        // Make sure the buffer offset and underlying blob agree on the state of the tip.
+        assert_eq!(
+            blob_state.current_page * self.cache_ref.page_size(),
+            buf_guard.offset
+        );
+
+        // Release the buffer lock to allow for concurrent reads & buffered writes while we
+        // write the physical pages.
+        drop(buf_guard);
+
+        let physical_page_size = logical_page_size as u64 + CHECKSUM_SIZE;
+        let write_at_offset = boundary / logical_page_size as u64 * physical_page_size;
+        blob_state.write_at(write_at_offset, physical_pages).await?;
+
+        Ok(offset)
     }
 
     /// Flush all full pages from the buffer to disk, resetting the buffer to contain only the bytes
@@ -807,41 +947,11 @@ impl<B: Blob> Append<B> {
         let buffer_data = buffer.as_ref();
 
         if pages_to_write > 0 {
-            let logical_page_size_u16 =
-                u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
-
-            // Build CRC bytes for full pages once. Full-page payload bytes are appended below as
-            // slices from tip, so we avoid copying logical payload here.
-            let mut crcs = self
-                .cache_ref
-                .pool()
-                .alloc(CHECKSUM_SIZE as usize * pages_to_write);
-            for page in 0..pages_to_write {
-                let start_read_idx = page * logical_page_size;
-                let end_read_idx = start_read_idx + logical_page_size;
-                let logical_page = &buffer_data[start_read_idx..end_read_idx];
-                let crc = Crc32::checksum(logical_page);
-
-                // For the first page, if there's an old partial page CRC, construct the record
-                // to preserve the old CRC in its original slot.
-                let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
-                    Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
-                } else {
-                    Checksum::new(logical_page_size_u16, crc)
-                };
-                crcs.put_slice(&crc_record.to_bytes());
-            }
-            let crc_blob = crcs.freeze();
-
-            // Physical full-page layout is [logical_page_bytes, crc_record_bytes].
-            for page in 0..pages_to_write {
-                let start_read_idx = page * logical_page_size;
-                let end_read_idx = start_read_idx + logical_page_size;
-                write_buffer.append(buffer.slice(start_read_idx..end_read_idx));
-
-                let crc_start = page * CHECKSUM_SIZE as usize;
-                write_buffer.append(crc_blob.slice(crc_start..crc_start + CHECKSUM_SIZE as usize));
-            }
+            self.append_full_pages(
+                &buffer.slice(..pages_to_write * logical_page_size),
+                old_crc_record,
+                &mut write_buffer,
+            );
         }
 
         if !include_partial_page {
@@ -889,6 +999,56 @@ impl<B: Blob> Append<B> {
         // Return the CRC record that matches what we wrote to disk, so that future flushes
         // correctly identify which slot is protected.
         (write_buffer, Some(crc_record))
+    }
+
+    /// Appends each page of `data` to `write_buffer` in on-disk format: its payload (a zero-copy
+    /// slice of `data`) followed by a CRC record.
+    ///
+    /// `data.len()` must be a non-zero multiple of the page size. When `old_crc_record` is present,
+    /// the first page's record preserves the old CRC in its original slot.
+    fn append_full_pages(
+        &self,
+        data: &IoBuf,
+        old_crc_record: Option<&Checksum>,
+        write_buffer: &mut IoBufs,
+    ) {
+        let logical_page_size = self.cache_ref.page_size() as usize;
+        let pages = data.len() / logical_page_size;
+        debug_assert!(pages > 0);
+        debug_assert_eq!(data.len() % logical_page_size, 0);
+        let logical_page_size_u16 =
+            u16::try_from(logical_page_size).expect("page size must fit in u16 for CRC record");
+
+        // Build CRC bytes for full pages once. Full-page payload bytes are appended below as
+        // slices from `data`, so we avoid copying logical payload here.
+        let mut crcs = self.cache_ref.pool().alloc(CHECKSUM_SIZE as usize * pages);
+        let data_bytes = data.as_ref();
+        for page in 0..pages {
+            let start_read_idx = page * logical_page_size;
+            let end_read_idx = start_read_idx + logical_page_size;
+            let logical_page = &data_bytes[start_read_idx..end_read_idx];
+            let crc = Crc32::checksum(logical_page);
+
+            // For the first page, if there's an old partial page CRC, construct the record
+            // to preserve the old CRC in its original slot.
+            let crc_record = if let (0, Some(old_crc)) = (page, old_crc_record) {
+                Self::build_crc_record_preserving_old(logical_page_size_u16, crc, old_crc)
+            } else {
+                Checksum::new(logical_page_size_u16, crc)
+            };
+            crcs.put_slice(&crc_record.to_bytes());
+        }
+        let crc_blob = crcs.freeze();
+
+        // Physical full-page layout is [logical_page_bytes, crc_record_bytes].
+        for page in 0..pages {
+            let start_read_idx = page * logical_page_size;
+            let end_read_idx = start_read_idx + logical_page_size;
+            write_buffer.append(data.slice(start_read_idx..end_read_idx));
+
+            let crc_start = page * CHECKSUM_SIZE as usize;
+            write_buffer.append(crc_blob.slice(crc_start..crc_start + CHECKSUM_SIZE as usize));
+        }
     }
 
     /// Encode one checksum slot as `[len: u16][crc: u32]`, matching `Checksum::write`.
@@ -1096,7 +1256,7 @@ impl<B: Blob> Append<B> {
             let zeros_needed = (size - current_size) as usize;
             let mut zeros = self.cache_ref.pool().alloc(zeros_needed);
             zeros.put_bytes(0, zeros_needed);
-            self.append(zeros.as_ref()).await?;
+            self.append_owned(zeros.freeze()).await?;
             return Ok(());
         }
 
@@ -1229,7 +1389,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, IoBufsMut, Runner as _, Storage as _,
+        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Storage as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
@@ -1749,6 +1909,316 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_append_owned_bypass_from_empty_tip() {
+        // A large owned append from an empty, page-aligned tip writes whole pages directly to the
+        // blob and leaves the partial-page suffix buffered.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_empty")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // 500 bytes = 4 full pages (412 bytes) + 88-byte remainder.
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            let src = IoBuf::from(data.clone());
+            let src_start = src.as_ptr() as usize;
+            let src_range = src_start..src_start + src.len();
+            append.append_owned(src.clone()).await.unwrap();
+            assert_eq!(append.size().await, 500);
+
+            // The buffered suffix is a copy, not a view that would pin the input allocation.
+            let tip_ptr = append.buffer.read().await.as_ref().as_ptr() as usize;
+            assert!(!src_range.contains(&tip_ptr));
+
+            // The directly written pages populate the page cache, exactly as a buffered flush
+            // would.
+            let mut probe = vec![0u8; PAGE_SIZE.get() as usize];
+            assert_eq!(
+                append.cache_ref.read_cached(append.id, &mut probe, 0),
+                PAGE_SIZE.get() as usize
+            );
+            assert_eq!(probe, &data[..PAGE_SIZE.get() as usize]);
+
+            // All bytes are readable before any sync (bulk from the cache, suffix from tip).
+            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
+            assert_eq!(read_buf, &data[..]);
+
+            // Everything becomes durable with a single sync.
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_empty")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 500);
+            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
+            assert_eq!(read_buf, &data[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_append_owned_bypass_with_synced_partial_page() {
+        // A large owned append on top of a synced partial page must run the protected-CRC
+        // handling for the first page before writing the bulk directly.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_partial")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Durably write a 50-byte partial page.
+            let all: Vec<u8> = (0..500).map(|i| (i % 247) as u8).collect();
+            append.append(&all[..50]).await.unwrap();
+            append.sync().await.unwrap();
+
+            // 450 more bytes: 53 fill the first page (protected CRC), 3 whole pages (309 bytes)
+            // bypass the buffer, 88 remain in the tip.
+            append
+                .append_owned(IoBuf::from(all[50..].to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 500);
+            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
+
+            // The direct write is not durable until sync: dropping without one preserves only the
+            // synced 50-byte prefix.
+            drop(append);
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_partial")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 50);
+            let read_buf = append.read_at(0, 50).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..50]);
+
+            // Repeating the owned append after recovery and syncing makes everything durable,
+            // exercising the protected-CRC handling for the recovered partial page.
+            append
+                .append_owned(IoBuf::from(all[50..].to_vec()))
+                .await
+                .unwrap();
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_partial")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 500);
+            let read_buf = append.read_at(0, 500).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_append_owned_bypass_with_buffered_tip() {
+        // A large owned append merges with unsynced buffered bytes: the fill completes the
+        // current page, the bulk bypasses the buffer, and everything is readable.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_buffered")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            let all: Vec<u8> = (0..430).map(|i| (i % 239) as u8).collect();
+            append.append(&all[..30]).await.unwrap();
+            append
+                .append_owned(IoBuf::from(all[30..].to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 430);
+            let read_buf = append.read_at(0, 430).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
+
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_buffered")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 430);
+            let read_buf = append.read_at(0, 430).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_append_owned_exact_page_multiple_and_small() {
+        // An owned append of an exact page multiple leaves an empty tip that later buffered and
+        // small owned appends continue from; small owned appends use the buffered path.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_exact")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Exactly 4 pages: no remainder.
+            let bulk: Vec<u8> = (0..412).map(|i| (i % 233) as u8).collect();
+            append
+                .append_owned(IoBuf::from(bulk.clone()))
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 412);
+
+            // A small owned append takes the buffered path.
+            let small: Vec<u8> = (0..10).map(|i| (i % 229) as u8).collect();
+            append
+                .append_owned(IoBuf::from(small.clone()))
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 422);
+
+            let read_buf = append.read_at(0, 422).await.unwrap().coalesce();
+            assert_eq!(&read_buf.as_ref()[..412], &bulk[..]);
+            assert_eq!(&read_buf.as_ref()[412..], &small[..]);
+
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"owned_exact")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 422);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_append_owned_physical_bytes_match_buffered() {
+        // The direct path must produce byte-identical physical output (page layout, CRC slot
+        // placement, zero padding) to the buffered path for the same logical content.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let data: Vec<u8> = (0..500).map(|i| (i % 251) as u8).collect();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+
+            let (blob, size) = context
+                .open("test_partition", b"phys_direct")
+                .await
+                .unwrap();
+            let direct = Append::new(blob, size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+            direct
+                .append_owned(IoBuf::from(data.clone()))
+                .await
+                .unwrap();
+            direct.sync().await.unwrap();
+            drop(direct);
+
+            // Small appends always stay on the buffered path and force intermediate flushes.
+            let (blob, size) = context
+                .open("test_partition", b"phys_buffered")
+                .await
+                .unwrap();
+            let buffered = Append::new(blob, size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            for chunk in data.chunks(10) {
+                buffered.append(chunk).await.unwrap();
+            }
+            buffered.sync().await.unwrap();
+            drop(buffered);
+
+            let (blob_a, size_a) = context
+                .open("test_partition", b"phys_direct")
+                .await
+                .unwrap();
+            let (blob_b, size_b) = context
+                .open("test_partition", b"phys_buffered")
+                .await
+                .unwrap();
+            assert_eq!(size_a, size_b);
+            let bytes_a = blob_a.read_at(0, size_a as usize).await.unwrap().coalesce();
+            let bytes_b = blob_b.read_at(0, size_b as usize).await.unwrap().coalesce();
+            assert_eq!(bytes_a.as_ref(), bytes_b.as_ref());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_append_borrowed_large_takes_direct_path() {
+        // A plain `append` larger than the write buffer is routed through the direct path, so the
+        // write buffer holds only the partial-page suffix afterwards instead of the whole input.
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let (blob, blob_size) = context
+                .open("test_partition", b"borrowed_large")
+                .await
+                .unwrap();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            // Start misaligned with a small buffered prefix.
+            let all: Vec<u8> = (0..530).map(|i| (i % 241) as u8).collect();
+            append.append(&all[..30]).await.unwrap();
+
+            // 500 more bytes exceed the 206-byte write buffer and take the direct path.
+            append.append(&all[30..]).await.unwrap();
+            assert_eq!(append.size().await, 530);
+
+            // Only the partial-page suffix remains buffered (530 = 5 full pages + 15 bytes).
+            assert_eq!(append.buffer.read().await.len(), 15);
+
+            let read_buf = append.read_at(0, 530).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
+
+            append.sync().await.unwrap();
+            drop(append);
+
+            let (blob, blob_size) = context
+                .open("test_partition", b"borrowed_large")
+                .await
+                .unwrap();
+            let append = Append::new(blob, blob_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert_eq!(append.size().await, 530);
+            let read_buf = append.read_at(0, 530).await.unwrap().coalesce();
+            assert_eq!(read_buf, &all[..]);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_sync_releases_tip_pool_slot_after_full_drain() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -2190,6 +2660,10 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             self.inner.sync().await
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            self.inner.start_sync().await
         }
     }
 

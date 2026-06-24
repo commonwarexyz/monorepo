@@ -14,6 +14,7 @@ documentation = "https://docs.rs/commonware-utils"
 workspace = true
 
 [dependencies]
+ahash = { workspace = true, features = ["no-rng"] }
 arbitrary = { workspace = true, optional = true, features = ["derive"] }
 bytes.workspace = true
 cfg-if.workspace = true
@@ -39,6 +40,12 @@ zeroize.workspace = true
 version = "0.2.15"
 features = ["js"]
 
+[target.'cfg(target_arch = "wasm32")'.dependencies.getrandom_v3]
+# Enable the wasm_js backend for ahash's getrandom 0.3 dependency on WASM
+package = "getrandom"
+version = "0.3"
+features = ["wasm_js"]
+
 [dev-dependencies]
 arbitrary = { workspace = true, features = ["derive"] }
 commonware-conformance.workspace = true
@@ -53,12 +60,15 @@ rstest.workspace = true
 [features]
 default = [ "std" ]
 std = [
+	"ahash/runtime-rng",
+	"ahash/std",
 	"bytes/std",
 	"commonware-codec/std",
 	"commonware-formatting/std",
 	"commonware-macros/std",
 	"futures",
 	"getrandom/std",
+	"getrandom_v3/std",
 	"num-bigint",
 	"num-bigint?/std",
 	"num-integer",
@@ -88,6 +98,11 @@ fuzz = [ "arbitrary", "arbitrary/derive", "dep:arbitrary", "std" ]
 
 [lib]
 bench = false
+
+[[bench]]
+name = "cache"
+harness = false
+path = "src/cache/benches/bench.rs"
 
 [[bench]]
 name = "bitmap"
