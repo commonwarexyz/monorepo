@@ -544,7 +544,6 @@ mod tests {
 #[cfg(feature = "arbitrary")]
 mod fuzz {
     use super::*;
-    use crate::bls12381::primitives::group::Private;
     use arbitrary::Arbitrary;
     use commonware_utils::{N3f1, NZU32};
     use rand::{rngs::StdRng, SeedableRng};
@@ -564,9 +563,7 @@ mod fuzz {
             let total: u32 = u.int_in_range(1..=100)?;
             let mode: Mode = u.arbitrary()?;
             let seed: u64 = u.arbitrary()?;
-            let poly =
-                Poly::<Private>::new(&mut StdRng::seed_from_u64(seed), N3f1::quorum(total) - 1)
-                    .translate(|private| private.expose(|scalar| scalar.clone()));
+            let poly = Poly::new(&mut StdRng::seed_from_u64(seed), N3f1::quorum(total) - 1);
             Ok(Self::new(
                 mode,
                 NZU32!(total),

@@ -269,9 +269,6 @@ const SMALL_SCALAR_LENGTH: usize = 16;
 /// Number of bytes of input key material for BLS key generation.
 const IKM_LENGTH: usize = 64;
 
-/// Number of bytes sampled before reducing into the BLS12-381 scalar field.
-const SCALAR_SAMPLE_LENGTH: usize = SCALAR_LENGTH + 128 / 8;
-
 /// Minimum number of points required to use parallel MSM.
 const MIN_PARALLEL_POINTS: usize = 32;
 
@@ -557,78 +554,6 @@ impl FixedSize for Private {
     const SIZE: usize = PRIVATE_KEY_LENGTH;
 }
 
-impl Object for Private {}
-
-impl<'a> AddAssign<&'a Self> for Private {
-    fn add_assign(&mut self, rhs: &'a Self) {
-        let mut out = self.expose(|scalar| scalar.clone());
-        rhs.expose(|rhs| out += rhs);
-        *self = Self::new(out);
-    }
-}
-
-impl<'a> Add<&'a Self> for Private {
-    type Output = Self;
-
-    fn add(self, rhs: &'a Self) -> Self::Output {
-        let mut out = self.expose_unwrap();
-        rhs.expose(|rhs| out += rhs);
-        Self::new(out)
-    }
-}
-
-impl<'a> SubAssign<&'a Self> for Private {
-    fn sub_assign(&mut self, rhs: &'a Self) {
-        let mut out = self.expose(|scalar| scalar.clone());
-        rhs.expose(|rhs| out -= rhs);
-        *self = Self::new(out);
-    }
-}
-
-impl<'a> Sub<&'a Self> for Private {
-    type Output = Self;
-
-    fn sub(self, rhs: &'a Self) -> Self::Output {
-        let mut out = self.expose_unwrap();
-        rhs.expose(|rhs| out -= rhs);
-        Self::new(out)
-    }
-}
-
-impl Neg for Private {
-    type Output = Self;
-
-    fn neg(self) -> Self::Output {
-        Self::new(-self.expose_unwrap())
-    }
-}
-
-impl Additive for Private {
-    fn zero() -> Self {
-        Self::new(Scalar::zero())
-    }
-}
-
-impl<'a> MulAssign<&'a Scalar> for Private {
-    fn mul_assign(&mut self, rhs: &'a Scalar) {
-        let mut out = self.expose(|scalar| scalar.clone());
-        out *= rhs;
-        *self = Self::new(out);
-    }
-}
-
-impl<'a> Mul<&'a Scalar> for Private {
-    type Output = Self;
-
-    fn mul(self, rhs: &'a Scalar) -> Self::Output {
-        let mut out = self.expose_unwrap();
-        out *= rhs;
-        Self::new(out)
-    }
-}
-
-impl Space<Scalar> for Private {}
-
 impl Random for Private {
     fn random(mut rng: impl CryptoRngCore) -> Self {
         let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
@@ -649,18 +574,6 @@ impl arbitrary::Arbitrary<'_> for Private {
 pub const PRIVATE_KEY_LENGTH: usize = SCALAR_LENGTH;
 
 impl Scalar {
-    /// Creates a scalar by reducing a wide big-endian integer modulo `r`.
-    fn reduce_bytes(bytes: &[u8; SCALAR_SAMPLE_LENGTH]) -> Self {
-        let mut ret = blst_fr::default();
-        // SAFETY: bytes points to a valid byte buffer of the provided length.
-        unsafe {
-            let mut scalar = blst_scalar::default();
-            blst_scalar_from_be_bytes(&mut scalar, bytes.as_ptr(), bytes.len());
-            blst_fr_from_scalar(&mut ret, &scalar);
-        }
-        Self(ret)
-    }
-
     /// Maps arbitrary bytes to a scalar using RFC9380 hash-to-field.
     pub fn map(dst: &[u8], msg: &[u8]) -> Self {
         // The BLS12-381 scalar field has a modulus of approximately 255 bits.
@@ -1020,9 +933,9 @@ impl Field for Scalar {
 
 impl Random for Scalar {
     fn random(mut rng: impl CryptoRngCore) -> Self {
-        let mut bytes = Zeroizing::new([0u8; SCALAR_SAMPLE_LENGTH]);
-        rng.fill_bytes(bytes.as_mut());
-        Self::reduce_bytes(&bytes)
+        let mut ikm = Zeroizing::new([0u8; IKM_LENGTH]);
+        rng.fill_bytes(ikm.as_mut());
+        Private::from_ikm(&ikm).expose_unwrap()
     }
 }
 

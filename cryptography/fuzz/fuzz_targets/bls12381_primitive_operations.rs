@@ -605,7 +605,7 @@ fn fuzz(op: FuzzOperation) {
             let mut encoded = Vec::new();
             scalar.write(&mut encoded);
             if let Ok(decoded) =
-                Scalar::read_cfg(&mut encoded.as_slice(), &ScalarReadCfg::AllowZero)
+                Scalar::read_cfg(&mut encoded.as_slice(), &ScalarReadCfg::RejectZero)
             {
                 assert_eq!(scalar, decoded);
             }
