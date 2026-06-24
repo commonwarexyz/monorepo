@@ -1,5 +1,5 @@
 use crate::{
-    journal::contiguous::{Contiguous, Reader as _},
+    journal::contiguous::Reader as _,
     merkle::{Family, Location},
 };
 use commonware_utils::range::NonEmptyRange;
@@ -70,7 +70,7 @@ where
     }
 
     async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
-        if Contiguous::size(self).await <= *start {
+        if self.size() <= *start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -82,7 +82,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Contiguous::size(self).await
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
@@ -107,7 +107,7 @@ where
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
         let mut journal = Self::init(context, config).await?;
-        let size = Contiguous::size(&journal).await;
+        let size = journal.size();
 
         // Fresh journal already aligned with the sync start - nothing to do.
         if size == 0 && *range.start() == 0 {
@@ -137,7 +137,7 @@ where
     }
 
     async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
-        if Contiguous::size(self).await <= *start {
+        if self.size() <= *start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -149,7 +149,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Contiguous::size(self).await
+        Self::size(self)
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
@@ -211,7 +211,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let size = Contiguous::size(&journal).await;
+            let size = <FixedJournal as Journal<F>>::size(&journal).await;
             assert_eq!(size, 7);
             let bounds = journal.reader().bounds();
             assert!(bounds.is_empty());
@@ -244,7 +244,7 @@ mod tests {
                 .await
                 .unwrap();
 
-            let size = Contiguous::size(&journal).await;
+            let size = <FixedJournal as Journal<F>>::size(&journal).await;
             assert_eq!(size, 7);
             let bounds = journal.reader().bounds();
             assert!(bounds.is_empty());

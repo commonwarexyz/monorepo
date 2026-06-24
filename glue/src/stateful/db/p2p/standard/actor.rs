@@ -5,7 +5,7 @@ use commonware_actor::mailbox as actor_mailbox;
 use commonware_codec::{Codec, Decode, Encode};
 use commonware_cryptography::PublicKey;
 use commonware_macros::select_loop;
-use commonware_p2p::{Blocker, Provider, Receiver, Sender};
+use commonware_p2p::{Blocker, Provider as PeerProvider, Receiver, Sender};
 use commonware_resolver::{p2p, Resolver as _};
 use commonware_runtime::{
     spawn_cell,
@@ -14,25 +14,24 @@ use commonware_runtime::{
 };
 use commonware_storage::{
     merkle::Family,
-    qmdb::sync::resolver::{FetchResult, Resolver as SyncResolver},
+    qmdb::sync::resolver::{FetchResult, Provider as ResolverProvider, Resolver as SyncResolver},
 };
-use commonware_utils::{
-    channel::{fallible::OneshotExt, oneshot},
-    sync::TracedAsyncRwLock,
-};
+use commonware_utils::channel::{fallible::OneshotExt, oneshot};
 use futures::future;
 use rand::Rng;
 use std::{
     collections::BTreeMap,
     num::{NonZeroU64, NonZeroUsize},
-    sync::Arc,
     time::Duration,
 };
 use tracing::{debug, info};
 
-type Op<DB> = <Arc<TracedAsyncRwLock<DB>> as SyncResolver>::Op;
-type DatabaseRoot<DB> = <Arc<TracedAsyncRwLock<DB>> as SyncResolver>::Digest;
-type SyncMailbox<F, DB> = Mailbox<DB, F, Op<DB>, DatabaseRoot<DB>>;
+type DbResolver<DB> = <DB as ResolverProvider>::Resolver;
+type Op<DB> = <DbResolver<DB> as SyncResolver>::Op;
+type DatabaseRoot<DB> = <DbResolver<DB> as SyncResolver>::Digest;
+type SyncMailbox<F, DB> = Mailbox<DbResolver<DB>, F, Op<DB>, DatabaseRoot<DB>>;
+type MailboxRx<F, DB> =
+    actor_mailbox::Receiver<mailbox::Message<DbResolver<DB>, F, Op<DB>, DatabaseRoot<DB>>>;
 type Pending<F, Op, D> = oneshot::Sender<Result<FetchResult<F, Op, D>, mailbox::ResponseDropped>>;
 type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, DatabaseRoot<DB>>>>;
 
@@ -40,8 +39,9 @@ type PendingSubs<F, DB> = BTreeMap<handler::Request<F>, Vec<Pending<F, Op<DB>, D
 pub struct Config<P, D, B, DB>
 where
     P: PublicKey,
-    D: Provider<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
+    DB: ResolverProvider,
 {
     /// Provider for the current peer set.
     pub peer_provider: D,
@@ -50,7 +50,7 @@ where
     pub blocker: B,
 
     /// Local database used to serve incoming requests when available.
-    pub database: Option<Arc<TracedAsyncRwLock<DB>>>,
+    pub database: Option<DbResolver<DB>>,
 
     /// Maximum size of resolver mailbox backlogs.
     pub mailbox_size: NonZeroUsize,
@@ -78,11 +78,11 @@ where
 }
 
 /// Runtime serving state for the resolver actor.
-enum State<DB> {
+enum State<DB: ResolverProvider> {
     /// Database is not attached yet.
     NoDb,
     /// Database is attached and can serve incoming requests.
-    HasDb(Arc<TracedAsyncRwLock<DB>>),
+    HasDb(DbResolver<DB>),
 }
 
 /// An action dispatched by incoming mailbox messages.
@@ -97,15 +97,16 @@ pub struct Actor<E, P, D, B, F, DB>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Provider<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Arc<TracedAsyncRwLock<DB>>: SyncResolver<Family = F>,
+    DB: ResolverProvider<Family = F>,
+    DbResolver<DB>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     context: ContextCell<E>,
     config: Config<P, D, B, DB>,
-    mailbox_rx: actor_mailbox::Receiver<mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>>,
+    mailbox_rx: MailboxRx<F, DB>,
     state: State<DB>,
     metrics: ResolverMetrics,
     pending: PendingSubs<F, DB>,
@@ -115,10 +116,11 @@ impl<E, P, D, B, F, DB> Actor<E, P, D, B, F, DB>
 where
     E: BufferPooler + Clock + Spawner + Rng + Metrics,
     P: PublicKey,
-    D: Provider<PublicKey = P>,
+    D: PeerProvider<PublicKey = P>,
     B: Blocker<PublicKey = P>,
     F: Family,
-    Arc<TracedAsyncRwLock<DB>>: SyncResolver<Family = F>,
+    DB: ResolverProvider<Family = F>,
+    DbResolver<DB>: SyncResolver<Family = F>,
     Op<DB>: Codec<Cfg = ()> + Send + Clone + 'static,
 {
     /// Create a new resolver actor and mailbox.
@@ -218,7 +220,7 @@ where
                     self.handle_deliver(key, value, response).await;
                 }
                 handler::EngineMessage::Produce { key, response } => {
-                    self.handle_produce(key, response).await;
+                    self.spawn_produce(key, response);
                 }
             },
         }
@@ -227,12 +229,12 @@ where
     /// Process a mailbox message. Returns a request to fetch if a new key was registered.
     fn handle_mailbox_message(
         &mut self,
-        message: mailbox::Message<DB, F, Op<DB>, DatabaseRoot<DB>>,
+        message: mailbox::Message<DbResolver<DB>, F, Op<DB>, DatabaseRoot<DB>>,
     ) -> MailboxAction<F> {
         match message {
-            mailbox::Message::AttachDatabase(db) => {
+            mailbox::Message::AttachResolver(db) => {
                 let replacing_existing = matches!(self.state, State::HasDb(_));
-                info!(replacing_existing, "attached resolver database");
+                info!(replacing_existing, "attached serving resolver");
                 self.state = State::HasDb(db);
                 let _ = self.metrics.has_database.try_set(1i64);
                 MailboxAction::None
@@ -344,12 +346,8 @@ where
         response.send_lossy(peer_valid);
     }
 
-    /// Serve a peer's request by querying the local database.
-    async fn handle_produce(
-        &mut self,
-        key: handler::Request<F>,
-        response: oneshot::Sender<bytes::Bytes>,
-    ) {
+    /// Serve a peer's request in a spawned task by querying the local database.
+    fn spawn_produce(&self, key: handler::Request<F>, response: oneshot::Sender<bytes::Bytes>) {
         let State::HasDb(database) = &self.state else {
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
@@ -358,6 +356,20 @@ where
             self.metrics.serve_requests.inc(status::Status::Dropped);
             return;
         }
+        let database = database.clone();
+        let metrics = self.metrics.clone();
+        self.context.child("serve").spawn(move |_| async move {
+            Self::handle_produce(database, metrics, key, response).await;
+        });
+    }
+
+    /// Serve a peer's request by querying the local database.
+    async fn handle_produce(
+        database: DbResolver<DB>,
+        metrics: ResolverMetrics,
+        key: handler::Request<F>,
+        response: oneshot::Sender<bytes::Bytes>,
+    ) {
         let (_cancel_tx, cancel_rx) = oneshot::channel();
         let result = database
             .get_operations(
@@ -370,7 +382,7 @@ where
             .await;
 
         let Ok(fetch) = result else {
-            self.metrics.serve_requests.inc(status::Status::Failure);
+            metrics.serve_requests.inc(status::Status::Failure);
             return;
         };
 
@@ -382,7 +394,7 @@ where
             }
             .encode(),
         );
-        self.metrics.serve_requests.inc(status::Status::Success);
+        metrics.serve_requests.inc(status::Status::Success);
     }
 }
 
@@ -399,7 +411,10 @@ mod tests {
     use commonware_storage::{
         journal::contiguous::fixed::Config as FixedLogConfig,
         mmr::{self, full::Config as MmrJournalConfig, Location, Proof},
-        qmdb::any::{unordered::fixed, FixedConfig},
+        qmdb::{
+            any::{unordered::fixed, FixedConfig},
+            sync::resolver::Provider as DbResolverProvider,
+        },
         translator::TwoCap,
     };
     use commonware_utils::{channel::oneshot, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
@@ -441,7 +456,8 @@ mod tests {
         TwoCap,
         Sequential,
     >;
-    type TestOp = <Arc<TracedAsyncRwLock<TestDb>> as SyncResolver>::Op;
+    type TestResolver = DbResolver<TestDb>;
+    type TestOp = <TestResolver as SyncResolver>::Op;
 
     type TestActor = Actor<
         deterministic::Context,
@@ -453,7 +469,7 @@ mod tests {
     >;
 
     fn test_config(
-        database: Option<Arc<TracedAsyncRwLock<TestDb>>>,
+        database: Option<TestResolver>,
     ) -> Config<ed25519::PublicKey, DummyProvider, DummyBlocker, TestDb> {
         Config {
             peer_provider: DummyProvider,
@@ -519,6 +535,11 @@ mod tests {
         Arc::new(TracedAsyncRwLock::new("test", db))
     }
 
+    async fn resolver(db: &Arc<TracedAsyncRwLock<TestDb>>) -> TestResolver {
+        let db = db.read().await;
+        DbResolverProvider::resolver(&*db)
+    }
+
     fn encoded_fetch_payload() -> Bytes {
         handler::Response::<mmr::Family, TestOp, sha256::Digest> {
             proof: Proof {
@@ -535,12 +556,10 @@ mod tests {
     #[test]
     fn produce_denied_before_attach() {
         deterministic::Runner::default().start(|context| async move {
-            let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
+            let (actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
 
             let (response_tx, response_rx) = oneshot::channel();
-            actor
-                .handle_produce(test_request_at(Location::new(1)), response_tx)
-                .await;
+            actor.spawn_produce(test_request_at(Location::new(1)), response_tx);
             assert!(response_rx.await.is_err());
         });
     }
@@ -551,12 +570,10 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-after-attach").await;
             let op_count = db.read().await.bounds().await.end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
+            actor.handle_mailbox_message(mailbox::Message::AttachResolver(resolver(&db).await));
 
             let (response_tx, response_rx) = oneshot::channel();
-            actor
-                .handle_produce(test_request_at(op_count), response_tx)
-                .await;
+            actor.spawn_produce(test_request_at(op_count), response_tx);
 
             let payload = response_rx
                 .await
@@ -571,7 +588,7 @@ mod tests {
             let (mut actor, _mailbox) = TestActor::new(context.child("actor"), test_config(None));
             let db = init_db(context.child("resolver_db"), "resolver-unbounded-max-ops").await;
             let op_count = db.read().await.bounds().await.end;
-            actor.handle_mailbox_message(mailbox::Message::AttachDatabase(db));
+            actor.handle_mailbox_message(mailbox::Message::AttachResolver(resolver(&db).await));
 
             let request = handler::Request {
                 op_count,
@@ -580,7 +597,7 @@ mod tests {
                 include_pinned_nodes: false,
             };
             let (response_tx, response_rx) = oneshot::channel();
-            actor.handle_produce(request, response_tx).await;
+            actor.spawn_produce(request, response_tx);
 
             assert!(response_rx.await.is_err());
         });

@@ -13,9 +13,12 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Buf, BufMut, BufferPooler, Metrics, Storage,
 };
-use commonware_utils::Array;
+use commonware_utils::{sync::Mutex, Array};
 use futures::{future::try_join_all, pin_mut, StreamExt};
-use std::collections::{btree_map, BTreeMap, BTreeSet};
+use std::{
+    collections::{btree_map, BTreeMap, BTreeSet},
+    sync::Arc,
+};
 use tracing::debug;
 
 /// Index entry for the archive.
@@ -101,6 +104,22 @@ where
     }
 }
 
+struct State<T: Translator, K: Array> {
+    pending: BTreeSet<u64>,
+    /// Oldest allowed section to read from. Updated when `prune` is called.
+    oldest_allowed: Option<u64>,
+    /// Maps translated key representation to its corresponding index.
+    keys: Index<T, u64>,
+    /// Maps index to its first position in the index journal.
+    indices: BTreeMap<u64, u64>,
+    /// Additional positions for indices that have more than one entry.
+    /// Only populated when used via [crate::archive::MultiArchive::put_multi].
+    extra_indices: BTreeMap<u64, Vec<u64>>,
+    /// Interval tracking for gap detection.
+    intervals: RMap,
+    _phantom: std::marker::PhantomData<K>,
+}
+
 /// Implementation of `Archive` storage.
 pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> {
     items_per_section: u64,
@@ -108,23 +127,7 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     /// Combined index + value storage with crash recovery.
     oversized: Oversized<E, Record<K>, V>,
 
-    pending: BTreeSet<u64>,
-
-    /// Oldest allowed section to read from. Updated when `prune` is called.
-    oldest_allowed: Option<u64>,
-
-    /// Maps translated key representation to its corresponding index.
-    keys: Index<T, u64>,
-
-    /// Maps index to its first position in the index journal.
-    indices: BTreeMap<u64, u64>,
-
-    /// Additional positions for indices that have more than one entry.
-    /// Only populated when used via [crate::archive::MultiArchive::put_multi].
-    extra_indices: BTreeMap<u64, Vec<u64>>,
-
-    /// Interval tracking for gap detection.
-    intervals: RMap,
+    state: Arc<Mutex<State<T, K>>>,
 
     // Metrics
     items_tracked: Gauge,
@@ -135,6 +138,52 @@ pub struct Archive<T: Translator, E: BufferPooler + Storage + Metrics, K: Array,
     syncs: Counter,
 }
 
+/// Cheap read handle for a prunable archive.
+pub struct Reader<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared> {
+    items_per_section: u64,
+    oversized: crate::journal::segmented::oversized::Reader<E, Record<K>, V>,
+    state: Arc<Mutex<State<T, K>>>,
+    unnecessary_reads: Counter,
+    gets: Counter,
+    has: Counter,
+}
+
+impl<T, E, K, V> Clone for Reader<T, E, K, V>
+where
+    T: Translator,
+    E: BufferPooler + Storage + Metrics,
+    K: Array,
+    V: CodecShared,
+{
+    fn clone(&self) -> Self {
+        Self {
+            items_per_section: self.items_per_section,
+            oversized: self.oversized.clone(),
+            state: self.state.clone(),
+            unnecessary_reads: self.unnecessary_reads.clone(),
+            gets: self.gets.clone(),
+            has: self.has.clone(),
+        }
+    }
+}
+
+impl<T: Translator, K: Array> State<T, K> {
+    fn positions(&self, index: u64) -> Option<Vec<u64>> {
+        let first = *self.indices.get(&index)?;
+        let extra = self.extra_indices.get(&index).map_or(0, Vec::len);
+        let mut positions = Vec::with_capacity(1 + extra);
+        positions.push(first);
+        if let Some(extra) = self.extra_indices.get(&index) {
+            positions.extend(extra.iter().copied());
+        }
+        Some(positions)
+    }
+
+    fn len(&self) -> usize {
+        self.indices.len()
+    }
+}
+
 impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
     Archive<T, E, K, V>
 {
@@ -143,14 +192,16 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         (index / self.items_per_section) * self.items_per_section
     }
 
-    /// Iterate over all positions for a given index (first + extras).
-    fn iter_positions(&self, index: u64) -> impl Iterator<Item = u64> + '_ {
-        self.indices.get(&index).into_iter().copied().chain(
-            self.extra_indices
-                .get(&index)
-                .into_iter()
-                .flat_map(|v| v.iter().copied()),
-        )
+    /// Return a cheap read handle.
+    pub fn reader(&self) -> Reader<T, E, K, V> {
+        Reader {
+            items_per_section: self.items_per_section,
+            oversized: self.oversized.reader(),
+            state: self.state.clone(),
+            unnecessary_reads: self.unnecessary_reads.clone(),
+            gets: self.gets.clone(),
+            has: self.has.clone(),
+        }
     }
 
     /// Initialize a new `Archive` instance.
@@ -218,12 +269,15 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         Ok(Self {
             items_per_section: cfg.items_per_section.get(),
             oversized,
-            pending: BTreeSet::new(),
-            oldest_allowed: None,
-            indices,
-            extra_indices,
-            intervals,
-            keys,
+            state: Arc::new(Mutex::new(State {
+                pending: BTreeSet::new(),
+                oldest_allowed: None,
+                keys,
+                indices,
+                extra_indices,
+                intervals,
+                _phantom: std::marker::PhantomData,
+            })),
             items_tracked,
             indices_pruned,
             unnecessary_reads,
@@ -233,55 +287,169 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
         })
     }
 
-    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
-        // Update metrics
-        self.gets.inc();
+    async fn put_internal(
+        &mut self,
+        index: u64,
+        key: K,
+        data: V,
+        skip_if_index_exists: bool,
+    ) -> Result<(), Error> {
+        // Check last pruned
+        {
+            let state = self.state.lock();
+            let oldest_allowed = state.oldest_allowed.unwrap_or(0);
+            if index < oldest_allowed {
+                return Err(Error::AlreadyPrunedTo(oldest_allowed));
+            }
 
-        // Get first position at this index
-        let position = match self.indices.get(&index) {
-            Some(&position) => position,
-            None => return Ok(None),
+            // Check for existing index when enforcing single-item semantics.
+            if skip_if_index_exists && state.indices.contains_key(&index) {
+                return Ok(());
+            }
+        }
+
+        // Write value and index entry atomically (glob first, then index)
+        let section = self.section(index);
+        let entry = Record::new(index, key.clone(), 0, 0);
+        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
+
+        let mut state = self.state.lock();
+        let oldest_allowed = state.oldest_allowed.unwrap_or(0);
+        if index < oldest_allowed {
+            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+        }
+
+        // Store index location
+        match state.indices.entry(index) {
+            btree_map::Entry::Vacant(e) => {
+                e.insert(position);
+            }
+            btree_map::Entry::Occupied(_) => {
+                state.extra_indices.entry(index).or_default().push(position);
+            }
+        }
+
+        // Store interval
+        state.intervals.insert(index);
+
+        // Insert and prune any useless keys
+        state
+            .keys
+            .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
+
+        // Add section to pending
+        state.pending.insert(section);
+
+        // Update metrics
+        let _ = self.items_tracked.try_set(state.len());
+        Ok(())
+    }
+
+    /// Prune `Archive` to the provided `min` (masked by the configured
+    /// section mask).
+    ///
+    /// If this is called with a min lower than the last pruned, nothing
+    /// will happen.
+    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
+        // Update `min` to reflect section mask
+        let min = self.section(min);
+
+        // Check if min is less than last pruned
+        if let Some(oldest_allowed) = self.state.lock().oldest_allowed {
+            if min <= oldest_allowed {
+                // We don't return an error in this case because the caller
+                // shouldn't be burdened with converting `min` to some section.
+                return Ok(());
+            }
+        }
+        debug!(min, "pruning archive");
+
+        // Prune oversized journal (handles both index and values)
+        self.oversized.prune(min).await?;
+
+        let mut state = self.state.lock();
+        // Remove pending writes (no need to call `sync` as we are pruning)
+        loop {
+            let next = match state.pending.iter().next() {
+                Some(section) if *section < min => *section,
+                _ => break,
+            };
+            state.pending.remove(&next);
+        }
+
+        // Remove all indices that are less than min
+        loop {
+            let next = match state.indices.first_key_value() {
+                Some((index, _)) if *index < min => *index,
+                _ => break,
+            };
+            state.indices.remove(&next).unwrap();
+            state.extra_indices.remove(&next);
+            self.indices_pruned.inc();
+        }
+
+        // Remove all keys from interval tree less than min
+        if min > 0 {
+            state.intervals.remove(0, min - 1);
+        }
+
+        // Update last pruned (to prevent reads from pruned sections)
+        state.oldest_allowed = Some(min);
+        let _ = self.items_tracked.try_set(state.len());
+        Ok(())
+    }
+}
+
+impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShared>
+    Reader<T, E, K, V>
+{
+    const fn section(&self, index: u64) -> u64 {
+        (index / self.items_per_section) * self.items_per_section
+    }
+
+    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
+        self.gets.inc();
+        let position = {
+            let state = self.state.lock();
+            match state.indices.get(&index) {
+                Some(&position) => position,
+                None => return Ok(None),
+            }
         };
 
-        // Fetch index entry to get value location
         let section = self.section(index);
         let entry = self.oversized.get(section, position).await?;
         let (value_offset, value_size) = entry.value_location();
-
-        // Fetch value directly from blob storage (bypasses page cache)
-        let value = self
+        Ok(self
             .oversized
             .get_value(section, value_offset, value_size)
-            .await?;
-        Ok(Some(value))
+            .await
+            .map(Some)?)
     }
 
     async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        // Update metrics
         self.gets.inc();
-
-        // Fetch index
-        let iter = self.keys.get(key);
-        let min_allowed = self.oldest_allowed.unwrap_or(0);
-        for index in iter {
-            // Continue if index is no longer allowed due to pruning.
-            if *index < min_allowed {
-                continue;
+        let candidates = {
+            let state = self.state.lock();
+            let min_allowed = state.oldest_allowed.unwrap_or(0);
+            let mut candidates = Vec::new();
+            for index in state.keys.get(key) {
+                if *index < min_allowed {
+                    continue;
+                }
+                let Some(positions) = state.positions(*index) else {
+                    return Err(Error::RecordCorrupted);
+                };
+                candidates.push((*index, positions));
             }
+            candidates
+        };
 
-            // Get all positions at this index
-            if !self.indices.contains_key(index) {
-                return Err(Error::RecordCorrupted);
-            }
-            let section = self.section(*index);
-
-            for position in self.iter_positions(*index) {
-                // Fetch index entry from index journal to verify key
+        for (index, positions) in candidates {
+            let section = self.section(index);
+            for position in positions {
                 let entry = self.oversized.get(section, position).await?;
-
-                // Verify key matches
                 if entry.key.as_ref() == key.as_ref() {
-                    // Fetch value directly from blob storage (bypasses page cache)
                     let (value_offset, value_size) = entry.value_location();
                     let value = self
                         .oversized
@@ -297,109 +465,91 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     fn has_index(&self, index: u64) -> bool {
-        // Check if index exists
-        self.indices.contains_key(&index)
+        self.state.lock().indices.contains_key(&index)
     }
 
-    async fn put_internal(
-        &mut self,
-        index: u64,
-        key: K,
-        data: V,
-        skip_if_index_exists: bool,
-    ) -> Result<(), Error> {
-        // Check last pruned
-        let oldest_allowed = self.oldest_allowed.unwrap_or(0);
-        if index < oldest_allowed {
-            return Err(Error::AlreadyPrunedTo(oldest_allowed));
+    /// Check if an item exists in [Archive].
+    pub async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+        self.has.inc();
+        match identifier {
+            Identifier::Index(index) => Ok(self.has_index(index)),
+            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
         }
+    }
 
-        // Check for existing index when enforcing single-item semantics.
-        if skip_if_index_exists && self.indices.contains_key(&index) {
-            return Ok(());
+    /// Retrieve an item from [Archive].
+    pub async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+        match identifier {
+            Identifier::Index(index) => self.get_index(index).await,
+            Identifier::Key(key) => self.get_key(key).await,
         }
+    }
 
-        // Write value and index entry atomically (glob first, then index)
+    /// Retrieve all values stored at the given index.
+    pub async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
+        self.gets.inc();
+        let positions = {
+            let state = self.state.lock();
+            let Some(positions) = state.positions(index) else {
+                return Ok(None);
+            };
+            positions
+        };
+
         let section = self.section(index);
-        let entry = Record::new(index, key.clone(), 0, 0);
-        let (position, _, _) = self.oversized.append(section, entry, &data).await?;
-
-        // Store index location
-        match self.indices.entry(index) {
-            btree_map::Entry::Vacant(e) => {
-                e.insert(position);
-            }
-            btree_map::Entry::Occupied(_) => {
-                self.extra_indices.entry(index).or_default().push(position);
-            }
+        let mut values = Vec::with_capacity(positions.len());
+        for position in positions {
+            let entry = self.oversized.get(section, position).await?;
+            let (value_offset, value_size) = entry.value_location();
+            let value = self
+                .oversized
+                .get_value(section, value_offset, value_size)
+                .await?;
+            values.push(value);
         }
-
-        // Store interval
-        self.intervals.insert(index);
-
-        // Insert and prune any useless keys
-        self.keys
-            .insert_and_retain(&key, index, |v| *v >= oldest_allowed);
-
-        // Add section to pending
-        self.pending.insert(section);
-
-        // Update metrics
-        let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+        Ok(Some(values))
     }
 
-    /// Prune `Archive` to the provided `min` (masked by the configured
-    /// section mask).
-    ///
-    /// If this is called with a min lower than the last pruned, nothing
-    /// will happen.
-    pub async fn prune(&mut self, min: u64) -> Result<(), Error> {
-        // Update `min` to reflect section mask
-        let min = self.section(min);
+    /// Retrieve the end of the current range and the start of the next range.
+    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.state.lock().intervals.next_gap(index)
+    }
 
-        // Check if min is less than last pruned
-        if let Some(oldest_allowed) = self.oldest_allowed {
-            if min <= oldest_allowed {
-                // We don't return an error in this case because the caller
-                // shouldn't be burdened with converting `min` to some section.
-                return Ok(());
-            }
-        }
-        debug!(min, "pruning archive");
+    /// Returns up to `max` missing items starting from `index`.
+    pub fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.state.lock().intervals.missing_items(index, max)
+    }
 
-        // Prune oversized journal (handles both index and values)
-        self.oversized.prune(min).await?;
+    /// Retrieve an iterator over all populated ranges.
+    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.state
+            .lock()
+            .intervals
+            .iter()
+            .map(|(&s, &e)| (s, e))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 
-        // Remove pending writes (no need to call `sync` as we are pruning)
-        loop {
-            let next = match self.pending.iter().next() {
-                Some(section) if *section < min => *section,
-                _ => break,
-            };
-            self.pending.remove(&next);
-        }
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.state
+            .lock()
+            .intervals
+            .iter_from(from)
+            .map(|(&s, &e)| (s, e))
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
 
-        // Remove all indices that are less than min
-        loop {
-            let next = match self.indices.first_key_value() {
-                Some((index, _)) if *index < min => *index,
-                _ => break,
-            };
-            self.indices.remove(&next).unwrap();
-            self.extra_indices.remove(&next);
-            self.indices_pruned.inc();
-        }
+    /// Retrieve the first index in the archive.
+    pub fn first_index(&self) -> Option<u64> {
+        self.state.lock().intervals.first_index()
+    }
 
-        // Remove all keys from interval tree less than min
-        if min > 0 {
-            self.intervals.remove(0, min - 1);
-        }
-
-        // Update last pruned (to prevent reads from pruned sections)
-        self.oldest_allowed = Some(min);
-        let _ = self.items_tracked.try_set(self.indices.len());
-        Ok(())
+    /// Retrieve the last index in the archive.
+    pub fn last_index(&self) -> Option<u64> {
+        self.state.lock().intervals.last_index()
     }
 }
 
@@ -414,55 +564,48 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
-        match identifier {
-            Identifier::Index(index) => self.get_index(index).await,
-            Identifier::Key(key) => self.get_key(key).await,
-        }
+        self.reader().get(identifier).await
     }
 
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
-        self.has.inc();
-        match identifier {
-            Identifier::Index(index) => Ok(self.has_index(index)),
-            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
-        }
+        self.reader().has(identifier).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
         // Collect pending sections and update metrics
-        let pending: Vec<u64> = self.pending.iter().copied().collect();
+        let pending: Vec<u64> = self.state.lock().pending.iter().copied().collect();
         self.syncs.inc_by(pending.len() as u64);
 
         // Sync oversized journal (handles both index and values)
         let syncs: Vec<_> = pending.iter().map(|s| self.oversized.sync(*s)).collect();
         try_join_all(syncs).await?;
 
-        self.pending.clear();
+        self.state.lock().pending.clear();
         Ok(())
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.intervals.next_gap(index)
+        self.reader().next_gap(index)
     }
 
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.intervals.missing_items(index, max)
+        self.reader().missing_items(index, max)
     }
 
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter().map(|(&s, &e)| (s, e))
+        self.reader().ranges()
     }
 
     fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        self.intervals.iter_from(from).map(|(&s, &e)| (s, e))
+        self.reader().ranges_from(from)
     }
 
     fn first_index(&self) -> Option<u64> {
-        self.intervals.first_index()
+        self.reader().first_index()
     }
 
     fn last_index(&self) -> Option<u64> {
-        self.intervals.last_index()
+        self.reader().last_index()
     }
 
     #[boxed]
@@ -475,32 +618,7 @@ impl<T: Translator, E: BufferPooler + Storage + Metrics, K: Array, V: CodecShare
     crate::archive::MultiArchive for Archive<T, E, K, V>
 {
     async fn get_all(&self, index: u64) -> Result<Option<Vec<V>>, Error> {
-        // Update metrics
-        self.gets.inc();
-
-        // Check if the index exists.
-        if !self.indices.contains_key(&index) {
-            return Ok(None);
-        }
-
-        // Get all positions at this index
-        let section = self.section(index);
-        let extra_count = self.extra_indices.get(&index).map_or(0, Vec::len);
-
-        let mut values = Vec::with_capacity(1 + extra_count);
-        for position in self.iter_positions(index) {
-            // Fetch index entry from index journal to verify key
-            let entry = self.oversized.get(section, position).await?;
-
-            // Fetch value directly from blob storage (bypasses page cache)
-            let (value_offset, value_size) = entry.value_location();
-            let value = self
-                .oversized
-                .get_value(section, value_offset, value_size)
-                .await?;
-            values.push(value);
-        }
-        Ok(Some(values))
+        self.reader().get_all(index).await
     }
 
     async fn put_multi(&mut self, index: u64, key: K, data: V) -> Result<(), Error> {

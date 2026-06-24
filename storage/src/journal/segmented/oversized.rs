@@ -41,8 +41,8 @@
 //! return a checksum error even though the index entry exists._
 
 use super::{
-    fixed::{Config as FixedConfig, Journal as FixedJournal},
-    glob::{Config as GlobConfig, Glob},
+    fixed::{Config as FixedConfig, Journal as FixedJournal, Reader as FixedReader},
+    glob::{Config as GlobConfig, Glob, Reader as GlobReader},
 };
 use crate::journal::Error;
 use commonware_codec::{Codec, CodecFixed, CodecShared};
@@ -97,6 +97,27 @@ pub struct Config<C> {
 pub struct Oversized<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
     index: FixedJournal<E, I>,
     values: Glob<E, V>,
+}
+
+/// A cheap read handle for oversized values.
+pub struct Reader<E: BufferPooler + Storage + Metrics, I: Record, V: Codec> {
+    index: FixedReader<E, I>,
+    values: GlobReader<E, V>,
+}
+
+impl<E, I, V> Clone for Reader<E, I, V>
+where
+    E: BufferPooler + Storage + Metrics,
+    I: Record,
+    V: Codec,
+    V::Cfg: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index.clone(),
+            values: self.values.clone(),
+        }
+    }
 }
 
 impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShared>
@@ -305,6 +326,14 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         self.index.get(section, position).await
     }
 
+    /// Return a cheap read handle.
+    pub fn reader(&self) -> Reader<E, I, V> {
+        Reader {
+            index: self.index.reader(),
+            values: self.values.reader(),
+        }
+    }
+
     /// Get the last entry for a section, if any.
     ///
     /// Returns `Ok(None)` if the section is empty.
@@ -449,6 +478,31 @@ impl<E: BufferPooler + Storage + Metrics, I: Record + Send + Sync, V: CodecShare
         try_join(self.index.destroy(), self.values.destroy())
             .await
             .map(|_| ())
+    }
+}
+
+impl<E, I, V> Reader<E, I, V>
+where
+    E: BufferPooler + Storage + Metrics,
+    I: Record + Send + Sync,
+    V: CodecShared,
+{
+    /// Get entry at position (index entry only, not value).
+    pub async fn get(&self, section: u64, position: u64) -> Result<I, Error> {
+        self.index.get(section, position).await
+    }
+
+    /// Get value using offset/size from entry.
+    pub async fn get_value(&self, section: u64, offset: u64, size: u32) -> Result<V, Error> {
+        self.values.get(section, offset, size).await
+    }
+
+    /// Get entry and value at position.
+    pub async fn get_entry_value(&self, section: u64, position: u64) -> Result<(I, V), Error> {
+        let entry = self.get(section, position).await?;
+        let (offset, size) = entry.value_location();
+        let value = self.get_value(section, offset, size).await?;
+        Ok((entry, value))
     }
 }
 

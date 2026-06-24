@@ -4,7 +4,7 @@
 
 use crate::{
     index::Unordered as UnorderedIndex,
-    journal::contiguous::{Contiguous, Mutable},
+    journal::authenticated,
     merkle::{
         self, batch::MerkleizedBatch as GenericMerkleizedBatch, mem::Mem,
         storage::Storage as MerkleStorage, Graftable, Location, Position, Readable,
@@ -378,7 +378,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         self.inner.get(key, &db.any).await
@@ -396,7 +396,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         self.inner.get_many(keys, &db.any).await
@@ -416,7 +416,7 @@ where
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Unordered<K, V>, N, S>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
     {
         let Self {
@@ -451,7 +451,7 @@ where
     ) -> Result<Option<V::Value>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
         self.inner.get(key, &db.any).await
@@ -467,7 +467,7 @@ where
     ) -> Result<Vec<Option<V::Value>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
         self.inner.get_many(keys, &db.any).await
@@ -487,7 +487,7 @@ where
     ) -> Result<Arc<MerkleizedBatch<F, H::Digest, update::Ordered<K, V>, N, S>>, Error<F>>
     where
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
     {
         let Self {
@@ -585,7 +585,7 @@ where
     F: Graftable,
     E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -909,7 +909,7 @@ where
     ) -> Result<Option<U::Value>, Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
@@ -926,7 +926,7 @@ where
     ) -> Result<Vec<Option<U::Value>>, Error<F>>
     where
         E: Context,
-        C: Contiguous<Item = Operation<F, U>>,
+        C: authenticated::Inner<E, Item = Operation<F, U>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher<Digest = D>,
     {
@@ -939,7 +939,7 @@ where
     F: Graftable,
     E: Context,
     U: update::Update + Send + Sync,
-    C: Contiguous<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     I: UnorderedIndex<Value = Location<F>>,
     H: Hasher,
     S: Strategy,
@@ -964,12 +964,9 @@ where
 #[cfg(any(test, feature = "test-traits"))]
 mod trait_impls {
     use super::*;
-    use crate::{
-        journal::contiguous::Mutable,
-        qmdb::any::traits::{
-            BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
-            UnmerkleizedBatch as UnmerkleizedBatchTrait,
-        },
+    use crate::qmdb::any::traits::{
+        BatchableDb, MerkleizedBatch as MerkleizedBatchTrait,
+        UnmerkleizedBatch as UnmerkleizedBatchTrait,
     };
     use std::future::Future;
 
@@ -985,7 +982,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         S: Strategy,
         Operation<F, update::Unordered<K, V>>: Codec,
@@ -1018,7 +1015,7 @@ mod trait_impls {
         V: ValueEncoding + 'static,
         H: Hasher,
         E: Context,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         S: Strategy,
         Operation<F, update::Ordered<K, V>>: Codec,
@@ -1066,7 +1063,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Unordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Unordered<K, V>>>,
         I: UnorderedIndex<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,
@@ -1098,7 +1095,7 @@ mod trait_impls {
         E: Context,
         K: Key,
         V: ValueEncoding + 'static,
-        C: Mutable<Item = Operation<F, update::Ordered<K, V>>>,
+        C: authenticated::Inner<E, Item = Operation<F, update::Ordered<K, V>>>,
         I: crate::index::Ordered<Value = Location<F>> + 'static,
         H: Hasher,
         S: Strategy,

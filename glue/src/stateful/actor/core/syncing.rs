@@ -8,7 +8,7 @@ use crate::stateful::{
         processor::{FinalizeStatus, Processor},
         syncer::{self, StateSyncMetadata, SyncResult},
     },
-    db::{Anchor, AttachableResolverSet},
+    db::{Anchor, AttachableResolverSet, DatabaseSet},
     Application, PruneConfig,
 };
 use commonware_actor::mailbox as actor_mailbox;
@@ -56,7 +56,7 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
+    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::ServingResolvers>,
 {
     /// Runtime context.
     pub(super) context: ContextCell<E>,
@@ -108,7 +108,7 @@ where
     A: Application<E>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
+    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::ServingResolvers>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     pub async fn start(mut self) {
@@ -243,6 +243,7 @@ where
     async fn transition(mut self, handoff: Option<FinalizedHandoff<A::Block>>) {
         let artifact = self.artifact.take().expect("transition must have artifact");
         let synced_height = artifact.anchor.height;
+        let serving_resolvers = artifact.serving_resolvers;
 
         let _ = self.metrics.sync_done.try_set(1);
         let mut processor = Processor::new(
@@ -284,11 +285,9 @@ where
             }
         }
 
-        // Attach the resolvers to the initialized databases before starting the processor,
-        // so that this instance can serve peers database operations and proofs.
-        self.resolvers
-            .attach_databases(processor.databases().clone())
-            .await;
+        // Attach the resolvers before starting the processor, so that this instance can serve
+        // peers database operations and proofs.
+        self.resolvers.attach_resolvers(serving_resolvers).await;
 
         // `subscribe_databases` promises a database set that is already attached to the
         // serving actor, so keep subscribers waiting until the resolver handoff is complete.
@@ -350,7 +349,7 @@ mod tests {
     use commonware_utils::{
         acknowledgement::Exact,
         channel::oneshot,
-        sync::{AsyncMutex, TracedAsyncRwLock},
+        sync::AsyncMutex,
         Acknowledgement, NZUsize, NZU16, NZU64,
     };
     use futures::{pin_mut, poll, FutureExt};
@@ -359,8 +358,8 @@ mod tests {
     #[derive(Clone)]
     struct NoopResolver;
 
-    impl<DB: Send + Sync + 'static> AttachableResolver<DB> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<DB>>) {}
+    impl AttachableResolver<()> for NoopResolver {
+        async fn attach_resolver(&self, _resolver: ()) {}
     }
 
     struct TestHarness {
@@ -390,6 +389,7 @@ mod tests {
                     database_subscribers: Vec::new(),
                     artifact: Some(SyncResult {
                         databases: test_databases(),
+                        serving_resolvers: (),
                         anchor,
                     }),
                     resolvers: NoopResolver,

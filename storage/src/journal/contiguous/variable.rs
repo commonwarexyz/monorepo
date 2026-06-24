@@ -4,7 +4,7 @@
 //! the preferred recovery point for replaying data to rebuild offset entries.
 
 use super::{
-    blobs::{Blobs, Handle, Partition, Snapshot},
+    blobs::{Blobs, Handle, Partition, Publisher, Snapshot},
     fixed,
     metrics::VariableMetrics as Metrics,
     replay::{self, Source as _},
@@ -20,7 +20,7 @@ use crate::{
 use commonware_codec::{varint::MAX_U32_VARINT_SIZE, Codec, CodecShared};
 use commonware_macros::boxed;
 use commonware_runtime::{
-    buffer::paged::{self, CacheRef, Replay, Writer},
+    buffer::paged::{self, CacheRef, Replay, Writer as PagedWriter},
     Blob, Buf, IoBuf, IoBufMut,
 };
 use commonware_utils::NZUsize;
@@ -37,8 +37,8 @@ use std::{
 use tracing::debug;
 use tracing::warn;
 
-/// Items encoded for a deferred append, created by [`Journal::prepare_append`] and consumed by
-/// [`Journal::append_prepared`].
+/// Items encoded for a deferred append, created by [`Writer::prepare_append`] and consumed by
+/// [`Writer::append_prepared`].
 pub struct PreparedAppend<V> {
     encoded: Vec<u8>,
     item_starts: Vec<usize>,
@@ -287,10 +287,37 @@ pub struct Journal<E: Context, V: Codec> {
     metrics: Arc<Metrics<E>>,
 }
 
+/// Append/prune side of a split variable-size journal.
+///
+/// Destructive repair operations such as rewind, clear, and destroy remain available only on the
+/// unsplit [Journal].
+pub struct Writer<E: Context, V: Codec> {
+    journal: Journal<E, V>,
+    published: Publisher<ReadState<E>>,
+}
+
+/// Reader factory for a split variable-size journal.
+///
+/// Readers clone one combined data/offset state, so they never observe mismatched generations.
+pub struct Readers<E: Context, V: Codec> {
+    published: Publisher<ReadState<E>>,
+    items_per_blob: NonZeroU64,
+    codec_config: V::Cfg,
+    compressed: bool,
+    metrics: Arc<Metrics<E>>,
+    _phantom: PhantomData<V>,
+}
+
+/// Published read state for a variable journal.
+struct ReadState<E: Context> {
+    data: Arc<Snapshot<E::Blob>>,
+    offsets: fixed::Reader<E, u64>,
+}
+
 /// A reader over a snapshot of the variable journal.
 pub struct Reader<E: Context, V: Codec> {
     /// Owned snapshot of the journal's data blobs at snapshot time.
-    data: Snapshot<E::Blob>,
+    data: Arc<Snapshot<E::Blob>>,
 
     /// Maps positions to byte offsets within the data blobs.
     offsets: fixed::Reader<E, u64>,
@@ -306,6 +333,22 @@ pub struct Reader<E: Context, V: Codec> {
 
     /// Journal and Reader metrics.
     metrics: Arc<Metrics<E>>,
+}
+
+impl<E: Context, V: Codec> Clone for Reader<E, V>
+where
+    V::Cfg: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            data: self.data.clone(),
+            offsets: self.offsets.clone(),
+            items_per_blob: self.items_per_blob,
+            codec_config: self.codec_config.clone(),
+            compressed: self.compressed,
+            metrics: self.metrics.clone(),
+        }
+    }
 }
 
 impl<E: Context, V: CodecShared> Reader<E, V> {
@@ -987,6 +1030,39 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(())
     }
 
+    /// Rewinds the journal to the last item matching `predicate`.
+    pub(crate) async fn rewind_to<P>(&mut self, mut predicate: P) -> Result<u64, Error>
+    where
+        P: FnMut(&V) -> bool + Send,
+    {
+        let (bounds, rewind_size) = {
+            let reader = self.reader();
+            let bounds = reader.bounds();
+            let mut rewind_size = bounds.end;
+
+            while rewind_size > bounds.start {
+                let item = reader.read(rewind_size - 1).await?;
+                if predicate(&item) {
+                    break;
+                }
+                rewind_size -= 1;
+            }
+
+            (bounds, rewind_size)
+        };
+
+        if rewind_size != bounds.end {
+            let rewound_items = bounds.end - rewind_size;
+            warn!(
+                journal_size = bounds.end,
+                rewound_items, "rewinding journal items"
+            );
+            self.rewind(rewind_size).await?;
+        }
+
+        Ok(rewind_size)
+    }
+
     /// Append a new item to the journal, returning its position.
     ///
     /// The position returned is a stable, consecutively increasing value starting from 0.
@@ -999,7 +1075,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
-    pub async fn append(&mut self, item: &V) -> Result<u64, Error> {
+    pub(crate) async fn append(&mut self, item: &V) -> Result<u64, Error> {
         let _timer = self.metrics.append_timer();
         self.metrics.append_calls.inc();
         self.append_many_inner(Many::Flat(std::slice::from_ref(item)))
@@ -1009,7 +1085,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Append items to the journal, returning the position of the last item appended.
     ///
     /// Returns [Error::EmptyAppend] if items is empty.
-    pub async fn append_many<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
+    pub(crate) async fn append_many<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
         let _timer = self.metrics.append_many_timer();
         self.metrics.append_many_calls.inc();
         self.append_many_inner(items).await
@@ -1023,7 +1099,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// This lets callers serialize borrowed items synchronously, release those borrows, and
     /// perform the append without holding unrelated locks across journal I/O.
-    pub fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
+    pub(crate) fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
         let mut encoded = Vec::new();
         let mut item_starts = Vec::with_capacity(items.len());
         let mut encode = |item: &V| {
@@ -1058,7 +1134,10 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Returns [Error::EmptyAppend] if `prepared` contains no items.
     /// Returns [Error::InvalidConfiguration] if `prepared` was encoded with different compression
     /// settings than this journal uses.
-    pub async fn append_prepared(&mut self, prepared: PreparedAppend<V>) -> Result<u64, Error> {
+    pub(crate) async fn append_prepared(
+        &mut self,
+        prepared: PreparedAppend<V>,
+    ) -> Result<u64, Error> {
         let _timer = self.metrics.append_prepared_timer();
         self.metrics.append_prepared_calls.inc();
         self.write_encoded(prepared).await
@@ -1149,11 +1228,19 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         Ok(self.bounds.end - 1)
     }
 
-    /// Acquire a reader that holds an owned, consistent snapshot of the journal.
-    pub fn reader(&self) -> Reader<E, V> {
-        Reader {
-            data: self.blobs.to_snapshot(self.bounds.clone()),
+    /// Capture the data and offset snapshots that must be read together.
+    fn read_state(&self) -> ReadState<E> {
+        ReadState {
+            data: Arc::new(self.blobs.to_snapshot(self.bounds.clone())),
             offsets: self.offsets.reader(),
+        }
+    }
+
+    /// Build a reader from published state.
+    fn reader_from_state(&self, state: &ReadState<E>) -> Reader<E, V> {
+        Reader {
+            data: state.data.clone(),
+            offsets: state.offsets.clone(),
             items_per_blob: self.items_per_blob,
             codec_config: self.codec_config.clone(),
             compressed: self.compression.is_some(),
@@ -1161,9 +1248,36 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
         }
     }
 
+    /// Acquire a reader that holds an owned, consistent snapshot of the journal.
+    pub(crate) fn reader(&self) -> Reader<E, V> {
+        self.reader_from_state(&self.read_state())
+    }
+
+    /// Split the journal into an append/prune writer and an independent reader factory.
+    ///
+    /// After splitting, the writer no longer exposes rewind or reset operations. Readers clone the
+    /// latest complete combined data/offset state published by the writer and can be created while
+    /// a write future holds `&mut Writer`.
+    pub fn split(self) -> (Writer<E, V>, Readers<E, V>) {
+        let published = Publisher::new(self.read_state());
+        let readers = Readers {
+            published: published.clone(),
+            items_per_blob: self.items_per_blob,
+            codec_config: self.codec_config.clone(),
+            compressed: self.compression.is_some(),
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        };
+        let writer = Writer {
+            journal: self,
+            published,
+        };
+        (writer, readers)
+    }
+
     /// Return the total number of items in the journal, irrespective of pruning. The next value
     /// appended to the journal will be at this position.
-    pub const fn size(&self) -> u64 {
+    pub(crate) const fn size(&self) -> u64 {
         self.bounds.end
     }
 
@@ -1177,7 +1291,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Errors may leave the journal in an inconsistent state. The journal should be closed and
     /// reopened to trigger alignment in [Journal::init].
-    pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+    pub(crate) async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
         let items_per_blob = self.items_per_blob.get();
 
         // Calculate the blob that would contain min_position, capped to the tail (which is
@@ -1222,7 +1336,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     ///
     /// Does not advance the recovery watermark, so reopen may need to replay entries beyond
     /// the previous `sync()`.
-    pub async fn commit(&mut self) -> Result<(), Error> {
+    pub(crate) async fn commit(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.commit_timer();
         self.metrics.record_commit();
         self.flush_dirty_data().await?;
@@ -1231,7 +1345,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     }
 
     /// Persist dirty data blobs and all metadata for both the data and offsets journals.
-    pub async fn sync(&mut self) -> Result<(), Error> {
+    pub(crate) async fn sync(&mut self) -> Result<(), Error> {
         let _timer = self.metrics.sync_timer();
         self.metrics.sync_calls.inc();
         self.flush_dirty_data().await?;
@@ -1282,7 +1396,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Scan every frame in `writer`, returning the item count and valid prefix.
     async fn scan_blob(
-        writer: &Writer<E::Blob>,
+        writer: &PagedWriter<E::Blob>,
         codec_config: &V::Cfg,
         compressed: bool,
     ) -> Result<BlobScan, Error> {
@@ -1316,7 +1430,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Returns the recovered bounds (`pruning_boundary..size`).
     async fn align(
         partition: &Partition<E>,
-        pending: &mut BTreeMap<u64, Writer<E::Blob>>,
+        pending: &mut BTreeMap<u64, PagedWriter<E::Blob>>,
         offsets: &mut fixed::Journal<E, u64>,
         items_per_blob: u64,
         codec_config: &V::Cfg,
@@ -1501,7 +1615,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// first-append crash.
     async fn align_empty(
         partition: &Partition<E>,
-        pending: &mut BTreeMap<u64, Writer<E::Blob>>,
+        pending: &mut BTreeMap<u64, PagedWriter<E::Blob>>,
         offsets: &mut fixed::Journal<E, u64>,
         items_per_blob: u64,
     ) -> Result<Range<u64>, Error> {
@@ -1574,7 +1688,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
 
     /// Sync data blobs backing rebuilt offsets before the offsets are made durable.
     async fn sync_data_range(
-        pending: &BTreeMap<u64, Writer<E::Blob>>,
+        pending: &BTreeMap<u64, PagedWriter<E::Blob>>,
         start_position: u64,
         end_position: u64,
         items_per_blob: u64,
@@ -1602,7 +1716,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// blobs and returns the contiguous data-backed size.
     async fn rebuild_offsets_from_anchor(
         partition: &Partition<E>,
-        pending: &mut BTreeMap<u64, Writer<E::Blob>>,
+        pending: &mut BTreeMap<u64, PagedWriter<E::Blob>>,
         offsets: &mut fixed::Journal<E, u64>,
         items_per_blob: u64,
         anchor: u64,
@@ -1720,7 +1834,7 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
     /// Remove every blob newer than `blob`, newest-first so a crash leaves a contiguous prefix.
     async fn remove_blobs_after(
         partition: &Partition<E>,
-        pending: &mut BTreeMap<u64, Writer<E::Blob>>,
+        pending: &mut BTreeMap<u64, PagedWriter<E::Blob>>,
         blob: u64,
     ) -> Result<(), Error> {
         while let Some((&newest, _)) = pending.last_key_value() {
@@ -1731,6 +1845,146 @@ impl<E: Context, V: CodecShared> Journal<E, V> {
             partition.remove(newest).await?;
         }
         Ok(())
+    }
+}
+
+impl<E: Context, V: CodecShared> Writer<E, V> {
+    /// Borrow the underlying journal.
+    #[cfg(test)]
+    pub(crate) const fn journal(&self) -> &Journal<E, V> {
+        &self.journal
+    }
+
+    /// Recover the underlying journal.
+    pub(crate) fn into_journal(self) -> Journal<E, V> {
+        self.journal
+    }
+
+    /// Publish the journal's latest complete data/offset snapshot.
+    fn publish(&self) {
+        self.published.publish(self.journal.read_state());
+    }
+
+    /// Return the total number of items in the journal, irrespective of pruning.
+    pub const fn size(&self) -> u64 {
+        self.journal.size()
+    }
+
+    /// Append a new item to the journal.
+    pub async fn append(&mut self, item: &V) -> Result<u64, Error> {
+        let position = self.journal.append(item).await?;
+        self.publish();
+        Ok(position)
+    }
+
+    /// Append items to the journal, returning the position of the last item appended.
+    pub async fn append_many<'a>(&'a mut self, items: Many<'a, V>) -> Result<u64, Error> {
+        let position = self.journal.append_many(items).await?;
+        self.publish();
+        Ok(position)
+    }
+
+    /// Encode `items` into a buffer that can be appended later with [Self::append_prepared].
+    pub fn prepare_append(&self, items: Many<'_, V>) -> Result<PreparedAppend<V>, Error> {
+        self.journal.prepare_append(items)
+    }
+
+    /// Append items encoded by [Self::prepare_append].
+    pub async fn append_prepared(&mut self, prepared: PreparedAppend<V>) -> Result<u64, Error> {
+        let position = self.journal.append_prepared(prepared).await?;
+        self.publish();
+        Ok(position)
+    }
+
+    /// Prune items older than `min_position`.
+    pub async fn prune(&mut self, min_position: u64) -> Result<bool, Error> {
+        let pruned = self.journal.prune(min_position).await?;
+        if pruned {
+            self.publish();
+        }
+        Ok(pruned)
+    }
+
+    /// Rewind to `size` when no reader factory can create new snapshots.
+    #[cfg(test)]
+    pub(crate) async fn rewind(&mut self, size: u64) -> Result<(), Error> {
+        if !self.published.clear_if_exclusive() {
+            return Err(Error::BlobInUse(0));
+        }
+
+        self.rewind_unpublished(size).await
+    }
+
+    /// Rewind to `size` when this writer is paired only with `readers`.
+    pub(crate) async fn rewind_with_readers(
+        &mut self,
+        readers: &Readers<E, V>,
+        size: u64,
+    ) -> Result<(), Error> {
+        if !self.published.clear_if_shared_with(&readers.published) {
+            return Err(Error::BlobInUse(0));
+        }
+
+        self.rewind_unpublished(size).await
+    }
+
+    async fn rewind_unpublished(&mut self, size: u64) -> Result<(), Error> {
+        let result = self.journal.rewind(size).await;
+        self.publish();
+        result
+    }
+
+    /// Persist dirty data blobs so committed data survives a crash.
+    pub async fn commit(&mut self) -> Result<(), Error> {
+        self.journal.commit().await
+    }
+
+    /// Persist dirty data blobs and all metadata for both the data and offsets journals.
+    pub async fn sync(&mut self) -> Result<(), Error> {
+        self.journal.sync().await
+    }
+}
+
+impl<E: Context, V: CodecShared> Readers<E, V> {
+    /// Return an owned snapshot of the latest published journal state.
+    pub fn reader(&self) -> Reader<E, V> {
+        let state = self.published.get();
+        Reader {
+            data: state.data.clone(),
+            offsets: state.offsets.clone(),
+            items_per_blob: self.items_per_blob,
+            codec_config: self.codec_config.clone(),
+            compressed: self.compressed,
+            metrics: self.metrics.clone(),
+        }
+    }
+}
+
+impl<E: Context, V: Codec> Clone for Readers<E, V>
+where
+    V::Cfg: Clone,
+{
+    fn clone(&self) -> Self {
+        Self {
+            published: self.published.clone(),
+            items_per_blob: self.items_per_blob,
+            codec_config: self.codec_config.clone(),
+            compressed: self.compressed,
+            metrics: self.metrics.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<E: Context, V: CodecShared> Contiguous for Readers<E, V> {
+    type Item = V;
+
+    async fn reader(&self) -> impl super::Reader<Item = V> + '_ {
+        Self::reader(self)
+    }
+
+    async fn size(&self) -> u64 {
+        self.published.get().data.bounds.end
     }
 }
 
@@ -1887,20 +2141,13 @@ impl<B: Blob, V: CodecShared> replay::Source for TailReplayState<B, V> {
     }
 }
 
-// Implement Contiguous trait for variable-length items
-impl<E: Context, V: CodecShared> Contiguous for Journal<E, V> {
+impl<E: Context, V: CodecShared> Mutable for Writer<E, V> {
     type Item = V;
-
-    async fn reader(&self) -> impl super::Reader<Item = V> + '_ {
-        Self::reader(self)
-    }
 
     async fn size(&self) -> u64 {
         Self::size(self)
     }
-}
 
-impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     async fn append(&mut self, item: &Self::Item) -> Result<u64, Error> {
         Self::append(self, item).await
     }
@@ -1913,10 +2160,6 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
         Self::prune(self, min_position).await
     }
 
-    async fn rewind(&mut self, size: u64) -> Result<(), Error> {
-        Self::rewind(self, size).await
-    }
-
     async fn commit(&mut self) -> Result<(), Error> {
         Self::commit(self).await
     }
@@ -1924,15 +2167,45 @@ impl<E: Context, V: CodecShared> Mutable for Journal<E, V> {
     async fn sync(&mut self) -> Result<(), Error> {
         Self::sync(self).await
     }
-
-    async fn destroy(self) -> Result<(), Error> {
-        Self::destroy(self).await
-    }
 }
 
 #[commonware_macros::stability(ALPHA)]
 impl<E: Context, V: CodecShared> crate::journal::authenticated::Inner<E> for Journal<E, V> {
+    type Item = V;
     type Config = Config<V::Cfg>;
+    type Writer = Writer<E, V>;
+    type Readers = Readers<E, V>;
+    type Reader = Reader<E, V>;
+
+    fn split(self) -> (Self::Writer, Self::Readers) {
+        Self::split(self)
+    }
+
+    fn reader(readers: &Self::Readers) -> Self::Reader {
+        readers.reader()
+    }
+
+    #[cfg(test)]
+    fn journal(writer: &Self::Writer) -> &Self {
+        writer.journal()
+    }
+
+    #[cfg(test)]
+    fn into_journal(writer: Self::Writer) -> Self {
+        writer.into_journal()
+    }
+
+    async fn rewind(
+        writer: &mut Self::Writer,
+        readers: &Self::Readers,
+        size: u64,
+    ) -> Result<(), Error> {
+        writer.rewind_with_readers(readers, size).await
+    }
+
+    async fn destroy(writer: Self::Writer) -> Result<(), Error> {
+        writer.into_journal().destroy().await
+    }
 
     async fn init<
         F: crate::merkle::Family,
@@ -2061,7 +2334,7 @@ mod tests {
     use crate::journal::contiguous::tests::{partition_sync_fault, run_contiguous_tests};
     use commonware_macros::test_traced;
     use commonware_runtime::{
-        buffer::paged::{CacheRef, Writer},
+        buffer::paged::{CacheRef, Writer as PagedWriter},
         deterministic, Metrics as _, Runner, Spawner as _, Storage, Supervisor as _,
     };
     use commonware_utils::{sequence::FixedBytes, NZUsize, NZU16, NZU64};
@@ -3969,7 +4242,7 @@ mod tests {
                 .open(&cfg.data_partition(), &1u64.to_be_bytes())
                 .await
                 .unwrap();
-            let writer = Writer::new(blob, size, 1024, cfg.page_cache.clone())
+            let writer = PagedWriter::new(blob, size, 1024, cfg.page_cache.clone())
                 .await
                 .unwrap();
             writer.resize(offset).await.unwrap();
@@ -4021,7 +4294,7 @@ mod tests {
                     .open(&offsets_blob_partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let append = Writer::new(
+                let append = PagedWriter::new(
                     blob,
                     raw_size,
                     2048,
@@ -4048,7 +4321,7 @@ mod tests {
                 .open(&offsets_blob_partition, &0u64.to_be_bytes())
                 .await
                 .unwrap();
-            let append = Writer::new(
+            let append = PagedWriter::new(
                 blob,
                 raw_size,
                 2048,
@@ -4087,7 +4360,7 @@ mod tests {
                     .open(&data_partition, &0u64.to_be_bytes())
                     .await
                     .unwrap();
-                let append = Writer::new(
+                let append = PagedWriter::new(
                     blob,
                     raw_size,
                     2048,
@@ -4114,7 +4387,7 @@ mod tests {
                 .open(&data_partition, &0u64.to_be_bytes())
                 .await
                 .unwrap();
-            let append = Writer::new(
+            let append = PagedWriter::new(
                 blob,
                 raw_size,
                 2048,

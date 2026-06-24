@@ -13,8 +13,9 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt, MetricsExt as _},
     Blob, BufferPool, Error as RError, Metrics, Storage,
 };
+use commonware_utils::sync::Mutex;
 use futures::future::try_join_all;
-use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize};
+use std::{collections::BTreeMap, future::Future, mem::take, num::NonZeroUsize, sync::Arc};
 use tracing::debug;
 
 /// A minimal [`Blob`] wrapper for [`Manager`].
@@ -54,6 +55,31 @@ impl<B: Blob> SectionBuffer for Write<B> {
 
     async fn resize(&self, len: u64) -> Result<(), RError> {
         Self::resize(self, len).await
+    }
+}
+
+/// A section buffer that can provide a cheap read handle.
+pub trait ReadableSectionBuffer: SectionBuffer {
+    /// The read handle type.
+    type Reader: Clone + Send + Sync + 'static;
+
+    /// Create a read handle for the section.
+    fn reader(&self) -> Self::Reader;
+}
+
+impl<B: Blob> ReadableSectionBuffer for Writer<B> {
+    type Reader = commonware_runtime::buffer::paged::Reader<B>;
+
+    fn reader(&self) -> Self::Reader {
+        Self::reader(self)
+    }
+}
+
+impl<B: Blob> ReadableSectionBuffer for Write<B> {
+    type Reader = Self;
+
+    fn reader(&self) -> Self::Reader {
+        self.clone()
     }
 }
 
@@ -125,7 +151,12 @@ pub struct Config<F> {
 /// Each section is stored in a separate blob, named by its section number
 /// (big-endian u64). This component handles initialization, pruning, syncing,
 /// and metrics.
-pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
+pub struct Manager<E, F>
+where
+    E: Storage + Metrics,
+    F: BufferFactory<E::Blob>,
+    F::Buffer: ReadableSectionBuffer,
+{
     context: E,
     partition: String,
     factory: F,
@@ -137,12 +168,48 @@ pub struct Manager<E: Storage + Metrics, F: BufferFactory<E::Blob>> {
     /// the current execution. Not persisted across restarts.
     oldest_retained_section: u64,
 
+    read_state: Arc<Mutex<ReadState<F::Buffer>>>,
+
     tracked: Gauge,
     synced: Counter,
     pruned: Counter,
 }
 
-impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
+struct ReadState<B: ReadableSectionBuffer> {
+    blobs: BTreeMap<u64, B::Reader>,
+    oldest_retained_section: u64,
+}
+
+/// Cheap read handle for section-based storage.
+pub struct Reader<B: ReadableSectionBuffer> {
+    state: Arc<Mutex<ReadState<B>>>,
+}
+
+impl<B: ReadableSectionBuffer> Clone for Reader<B> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<B: ReadableSectionBuffer> Reader<B> {
+    /// Get a read handle for `section`.
+    pub fn get(&self, section: u64) -> Result<Option<B::Reader>, Error> {
+        let state = self.state.lock();
+        if section < state.oldest_retained_section {
+            return Err(Error::AlreadyPrunedToSection(state.oldest_retained_section));
+        }
+        Ok(state.blobs.get(&section).cloned())
+    }
+}
+
+impl<E, F> Manager<E, F>
+where
+    E: Storage + Metrics,
+    F: BufferFactory<E::Blob>,
+    F::Buffer: ReadableSectionBuffer,
+{
     /// Initialize a new `Manager`.
     ///
     /// Scans the partition for existing blobs and opens them.
@@ -172,6 +239,13 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         let synced = context.counter("synced", "Number of syncs");
         let pruned = context.counter("pruned", "Number of blobs pruned");
         let _ = tracked.try_set(blobs.len());
+        let read_state = Arc::new(Mutex::new(ReadState {
+            blobs: blobs
+                .iter()
+                .map(|(&section, blob)| (section, blob.reader()))
+                .collect(),
+            oldest_retained_section: 0,
+        }));
 
         Ok(Self {
             context,
@@ -179,10 +253,18 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             factory: cfg.factory,
             blobs,
             oldest_retained_section: 0,
+            read_state,
             tracked,
             synced,
             pruned,
         })
+    }
+
+    /// Return a cheap read handle for this manager.
+    pub fn reader(&self) -> Reader<F::Buffer> {
+        Reader {
+            state: self.read_state.clone(),
+        }
     }
 
     /// Ensures that a section pruned during the current execution is not accessed.
@@ -210,6 +292,8 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let buffer = self.factory.create(blob, size).await?;
             self.tracked.inc();
             self.blobs.insert(section, buffer);
+            let reader = self.blobs.get(&section).unwrap().reader();
+            self.read_state.lock().blobs.insert(section, reader);
         }
 
         Ok(self.blobs.get_mut(&section).unwrap())
@@ -247,6 +331,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             let blob = self.blobs.remove(&section).unwrap();
             let size = blob.size().await;
             drop(blob);
+            self.read_state.lock().blobs.remove(&section);
 
             // Remove blob from storage
             self.context
@@ -261,6 +346,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
 
         if pruned {
             self.oldest_retained_section = min;
+            self.read_state.lock().oldest_retained_section = min;
         }
 
         Ok(pruned)
@@ -303,6 +389,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         if let Some(blob) = self.blobs.remove(&section) {
             let size = blob.size().await;
             drop(blob);
+            self.read_state.lock().blobs.remove(&section);
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
                 .await?;
@@ -341,6 +428,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         for (section, blob) in blobs {
             let size = blob.size().await;
             drop(blob);
+            self.read_state.lock().blobs.remove(&section);
             debug!(section, size, "cleared blob");
             self.context
                 .remove(&self.partition, Some(&section.to_be_bytes()))
@@ -348,6 +436,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
         }
         let _ = self.tracked.try_set(0);
         self.oldest_retained_section = 0;
+        self.read_state.lock().oldest_retained_section = 0;
         Ok(())
     }
 
@@ -367,6 +456,7 @@ impl<E: Storage + Metrics, F: BufferFactory<E::Blob>> Manager<E, F> {
             // Remove the underlying blob from storage
             let blob = self.blobs.remove(&s).unwrap();
             drop(blob);
+            self.read_state.lock().blobs.remove(&s);
             self.context
                 .remove(&self.partition, Some(&s.to_be_bytes()))
                 .await?;

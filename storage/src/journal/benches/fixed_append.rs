@@ -35,19 +35,27 @@ fn bench_fixed_append(c: &mut Criterion) {
                     let mut duration = Duration::ZERO;
                     for _ in 0..iters {
                         // Create a new journal for each iteration
-                        let mut j = get_fixed_journal::<ITEM_SIZE>(
+                        let j = get_fixed_journal::<ITEM_SIZE>(
                             ctx.child("storage"),
                             PARTITION,
                             ITEMS_PER_BLOB,
                         )
                         .await;
+                        let (mut writer, readers) = j.split();
 
                         // Append random data to the journal
                         let start = Instant::now();
-                        append_fixed_random_data(&mut j, items_to_write).await;
+                        append_fixed_random_data(&mut writer, items_to_write).await;
                         duration += start.elapsed();
+                        drop((writer, readers));
 
                         // Destroy the journal after appending to avoid polluting the next iteration
+                        let j = get_fixed_journal::<ITEM_SIZE>(
+                            ctx.child("cleanup"),
+                            PARTITION,
+                            ITEMS_PER_BLOB,
+                        )
+                        .await;
                         j.destroy().await.unwrap();
                     }
                     duration

@@ -100,7 +100,7 @@
 mod storage;
 
 use std::num::{NonZeroU64, NonZeroUsize};
-pub use storage::Ordinal;
+pub use storage::{Ordinal, Reader};
 use thiserror::Error;
 
 /// Errors that can occur when interacting with the [Ordinal].

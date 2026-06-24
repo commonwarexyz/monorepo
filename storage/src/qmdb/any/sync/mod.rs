@@ -8,7 +8,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable, Reader as _},
+        contiguous::{fixed, variable, Reader as _},
     },
     merkle::{self, full, Location},
     qmdb::{
@@ -68,7 +68,7 @@ where
     I: IndexFactory<T, Value = Location<F>>,
     H: Hasher,
     T: Translator,
-    C: Mutable<Item = Operation<F, U>>,
+    C: authenticated::Inner<E, Item = Operation<F, U>>,
     S: Strategy,
     Operation<F, U>: Codec + Committable + CodecShared,
 {
@@ -155,7 +155,7 @@ macro_rules! impl_sync_database {
                     return Ok(None);
                 }
 
-                let reader = Contiguous::reader(journal).await;
+                let reader = journal.reader();
                 let bounds = reader.bounds();
                 if Location::new(bounds.start) > target.range.start()
                     || Location::new(bounds.end) != target.range.end()

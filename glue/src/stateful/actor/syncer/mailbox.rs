@@ -149,6 +149,7 @@ mod tests {
 
             let expected = SyncResult::<deterministic::Context, TestApp> {
                 databases: test_databases(),
+                serving_resolvers: (),
                 anchor: anchor(8, 10),
             };
             let Some(Message::UpdateTargets { response, .. }) = receiver.recv().await else {

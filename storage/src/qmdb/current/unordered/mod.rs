@@ -20,7 +20,7 @@ pub mod tests {
     use super::db;
     use crate::{
         index::unordered::Index,
-        journal::contiguous::Mutable,
+        journal::authenticated,
         merkle::{Graftable, Location, Proof},
         qmdb::{
             any::{
@@ -166,7 +166,7 @@ pub mod tests {
         mut open_db: Fn,
     ) where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
+        C: authenticated::Inner<Context, Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
@@ -313,7 +313,7 @@ pub mod tests {
     pub(super) fn test_range_proofs<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
+        C: authenticated::Inner<Context, Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
@@ -391,7 +391,7 @@ pub mod tests {
     pub(super) fn test_key_value_proof<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
+        C: authenticated::Inner<Context, Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,
@@ -469,7 +469,7 @@ pub mod tests {
     pub(super) fn test_proving_repeated_updates<F, C, V, Fn, Fut>(mut open_db: Fn)
     where
         F: Graftable,
-        C: Mutable<Item = Operation<F, Digest, V>> + 'static,
+        C: authenticated::Inner<Context, Item = Operation<F, Digest, V>> + 'static,
         V: ValueEncoding<Value = Digest> + 'static,
         Operation<F, Digest, V>: Codec,
         TestDb<F, C, V>: DbAny<F, Key = Digest, Value = Digest, Digest = Digest> + 'static,

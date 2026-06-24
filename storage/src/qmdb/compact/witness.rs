@@ -18,14 +18,21 @@ use crate::{
     merkle::{
         self, compact, Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
     },
-    qmdb::{self, sync::compact::Target, Error},
+    qmdb::{
+        self,
+        sync::compact::{ServeError, State, Target},
+        Error,
+    },
     Context,
 };
 use commonware_codec::{Decode as _, EncodeSize, Read, Write};
 use commonware_cryptography::{Digest, Hasher};
 use commonware_parallel::Strategy;
-use commonware_utils::sync::RwLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use commonware_utils::sync::ArcSwapOption;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 /// A single durably persisted witness: a complete snapshot of one synced commit.
 ///
@@ -126,7 +133,7 @@ enum Durability {
 pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     journal: Journal<E, F, D>,
 
-    tip_witness: RwLock<VerifiedWitness<F, D>>,
+    tip_witness: Arc<ArcSwapOption<VerifiedWitness<F, D>>>,
 
     /// Whether the cached witness came from compact sync and has not been written to the
     /// journal yet. While set, the journal still holds the partition's previous contents; the
@@ -135,12 +142,55 @@ pub(crate) struct Store<E: Context, F: Family, D: Digest> {
     import_pending: AtomicBool,
 }
 
+/// Reader for the latest compact witness.
+#[derive(Clone)]
+pub(crate) struct Reader<F: Family, D: Digest> {
+    tip_witness: Arc<ArcSwapOption<VerifiedWitness<F, D>>>,
+}
+
+impl<F: Family, D: Digest> Reader<F, D> {
+    /// Return compact-sync state for `target`.
+    pub(crate) fn state<Op>(
+        &self,
+        target: Target<F, D>,
+        commit_codec_config: &Op::Cfg,
+    ) -> Result<State<F, Op, D>, ServeError<F, D>>
+    where
+        Op: Read,
+    {
+        let witness = self
+            .tip_witness
+            .load_full()
+            .expect("published witness should be available");
+        if target.root != witness.root || target.leaf_count != witness.leaf_count() {
+            return Err(ServeError::StaleTarget {
+                requested: target,
+                current: witness.target(),
+            });
+        }
+
+        let Witness {
+            op_bytes,
+            proof: last_commit_proof,
+            pinned_nodes,
+        } = witness.witness.clone();
+        let last_commit_op = Op::decode_cfg(op_bytes.as_ref(), commit_codec_config)
+            .map_err(|_| ServeError::Database(Error::DataCorrupted("invalid commit operation")))?;
+        Ok(State {
+            leaf_count: witness.leaf_count(),
+            pinned_nodes,
+            last_commit_op,
+            last_commit_proof,
+        })
+    }
+}
+
 impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// Wrap an opened journal and a verified witness into a store.
-    pub(crate) const fn new(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
+    pub(crate) fn new(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
         Self {
             journal,
-            tip_witness: RwLock::new(witness),
+            tip_witness: Arc::new(ArcSwapOption::from_pointee(witness)),
             import_pending: AtomicBool::new(false),
         }
     }
@@ -149,25 +199,33 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     /// journal is untouched until the first persist replaces its contents with `witness`. A
     /// crash during that replacement leaves a journal that fails to reopen; re-syncing
     /// recovers it.
-    pub(crate) const fn from_import(
-        journal: Journal<E, F, D>,
-        witness: VerifiedWitness<F, D>,
-    ) -> Self {
+    pub(crate) fn from_import(journal: Journal<E, F, D>, witness: VerifiedWitness<F, D>) -> Self {
         Self {
             journal,
-            tip_witness: RwLock::new(witness),
+            tip_witness: Arc::new(ArcSwapOption::from_pointee(witness)),
             import_pending: AtomicBool::new(true),
         }
     }
 
     /// Read the cached witness without exposing the underlying lock to db code.
     pub(crate) fn with<R>(&self, f: impl FnOnce(&VerifiedWitness<F, D>) -> R) -> R {
-        f(&self.tip_witness.read())
+        let witness = self
+            .tip_witness
+            .load_full()
+            .expect("published witness should be available");
+        f(&witness)
     }
 
     /// Replace the cached witness after the matching compact Merkle state is persisted or loaded.
     pub(crate) fn replace(&self, witness: VerifiedWitness<F, D>) {
-        *self.tip_witness.write() = witness;
+        self.tip_witness.store(Some(Arc::new(witness)));
+    }
+
+    /// Return a reader for the latest compact witness.
+    pub(crate) fn reader(&self) -> Reader<F, D> {
+        Reader {
+            tip_witness: self.tip_witness.clone(),
+        }
     }
 
     /// Persist the current compact state as a new witness journal entry, committing the journal

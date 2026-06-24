@@ -12,7 +12,7 @@ use super::{
 use crate::{
     marshal::{
         resolver::handler::{self, Annotation, Key, Request},
-        store::{Blocks, Certificates},
+        store::{BlockReader, Blocks, CertificateReader, Certificates},
         Config, Identifier as BlockID, Start, Update,
     },
     simplex::{
@@ -48,7 +48,7 @@ use commonware_utils::{
     futures::AbortablePool,
     Acknowledgement, BoxedError,
 };
-use futures::{future::join_all, try_join};
+use futures::try_join;
 use rand_core::CryptoRngCore;
 use std::{collections::BTreeMap, future::Future, num::NonZeroUsize};
 use tracing::{debug, info_span, warn, Instrument as _, Span};
@@ -898,49 +898,91 @@ where
             self.try_dispatch_blocks(application).await;
         }
 
-        // Handle produce requests in parallel.
-        join_all(
-            produces
-                .into_iter()
-                .map(|(key, response)| self.handle_produce(key, response, buffer)),
-        )
-        .await;
+        // Handle produce requests in independent tasks so storage reads do not block the actor.
+        let cache = self.cache.reader();
+        let finalizations = self.finalizations_by_height.reader();
+        let finalized_blocks = self.finalized_blocks.reader();
+        let buffer = buffer.clone();
+        for (key, response) in produces {
+            let cache = cache.clone();
+            let finalizations = finalizations.clone();
+            let finalized_blocks = finalized_blocks.clone();
+            let buffer = buffer.clone();
+            drop(self.context.child("produce").spawn(move |_| async move {
+                Self::handle_produce(
+                    key,
+                    response,
+                    buffer,
+                    cache,
+                    finalizations,
+                    finalized_blocks,
+                )
+                .await;
+            }));
+        }
     }
 
     /// Handle a produce request from a remote peer.
     #[tracing::instrument(name = "marshal.resolver.produce", level = "debug", skip_all, fields(key = %key))]
-    async fn handle_produce<Buf: Buffer<V>>(
-        &self,
+    async fn handle_produce<Buf, CR, BR>(
         key: ResolverRequestFor<V>,
         response: oneshot::Sender<Bytes>,
-        buffer: &Buf,
-    ) {
+        buffer: Buf,
+        cache: cache::Reader<E, V, P::Scheme>,
+        finalizations: CR,
+        finalized_blocks: BR,
+    ) where
+        Buf: Buffer<V>,
+        CR: CertificateReader<
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
+        BR: BlockReader<Block = V::StoredBlock>,
+    {
         match key {
             Key::Block(commitment) => {
-                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                let Some(block) = Self::find_block_by_commitment_with(
+                    &buffer,
+                    &cache,
+                    &finalized_blocks,
+                    commitment,
+                )
+                .await
+                else {
                     debug!(?commitment, "block missing on request");
                     return;
                 };
                 response.send_lossy(block.encode());
             }
             Key::Finalized { height } => {
-                let Some(finalization) = self.get_finalization_by_height(height).await else {
+                let Some(finalization) =
+                    Self::read_finalization_by_height(&finalizations, height).await
+                else {
                     debug!(%height, "finalization missing on request");
                     return;
                 };
-                let Some(block) = self.get_finalized_block(height).await else {
+                let Some(block) = Self::read_finalized_block(&finalized_blocks, height).await
+                else {
                     debug!(%height, "finalized block missing on request");
                     return;
                 };
                 response.send_lossy((finalization, V::into_inner(block)).encode());
             }
             Key::Notarized { round } => {
-                let Some(notarization) = self.cache.get_notarization(round).await else {
+                let Some(notarization) = cache.get_notarization(round).await else {
                     debug!(?round, "notarization missing on request");
                     return;
                 };
                 let commitment = notarization.proposal.payload;
-                let Some(block) = self.find_block_by_commitment(buffer, commitment).await else {
+                let Some(block) = Self::find_block_by_commitment_with(
+                    &buffer,
+                    &cache,
+                    &finalized_blocks,
+                    commitment,
+                )
+                .await
+                else {
                     debug!(?commitment, "block missing on request");
                     return;
                 };
@@ -1696,6 +1738,74 @@ where
     }
 
     // -------------------- Immutable Storage --------------------
+
+    async fn read_finalized_block<BR>(blocks: &BR, height: Height) -> Option<V::Block>
+    where
+        BR: BlockReader<Block = V::StoredBlock>,
+    {
+        match blocks.get(ArchiveID::Index(height.get())).await {
+            Ok(stored) => stored.map(|stored| stored.into()),
+            Err(e) => panic!("failed to get block: {e}"),
+        }
+    }
+
+    async fn read_finalization_by_height<CR>(
+        finalizations: &CR,
+        height: Height,
+    ) -> Option<Finalization<P::Scheme, V::Commitment>>
+    where
+        CR: CertificateReader<
+            BlockDigest = <V::Block as Digestible>::Digest,
+            Commitment = V::Commitment,
+            Scheme = P::Scheme,
+        >,
+    {
+        match finalizations.get(ArchiveID::Index(height.get())).await {
+            Ok(finalization) => finalization,
+            Err(e) => panic!("failed to get finalization: {e}"),
+        }
+    }
+
+    async fn find_block_in_storage_by_commitment_with<BR>(
+        cache: &cache::Reader<E, V, P::Scheme>,
+        finalized_blocks: &BR,
+        commitment: V::Commitment,
+    ) -> Option<V::Block>
+    where
+        BR: BlockReader<Block = V::StoredBlock>,
+    {
+        let digest = V::commitment_to_inner(commitment);
+        if let Some(block) = cache
+            .find_block_matching(digest, |stored| V::stored_commitment(stored) == commitment)
+            .await
+        {
+            return Some(block.into());
+        }
+
+        match finalized_blocks.get(ArchiveID::Key(&digest)).await {
+            Ok(Some(stored)) => {
+                (V::stored_commitment(&stored) == commitment).then(|| stored.into())
+            }
+            Ok(None) => None,
+            Err(e) => panic!("failed to get block: {e}"),
+        }
+    }
+
+    async fn find_block_by_commitment_with<Buf, BR>(
+        buffer: &Buf,
+        cache: &cache::Reader<E, V, P::Scheme>,
+        finalized_blocks: &BR,
+        commitment: V::Commitment,
+    ) -> Option<V::Block>
+    where
+        Buf: Buffer<V>,
+        BR: BlockReader<Block = V::StoredBlock>,
+    {
+        if let Some(block) = buffer.find_by_commitment(commitment).await {
+            return Some(block);
+        }
+        Self::find_block_in_storage_by_commitment_with(cache, finalized_blocks, commitment).await
+    }
 
     /// Get a finalized block from the immutable archive.
     async fn get_finalized_block(&self, height: Height) -> Option<V::Block> {

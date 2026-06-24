@@ -2,7 +2,7 @@ use crate::{
     index::unordered::Index,
     journal::{
         authenticated,
-        contiguous::{Mutable, Reader as _},
+        contiguous::{Contiguous as _, Reader as _},
     },
     merkle::{
         full::{self, Merkle},
@@ -31,9 +31,10 @@ where
     E: Context,
     K: Key,
     V: ValueEncoding,
-    C: Mutable<Item = Operation<F, K, V>> + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
+    C: authenticated::Inner<E, Item = Operation<F, K, V>>
+        + sync::Journal<F, Context = E, Op = Operation<F, K, V>>,
     C::Item: EncodeShared,
-    C::Config: Clone + Send,
+    <C as sync::Journal<F>>::Config: Clone + Send,
     H: Hasher,
     T: Translator,
     S: Strategy,
@@ -42,7 +43,7 @@ where
     type Op = Operation<F, K, V>;
     type Journal = C;
     type Hasher = H;
-    type Config = immutable::Config<T, C::Config, S>;
+    type Config = immutable::Config<T, <C as sync::Journal<F>>::Config, S>;
     type Digest = H::Digest;
     type Context = E;
 
@@ -95,7 +96,7 @@ where
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.journal.reader().await;
+            let reader = journal.reader().await;
             let bounds = reader.bounds();
             let last_commit_loc = Location::<F>::new(
                 bounds

@@ -170,7 +170,7 @@ where
     A::Databases: StateSyncSet<E, R, BlockDigest<A, E>>,
     S: Scheme,
     V: Variant<ApplicationBlock = A::Block>,
-    R: AttachableResolverSet<A::Databases>,
+    R: AttachableResolverSet<<A::Databases as DatabaseSet<E>>::ServingResolvers>,
     MarshalMailbox<S, V>: BlockProvider<Block = A::Block>,
 {
     /// Construct a [`Stateful`] actor and its [`Mailbox`].
@@ -252,7 +252,12 @@ where
     /// Starts the application by initializing the database set at marshal's current floor.
     async fn start_from_marshal(self) {
         let syncer::StartupResult {
-            sync: SyncResult { databases, anchor },
+            sync:
+                SyncResult {
+                    databases,
+                    serving_resolvers,
+                    anchor,
+                },
             skip_finalized_until,
         } = syncer::init_databases_from_marshal::<E, A, S, V>(
             self.context.as_present(),
@@ -266,7 +271,7 @@ where
         // so that this instance can serve peers database operations and proofs. The
         // resolver handles can be dropped after this: serving runs on the resolver
         // actors' own contexts.
-        self.resolvers.attach_databases(databases.clone()).await;
+        self.resolvers.attach_resolvers(serving_resolvers).await;
 
         let metrics = StatefulMetrics::new(self.context.as_present());
         let _ = metrics.sync_done.try_set(1);
@@ -317,14 +322,14 @@ mod tests {
         buffer::paged::CacheRef, deterministic, Clock as _, Runner as _, Supervisor as _,
     };
     use commonware_storage::archive::immutable;
-    use commonware_utils::{channel::mpsc, sync::TracedAsyncRwLock, NZUsize, NZU16, NZU64};
-    use std::{convert::Infallible, sync::Arc, time::Duration};
+    use commonware_utils::{channel::mpsc, NZUsize, NZU16, NZU64};
+    use std::{convert::Infallible, time::Duration};
 
     #[derive(Clone)]
     struct NoopResolver;
 
-    impl AttachableResolver<TestDb> for NoopResolver {
-        async fn attach_database(&self, _db: Arc<TracedAsyncRwLock<TestDb>>) {}
+    impl AttachableResolver<()> for NoopResolver {
+        async fn attach_resolver(&self, _resolver: ()) {}
     }
 
     impl StateSyncDb<deterministic::Context, NoopResolver> for TestDb {

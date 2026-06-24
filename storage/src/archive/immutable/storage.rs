@@ -1,8 +1,8 @@
 use crate::{
     archive::{immutable::Config, Error, Identifier},
-    freezer::{self, Checkpoint, Cursor, Freezer},
+    freezer::{self, Checkpoint, Cursor, Freezer, Reader as FreezerReader},
     metadata::{self, Metadata},
-    ordinal::{self, Ordinal},
+    ordinal::{self, Ordinal, Reader as OrdinalReader},
     Context,
 };
 use commonware_codec::{CodecShared, EncodeSize, FixedSize, Read, ReadExt, Write};
@@ -106,6 +106,27 @@ pub struct Archive<E: BufferPooler + Context, K: Array, V: CodecShared> {
     syncs: Counter,
 }
 
+/// Cheap read handle for an immutable archive.
+pub struct Reader<E: BufferPooler + Context, K: Array, V: CodecShared> {
+    freezer: FreezerReader<E, K, V>,
+    ordinal: OrdinalReader<E, Cursor>,
+    gets: Counter,
+    has: Counter,
+    _phantom: std::marker::PhantomData<V>,
+}
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Clone for Reader<E, K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            freezer: self.freezer.clone(),
+            ordinal: self.ordinal.clone(),
+            gets: self.gets.clone(),
+            has: self.has.clone(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
 impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
     /// Initialize a new [Archive] with the given [Config].
     pub async fn init(context: E, cfg: Config<V::Cfg>) -> Result<Self, Error> {
@@ -195,32 +216,6 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         })
     }
 
-    /// Get the value for the given index.
-    async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
-        // Get ordinal
-        let Some(cursor) = self.ordinal.get(index).await? else {
-            return Ok(None);
-        };
-
-        // Get journal entry
-        let result = self
-            .freezer
-            .get(freezer::Identifier::Cursor(cursor))
-            .await?;
-
-        // Get value
-        Ok(result)
-    }
-
-    /// Get the value for the given key.
-    async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
-        // Get table entry
-        let result = self.freezer.get(freezer::Identifier::Key(key)).await?;
-
-        // Get value
-        Ok(result)
-    }
-
     /// Initialize the section.
     fn initialize_section(&mut self, section: u64) {
         // Create active bit vector
@@ -230,6 +225,86 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> Archive<E, K, V> {
         let key = U64::new(ORDINAL_PREFIX, section);
         self.metadata.put(key, Record::Ordinal(Some(bits)));
         debug!(section, "initialized section");
+    }
+
+    /// Return a cheap read handle.
+    pub fn reader(&self) -> Reader<E, K, V> {
+        Reader {
+            freezer: self.freezer.reader(),
+            ordinal: self.ordinal.reader(),
+            gets: self.gets.clone(),
+            has: self.has.clone(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<E: BufferPooler + Context, K: Array, V: CodecShared> Reader<E, K, V> {
+    /// Get the value for the given index.
+    pub async fn get_index(&self, index: u64) -> Result<Option<V>, Error> {
+        let Some(cursor) = self.ordinal.get(index).await? else {
+            return Ok(None);
+        };
+        self.freezer
+            .get(freezer::Identifier::Cursor(cursor))
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Get the value for the given key.
+    pub async fn get_key(&self, key: &K) -> Result<Option<V>, Error> {
+        self.freezer
+            .get(freezer::Identifier::Key(key))
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Retrieve an item from [Archive].
+    pub async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
+        self.gets.inc();
+        match identifier {
+            Identifier::Index(index) => self.get_index(index).await,
+            Identifier::Key(key) => self.get_key(key).await,
+        }
+    }
+
+    /// Check if an item exists in [Archive].
+    pub async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
+        self.has.inc();
+        match identifier {
+            Identifier::Index(index) => Ok(self.ordinal.has(index)),
+            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
+        }
+    }
+
+    /// Retrieve the end of the current range and the start of the next range.
+    pub fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
+        self.ordinal.next_gap(index)
+    }
+
+    /// Returns up to `max` missing items starting from `index`.
+    pub fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
+        self.ordinal.missing_items(index, max)
+    }
+
+    /// Retrieve an iterator over all populated ranges.
+    pub fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
+        self.ordinal.ranges()
+    }
+
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    pub fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
+        self.ordinal.ranges_from(from)
+    }
+
+    /// Retrieve the first index in the archive.
+    pub fn first_index(&self) -> Option<u64> {
+        self.ordinal.first_index()
+    }
+
+    /// Retrieve the last index in the archive.
+    pub fn last_index(&self) -> Option<u64> {
+        self.ordinal.last_index()
     }
 }
 
@@ -274,21 +349,11 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
     }
 
     async fn get(&self, identifier: Identifier<'_, K>) -> Result<Option<V>, Error> {
-        self.gets.inc();
-
-        match identifier {
-            Identifier::Index(index) => self.get_index(index).await,
-            Identifier::Key(key) => self.get_key(key).await,
-        }
+        self.reader().get(identifier).await
     }
 
     async fn has(&self, identifier: Identifier<'_, K>) -> Result<bool, Error> {
-        self.has.inc();
-
-        match identifier {
-            Identifier::Index(index) => Ok(self.ordinal.has(index)),
-            Identifier::Key(key) => self.get_key(key).await.map(|result| result.is_some()),
-        }
+        self.reader().has(identifier).await
     }
 
     async fn sync(&mut self) -> Result<(), Error> {
@@ -310,27 +375,27 @@ impl<E: BufferPooler + Context, K: Array, V: CodecShared> crate::archive::Archiv
     }
 
     fn next_gap(&self, index: u64) -> (Option<u64>, Option<u64>) {
-        self.ordinal.next_gap(index)
+        self.reader().next_gap(index)
     }
 
     fn missing_items(&self, index: u64, max: usize) -> Vec<u64> {
-        self.ordinal.missing_items(index, max)
+        self.reader().missing_items(index, max)
     }
 
     fn ranges(&self) -> impl Iterator<Item = (u64, u64)> {
-        self.ordinal.ranges()
+        self.reader().ranges()
     }
 
     fn ranges_from(&self, from: u64) -> impl Iterator<Item = (u64, u64)> {
-        self.ordinal.ranges_from(from)
+        self.reader().ranges_from(from)
     }
 
     fn first_index(&self) -> Option<u64> {
-        self.ordinal.first_index()
+        self.reader().first_index()
     }
 
     fn last_index(&self) -> Option<u64> {
-        self.ordinal.last_index()
+        self.reader().last_index()
     }
 
     #[boxed]

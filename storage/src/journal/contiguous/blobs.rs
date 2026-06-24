@@ -7,6 +7,7 @@ use commonware_runtime::{
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
     Blob, Error as RError, IoBuf, IoBufMut, IoBufs,
 };
+use commonware_utils::sync::ArcSwapOption;
 use futures::future::try_join_all;
 use std::{
     collections::BTreeMap,
@@ -33,6 +34,62 @@ impl Metrics {
             synced: context.counter("synced", "Number of blob syncs"),
             pruned: context.counter("pruned", "Number of blobs pruned"),
         }
+    }
+}
+
+/// Atomically publishes the latest reader state for split journals.
+pub(super) struct Publisher<T> {
+    current: Arc<ArcSwapOption<T>>,
+}
+
+impl<T> Clone for Publisher<T> {
+    fn clone(&self) -> Self {
+        Self {
+            current: self.current.clone(),
+        }
+    }
+}
+
+impl<T> Publisher<T> {
+    /// Create a new publisher.
+    pub(super) fn new(current: T) -> Self {
+        Self {
+            current: Arc::new(ArcSwapOption::from_pointee(current)),
+        }
+    }
+
+    /// Clone the latest published state.
+    pub(super) fn get(&self) -> Arc<T> {
+        self.current
+            .load_full()
+            .expect("published state should be available")
+    }
+
+    /// Replace the latest published state.
+    pub(super) fn publish(&self, current: T) {
+        self.current.store(Some(Arc::new(current)));
+    }
+
+    /// Clear the latest published state if the writer owns the publisher exclusively.
+    #[cfg(test)]
+    pub(super) fn clear_if_exclusive(&self) -> bool {
+        if Arc::strong_count(&self.current) != 1 {
+            return false;
+        }
+        self.current.store(None);
+        true
+    }
+
+    /// Clear the latest published state if ownership is exactly this publisher and `other`.
+    pub(super) fn clear_if_shared_with(&self, other: &Self) -> bool {
+        if !Arc::ptr_eq(&self.current, &other.current) {
+            return false;
+        }
+        if Arc::strong_count(&self.current) != 2 {
+            return false;
+        }
+        self.current.store(None);
+        true
     }
 }
 

@@ -9,6 +9,60 @@ use commonware_storage::{
 };
 use std::{error::Error, future::Future};
 
+/// Read handle for finalized certificate storage.
+pub trait CertificateReader: Clone + Send + Sync + 'static {
+    /// The type of [Digest] used for block digests.
+    type BlockDigest: Digest;
+
+    /// The type of [Digest] included in consensus certificates.
+    type Commitment: Digest;
+
+    /// The type of signing [Scheme] used by consensus.
+    type Scheme: Scheme;
+
+    /// The type of error returned when retrieving finalizations.
+    type Error: Error + Send + Sync + 'static;
+
+    /// Retrieve a [Finalization] by height or corresponding block digest.
+    #[allow(clippy::type_complexity)]
+    fn get(
+        &self,
+        id: Identifier<'_, Self::BlockDigest>,
+    ) -> impl Future<
+        Output = Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error>,
+    > + Send;
+
+    /// Retrieves the highest stored finalization's application height.
+    fn last_index(&self) -> Option<Height>;
+
+    /// Retrieve an iterator over ranges that overlap or follow `from`.
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
+}
+
+/// Read handle for finalized block storage.
+pub trait BlockReader: Clone + Send + Sync + 'static {
+    /// The type of [Block] that is stored.
+    type Block: Block;
+
+    /// The type of error returned when retrieving blocks.
+    type Error: Error + Send + Sync + 'static;
+
+    /// Retrieve a finalized block by height or block digest.
+    fn get(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> impl Future<Output = Result<Option<Self::Block>, Self::Error>> + Send;
+
+    /// Returns up to `max` missing items starting from `start`.
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height>;
+
+    /// Finds the end of the range containing `value` and the start of the range succeeding `value`.
+    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>);
+
+    /// Retrieve the last (highest) index in the store.
+    fn last_index(&self) -> Option<Height>;
+}
+
 /// Durable store for [Finalizations](Finalization) keyed by height and block digest.
 pub trait Certificates: Send + Sync + 'static {
     /// The type of [Digest] used for block digests.
@@ -22,6 +76,14 @@ pub trait Certificates: Send + Sync + 'static {
 
     /// The type of error returned when storing, retrieving, or pruning finalizations.
     type Error: Error + Send + Sync + 'static;
+
+    /// Cloneable read handle for this store.
+    type Reader: CertificateReader<
+        BlockDigest = Self::BlockDigest,
+        Commitment = Self::Commitment,
+        Scheme = Self::Scheme,
+        Error = Self::Error,
+    >;
 
     /// Buffer a finalization certificate for storage, keyed by height and block digest.
     ///
@@ -88,6 +150,9 @@ pub trait Certificates: Send + Sync + 'static {
 
     /// Retrieve an iterator over ranges that overlap or follow `from`.
     fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)>;
+
+    /// Return a cloneable read handle.
+    fn reader(&self) -> Self::Reader;
 }
 
 /// Durable store for finalized [Blocks](Block) keyed by height and block digest.
@@ -97,6 +162,9 @@ pub trait Blocks: Send + Sync + 'static {
 
     /// The type of error returned when storing, retrieving, or pruning blocks.
     type Error: Error + Send + Sync + 'static;
+
+    /// Cloneable read handle for this store.
+    type Reader: BlockReader<Block = Self::Block, Error = Self::Error>;
 
     /// Buffer a finalized block for storage, keyed by height and block digest.
     ///
@@ -186,6 +254,9 @@ pub trait Blocks: Send + Sync + 'static {
     /// # Returns
     /// `Some(height)` if there are any stored blocks, or `None` if the store is empty.
     fn last_index(&self) -> Option<Height>;
+
+    /// Return a cloneable read handle.
+    fn reader(&self) -> Self::Reader;
 }
 
 impl<E, B, C, S> Certificates for immutable::Archive<E, B, Finalization<S, C>>
@@ -199,6 +270,7 @@ where
     type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
+    type Reader = immutable::Reader<E, B, Finalization<S, C>>;
 
     async fn put(
         &mut self,
@@ -233,6 +305,38 @@ where
         <Self as Archive>::ranges_from(self, from.get())
             .map(|(s, e)| (Height::new(s), Height::new(e)))
     }
+
+    fn reader(&self) -> Self::Reader {
+        Self::reader(self)
+    }
+}
+
+impl<E, B, C, S> CertificateReader for immutable::Reader<E, B, Finalization<S, C>>
+where
+    E: BufferPooler + Storage + Metrics + Clock,
+    B: Digest,
+    C: Digest,
+    S: Scheme,
+{
+    type BlockDigest = B;
+    type Commitment = C;
+    type Scheme = S;
+    type Error = archive::Error;
+
+    async fn get(
+        &self,
+        id: Identifier<'_, Self::BlockDigest>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+        Self::get(self, id).await
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        Self::last_index(self).map(Height::new)
+    }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        Self::ranges_from(self, from.get()).map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
 }
 
 impl<E, B> Blocks for immutable::Archive<E, B::Digest, B>
@@ -242,6 +346,7 @@ where
 {
     type Block = B;
     type Error = archive::Error;
+    type Reader = immutable::Reader<E, B::Digest, B>;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
         Archive::put(self, block.height().get(), block.digest(), block).await
@@ -277,6 +382,42 @@ where
 
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
+    }
+
+    fn reader(&self) -> Self::Reader {
+        Self::reader(self)
+    }
+}
+
+impl<E, B> BlockReader for immutable::Reader<E, B::Digest, B>
+where
+    E: BufferPooler + Storage + Metrics + Clock,
+    B: Block,
+{
+    type Block = B;
+    type Error = archive::Error;
+
+    async fn get(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<Option<Self::Block>, Self::Error> {
+        Self::get(self, id).await
+    }
+
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+        Self::missing_items(self, start.get(), max)
+            .into_iter()
+            .map(Height::new)
+            .collect()
+    }
+
+    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+        let (a, b) = Self::next_gap(self, value.get());
+        (a.map(Height::new), b.map(Height::new))
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        Self::last_index(self).map(Height::new)
     }
 }
 
@@ -292,6 +433,7 @@ where
     type Commitment = C;
     type Scheme = S;
     type Error = archive::Error;
+    type Reader = prunable::Reader<T, E, B, Finalization<S, C>>;
 
     async fn put(
         &mut self,
@@ -325,6 +467,39 @@ where
         <Self as Archive>::ranges_from(self, from.get())
             .map(|(s, e)| (Height::new(s), Height::new(e)))
     }
+
+    fn reader(&self) -> Self::Reader {
+        Self::reader(self)
+    }
+}
+
+impl<T, E, B, C, S> CertificateReader for prunable::Reader<T, E, B, Finalization<S, C>>
+where
+    T: Translator,
+    E: BufferPooler + Storage + Metrics + Clock,
+    B: Digest,
+    C: Digest,
+    S: Scheme,
+{
+    type BlockDigest = B;
+    type Commitment = C;
+    type Scheme = S;
+    type Error = archive::Error;
+
+    async fn get(
+        &self,
+        id: Identifier<'_, Self::BlockDigest>,
+    ) -> Result<Option<Finalization<Self::Scheme, Self::Commitment>>, Self::Error> {
+        Self::get(self, id).await
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        Self::last_index(self).map(Height::new)
+    }
+
+    fn ranges_from(&self, from: Height) -> impl Iterator<Item = (Height, Height)> {
+        Self::ranges_from(self, from.get()).map(|(s, e)| (Height::new(s), Height::new(e)))
+    }
 }
 
 impl<T, E, B> Blocks for prunable::Archive<T, E, B::Digest, B>
@@ -335,6 +510,7 @@ where
 {
     type Block = B;
     type Error = archive::Error;
+    type Reader = prunable::Reader<T, E, B::Digest, B>;
 
     async fn put(&mut self, block: Self::Block) -> Result<(), Self::Error> {
         Archive::put(self, block.height().get(), block.digest(), block).await
@@ -369,5 +545,42 @@ where
 
     fn last_index(&self) -> Option<Height> {
         <Self as Archive>::last_index(self).map(Height::new)
+    }
+
+    fn reader(&self) -> Self::Reader {
+        Self::reader(self)
+    }
+}
+
+impl<T, E, B> BlockReader for prunable::Reader<T, E, B::Digest, B>
+where
+    T: Translator,
+    E: BufferPooler + Storage + Metrics + Clock,
+    B: Block,
+{
+    type Block = B;
+    type Error = archive::Error;
+
+    async fn get(
+        &self,
+        id: Identifier<'_, <Self::Block as Digestible>::Digest>,
+    ) -> Result<Option<Self::Block>, Self::Error> {
+        Self::get(self, id).await
+    }
+
+    fn missing_items(&self, start: Height, max: usize) -> Vec<Height> {
+        Self::missing_items(self, start.get(), max)
+            .into_iter()
+            .map(Height::new)
+            .collect()
+    }
+
+    fn next_gap(&self, value: Height) -> (Option<Height>, Option<Height>) {
+        let (a, b) = Self::next_gap(self, value.get());
+        (a.map(Height::new), b.map(Height::new))
+    }
+
+    fn last_index(&self) -> Option<Height> {
+        Self::last_index(self).map(Height::new)
     }
 }

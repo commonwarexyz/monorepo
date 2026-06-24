@@ -591,23 +591,29 @@ impl EngineDefinition for MultiDbEngine {
         let sync_floor = plan.floor().cloned();
 
         // QMDB state-sync resolvers (one per database).
-        let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) =
-            qmdb_resolver::Actor::<_, ed25519::PublicKey, _, _, mmr::Family, QmdbA<_>>::new(
-                context.child("qmdb_resolver_a"),
-                qmdb_resolver::Config {
-                    peer_provider: oracle.manager(),
-                    blocker: oracle.control(public_key.clone()),
-                    database: None,
-                    mailbox_size: NZUsize!(100),
-                    me: Some(public_key.clone()),
-                    initial: Duration::from_secs(1),
-                    timeout: Duration::from_secs(2),
-                    fetch_retry_timeout: Duration::from_millis(100),
-                    max_serve_ops: NZU64!(16),
-                    priority_requests: false,
-                    priority_responses: false,
-                },
-            );
+        let (qmdb_resolver_actor_a, qmdb_sync_resolver_a) = qmdb_resolver::Actor::<
+            _,
+            ed25519::PublicKey,
+            _,
+            _,
+            mmr::Family,
+            QmdbA<commonware_runtime::deterministic::Context>,
+        >::new(
+            context.child("qmdb_resolver_a"),
+            qmdb_resolver::Config {
+                peer_provider: oracle.manager(),
+                blocker: oracle.control(public_key.clone()),
+                database: None,
+                mailbox_size: NZUsize!(100),
+                me: Some(public_key.clone()),
+                initial: Duration::from_secs(1),
+                timeout: Duration::from_secs(2),
+                fetch_retry_timeout: Duration::from_millis(100),
+                max_serve_ops: NZU64!(16),
+                priority_requests: false,
+                priority_responses: false,
+            },
+        );
         qmdb_resolver_actor_a.start(qmdb_a_resolver_network);
 
         let (qmdb_resolver_actor_b, qmdb_sync_resolver_b) = compact_resolver::Actor::<
@@ -616,7 +622,7 @@ impl EngineDefinition for MultiDbEngine {
             _,
             _,
             mmr::Family,
-            QmdbB<_>,
+            QmdbB<commonware_runtime::deterministic::Context>,
             Sha256,
         >::new(
             context.child("qmdb_resolver_b"),

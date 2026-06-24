@@ -90,6 +90,7 @@ suspicious_op_assign_impl = "allow"
 ahash = { version = "0.8.12", default-features = false }
 anyhow = { version = "1.0.99", default-features = false }
 arbitrary = "1.4.1"
+arc-swap = "1.9.1"
 ark-ec = { version = "0.6.0", default-features = false }
 ark-ed-on-bls12-381-bandersnatch = { version = "0.6.0", default-features = false }
 ark-ff = { version = "0.6.0", default-features = false }

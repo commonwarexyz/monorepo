@@ -20,7 +20,7 @@
 //! All data must be assigned to a `section`. This allows pruning entire sections
 //! (and their corresponding blobs) independently.
 
-use super::manager::{AppendFactory, Config as ManagerConfig, Manager};
+use super::manager::{AppendFactory, Config as ManagerConfig, Manager, Reader as ManagerReader};
 use crate::journal::Error;
 use commonware_codec::{CodecFixed, CodecFixedShared, DecodeExt as _, ReadExt as _};
 use commonware_runtime::{
@@ -74,10 +74,44 @@ pub struct Journal<E: Storage + Metrics, A: CodecFixed> {
     _array: PhantomData<A>,
 }
 
+/// A cheap read handle for a segmented fixed journal.
+pub struct Reader<E: Storage + Metrics, A: CodecFixed> {
+    manager: ManagerReader<commonware_runtime::buffer::paged::Writer<E::Blob>>,
+    _array: PhantomData<A>,
+}
+
+impl<E: Storage + Metrics, A: CodecFixed> Clone for Reader<E, A> {
+    fn clone(&self) -> Self {
+        Self {
+            manager: self.manager.clone(),
+            _array: PhantomData,
+        }
+    }
+}
+
 impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Size of each entry.
     pub const CHUNK_SIZE: usize = A::SIZE;
     const CHUNK_SIZE_U64: u64 = Self::CHUNK_SIZE as u64;
+
+    async fn read_from_blob(
+        blob: &commonware_runtime::buffer::paged::Reader<E::Blob>,
+        position: u64,
+    ) -> Result<A, Error> {
+        let offset = position
+            .checked_mul(Self::CHUNK_SIZE_U64)
+            .ok_or(Error::ItemOutOfRange(position))?;
+
+        let buf = blob
+            .read_at(offset, Self::CHUNK_SIZE)
+            .await
+            .map_err(|err| match err {
+                commonware_runtime::Error::BlobInsufficientLength
+                | commonware_runtime::Error::OffsetOverflow => Error::ItemOutOfRange(position),
+                err => Error::Runtime(err),
+            })?;
+        A::decode(buf.coalesce()).map_err(Error::Codec)
+    }
 
     /// Initialize a new `Journal` instance.
     ///
@@ -144,25 +178,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// - [Error::SectionOutOfRange] if the section doesn't exist.
     /// - [Error::ItemOutOfRange] if the position is beyond the blob size.
     pub async fn get(&self, section: u64, position: u64) -> Result<A, Error> {
-        let blob = self
-            .manager
-            .get(section)?
-            .ok_or(Error::SectionOutOfRange(section))?;
-
-        let offset = position
-            .checked_mul(Self::CHUNK_SIZE_U64)
-            .ok_or(Error::ItemOutOfRange(position))?;
-
-        // The read validates bounds against the blob's logical size.
-        let buf = blob
-            .read_at(offset, Self::CHUNK_SIZE)
-            .await
-            .map_err(|err| match err {
-                commonware_runtime::Error::BlobInsufficientLength
-                | commonware_runtime::Error::OffsetOverflow => Error::ItemOutOfRange(position),
-                err => Error::Runtime(err),
-            })?;
-        A::decode(buf.coalesce()).map_err(Error::Codec)
+        self.reader().get(section, position).await
     }
 
     /// Read multiple items from the same section into a caller buffer.
@@ -187,6 +203,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         }
         let blob = self
             .manager
+            .reader()
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
@@ -228,7 +245,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
             buf.len() >= Self::CHUNK_SIZE,
             "try_get_sync_into requires buf.len() >= CHUNK_SIZE"
         );
-        let blob = self.manager.get(section).ok()??;
+        let blob = self.manager.reader().get(section).ok()??;
         let offset = position.checked_mul(Self::CHUNK_SIZE_U64)?;
         let remaining = blob.try_size()?.checked_sub(offset)?;
         if remaining < Self::CHUNK_SIZE_U64 {
@@ -252,6 +269,7 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
         let blob = self
             .manager
+            .reader()
             .get(section)?
             .ok_or(Error::SectionOutOfRange(section))?;
 
@@ -364,6 +382,14 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
         self.manager.sync(section).await
     }
 
+    /// Return a cheap read handle.
+    pub fn reader(&self) -> Reader<E, A> {
+        Reader {
+            manager: self.manager.reader(),
+            _array: PhantomData,
+        }
+    }
+
     /// Sync all sections to storage.
     pub async fn sync_all(&self) -> Result<(), Error> {
         self.manager.sync_all().await
@@ -425,6 +451,100 @@ impl<E: Storage + Metrics, A: CodecFixedShared> Journal<E, A> {
     /// Unlike `destroy`, this keeps the journal alive so it can be reused.
     pub async fn clear(&mut self) -> Result<(), Error> {
         self.manager.clear().await
+    }
+}
+
+impl<E: Storage + Metrics, A: CodecFixedShared> Reader<E, A> {
+    /// Read the item at the given section and position.
+    pub async fn get(&self, section: u64, position: u64) -> Result<A, Error> {
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+        Journal::<E, A>::read_from_blob(&blob, position).await
+    }
+
+    /// Read multiple items from the same section into a caller buffer.
+    pub async fn get_many(
+        &self,
+        section: u64,
+        positions: &[u64],
+        buf: &mut [u8],
+    ) -> Result<(Vec<A>, usize), Error> {
+        assert!(
+            positions.windows(2).all(|w| w[0] < w[1]),
+            "positions must be strictly increasing"
+        );
+        if positions.is_empty() {
+            return Ok((Vec::new(), 0));
+        }
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let offsets: Vec<u64> = positions
+            .iter()
+            .map(|&p| {
+                p.checked_mul(Journal::<E, A>::CHUNK_SIZE_U64)
+                    .ok_or(Error::ItemOutOfRange(p))
+            })
+            .collect::<Result<_, _>>()?;
+
+        let hits = blob
+            .read_many_into(buf, &offsets, NZUsize!(Journal::<E, A>::CHUNK_SIZE))
+            .await?;
+
+        let mut items = Vec::with_capacity(positions.len());
+        for i in 0..positions.len() {
+            let slice =
+                &buf[i * Journal::<E, A>::CHUNK_SIZE..(i + 1) * Journal::<E, A>::CHUNK_SIZE];
+            items.push(A::decode(slice).map_err(Error::Codec)?);
+        }
+        Ok((items, hits))
+    }
+
+    /// Get an item if it can be done synchronously, returning `None` otherwise.
+    pub fn try_get_sync(&self, section: u64, position: u64) -> Option<A> {
+        let mut buf = vec![0u8; Journal::<E, A>::CHUNK_SIZE];
+        self.try_get_sync_into(section, position, &mut buf)
+    }
+
+    /// Get an item synchronously using caller-provided buffer.
+    pub fn try_get_sync_into(&self, section: u64, position: u64, buf: &mut [u8]) -> Option<A> {
+        assert!(
+            buf.len() >= Journal::<E, A>::CHUNK_SIZE,
+            "try_get_sync_into requires buf.len() >= CHUNK_SIZE"
+        );
+        let blob = self.manager.get(section).ok()??;
+        let offset = position.checked_mul(Journal::<E, A>::CHUNK_SIZE_U64)?;
+        let remaining = blob.try_size()?.checked_sub(offset)?;
+        if remaining < Journal::<E, A>::CHUNK_SIZE_U64 {
+            return None;
+        }
+        let buf = &mut buf[..Journal::<E, A>::CHUNK_SIZE];
+        if !blob.try_read_sync(offset, buf) {
+            return None;
+        }
+        A::decode(&buf[..]).ok()
+    }
+
+    /// Read the last item in a section, if any.
+    pub async fn last(&self, section: u64) -> Result<Option<A>, Error> {
+        let blob = self
+            .manager
+            .get(section)?
+            .ok_or(Error::SectionOutOfRange(section))?;
+
+        let size = blob.size().await;
+        if size < Journal::<E, A>::CHUNK_SIZE_U64 {
+            return Ok(None);
+        }
+
+        let last_position = (size / Journal::<E, A>::CHUNK_SIZE_U64) - 1;
+        Journal::<E, A>::read_from_blob(&blob, last_position)
+            .await
+            .map(Some)
     }
 }
 

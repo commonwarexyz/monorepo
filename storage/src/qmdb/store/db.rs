@@ -76,8 +76,8 @@
 use crate::{
     index::{unordered::Index, Unordered as _},
     journal::contiguous::{
-        variable::{Config as JournalConfig, Journal},
-        Mutable as _, Reader,
+        variable::{Config as JournalConfig, Journal, Readers as JournalReaders, Writer},
+        Reader,
     },
     merkle::mmr::Location,
     qmdb::{
@@ -208,7 +208,10 @@ where
     ///
     /// - There is always at least one commit operation in the log.
     /// - The log is never pruned beyond the inactivity floor.
-    log: Journal<E, Operation<crate::mmr::Family, K, V>>,
+    log: Writer<E, Operation<crate::mmr::Family, K, V>>,
+
+    /// Reader factory for operations in the log.
+    readers: JournalReaders<E, Operation<crate::mmr::Family, K, V>>,
 
     /// A snapshot of all currently active operations in the form of a map from each key to the
     /// location containing its most recent update.
@@ -269,7 +272,7 @@ where
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     async fn get_op(&self, loc: Location) -> Result<Operation<crate::mmr::Family, K, V>, Error> {
-        let reader = self.log.reader();
+        let reader = self.readers.reader();
         assert!(*loc < reader.bounds().end);
         reader.read(*loc).await.map_err(|e| match e {
             crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
@@ -280,7 +283,7 @@ where
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
     pub fn bounds(&self) -> std::ops::Range<Location> {
-        let bounds = self.log.reader().bounds();
+        let bounds = self.readers.reader().bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
@@ -298,7 +301,7 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
         let Operation::CommitFloor(metadata, _) =
-            self.log.reader().read(*self.last_commit_loc).await?
+            self.readers.reader().read(*self.last_commit_loc).await?
         else {
             unreachable!("last commit should be a commit floor operation");
         };
@@ -322,7 +325,7 @@ where
             return Ok(());
         }
 
-        let bounds = self.log.reader().bounds();
+        let bounds = self.readers.reader().bounds();
         let log_size = Location::new(bounds.end);
         let oldest_retained_loc = Location::new(bounds.start);
         debug!(
@@ -340,28 +343,30 @@ where
         context: E,
         cfg: Config<T, <Operation<crate::mmr::Family, K, V> as Read>::Cfg>,
     ) -> Result<Self, Error> {
-        let mut log =
+        let mut journal =
             Journal::<E, Operation<crate::mmr::Family, K, V>>::init(context.child("log"), cfg.log)
                 .await?;
 
         // Rewind log to remove uncommitted operations.
-        if log.rewind_to(|op| op.is_commit()).await? == 0 {
+        if journal.rewind_to(|op| op.is_commit()).await? == 0 {
             warn!("Log is empty, initializing new db");
-            log.append(&Operation::CommitFloor(None, Location::new(0)))
+            journal
+                .append(&Operation::CommitFloor(None, Location::new(0)))
                 .await?;
         }
 
         // Sync the log to avoid having to repeat any recovery that may have been performed on next
         // startup.
-        log.sync().await?;
+        journal.sync().await?;
 
         let last_commit_loc =
-            Location::new(log.size().checked_sub(1).expect("commit should exist"));
+            Location::new(journal.size().checked_sub(1).expect("commit should exist"));
+        let (log, readers) = journal.split();
 
         // Build the snapshot.
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
-            let reader = log.reader();
+            let reader = readers.reader();
             let op = reader.read(*last_commit_loc).await?;
             let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
             if inactivity_floor_loc > last_commit_loc {
@@ -377,6 +382,7 @@ where
 
         Ok(Self {
             log,
+            readers,
             snapshot,
             active_keys,
             inactivity_floor_loc,
@@ -395,7 +401,7 @@ where
     /// Destroy the db, removing all data from disk.
     #[boxed]
     pub async fn destroy(self) -> Result<(), Error> {
-        self.log.destroy().await.map_err(Into::into)
+        self.log.into_journal().destroy().await.map_err(Into::into)
     }
 
     #[allow(clippy::type_complexity)]
@@ -405,11 +411,13 @@ where
         '_,
         crate::mmr::Family,
         Index<T, Location>,
-        Journal<E, Operation<crate::mmr::Family, K, V>>,
+        Writer<E, Operation<crate::mmr::Family, K, V>>,
+        JournalReaders<E, Operation<crate::mmr::Family, K, V>>,
     > {
         FloorHelper {
             snapshot: &mut self.snapshot,
             log: &mut self.log,
+            readers: &self.readers,
         }
     }
 
@@ -425,8 +433,8 @@ where
         for (key, value) in diff {
             if let Some(value) = value {
                 let updated = {
-                    let reader = self.log.reader();
-                    let new_loc = reader.bounds().end;
+                    let reader = self.readers.reader();
+                    let new_loc = self.log.size();
                     update_key::<crate::mmr::Family, _, _>(
                         &mut self.snapshot,
                         &reader,
@@ -445,7 +453,7 @@ where
                     .await?;
             } else {
                 let deleted = {
-                    let reader = self.log.reader();
+                    let reader = self.readers.reader();
                     delete_key::<crate::mmr::Family, _, _>(&mut self.snapshot, &reader, &key)
                         .await?
                 };
@@ -537,7 +545,7 @@ mod test {
         executor.start(|mut context| async move {
             let mut db = create_test_store(context.child("store").with_attribute("index", 0)).await;
             assert_eq!(db.bounds().end, 1);
-            assert_eq!(db.log.bounds().start, 0);
+            assert_eq!(*db.bounds().start, 0);
             assert_eq!(db.inactivity_floor_loc(), 0);
             assert!(matches!(db.prune(db.inactivity_floor_loc()).await, Ok(())));
             assert!(matches!(
@@ -740,7 +748,7 @@ mod test {
 
             // All blobs prior to the inactivity floor are pruned, so the oldest retained location
             // is the first in the last retained blob.
-            assert_eq!(db.log.bounds().start, *floor - *floor % 7);
+            assert_eq!(*db.bounds().start, *floor - *floor % 7);
 
             db.destroy().await.unwrap();
         });
@@ -941,7 +949,7 @@ mod test {
             assert_eq!(db.inactivity_floor_loc, final_floor);
 
             db.prune(db.inactivity_floor_loc()).await.unwrap();
-            assert_eq!(db.log.bounds().start, *final_floor - *final_floor % 7);
+            assert_eq!(*db.bounds().start, *final_floor - *final_floor % 7);
             assert_eq!(db.snapshot.items(), 857);
 
             db.destroy().await.unwrap();
