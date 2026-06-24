@@ -86,7 +86,7 @@ impl Barrier {
 
     /// Records `fut` as the barrier. Observe it afterward with [`Self::pending`].
     fn record(&mut self, fut: impl Future<Output = Result<(), Error>> + Send + 'static) {
-        self.0 = Some(Self::into_shared(fut));
+        self.record_shared(Self::into_shared(fut));
     }
 
     /// Records an already-started sync as the barrier.
@@ -104,6 +104,15 @@ impl Barrier {
     /// barrier or running a full blob sync).
     fn discharge(&mut self) {
         self.0 = None;
+    }
+
+    /// Discharges the barrier if the current barrier has completed successfully.
+    fn discharge_completed(&mut self) -> bool {
+        if !self.0.as_ref().is_some_and(sync::completed_successfully) {
+            return false;
+        }
+        self.0 = None;
+        true
     }
 }
 
@@ -191,13 +200,6 @@ impl<B: Blob> BlobState<B> {
         self.sync.start(&self.blob).await
     }
 
-    /// Start syncing the underlying blob if there are unsynced mutations.
-    async fn start_sync(&mut self) -> Handle<()> {
-        self.start_sync_shared()
-            .await
-            .map(sync::observe)
-            .unwrap_or_else(|| Handle::ready(Ok(())))
-    }
 }
 
 /// A [Blob] wrapper that supports write-cached appending of data, with checksums for data integrity
@@ -1397,20 +1399,23 @@ impl<B: Blob> Append<B> {
 impl<B: Blob> Append<B> {
     /// Awaits the in-flight barrier, if any, and discharges it so its page can be rewritten.
     ///
-    /// Only this method (and a full `sync`) discharges the barrier, and the caller must ensure no
-    /// new barrier is recorded concurrently (flush callers hold the buffer write lock; other callers
-    /// rely on the contract that mutable operations are serialized). That lets it discharge
-    /// unconditionally without tracking which barrier it observed. The awaited barrier is a
-    /// full-blob sync, so any earlier plain write it covered is now durable too; hence the sync
-    /// state is also cleared.
+    /// Cleanup is intentionally conservative: while this method awaits, another sync caller may
+    /// record a newer barrier. After the wait, only state that is currently known complete is
+    /// cleared.
     async fn drain_barrier(&self) -> Result<(), Error> {
         let Some(pending) = self.blob_state.read().await.barrier.pending() else {
             return Ok(());
         };
         pending.await?;
         let mut blob_state = self.blob_state.write().await;
-        blob_state.barrier.discharge();
-        blob_state.sync = SyncState::Clean;
+        if blob_state.barrier.discharge_completed() {
+            if matches!(
+                &blob_state.sync,
+                SyncState::InFlight(syncing) if sync::completed_successfully(syncing)
+            ) {
+                blob_state.sync = SyncState::Clean;
+            }
+        }
         Ok(())
     }
 
@@ -1470,7 +1475,14 @@ impl<B: Blob> Append<B> {
             blob_state.barrier.record_shared(syncing.clone());
             Ok(sync::observe(syncing))
         } else {
-            Ok(blob_state.start_sync().await)
+            let had_barrier = blob_state.barrier.pending().is_some();
+            let syncing = blob_state.start_sync_shared().await;
+            if had_barrier {
+                if let Some(syncing) = syncing.as_ref() {
+                    blob_state.barrier.record_shared(syncing.clone());
+                }
+            }
+            Ok(syncing.map(sync::observe).unwrap_or_else(|| Handle::ready(Ok(()))))
         }
     }
 
@@ -1769,6 +1781,7 @@ mod tests {
         data: Vec<u8>,
         durable: Vec<u8>,
         writes: usize,
+        syncs: usize,
         pending_syncs: VecDeque<oneshot::Sender<()>>,
     }
 
@@ -1787,6 +1800,10 @@ mod tests {
 
         fn writes(&self) -> usize {
             self.state.lock().writes
+        }
+
+        fn syncs(&self) -> usize {
+            self.state.lock().syncs
         }
 
         fn pending_syncs(&self) -> usize {
@@ -1874,6 +1891,7 @@ mod tests {
 
         async fn sync(&self) -> Result<(), Error> {
             let mut state = self.state.lock();
+            state.syncs += 1;
             state.durable = state.data.clone();
             Ok(())
         }
@@ -3345,6 +3363,85 @@ mod tests {
             blob.release_next_sync();
             third.await.unwrap();
             assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_drain_barrier_does_not_clear_newer_pending_sync() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob, 0, BUFFER_SIZE, cache_ref).await.unwrap();
+
+            let (newer_sender, newer_receiver) = oneshot::channel();
+            let newer = sync::share(async move {
+                newer_receiver.await.map_err(|_| Error::Closed)?;
+                Ok(())
+            });
+            let blob_state = append.blob_state.clone();
+
+            {
+                let mut state = append.blob_state.write().await;
+                let newer_for_old = newer.clone();
+                state.barrier.record(async move {
+                    let mut state = blob_state.write().await;
+                    state.sync = SyncState::InFlight(newer_for_old.clone());
+                    state.barrier.record_shared(newer_for_old);
+                    Ok(())
+                });
+                let pending = state.barrier.pending().unwrap();
+                state.sync = SyncState::InFlight(pending);
+            }
+
+            append.drain_barrier().await.unwrap();
+
+            let state = append.blob_state.read().await;
+            assert!(
+                state.barrier.pending().is_some(),
+                "stale barrier cleanup must not drop a newer pending barrier"
+            );
+            assert!(
+                matches!(state.sync, SyncState::InFlight(_)),
+                "stale barrier cleanup must not mark newer in-flight sync clean"
+            );
+            drop(state);
+
+            let _ = newer_sender.send(());
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_start_sync_satisfies_replay_barrier_before_rewrite() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(b"abc").await.unwrap();
+            let _replay = append.replay(NZUsize!(BUFFER_SIZE)).await.unwrap();
+            assert_eq!(blob.syncs(), 0, "replay records a lazy barrier");
+
+            let handle = append.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+            blob.release_next_sync();
+            handle.await.unwrap();
+            assert_eq!(blob.syncs(), 0);
+
+            append.append(b"d").await.unwrap();
+            let next = append.start_sync().await.unwrap();
+            assert_eq!(
+                blob.syncs(),
+                0,
+                "rewrite should reuse the completed start_sync barrier"
+            );
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            next.await.unwrap();
         });
     }
 
