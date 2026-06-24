@@ -5,7 +5,7 @@
 
 use crate::{
     index::Ordered as OrderedIndex,
-    journal::contiguous::{Contiguous, Mutable, Reader},
+    journal::contiguous::{Contiguous, Mutable},
     merkle::{self, hasher::Standard as StandardHasher, Location},
     qmdb::{
         any::{
@@ -243,13 +243,7 @@ where
                 // The DB is empty. Use the last CommitFloor to prove emptiness. The Commit proof
                 // variant requires the CommitFloor's floor to equal its own location (genuinely
                 // empty at commit time). If this doesn't hold, the persisted state is inconsistent.
-                let op = self
-                    .any
-                    .log
-                    .reader()
-                    .await
-                    .read(*self.any.last_commit_loc)
-                    .await?;
+                let op = self.any.log.read(*self.any.last_commit_loc).await?;
                 let Operation::CommitFloor(value, floor) = op else {
                     unreachable!("last_commit_loc should always point to a CommitFloor");
                 };

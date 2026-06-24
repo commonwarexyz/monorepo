@@ -10,7 +10,7 @@ use crate::{
     journal::{
         contiguous::{
             fixed::{Config as JConfig, Journal},
-            Many, Reader,
+            Contiguous, Many,
         },
         Error as JError,
     },
@@ -195,7 +195,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
 
         // If a node isn't found in the metadata, it might still be in the journal.
         debug!(?pos, "reading node from journal");
-        let node = journal.reader().read(*pos).await;
+        let node = journal.read(*pos).await;
         match node {
             Ok(node) => Ok(node),
             Err(JError::ItemPruned(_)) => {
@@ -283,12 +283,12 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             )
         }));
         let metadata_prune_pos = Position::try_from(metadata_pruned_to)?;
-        let journal_bounds_start = journal.reader().bounds().start;
+        let journal_bounds_start = journal.bounds().start;
         if *metadata_prune_pos > journal_bounds_start {
             // Metadata is ahead of journal (crashed before completing journal prune).
             // Prune the journal to match metadata.
             journal.prune(*metadata_prune_pos).await?;
-            if journal.reader().bounds().start != journal_bounds_start {
+            if journal.bounds().start != journal_bounds_start {
                 // This should only happen in the event of some failure during the last attempt to
                 // prune the journal.
                 warn!(
@@ -334,7 +334,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             );
             // Check if there is an intact leaf following the last valid size, from which we can
             // recover its missing parents.
-            let recovered_item = journal.reader().read(*last_valid_size).await;
+            let recovered_item = journal.read(*last_valid_size).await;
             if let Ok(item) = recovered_item {
                 orphaned_leaf = Some(item);
             }
@@ -556,7 +556,7 @@ impl<F: Family, E: RStorage + Clock + Metrics, D: Digest, S: Strategy> Merkle<F,
             return Ok(Some(node));
         }
 
-        match self.journal.reader().read(*position).await {
+        match self.journal.read(*position).await {
             Ok(item) => Ok(Some(item)),
             Err(JError::ItemPruned(_)) => Ok(None),
             Err(e) => Err(Error::Journal(e)),

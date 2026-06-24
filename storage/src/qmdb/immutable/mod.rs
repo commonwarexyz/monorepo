@@ -81,7 +81,7 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
     },
     merkle::{full::Config as MerkleConfig, Family, Location, Proof},
     qmdb::{
@@ -218,7 +218,7 @@ where
         context: E,
         translator: T,
     ) -> Result<Self, Error<F>> {
-        if journal.size().await == 0 {
+        if journal.size() == 0 {
             warn!("Authenticated log is empty, initialized new db.");
             journal
                 .append(&Operation::Commit(None, Location::new(0)))
@@ -229,13 +229,12 @@ where
         let mut snapshot = Index::new(context.child("snapshot"), translator);
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.journal.reader().await;
-            let bounds = reader.bounds();
+            let bounds = journal.journal.bounds();
             let last_commit_loc =
                 Location::new(bounds.end.checked_sub(1).expect("commit should exist"));
 
             // Read the floor from the last commit operation.
-            let last_op = reader.read(*last_commit_loc).await?;
+            let last_op = journal.journal.read(*last_commit_loc).await?;
             let inactivity_floor_loc = last_op
                 .has_floor()
                 .expect("last operation should be a commit with floor");
@@ -246,7 +245,7 @@ where
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
-                &reader,
+                &journal.journal,
                 &mut snapshot,
                 |_, _| {},
             )
@@ -269,7 +268,7 @@ where
             inactivity_floor_loc,
             metrics,
         };
-        db.update_metrics().await;
+        db.update_metrics();
         Ok(db)
     }
 
@@ -279,20 +278,19 @@ where
     }
 
     /// Return the Location of the next operation appended to this db.
-    pub async fn size(&self) -> Location<F> {
-        self.bounds().await.end
+    pub fn size(&self) -> Location<F> {
+        self.bounds().end
     }
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> Range<Location<F>> {
-        let bounds = self.journal.reader().await.bounds();
-        Location::new(bounds.start)..Location::new(bounds.end)
+    pub fn bounds(&self) -> Range<Location<F>> {
+        Location::new(self.journal.bounds().start)..Location::new(self.journal.bounds().end)
     }
 
     /// Update state gauges from the current database state.
-    async fn update_metrics(&self) {
-        let bounds = self.journal.reader().await.bounds();
+    fn update_metrics(&self) {
+        let bounds = self.journal.bounds();
         self.metrics.state.set(
             bounds.end,
             bounds.start,
@@ -315,14 +313,13 @@ where
         self.metrics.reads.get_calls.inc();
         self.metrics.reads.keys_requested.inc();
         let iter = self.snapshot.get(key);
-        let reader = self.journal.reader().await;
-        let oldest = reader.bounds().start;
+        let oldest = self.journal.bounds().start;
         let mut result = None;
         for &loc in iter {
             if loc < oldest {
                 continue;
             }
-            if let Some(v) = Self::get_from_loc(&reader, key, loc).await? {
+            if let Some(v) = Self::get_from_loc(&self.journal, key, loc).await? {
                 result = Some(v);
                 break;
             }
@@ -345,8 +342,7 @@ where
         let mut candidates: Vec<(usize, u64)> = Vec::with_capacity(keys.len());
         let mut results: Vec<Option<V::Value>> = vec![None; keys.len()];
 
-        let reader = self.journal.reader().await;
-        let oldest = reader.bounds().start;
+        let oldest = self.journal.bounds().start;
 
         for (key_idx, key) in keys.iter().enumerate() {
             for &loc in self.snapshot.get(key) {
@@ -370,7 +366,7 @@ where
             }
         }
 
-        let ops = reader.read_many(&positions).await?;
+        let ops = self.journal.read_many(&positions).await?;
 
         for &(key_idx, pos) in &candidates {
             if results[key_idx].is_some() {
@@ -394,7 +390,7 @@ where
     /// [`crate::qmdb::Error::OperationPruned`] if loc precedes the oldest retained location. The
     /// location is otherwise assumed valid.
     async fn get_from_loc(
-        reader: &impl Reader<Item = Operation<F, K, V>>,
+        reader: &impl Contiguous<Item = Operation<F, K, V>>,
         key: &K,
         loc: Location<F>,
     ) -> Result<Option<V::Value>, Error<F>> {
@@ -416,13 +412,8 @@ where
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V::Value>, Error<F>> {
         let last_commit_loc = self.last_commit_loc;
-        let Operation::Commit(metadata, _floor) = self
-            .journal
-            .journal
-            .reader()
-            .await
-            .read(*last_commit_loc)
-            .await?
+        let Operation::Commit(metadata, _floor) =
+            self.journal.journal.read(*last_commit_loc).await?
         else {
             unreachable!("no commit operation at location of last commit {last_commit_loc}");
         };
@@ -466,13 +457,13 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        if op_count > self.journal.size().await {
+        if op_count > self.journal.size() {
             return Err(crate::merkle::Error::RangeOutOfBounds(op_count).into());
         }
 
-        let reader = self.journal.reader().await;
         let inactive_peaks =
-            crate::qmdb::inactive_peaks_at::<F, _>(&reader, op_count, |op| op.has_floor()).await?;
+            crate::qmdb::inactive_peaks_at::<F, _>(&self.journal, op_count, |op| op.has_floor())
+                .await?;
 
         Ok(self
             .journal
@@ -491,7 +482,7 @@ where
         start_index: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, K, V>>), Error<F>> {
-        let op_count = self.bounds().await.end;
+        let op_count = self.bounds().end;
         self.historical_proof(op_count, start_index, max_ops).await
     }
 
@@ -519,7 +510,7 @@ where
             ));
         }
         self.journal.prune(loc).await?;
-        self.update_metrics().await;
+        self.update_metrics();
         Ok(())
     }
 
@@ -556,15 +547,14 @@ where
         }
 
         let (rewind_last_loc, rewind_floor, rewound_keys) = {
-            let reader = self.journal.reader().await;
-            let bounds = reader.bounds();
+            let bounds = self.journal.bounds();
             let rewind_last_loc = Location::new(rewind_size - 1);
             if rewind_size <= bounds.start {
                 return Err(Error::Journal(crate::journal::Error::ItemPruned(
                     *rewind_last_loc,
                 )));
             }
-            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let rewind_last_op = self.journal.read(*rewind_last_loc).await?;
             let Operation::Commit(_, rewind_floor) = &rewind_last_op else {
                 return Err(Error::UnexpectedData(rewind_last_loc));
             };
@@ -577,7 +567,7 @@ where
 
             let mut rewound_keys = Vec::new();
             for loc in rewind_size..current_size {
-                if let Operation::Set(key, _) = reader.read(loc).await? {
+                if let Operation::Set(key, _) = self.journal.read(loc).await? {
                     rewound_keys.push(key);
                 }
             }
@@ -605,10 +595,9 @@ where
         // Iterate in reverse so front-insertion preserves ascending loc order
         // for repeated keys, matching the ordering that apply_batch produces.
         if rewind_floor < old_floor {
-            let reader = self.journal.journal.reader().await;
             let gap_end = core::cmp::min(*old_floor, rewind_size);
             for loc in (*rewind_floor..gap_end).rev() {
-                if let Operation::Set(key, _) = reader.read(loc).await? {
+                if let Operation::Set(key, _) = self.journal.journal.read(loc).await? {
                     self.snapshot.insert(&key, Location::new(loc));
                 }
             }
@@ -618,7 +607,7 @@ where
         self.inactivity_floor_loc = rewind_floor;
         let inactive_peaks = F::inactive_peaks(F::location_to_position(size), rewind_floor);
         self.root = self.journal.root(inactive_peaks)?;
-        self.update_metrics().await;
+        self.update_metrics();
 
         Ok(())
     }
@@ -722,7 +711,7 @@ where
         //
         // `seen` is only consulted when at least one ancestor diff will be applied, so it is
         // skipped entirely otherwise.
-        let bounds = self.journal.reader().await.bounds();
+        let bounds = self.journal.bounds();
         let track_shadow = batch.bounds.ancestors.iter().any(|a| a.end > db_size);
         let seen_cap = if track_shadow {
             batch.diff.len()
@@ -762,7 +751,7 @@ where
         self.inactivity_floor_loc = batch.bounds.inactivity_floor;
         self.root = batch.root;
         let range = start_loc..Location::new(batch.bounds.total_size);
-        self.update_metrics().await;
+        self.update_metrics();
         self.metrics
             .operations
             .operations_applied
@@ -811,7 +800,7 @@ pub(super) mod test {
         C::Item: EncodeShared,
     {
         let db = open_db(context.child("first")).await;
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         assert_eq!(bounds.end, 1);
         assert_eq!(bounds.start, Location::new(0));
         assert_eq!(db.inactivity_floor_loc(), Location::new(0));
@@ -828,14 +817,14 @@ pub(super) mod test {
         drop(db);
         let mut db = open_db(context.child("second")).await;
         assert_eq!(db.root(), root);
-        assert_eq!(db.bounds().await.end, 1);
+        assert_eq!(db.bounds().end, 1);
 
         // Test calling commit on an empty db which should make it (durably) non-empty.
         db.apply_batch(db.new_batch().merkleize(&db, None, Location::new(0)))
             .await
             .unwrap();
         db.commit().await.unwrap();
-        assert_eq!(db.bounds().await.end, 2); // commit op added
+        assert_eq!(db.bounds().end, 2); // commit op added
         let root = db.root();
         drop(db);
 
@@ -868,12 +857,12 @@ pub(super) mod test {
 
         // Commit a second key without syncing; reopen must replay it from journal data.
         commit_sets(&mut db, [(k2, v2)], None).await;
-        let committed_bounds = db.bounds().await;
+        let committed_bounds = db.bounds();
         let committed_root = db.root();
         drop(db);
 
         let db = open_db(context.child("second")).await;
-        assert_eq!(db.bounds().await, committed_bounds);
+        assert_eq!(db.bounds(), committed_bounds);
         assert_eq!(db.root(), committed_root);
         assert_eq!(db.get(&k1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&k2).await.unwrap(), Some(v2));
@@ -915,7 +904,7 @@ pub(super) mod test {
         db.commit().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert!(db.get(&k2).await.unwrap().is_none());
-        assert_eq!(db.bounds().await.end, 3);
+        assert_eq!(db.bounds().end, 3);
         assert_eq!(db.get_metadata().await.unwrap(), Some(Sha256::fill(99u8)));
 
         // Set and commit the second key.
@@ -929,7 +918,7 @@ pub(super) mod test {
         db.commit().await.unwrap();
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
-        assert_eq!(db.bounds().await.end, 5);
+        assert_eq!(db.bounds().end, 5);
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
         // Capture state.
@@ -950,7 +939,7 @@ pub(super) mod test {
         assert_eq!(db.root(), root);
         assert_eq!(db.get(&k1).await.unwrap().unwrap(), v1);
         assert_eq!(db.get(&k2).await.unwrap().unwrap(), v2);
-        assert_eq!(db.bounds().await.end, 5);
+        assert_eq!(db.bounds().end, 5);
         assert_eq!(db.get_metadata().await.unwrap(), None);
 
         // Cleanup.
@@ -1005,7 +994,7 @@ pub(super) mod test {
         for i in 0..20u8 {
             let key = Sha256::fill(i);
             let value = Sha256::fill(i.wrapping_add(100));
-            let floor = db.bounds().await.end;
+            let floor = db.bounds().end;
             db.apply_batch(db.new_batch().set(key, value).merkleize(&db, None, floor))
                 .await
                 .unwrap();
@@ -1013,7 +1002,7 @@ pub(super) mod test {
         }
 
         let root_before = db.root();
-        let bounds_before = db.bounds().await;
+        let bounds_before = db.bounds();
 
         let prune_loc = Location::new(*bounds_before.end - 5);
         db.prune(prune_loc).await.unwrap();
@@ -1108,7 +1097,7 @@ pub(super) mod test {
         let merkleized = batch.merkleize(&db, None, Location::new(0));
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
-        assert_eq!(db.bounds().await.end, 2_000 + 2);
+        assert_eq!(db.bounds().end, 2_000 + 2);
 
         // Drop & reopen the db, making sure it has exactly the same state.
         let root = db.root();
@@ -1116,7 +1105,7 @@ pub(super) mod test {
 
         let db = open_db(context.child("second")).await;
         assert_eq!(root, db.root());
-        assert_eq!(db.bounds().await.end, 2_000 + 2);
+        assert_eq!(db.bounds().end, 2_000 + 2);
         for i in 0u64..2_000 {
             let k = Sha256::hash(&i.to_be_bytes());
             let v = Sha256::fill(i as u8);
@@ -1126,7 +1115,7 @@ pub(super) mod test {
         // Make sure all ranges of 5 operations are provable, including truncated ranges at the
         // end.
         let max_ops = NZU64!(5);
-        for i in 0..*db.bounds().await.end {
+        for i in 0..*db.bounds().end {
             let (proof, log) = db.proof(Location::new(i), max_ops).await.unwrap();
             assert!(verify_proof(&hasher, &proof, Location::new(i), &log, &root));
         }
@@ -1158,7 +1147,7 @@ pub(super) mod test {
         let merkleized = batch.merkleize(&db, None, Location::new(0));
         db.apply_batch(merkleized).await.unwrap();
         db.commit().await.unwrap();
-        assert_eq!(db.bounds().await.end, ELEMENTS + 2);
+        assert_eq!(db.bounds().end, ELEMENTS + 2);
         db.sync().await.unwrap();
         let halfway_root = db.root();
 
@@ -1177,14 +1166,14 @@ pub(super) mod test {
         // Recovery should replay the log to regenerate the merkle structure.
         // op_count = 1002 (first batch + commit) + 1000 (second batch) + 1 (second commit) = 2003
         let db = open_db(context.child("second")).await;
-        assert_eq!(db.bounds().await.end, 2003);
+        assert_eq!(db.bounds().end, 2003);
         let root = db.root();
         assert_ne!(root, halfway_root);
 
         // Drop & reopen could preserve the final commit.
         drop(db);
         let db = open_db(context.child("third")).await;
-        assert_eq!(db.bounds().await.end, 2003);
+        assert_eq!(db.bounds().end, 2003);
         assert_eq!(db.root(), root);
 
         db.destroy().await.unwrap();
@@ -1222,7 +1211,7 @@ pub(super) mod test {
 
         // Recovery should back up to previous commit point.
         let db = open_db(context.child("second")).await;
-        assert_eq!(db.bounds().await.end, 3);
+        assert_eq!(db.bounds().end, 3);
         let root = db.root();
         assert_eq!(root, first_commit_root);
 
@@ -1265,11 +1254,11 @@ pub(super) mod test {
         let inactivity_floor = Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION * 2 - 1);
         let merkleized = batch.merkleize(&db, None, inactivity_floor);
         db.apply_batch(merkleized).await.unwrap();
-        assert_eq!(db.bounds().await.end, ELEMENTS + 2);
+        assert_eq!(db.bounds().end, ELEMENTS + 2);
 
         // Prune the db to the first half of the operations.
         db.prune(Location::new((ELEMENTS + 2) / 2)).await.unwrap();
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
 
         // items_per_section is 5, so half should be exactly at a blob boundary, in which case
@@ -1292,7 +1281,7 @@ pub(super) mod test {
 
         let mut db = open_db(context.child("second")).await;
         assert_eq!(root, db.root());
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         assert_eq!(bounds.end, ELEMENTS + 2);
         let oldest_retained_loc = bounds.start;
         assert_eq!(oldest_retained_loc, Location::new(ELEMENTS / 2));
@@ -1301,7 +1290,7 @@ pub(super) mod test {
         let loc = Location::new(ELEMENTS / 2 + (ITEMS_PER_SECTION * 2 - 1));
         db.prune(loc).await.unwrap();
         // Actual boundary should be a multiple of 5.
-        let oldest_retained_loc = db.bounds().await.start;
+        let oldest_retained_loc = db.bounds().start;
         assert_eq!(
             oldest_retained_loc,
             Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
@@ -1311,7 +1300,7 @@ pub(super) mod test {
         db.sync().await.unwrap();
         drop(db);
         let db = open_db(context.child("third")).await;
-        let oldest_retained_loc = db.bounds().await.start;
+        let oldest_retained_loc = db.bounds().start;
         assert_eq!(
             oldest_retained_loc,
             Location::new(ELEMENTS / 2 + ITEMS_PER_SECTION)
@@ -1464,7 +1453,7 @@ pub(super) mod test {
         let metadata_a = Sha256::fill(44u8);
         let first_range =
             commit_sets(&mut db, [(key1, value1), (key2, value2)], Some(metadata_a)).await;
-        let size_before = db.bounds().await.end;
+        let size_before = db.bounds().end;
         let root_before = db.root();
         let last_commit_before = db.last_commit_loc;
         assert_eq!(size_before, first_range.end);
@@ -1480,7 +1469,7 @@ pub(super) mod test {
 
         db.rewind(size_before).await.unwrap();
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.bounds().await.end, size_before);
+        assert_eq!(db.bounds().end, size_before);
         assert_eq!(db.last_commit_loc, last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
@@ -1492,7 +1481,7 @@ pub(super) mod test {
         drop(db);
         let db = open_db(context.child("reopen")).await;
         assert_eq!(db.root(), root_before);
-        assert_eq!(db.bounds().await.end, size_before);
+        assert_eq!(db.bounds().end, size_before);
         assert_eq!(db.last_commit_loc, last_commit_before);
         assert_eq!(db.get_metadata().await.unwrap(), Some(metadata_a));
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
@@ -1534,7 +1523,7 @@ pub(super) mod test {
         let value2 = Sha256::fill(22u8);
 
         commit_sets(&mut db, [(key1, value1)], None).await;
-        let size_after_first = db.bounds().await.end;
+        let size_after_first = db.bounds().end;
         commit_sets(&mut db, [(key2, value2)], None).await;
         assert_eq!(db.get(&key1).await.unwrap(), Some(value1));
         assert_eq!(db.get(&key2).await.unwrap(), Some(value2));
@@ -1580,7 +1569,7 @@ pub(super) mod test {
 
             // Floor must be >= last_commit_loc for prune to succeed.
             // With 16 sets, commit is at current end + 16.
-            let floor = Location::new(*db.bounds().await.end + 16);
+            let floor = Location::new(*db.bounds().end + 16);
             commit_sets_with_floor(
                 &mut db,
                 (0u64..16).map(|i| {
@@ -1593,12 +1582,12 @@ pub(super) mod test {
             .await;
             db.prune(db.last_commit_loc).await.unwrap();
 
-            if db.bounds().await.start > first_range.start {
+            if db.bounds().start > first_range.start {
                 break;
             }
         }
 
-        let oldest_retained = db.bounds().await.start;
+        let oldest_retained = db.bounds().start;
         let boundary_err = db.rewind(oldest_retained).await.unwrap_err();
         assert!(
             matches!(
@@ -1918,7 +1907,7 @@ pub(super) mod test {
 
         // Expected: 1 initial commit + BATCHES * (KEYS_PER_BATCH + 1 commit).
         let expected = 1 + BATCHES * (KEYS_PER_BATCH + 1);
-        assert_eq!(db.bounds().await.end, expected);
+        assert_eq!(db.bounds().end, expected);
 
         db.destroy().await.unwrap();
     }
@@ -1947,7 +1936,7 @@ pub(super) mod test {
         .await
         .unwrap();
         let root_before = db.root();
-        let size_before = db.bounds().await.end;
+        let size_before = db.bounds().end;
 
         // Empty batch with no mutations.
         let merkleized = db.new_batch().merkleize(&db, None, Location::new(0));
@@ -1958,7 +1947,7 @@ pub(super) mod test {
         assert_ne!(db.root(), root_before);
         assert_eq!(db.root(), speculative);
         // Size grew by exactly 1 (the Commit op).
-        assert_eq!(db.bounds().await.end, size_before + 1);
+        assert_eq!(db.bounds().end, size_before + 1);
 
         db.destroy().await.unwrap();
     }
@@ -2058,7 +2047,7 @@ pub(super) mod test {
         assert!(verify_proof(&hasher, &proof, Location::new(0), &ops, &root));
 
         // Expected: 1 initial commit + N sets + 1 commit.
-        assert_eq!(db.bounds().await.end, 1 + N + 1);
+        assert_eq!(db.bounds().end, 1 + N + 1);
 
         db.destroy().await.unwrap();
     }
@@ -2229,7 +2218,7 @@ pub(super) mod test {
         // Apply the first -- should succeed.
         db.apply_batch(batch_a).await.unwrap();
         let expected_root = db.root();
-        let expected_bounds = db.bounds().await;
+        let expected_bounds = db.bounds();
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), None);
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -2241,7 +2230,7 @@ pub(super) mod test {
             "expected StaleBatch error, got {result:?}"
         );
         assert_eq!(db.root(), expected_root);
-        assert_eq!(db.bounds().await, expected_bounds);
+        assert_eq!(db.bounds(), expected_bounds);
         assert_eq!(db.get(&key1).await.unwrap(), Some(v1));
         assert_eq!(db.get(&key2).await.unwrap(), None);
         assert_eq!(db.get_metadata().await.unwrap(), None);
@@ -2696,7 +2685,7 @@ pub(super) mod test {
         .await
         .unwrap();
         db.commit().await.unwrap();
-        let first_size = db.bounds().await.end;
+        let first_size = db.bounds().end;
         assert_eq!(db.inactivity_floor_loc(), Location::new(2));
 
         // Apply second batch with floor=4 (the new commit's location).
@@ -2949,7 +2938,7 @@ pub(super) mod test {
 
         // Commit A: 3 keys with floor=0.
         commit_sets(&mut db, [(k1, v1), (k2, v2), (k3, v3)], None).await;
-        let first_size = db.bounds().await.end;
+        let first_size = db.bounds().end;
         let first_root = db.root();
 
         // Commit B: 3 more keys with floor=first_size (declares batch A inactive).
@@ -3006,14 +2995,14 @@ pub(super) mod test {
 
         // Commit A: 1 key, floor=0.
         commit_sets(&mut db, [(k1, v1)], None).await;
-        let first_size = db.bounds().await.end;
+        let first_size = db.bounds().end;
         let first_root = db.root();
 
         // Commit B: 1 key, floor=first_size.
         let k2 = Sha256::fill(2u8);
         let v2 = Sha256::fill(12u8);
         commit_sets_with_floor(&mut db, [(k2, v2)], None, first_size).await;
-        let second_size = db.bounds().await.end;
+        let second_size = db.bounds().end;
 
         // Commit C: 1 key, floor=second_size. This raises the floor
         // above commit B's keys, so reopen excludes both A and B keys.
@@ -3074,7 +3063,7 @@ pub(super) mod test {
 
         // Commit B: Set(key, v2) with floor=0. get() returns v1 (earliest).
         commit_sets(&mut db, [(key, v2)], None).await;
-        let second_size = db.bounds().await.end;
+        let second_size = db.bounds().end;
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         // Commit C: raises floor above both earlier writes.
@@ -3118,11 +3107,11 @@ pub(super) mod test {
 
         // Commit A: Set(key, v1) at loc=0, floor=0.
         commit_sets(&mut db, [(key, v1)], None).await;
-        let first_size = db.bounds().await.end;
+        let first_size = db.bounds().end;
 
         // Commit B: Set(key, v2), floor=0. get() returns v1 (earliest).
         commit_sets(&mut db, [(key, v2)], None).await;
-        let second_size = db.bounds().await.end;
+        let second_size = db.bounds().end;
         assert_eq!(db.get(&key).await.unwrap(), Some(v1));
 
         // Commit C: raises floor to first_size, so loc=0 is below floor but
@@ -3200,7 +3189,7 @@ pub(super) mod test {
         // to `commit_loc`; what matters semantically is that the floor authorizes pruning
         // of everything below the commit and that any further prune is rejected.
         db.prune(commit_loc).await.unwrap();
-        let bounds = db.bounds().await;
+        let bounds = db.bounds();
         assert!(
             bounds.start <= commit_loc,
             "prune must not advance bounds.start past the floor"

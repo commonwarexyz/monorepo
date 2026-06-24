@@ -2,7 +2,7 @@
 
 use super::{metrics, Error};
 use crate::{
-    journal::contiguous::{variable, Reader as _},
+    journal::contiguous::{variable, Contiguous as _},
     rmap::RMap,
     Context,
 };
@@ -126,7 +126,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
 
         // On restart, ack_floor is the pruning boundary (items below are deleted).
         // acked_above is empty (in-memory state lost on restart).
-        let bounds = journal.reader().bounds();
+        let bounds = journal.bounds();
         let acked_above = RMap::new();
 
         debug!(floor = bounds.start, size = bounds.end, "queue initialized");
@@ -184,8 +184,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
     ///
     /// Returns an error if the underlying storage operation fails.
     pub async fn dequeue(&mut self) -> Result<Option<(u64, V)>, Error> {
-        let reader = self.journal.reader();
-        let size = reader.bounds().end;
+        let size = self.journal.bounds().end;
 
         // Fast-forward above ack floor
         if self.read_pos < self.ack_floor {
@@ -203,7 +202,7 @@ impl<E: Context, V: CodecShared> Queue<E, V> {
             return Ok(None);
         }
 
-        let item = reader.read(self.read_pos).await?;
+        let item = self.journal.read(self.read_pos).await?;
         let pos = self.read_pos;
         self.read_pos += 1;
         let _ = self.metrics.next.try_set(self.read_pos);

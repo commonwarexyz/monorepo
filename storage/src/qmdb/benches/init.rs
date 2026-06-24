@@ -86,7 +86,7 @@ fn bench_fixed_value_init(c: &mut Criterion) {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<Context>();
                         dispatch_fixed_timed_init!(ctx, variant, iters, |db| {
-                            assert_ne!(db.bounds().await.end, 0);
+                            assert_ne!(db.bounds().end, 0);
                         })
                     });
                 },
@@ -148,7 +148,7 @@ fn bench_var_value_init(c: &mut Criterion) {
                     b.to_async(&runner).iter_custom(|iters| async move {
                         let ctx = context::get::<Context>();
                         dispatch_var_timed_init!(ctx, variant, iters, |db| {
-                            assert_ne!(db.bounds().await.end, 0);
+                            assert_ne!(db.bounds().end, 0);
                         })
                     });
                 },

@@ -1,9 +1,6 @@
 use crate::{
     index::unordered::Index,
-    journal::{
-        authenticated,
-        contiguous::{Mutable, Reader as _},
-    },
+    journal::{authenticated, contiguous::Mutable},
     merkle::{
         full::{self, Merkle},
         Family, Location,
@@ -95,8 +92,7 @@ where
             Index::new(context.child("snapshot"), db_config.translator.clone());
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.journal.reader().await;
-            let bounds = reader.bounds();
+            let bounds = journal.journal.bounds();
             let last_commit_loc = Location::<F>::new(
                 bounds
                     .end
@@ -104,7 +100,7 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &reader,
+                &journal.journal,
                 Location::new(bounds.end),
                 |op| op.has_floor(),
             )
@@ -113,7 +109,7 @@ where
             // Replay the log from the inactivity floor to build the snapshot.
             build_snapshot_from_log::<F, _, _, _>(
                 inactivity_floor_loc,
-                &reader,
+                &journal.journal,
                 &mut snapshot,
                 |_, _| {},
             )
@@ -136,7 +132,7 @@ where
             inactivity_floor_loc,
             metrics,
         };
-        db.update_metrics().await;
+        db.update_metrics();
 
         db.sync().await?;
         Ok(db)

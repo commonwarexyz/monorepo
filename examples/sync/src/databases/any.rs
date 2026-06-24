@@ -136,7 +136,7 @@ where
     E: Storage + Clock + Metrics,
 {
     async fn size(&self) -> Location {
-        self.bounds().await.end
+        self.bounds().end
     }
 
     async fn sync_boundary(&self) -> Location {

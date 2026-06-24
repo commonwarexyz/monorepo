@@ -14,7 +14,7 @@
 //! entry is never pruned.
 
 use crate::{
-    journal::contiguous::{variable, Reader as _},
+    journal::contiguous::{variable, Contiguous},
     merkle::{
         self, compact, Family, Location, Proof, MAX_PINNED_NODES, MAX_PROOF_DIGESTS_PER_ELEMENT,
     },
@@ -332,17 +332,14 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
     pub(crate) async fn prune(&mut self, pruning_boundary: Location<F>) -> Result<(), Error<F>> {
         self.check_import_persisted()?;
 
-        let reader = self.journal.reader();
-        let bounds = reader.bounds();
+        let bounds = self.journal.bounds();
         if bounds.is_empty() {
             return Ok(());
         }
         // Clamp below the tip so the journal never empties: the tip is the current state.
-        let pos = Self::first_at_or_above(&reader, pruning_boundary)
+        let pos = Self::first_at_or_above(&self.journal, pruning_boundary)
             .await?
             .min(bounds.end - 1);
-        // Release the read guard before mutating the journal.
-        drop(reader);
         self.journal.prune(pos).await?;
         self.journal.sync().await?;
         Ok(())
@@ -368,19 +365,18 @@ impl<E: Context, F: Family, D: Digest> Store<E, F, D> {
         &self,
         target: Location<F>,
     ) -> Result<Option<(u64, Witness<F, D>)>, Error<F>> {
-        let reader = self.journal.reader();
-        let pos = Self::first_at_or_above(&reader, target).await?;
-        if pos >= reader.bounds().end {
+        let pos = Self::first_at_or_above(&self.journal, target).await?;
+        if pos >= self.journal.bounds().end {
             return Ok(None);
         }
-        let entry = reader.read(pos).await?;
+        let entry = self.journal.read(pos).await?;
         Ok((entry.proof.leaves == target).then_some((pos, entry)))
     }
 
     /// Binary search for the first retained position whose entry commits at least `leaf_count`
     /// leaves, or the end of the journal if none does.
     async fn first_at_or_above(
-        reader: &variable::Reader<E, Witness<F, D>>,
+        reader: &impl Contiguous<Item = Witness<F, D>>,
         leaf_count: Location<F>,
     ) -> Result<u64, Error<F>> {
         let bounds = reader.bounds();
@@ -484,10 +480,7 @@ where
     if size == 0 {
         return Err(Error::DataCorrupted("missing compact witness"));
     }
-    let entry = {
-        let reader = journal.reader();
-        reader.read(size - 1).await?
-    };
+    let entry = journal.read(size - 1).await?;
     rebuild_and_verify::<F, H::Digest, H, S, Op>(
         entry,
         merkle,
@@ -632,9 +625,8 @@ pub(crate) mod tests {
     {
         let mut entries = Vec::new();
         {
-            let reader = journal.reader();
-            for p in pos..reader.bounds().end {
-                entries.push(reader.read(p).await.unwrap());
+            for p in pos..journal.bounds().end {
+                entries.push(journal.read(p).await.unwrap());
             }
         }
         f(&mut entries[0]);
@@ -653,10 +645,7 @@ pub(crate) mod tests {
         D: Digest,
     {
         let size = journal.size();
-        let entry = {
-            let reader = journal.reader();
-            reader.read(size - 1).await.unwrap()
-        };
+        let entry = journal.read(size - 1).await.unwrap();
         (entry.op_bytes, entry.proof, entry.pinned_nodes)
     }
 

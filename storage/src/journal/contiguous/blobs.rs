@@ -5,7 +5,7 @@ use commonware_formatting::hex;
 use commonware_runtime::{
     buffer::paged::{self, CacheRef, Sealed, Writer},
     telemetry::metrics::{Counter, Gauge, GaugeExt as _, MetricsExt as _},
-    Blob, Error as RError, IoBuf, IoBufMut, IoBufs,
+    Blob as RBlob, Error as RError, IoBuf, IoBufMut, IoBufs,
 };
 use futures::future::try_join_all;
 use std::{
@@ -139,7 +139,7 @@ impl<E: Context> Partition<E> {
 }
 
 /// A journal's blobs: contiguous sealed blobs ending in one writable tail.
-pub(super) struct Blobs<E: Context> {
+pub(super) struct Writable<E: Context> {
     partition: Partition<E>,
     metrics: Metrics,
 
@@ -152,11 +152,11 @@ pub(super) struct Blobs<E: Context> {
     /// Sealed historical blobs, ascending and contiguous from `oldest_blob_index`.
     sealed: Arc<[Sealed<E::Blob>]>,
 
-    /// Number of live readers. Gates in-place truncation during rewind.
-    readers: Arc<AtomicUsize>,
+    /// Number of live [`Snapshot`]s. Gates in-place truncation during rewind.
+    snapshots: Arc<AtomicUsize>,
 }
 
-impl<E: Context> Blobs<E> {
+impl<E: Context> Writable<E> {
     /// Build from recovered writers: seal every blob below `tail_blob` and install the tail,
     /// opening an empty one if absent.
     ///
@@ -216,7 +216,7 @@ impl<E: Context> Blobs<E> {
             oldest_blob_index,
             tail,
             sealed: sealed.into(),
-            readers: Arc::new(AtomicUsize::new(0)),
+            snapshots: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -235,24 +235,24 @@ impl<E: Context> Blobs<E> {
         &self.tail
     }
 
-    /// Whether any [`Snapshot`] is live. A new reader can't be created while the caller holds
-    /// `&mut self`, so this only accounts for snapshots taken earlier. The Acquire load pairs
-    /// with the Release in [`Snapshot`]'s drop, so a `false` result means their reads are done.
-    pub(super) fn readers_outstanding(&self) -> bool {
-        self.readers.load(Ordering::Acquire) != 0
+    /// Whether any [`Snapshot`] is alive. A new one can't be created while the
+    /// caller holds `&mut self`, so this only accounts for snapshots taken earlier. The Acquire
+    /// load pairs with the Release in [`Snapshot`]'s drop, so `false` means their reads are done.
+    pub(super) fn snapshots_alive(&self) -> bool {
+        self.snapshots.load(Ordering::Acquire) != 0
     }
 
     /// Capture an owned [`Snapshot`] of the current blobs, readable within `bounds`. The
-    /// snapshot counts itself in `readers` until dropped, gating in-place truncation during
+    /// snapshot counts itself in `snapshots` until dropped, gating in-place truncation during
     /// rewind.
     pub(super) fn to_snapshot(&self, bounds: Range<u64>) -> Snapshot<E::Blob> {
-        self.readers.fetch_add(1, Ordering::Relaxed);
+        self.snapshots.fetch_add(1, Ordering::Relaxed);
         Snapshot {
             oldest_blob_index: self.oldest_blob_index,
             sealed: self.sealed.clone(),
-            tail_reader: self.tail.reader(),
+            tail: self.tail.reader(),
             bounds,
-            readers: self.readers.clone(),
+            snapshots: self.snapshots.clone(),
         }
     }
 
@@ -307,14 +307,14 @@ impl<E: Context> Blobs<E> {
     /// - `byte_offset <= tail size`
     ///
     /// # Errors
-    /// Returns [Error::BlobInUse] if there are outstanding readers: the tail is shared mutable
+    /// Returns [Error::BlobInUse] if there are live [`Snapshot`]s: the tail is shared mutable
     /// state, so truncating it could tear a live snapshot's reads of bytes a later append reuses.
     pub(super) async fn rewind_tail(&mut self, byte_offset: u64) -> Result<(), Error> {
         let current_bytes = self.tail.size().await;
         debug_assert!(byte_offset <= current_bytes);
         if byte_offset < current_bytes {
             // Refuse the in-place truncation while any snapshot is live.
-            if self.readers_outstanding() {
+            if self.snapshots_alive() {
                 return Err(Error::BlobInUse(self.tail_blob_index()));
             }
             self.tail
@@ -333,7 +333,7 @@ impl<E: Context> Blobs<E> {
     /// - `blob < tail_blob_index`
     ///
     /// # Errors
-    /// Returns [Error::BlobInUse] if there are outstanding readers.
+    /// Returns [Error::BlobInUse] if there are live [`Snapshot`]s.
     pub(super) async fn rewind_into_sealed(
         &mut self,
         blob: u64,
@@ -346,7 +346,7 @@ impl<E: Context> Blobs<E> {
             .ok_or_else(|| Error::Corruption(format!("rewind target blob {blob} not retained")))?;
 
         // Refuse the in-place truncation while any snapshot is live.
-        if self.readers_outstanding() {
+        if self.snapshots_alive() {
             return Err(Error::BlobInUse(blob));
         }
 
@@ -386,7 +386,7 @@ impl<E: Context> Blobs<E> {
 
     /// Remove every blob and start an empty journal with its tail at `tail_blob`.
     ///
-    /// Safe with live readers, like [Self::prune]: snapshots keep their own handles, which the
+    /// Safe with live [`Snapshot`]s, like [Self::prune]: snapshots keep their own handles, which the
     /// runtime's read-after-remove contract keeps valid.
     pub(super) async fn clear(&mut self, tail_blob: u64) -> Result<(), Error> {
         for blob in self.oldest_blob_index..=self.tail_blob_index() {
@@ -425,13 +425,13 @@ impl<E: Context> Blobs<E> {
     }
 }
 
-/// A read handle for one blob, resolved from a [`Snapshot`].
-pub(super) enum Handle<'a, B: Blob> {
+/// A read handle for one blob.
+pub(super) enum Blob<'a, B: RBlob> {
     Sealed(&'a Sealed<B>),
-    Tail(&'a paged::Reader<B>),
+    Tail(paged::Reader<B>),
 }
 
-impl<B: Blob> Handle<'_, B> {
+impl<B: RBlob> Blob<'_, B> {
     pub(super) async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufs, Error> {
         match self {
             Self::Sealed(s) => s.read_at(offset, len).await.map_err(Error::Runtime),
@@ -498,12 +498,12 @@ impl<B: Blob> Handle<'_, B> {
     }
 }
 
-/// An owned copy of the journal's blob handles and bounds, captured by [`Blobs::to_snapshot`].
+/// An owned copy of the journal's blob handles and bounds, captured by [`Writable::to_snapshot`].
 /// Later appends, seals, and prunes are invisible to it: it serves the positions in its frozen
 /// `bounds` from the handles retained at capture, so even pruned blobs stay readable. A rewind
 /// would mutate the tail (shared with the writer) or a sealed blob in place, so it counts itself
-/// in `readers` for its lifetime and rewind refuses ([Error::BlobInUse]) while the count is nonzero.
-pub(super) struct Snapshot<B: Blob> {
+/// in `snapshots` for its lifetime and rewind refuses ([Error::BlobInUse]) while the count is nonzero.
+pub(super) struct Snapshot<B: RBlob> {
     /// Index of the first blob in [Self::sealed].
     pub(super) oldest_blob_index: u64,
 
@@ -511,65 +511,77 @@ pub(super) struct Snapshot<B: Blob> {
     pub(super) sealed: Arc<[Sealed<B>]>,
 
     /// Read handle for the tail, blob [`Self::tail_blob_index`].
-    pub(super) tail_reader: paged::Reader<B>,
+    pub(super) tail: paged::Reader<B>,
 
     /// The positions readable through this snapshot.
     pub(super) bounds: Range<u64>,
 
-    /// The journal's live-reader count, shared with [`Blobs`]. Incremented at capture and
+    /// The journal's live-reader count, shared with [`Writable`]. Incremented at capture and
     /// decremented on drop; a nonzero count blocks in-place truncation of the tail and of
     /// sealed blobs during rewind.
-    readers: Arc<AtomicUsize>,
+    snapshots: Arc<AtomicUsize>,
 }
 
-impl<B: Blob> Snapshot<B> {
-    /// Validate a position to be read: must lie within `bounds`.
-    pub(super) const fn validate_readable(&self, pos: u64) -> Result<(), Error> {
-        if pos >= self.bounds.end {
-            return Err(Error::ItemOutOfRange(pos));
-        }
-        if pos < self.bounds.start {
-            return Err(Error::ItemPruned(pos));
-        }
-        Ok(())
-    }
-
-    /// Validate a replay start cursor, which may also sit at `bounds.end`.
-    pub(super) const fn validate_cursor(&self, pos: u64) -> Result<(), Error> {
-        if pos > self.bounds.end {
-            return Err(Error::ItemOutOfRange(pos));
-        }
-        if pos < self.bounds.start {
-            return Err(Error::ItemPruned(pos));
-        }
-        Ok(())
-    }
-
+impl<B: RBlob> Snapshot<B> {
     /// Index of the newest blob.
     pub(super) fn tail_blob_index(&self) -> u64 {
         self.oldest_blob_index + self.sealed.len() as u64
     }
+}
 
-    /// Resolve the read handle for `blob`, if retained.
-    pub(super) fn handle(&self, blob: u64) -> Option<Handle<'_, B>> {
-        if blob == self.tail_blob_index() {
-            return Some(Handle::Tail(&self.tail_reader));
-        }
-        let idx = blob.checked_sub(self.oldest_blob_index)?;
-        self.sealed.get(idx as usize).map(Handle::Sealed)
-    }
-
-    /// Resolve the read handle for `blob`, treating absence as corruption: callers only ask
-    /// for blobs implied by positions validated against `bounds`.
-    pub(super) fn require_handle(&self, blob: u64) -> Result<Handle<'_, B>, Error> {
-        self.handle(blob)
-            .ok_or_else(|| Error::Corruption(format!("blob {blob} missing from snapshot")))
+impl<B: RBlob> Drop for Snapshot<B> {
+    fn drop(&mut self) {
+        self.snapshots.fetch_sub(1, Ordering::Release);
     }
 }
 
-impl<B: Blob> Drop for Snapshot<B> {
-    fn drop(&mut self) {
-        self.readers.fetch_sub(1, Ordering::Release);
+/// Resolves a blob index to a blob, over either a [`Snapshot`] or the live [`Writable`]
+/// (borrowed). The per-position read logic is written once against this.
+pub(super) enum Blobs<'a, E: Context> {
+    Snapshot(Snapshot<E::Blob>),
+    Writable {
+        writable: &'a Writable<E>,
+        bounds: Range<u64>,
+    },
+}
+
+impl<E: Context> Blobs<'_, E> {
+    /// Validate a position to be read: must lie within `bounds`.
+    pub(super) fn validate_readable(&self, pos: u64) -> Result<(), Error> {
+        let bounds = self.bounds();
+        if pos >= bounds.end {
+            return Err(Error::ItemOutOfRange(pos));
+        }
+        if pos < bounds.start {
+            return Err(Error::ItemPruned(pos));
+        }
+        Ok(())
+    }
+
+    /// The readable position range `[start, end)`.
+    pub(super) fn bounds(&self) -> Range<u64> {
+        match self {
+            Self::Snapshot(s) => s.bounds.clone(),
+            Self::Writable { bounds, .. } => bounds.clone(),
+        }
+    }
+
+    /// Resolve the read handle for `blob`, if retained.
+    pub(super) fn get(&self, blob: u64) -> Option<Blob<'_, E::Blob>> {
+        let (oldest, sealed) = match self {
+            Self::Snapshot(s) => (s.oldest_blob_index, &*s.sealed),
+            Self::Writable { writable, .. } => (writable.oldest_blob_index, &*writable.sealed),
+        };
+        if blob == oldest + sealed.len() as u64 {
+            let tail = match self {
+                Self::Snapshot(s) => s.tail.clone(),
+                Self::Writable { writable, .. } => writable.tail.reader(),
+            };
+            return Some(Blob::Tail(tail));
+        }
+        sealed
+            .get(blob.checked_sub(oldest)? as usize)
+            .map(Blob::Sealed)
     }
 }
 
@@ -577,7 +589,7 @@ impl<B: Blob> Drop for Snapshot<B> {
 mod tests {
     use super::*;
 
-    impl<E: Context> Blobs<E> {
+    impl<E: Context> Writable<E> {
         /// Open `blob` as an independent writer, outside this journal's tracking
         /// (simulates a crash-artifact blob).
         pub(crate) async fn open_blob(&self, blob: u64) -> Result<Writer<E::Blob>, Error> {

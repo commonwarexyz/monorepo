@@ -29,7 +29,7 @@ use crate::{
     index::Factory as IndexFactory,
     journal::{
         authenticated,
-        contiguous::{fixed, variable, Contiguous, Mutable, Reader as _},
+        contiguous::{fixed, variable, Contiguous, Mutable},
     },
     merkle::{
         full::{self, Merkle},
@@ -307,8 +307,7 @@ macro_rules! impl_current_sync_database {
                     return Ok(None);
                 }
 
-                let reader = Contiguous::reader(journal).await;
-                let bounds = reader.bounds();
+                let bounds = journal.bounds();
                 if Location::new(bounds.start) > target.range.start()
                     || Location::new(bounds.end) != target.range.end()
                 {
@@ -316,12 +315,11 @@ macro_rules! impl_current_sync_database {
                 }
 
                 let inactivity_floor = qmdb::find_inactivity_floor_at::<F, _>(
-                    &reader,
+                    journal,
                     target.range.end(),
                     |op| op.has_floor(),
                 )
                 .await?;
-                drop(reader);
 
                 let hasher = qmdb::hasher::<H>();
                 let merkle = Merkle::<F, _, _, S>::init(

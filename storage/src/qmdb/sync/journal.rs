@@ -1,5 +1,5 @@
 use crate::{
-    journal::contiguous::{Contiguous, Reader as _},
+    journal::contiguous::Contiguous,
     merkle::{Family, Location},
 };
 use commonware_utils::range::NonEmptyRange;
@@ -70,7 +70,7 @@ where
     }
 
     async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
-        if Contiguous::size(self).await <= *start {
+        if Contiguous::bounds(self).end <= *start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -82,7 +82,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Contiguous::size(self).await
+        Contiguous::bounds(self).end
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
@@ -107,7 +107,7 @@ where
         range: NonEmptyRange<Location<F>>,
     ) -> Result<Self, Self::Error> {
         let mut journal = Self::init(context, config).await?;
-        let size = Contiguous::size(&journal).await;
+        let size = Contiguous::bounds(&journal).end;
 
         // Fresh journal already aligned with the sync start - nothing to do.
         if size == 0 && *range.start() == 0 {
@@ -117,7 +117,7 @@ where
         // After a crash during a previous clear_to_size, the journal may recover empty at a stale
         // position ahead of the requested start (possibly even beyond range.end). Re-clear so the
         // sync engine starts from the correct location.
-        let bounds = journal.reader().bounds();
+        let bounds = journal.bounds();
         if bounds.is_empty() && bounds.start > *range.start() {
             journal.clear_to_size(*range.start()).await?;
             return Ok(journal);
@@ -137,7 +137,7 @@ where
     }
 
     async fn resize(&mut self, start: Location<F>) -> Result<(), Self::Error> {
-        if Contiguous::size(self).await <= *start {
+        if Contiguous::bounds(self).end <= *start {
             self.clear_to_size(*start).await
         } else {
             self.prune(*start).await.map(|_| ())
@@ -149,7 +149,7 @@ where
     }
 
     async fn size(&self) -> u64 {
-        Contiguous::size(self).await
+        Contiguous::bounds(self).end
     }
 
     async fn append(&mut self, op: Self::Op) -> Result<(), Self::Error> {
@@ -211,9 +211,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let size = Contiguous::size(&journal).await;
+            let size = Contiguous::bounds(&journal).end;
             assert_eq!(size, 7);
-            let bounds = journal.reader().bounds();
+            let bounds = journal.bounds();
             assert!(bounds.is_empty());
             assert_eq!(bounds.start, 7);
 
@@ -244,9 +244,9 @@ mod tests {
                 .await
                 .unwrap();
 
-            let size = Contiguous::size(&journal).await;
+            let size = Contiguous::bounds(&journal).end;
             assert_eq!(size, 7);
-            let bounds = journal.reader().bounds();
+            let bounds = journal.bounds();
             assert!(bounds.is_empty());
             assert_eq!(bounds.start, 7);
 

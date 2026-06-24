@@ -19,16 +19,11 @@ pub mod variable;
 #[cfg(test)]
 mod tests;
 
-/// A consistent view of the journal.
+/// A read-only, position-based view of a contiguous journal.
 ///
-/// Bounds are stable for the reader's lifetime, and every position within `bounds()` stays
-/// readable through it, even if the journal prunes those items afterward. A reader never
-/// observes appends made after it was created.
-///
-/// A rewind below `bounds().end` would mutate bytes a reader can still see, so the journal
-/// refuses it while any reader is alive (the rewind returns an error); it never proceeds and
-/// leaves a reader observing changed data.
-pub trait Reader: Send + Sync {
+/// Maintains a monotonically increasing position counter where each appended item receives a unique
+/// position starting from 0.
+pub trait Contiguous: Send + Sync {
     /// The type of items stored in the journal.
     type Item;
 
@@ -67,7 +62,7 @@ pub trait Reader: Send + Sync {
         None
     }
 
-    /// Return a stream of all items starting from `start_pos`, bounded by the reader's `bounds()`.
+    /// Return a stream of all items starting from `start_pos`, bounded by `bounds()`.
     fn replay(
         &self,
         buffer: NonZeroUsize,
@@ -77,31 +72,9 @@ pub trait Reader: Send + Sync {
     > + Send;
 }
 
-/// Journals that support sequential append operations.
-///
-/// Maintains a monotonically increasing position counter where each appended item receives a unique
-/// position starting from 0.
-pub trait Contiguous: Send + Sync {
-    /// The type of items stored in the journal.
-    type Item;
-
-    /// Acquire a reader that holds a consistent view of the journal.
-    ///
-    /// Any position within `reader.bounds()` remains readable for the
-    /// reader's lifetime (see [Reader]).
-    fn reader(&self) -> impl Future<Output = impl Reader<Item = Self::Item> + '_> + Send;
-
-    /// Return the total number of items that have been appended to the journal.
-    ///
-    /// This count is NOT affected by pruning. The next appended item will receive this
-    /// position as its value. Equivalent to [`Reader::bounds`]`.end`.
-    fn size(&self) -> impl Future<Output = u64> + Send;
-}
-
 /// Items to append via [`Mutable::append_many`].
 ///
-/// `Flat` wraps a single contiguous slice; `Nested` wraps multiple slices that are
-/// appended in order under a single lock acquisition.
+/// `Flat` wraps a single contiguous slice; `Nested` wraps multiple slices appended in order.
 pub enum Many<'a, T> {
     /// A single contiguous slice of items.
     Flat(&'a [T]),
@@ -161,7 +134,7 @@ pub trait Mutable: Contiguous + Send + Sync {
             if items.is_empty() {
                 return Err(Error::EmptyAppend);
             }
-            let mut last_pos = self.size().await;
+            let mut last_pos = self.bounds().end;
             match items {
                 Many::Flat(items) => {
                     for item in items {
@@ -265,21 +238,15 @@ pub trait Mutable: Contiguous + Send + Sync {
         P: FnMut(&Self::Item) -> bool + Send + 'a,
     {
         async move {
-            let (bounds, rewind_size) = {
-                let reader = self.reader().await;
-                let bounds = reader.bounds();
-                let mut rewind_size = bounds.end;
-
-                while rewind_size > bounds.start {
-                    let item = reader.read(rewind_size - 1).await?;
-                    if predicate(&item) {
-                        break;
-                    }
-                    rewind_size -= 1;
+            let bounds = self.bounds();
+            let mut rewind_size = bounds.end;
+            while rewind_size > bounds.start {
+                let item = self.read(rewind_size - 1).await?;
+                if predicate(&item) {
+                    break;
                 }
-
-                (bounds, rewind_size)
-            };
+                rewind_size -= 1;
+            }
 
             if rewind_size != bounds.end {
                 let rewound_items = bounds.end - rewind_size;

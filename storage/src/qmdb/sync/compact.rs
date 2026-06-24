@@ -590,7 +590,7 @@ macro_rules! impl_compact_resolver_keyless {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(self.root(), self.bounds().await.end) },
+                    || async { Target::new(self.root(), self.bounds().end) },
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -629,7 +629,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || async { Target::new(db.root(), db.bounds().end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -665,7 +665,7 @@ macro_rules! impl_compact_resolver_keyless {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || async { Target::new(db.root(), db.bounds().end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -708,7 +708,7 @@ macro_rules! impl_compact_resolver_immutable {
             ) -> Result<FetchResult<Self::Family, Self::Op, Self::Digest>, Self::Error> {
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(self.root(), self.bounds().await.end) },
+                    || async { Target::new(self.root(), self.bounds().end) },
                     |leaf_count, last_commit_loc| {
                         self.historical_proof(
                             leaf_count,
@@ -750,7 +750,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = self.read().await;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || async { Target::new(db.root(), db.bounds().end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,
@@ -789,7 +789,7 @@ macro_rules! impl_compact_resolver_immutable {
                 let db = guard.as_ref().ok_or(ServeError::MissingSource)?;
                 fetch_state_from_full_source(
                     target,
-                    || async { Target::new(db.root(), db.bounds().await.end) },
+                    || async { Target::new(db.root(), db.bounds().end) },
                     |leaf_count, last_commit_loc| {
                         db.historical_proof(
                             leaf_count,

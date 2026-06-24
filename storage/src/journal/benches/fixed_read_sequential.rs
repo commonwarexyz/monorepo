@@ -3,7 +3,7 @@ use commonware_runtime::{
     benchmarks::{context, tokio},
     tokio::Context,
 };
-use commonware_storage::journal::contiguous::{fixed::Journal, Reader as _};
+use commonware_storage::journal::contiguous::{fixed::Journal, Contiguous as _};
 use commonware_utils::{sequence::FixedBytes, NZU64};
 use criterion::{criterion_group, Criterion};
 use std::{
@@ -23,7 +23,7 @@ const ITEM_SIZE: usize = 32;
 
 /// Sequentially read `items_to_read` items in the given `journal` starting from item 0.
 async fn bench_run(journal: &Journal<Context, FixedBytes<ITEM_SIZE>>, items_to_read: u64) {
-    let reader = journal.reader();
+    let reader = journal.snapshot();
     for pos in 0..items_to_read {
         black_box(reader.read(pos).await.expect("failed to read data"));
     }

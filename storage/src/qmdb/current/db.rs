@@ -5,7 +5,7 @@
 use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     merkle::{
@@ -199,8 +199,8 @@ where
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
-        self.any.bounds().await
+    pub fn bounds(&self) -> std::ops::Range<Location<F>> {
+        self.any.bounds()
     }
 
     /// Return true if the given sequence of `ops` were applied starting at location `start_loc`
@@ -545,7 +545,7 @@ where
         self.sync_metadata().await?;
 
         self.any.prune_log(prune_loc).await?;
-        self.any.update_metrics().await;
+        self.any.update_metrics();
         self.update_metrics();
         Ok(())
     }
@@ -604,9 +604,8 @@ where
         // to a commit with floor below `pruned_bits` would require bitmap chunks we've already
         // discarded.
         {
-            let reader = self.any.log.reader().await;
             let rewind_last_loc = Location::<F>::new(rewind_size - 1);
-            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let rewind_last_op = self.any.log.read(*rewind_last_loc).await?;
             let Some(rewind_floor) = rewind_last_op.has_floor() else {
                 return Err(Error::<F>::UnexpectedData(rewind_last_loc));
             };

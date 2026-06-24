@@ -1,7 +1,7 @@
 use crate::{
     journal::{
         authenticated,
-        contiguous::{Contiguous as _, Mutable, Reader as _},
+        contiguous::{Contiguous as _, Mutable},
     },
     merkle::{
         full::{self, Merkle},
@@ -83,8 +83,7 @@ where
         .await?;
 
         let (last_commit_loc, inactivity_floor_loc) = {
-            let reader = journal.reader().await;
-            let bounds = reader.bounds();
+            let bounds = journal.bounds();
             let loc = bounds
                 .end
                 .checked_sub(1)
@@ -92,7 +91,7 @@ where
                     bounds.end,
                 )))?;
             let floor =
-                qmdb::find_inactivity_floor_at::<F, _>(&reader, Location::new(bounds.end), |op| {
+                qmdb::find_inactivity_floor_at::<F, _>(&journal, Location::new(bounds.end), |op| {
                     op.has_floor()
                 })
                 .await?;
@@ -112,7 +111,7 @@ where
             inactivity_floor_loc,
             metrics,
         };
-        db.update_metrics().await;
+        db.update_metrics();
 
         db.sync().await?;
         Ok(db)

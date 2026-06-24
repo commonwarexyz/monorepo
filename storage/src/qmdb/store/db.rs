@@ -77,7 +77,7 @@ use crate::{
     index::{unordered::Index, Unordered as _},
     journal::contiguous::{
         variable::{Config as JournalConfig, Journal},
-        Mutable as _, Reader,
+        Contiguous, Mutable as _,
     },
     merkle::mmr::Location,
     qmdb::{
@@ -269,9 +269,8 @@ where
     /// if the location precedes the oldest retained location. The location is otherwise assumed
     /// valid.
     async fn get_op(&self, loc: Location) -> Result<Operation<crate::mmr::Family, K, V>, Error> {
-        let reader = self.log.reader();
-        assert!(*loc < reader.bounds().end);
-        reader.read(*loc).await.map_err(|e| match e {
+        assert!(*loc < self.log.bounds().end);
+        self.log.read(*loc).await.map_err(|e| match e {
             crate::journal::Error::ItemPruned(_) => Error::OperationPruned(loc),
             e => Error::Journal(e),
         })
@@ -280,7 +279,7 @@ where
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
     pub fn bounds(&self) -> std::ops::Range<Location> {
-        let bounds = self.log.reader().bounds();
+        let bounds = self.log.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
@@ -297,8 +296,7 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<V>, Error> {
-        let Operation::CommitFloor(metadata, _) =
-            self.log.reader().read(*self.last_commit_loc).await?
+        let Operation::CommitFloor(metadata, _) = self.log.read(*self.last_commit_loc).await?
         else {
             unreachable!("last commit should be a commit floor operation");
         };
@@ -322,7 +320,7 @@ where
             return Ok(());
         }
 
-        let bounds = self.log.reader().bounds();
+        let bounds = self.log.bounds();
         let log_size = Location::new(bounds.end);
         let oldest_retained_loc = Location::new(bounds.start);
         debug!(
@@ -361,8 +359,7 @@ where
         // Build the snapshot.
         let mut snapshot = Index::new(context.child("snapshot"), cfg.translator);
         let (inactivity_floor_loc, active_keys) = {
-            let reader = log.reader();
-            let op = reader.read(*last_commit_loc).await?;
+            let op = log.read(*last_commit_loc).await?;
             let inactivity_floor_loc = op.has_floor().expect("last op should be a commit");
             if inactivity_floor_loc > last_commit_loc {
                 return Err(crate::qmdb::Error::DataCorrupted(
@@ -370,7 +367,7 @@ where
                 ));
             }
             let active_keys =
-                build_snapshot_from_log(inactivity_floor_loc, &reader, &mut snapshot, |_, _| {})
+                build_snapshot_from_log(inactivity_floor_loc, &log, &mut snapshot, |_, _| {})
                     .await?;
             (inactivity_floor_loc, active_keys)
         };
@@ -425,11 +422,10 @@ where
         for (key, value) in diff {
             if let Some(value) = value {
                 let updated = {
-                    let reader = self.log.reader();
-                    let new_loc = reader.bounds().end;
+                    let new_loc = self.log.bounds().end;
                     update_key::<crate::mmr::Family, _, _>(
                         &mut self.snapshot,
-                        &reader,
+                        &self.log,
                         &key,
                         Location::new(new_loc),
                     )
@@ -444,11 +440,9 @@ where
                     .append(&Operation::Update(Update(key, value)))
                     .await?;
             } else {
-                let deleted = {
-                    let reader = self.log.reader();
-                    delete_key::<crate::mmr::Family, _, _>(&mut self.snapshot, &reader, &key)
-                        .await?
-                };
+                let deleted =
+                    delete_key::<crate::mmr::Family, _, _>(&mut self.snapshot, &self.log, &key)
+                        .await?;
                 if deleted.is_some() {
                     self.log.append(&Operation::Delete(key)).await?;
                     self.steps += 1;

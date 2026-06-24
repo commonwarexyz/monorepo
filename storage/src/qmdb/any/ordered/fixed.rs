@@ -656,7 +656,7 @@ pub(crate) mod test {
             // Make sure size-constrained batches of operations are provable from the oldest
             // retained op to tip.
             let max_ops = NZU64!(4);
-            let end_loc = db.bounds().await.end;
+            let end_loc = db.bounds().end;
             let start_loc = db.log.merkle.bounds().start;
             // Raise the inactivity floor via an empty batch and make sure historical inactive
             // operations are still provable.
@@ -698,12 +698,12 @@ pub(crate) mod test {
             }
             db.prune(db.sync_boundary()).await.unwrap();
             let root = db.root();
-            let op_count = db.bounds().await.end;
+            let op_count = db.bounds().end;
             let inactivity_floor_loc = db.inactivity_floor_loc();
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.child("second")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -722,7 +722,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("third")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_eq!(db.root(), root);
 
@@ -731,7 +731,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("fourth")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -740,7 +740,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             let mut db = open_db(context.child("fifth")).await;
-            assert_eq!(db.bounds().await.end, op_count);
+            assert_eq!(db.bounds().end, op_count);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -757,7 +757,7 @@ pub(crate) mod test {
                 db.commit().await.unwrap();
             }
             let db = open_db(context.child("sixth")).await;
-            assert!(db.bounds().await.end > op_count);
+            assert!(db.bounds().end > op_count);
             assert_ne!(db.inactivity_floor_loc(), inactivity_floor_loc);
             assert_ne!(db.root(), root);
 
@@ -777,7 +777,7 @@ pub(crate) mod test {
 
             // Reopen DB without clean shutdown and make sure the state is the same.
             let mut db = open_db(context.child("second")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             fn write_unapplied_batch(db: &mut AnyTest) {
@@ -795,7 +795,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("third")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // Repeat, drop without cleanup again.
@@ -803,7 +803,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             drop(db);
             let mut db = open_db(context.child("fourth")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // One last check that re-open without proper shutdown still recovers the correct state.
@@ -812,7 +812,7 @@ pub(crate) mod test {
             write_unapplied_batch(&mut db);
             write_unapplied_batch(&mut db);
             let mut db = open_db(context.child("fifth")).await;
-            assert_eq!(db.bounds().await.end, 1);
+            assert_eq!(db.bounds().end, 1);
             assert_eq!(db.root(), root);
 
             // Apply the ops one last time but fully commit them this time, then clean up.
@@ -829,7 +829,7 @@ pub(crate) mod test {
                 db.commit().await.unwrap();
             }
             let db = open_db(context.child("sixth")).await;
-            assert!(db.bounds().await.end > 1);
+            assert!(db.bounds().end > 1);
             assert_ne!(db.root(), root);
 
             db.destroy().await.unwrap();
@@ -898,7 +898,7 @@ pub(crate) mod test {
             apply_ops(&mut db, ops.clone()).await;
             let hasher = qmdb::hasher::<Sha256>();
             let root_hash = db.root();
-            let original_op_count = db.bounds().await.end;
+            let original_op_count = db.bounds().end;
 
             // Historical proof should match "regular" proof when historical size == current database size
             let max_ops = NZU64!(10);
@@ -958,11 +958,11 @@ pub(crate) mod test {
             let mut commit_boundary_sizes: Vec<Location> = Vec::new();
             for _ in 0..5 {
                 apply_ops(&mut db, create_test_ops(10)).await;
-                commit_boundary_sizes.push(db.bounds().await.end);
+                commit_boundary_sizes.push(db.bounds().end);
             }
 
             let root = db.root();
-            let full_size = db.bounds().await.end;
+            let full_size = db.bounds().end;
             assert_eq!(full_size, *commit_boundary_sizes.last().unwrap());
 
             // Verify a single-op proof at the full commit size.
@@ -1029,7 +1029,7 @@ pub(crate) mod test {
             let (proof, ops) = db.proof(start_loc, max_ops).await.unwrap();
 
             // Now keep adding operations and make sure we can still generate a historical proof that matches the original.
-            let historical_size = db.bounds().await.end;
+            let historical_size = db.bounds().end;
 
             for i in 1..10 {
                 // Use different seed per iteration to avoid key collisions

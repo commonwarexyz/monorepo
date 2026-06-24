@@ -7,7 +7,7 @@ use crate::{
     index::Unordered as UnorderedIndex,
     journal::{
         authenticated,
-        contiguous::{Contiguous, Mutable, Reader},
+        contiguous::{Contiguous, Mutable},
         Error as JournalError,
     },
     merkle::{Family, Location, Proof},
@@ -176,7 +176,7 @@ where
 
     /// Get the metadata associated with the last commit.
     pub async fn get_metadata(&self) -> Result<Option<U::Value>, crate::qmdb::Error<F>> {
-        match self.log.reader().await.read(*self.last_commit_loc).await? {
+        match self.log.read(*self.last_commit_loc).await? {
             Operation::CommitFloor(metadata, _) => Ok(metadata),
             _ => unreachable!("last commit is not a CommitFloor operation"),
         }
@@ -208,10 +208,9 @@ where
         self.metrics.reads.keys_requested.inc();
         // Collect to avoid holding a borrow across await points (rust-lang/rust#100013).
         let locs: Vec<Location<F>> = self.snapshot.get(key).copied().collect();
-        let reader = self.log.reader().await;
         let mut result = None;
         for loc in locs {
-            let op = reader.read(*loc).await?;
+            let op = self.log.read(*loc).await?;
             let Operation::Update(data) = op else {
                 panic!("location does not reference update operation. loc={loc}");
             };
@@ -298,8 +297,7 @@ where
         }
 
         // Phase 3: Batch-read from the journal (one reader acquisition, one I/O batch).
-        let reader = self.log.reader().await;
-        let ops = reader.read_many(&positions).await?;
+        let ops = self.log.read_many(&positions).await?;
 
         // Phase 4: Match operations back to keys via binary search (no HashMap).
         for &(key_idx, pos) in &candidates {
@@ -322,14 +320,14 @@ where
 
     /// Return [start, end) where `start` and `end - 1` are the Locations of the oldest and newest
     /// retained operations respectively.
-    pub async fn bounds(&self) -> std::ops::Range<Location<F>> {
-        let bounds = self.log.reader().await.bounds();
+    pub fn bounds(&self) -> std::ops::Range<Location<F>> {
+        let bounds = self.log.bounds();
         Location::new(bounds.start)..Location::new(bounds.end)
     }
 
     /// Update state gauges from the current database state.
-    pub(crate) async fn update_metrics(&self) {
-        let bounds = self.log.reader().await.bounds();
+    pub(crate) fn update_metrics(&self) {
+        let bounds = self.log.bounds();
         self.metrics.state.set(
             bounds.end,
             bounds.start,
@@ -409,7 +407,7 @@ where
         self.metrics.operations.prune_calls.inc();
         let actual_pruned = self.prune_log(prune_loc).await?;
         self.prune_bitmap(actual_pruned);
-        self.update_metrics().await;
+        self.update_metrics();
         Ok(())
     }
 
@@ -443,19 +441,17 @@ where
         start_loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
-        if historical_size > self.log.size().await {
+        if historical_size > self.log.size() {
             return Err(crate::qmdb::Error::Merkle(
                 crate::merkle::Error::RangeOutOfBounds(historical_size),
             ));
         }
 
-        let inactivity_floor = {
-            let reader = self.log.reader().await;
-            crate::qmdb::find_inactivity_floor_at::<F, _>(&reader, historical_size, |op| {
+        let inactivity_floor =
+            crate::qmdb::find_inactivity_floor_at::<F, _>(&self.log, historical_size, |op| {
                 op.has_floor()
             })
-            .await?
-        };
+            .await?;
         let inactive_peaks = self.inactive_peaks(historical_size, inactivity_floor);
         self.log
             .historical_proof(historical_size, start_loc, max_ops, inactive_peaks)
@@ -468,8 +464,7 @@ where
         loc: Location<F>,
         max_ops: NonZeroU64,
     ) -> Result<(Proof<F, H::Digest>, Vec<Operation<F, U>>), crate::qmdb::Error<F>> {
-        self.historical_proof(self.log.size().await, loc, max_ops)
-            .await
+        self.historical_proof(self.log.size(), loc, max_ops).await
     }
 
     /// Rewind the database to `size` operations, where `size` is the location of the next append.
@@ -513,15 +508,14 @@ where
 
         // Read everything needed for rewind before mutating storage.
         let (rewind_floor, undos, active_keys_delta) = {
-            let reader = self.log.reader().await;
-            let bounds = reader.bounds();
+            let bounds = self.log.bounds();
             let rewind_last_loc = Location::new(rewind_size - 1);
             if rewind_size <= bounds.start {
                 return Err(Error::<F>::Journal(JournalError::ItemPruned(
                     *rewind_last_loc,
                 )));
             }
-            let rewind_last_op = reader.read(*rewind_last_loc).await?;
+            let rewind_last_op = self.log.read(*rewind_last_loc).await?;
             let Some(rewind_floor) = rewind_last_op.has_floor() else {
                 return Err(Error::UnexpectedData(rewind_last_loc));
             };
@@ -535,7 +529,7 @@ where
 
             // Reconstruct key state once in a single pass from the rewind floor.
             for loc in *rewind_floor..current_size {
-                let op = reader.read(loc).await?;
+                let op = self.log.read(loc).await?;
                 let op_loc = Location::new(loc);
                 match op {
                     Operation::CommitFloor(_, _) => {}
@@ -645,7 +639,7 @@ where
         self.root = self
             .log
             .root(self.inactive_peaks(Location::new(rewind_size), rewind_floor))?;
-        self.update_metrics().await;
+        self.update_metrics();
 
         Ok(())
     }
@@ -678,8 +672,7 @@ where
         metrics: Metrics<E>,
     ) -> Result<Self, crate::qmdb::Error<F>> {
         let (last_commit_loc, inactivity_floor_loc, active_keys, bitmap) = {
-            let reader = log.reader().await;
-            let bounds = reader.bounds();
+            let bounds = log.bounds();
             let last_commit_loc = Location::new(
                 bounds
                     .end
@@ -687,7 +680,7 @@ where
                     .ok_or(Error::HistoricalFloorPruned(Location::new(bounds.end)))?,
             );
             let inactivity_floor_loc = crate::qmdb::find_inactivity_floor_at::<F, _>(
-                &reader,
+                &log,
                 Location::new(bounds.end),
                 |op| op.has_floor(),
             )
@@ -725,7 +718,7 @@ where
                 let bitmap = &bitmap;
                 build_snapshot_from_log(
                     inactivity_floor_loc,
-                    &reader,
+                    &log,
                     &mut index,
                     |is_active, old_loc| {
                         let mut guard = bitmap.write();
@@ -747,7 +740,7 @@ where
         };
 
         // The bitmap must have exactly one bit per retained log location.
-        if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size().await {
+        if bitmap::Readable::<N>::len(bitmap.as_ref()) != log.size() {
             return Err(crate::qmdb::Error::DataCorrupted(
                 "bitmap length diverged from log size during init",
             ));
@@ -770,7 +763,7 @@ where
             metrics,
             _update: core::marker::PhantomData,
         };
-        db.update_metrics().await;
+        db.update_metrics();
         Ok(db)
     }
 
