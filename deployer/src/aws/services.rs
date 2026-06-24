@@ -1435,7 +1435,6 @@ mod tests {
         assert!(!download.contains("prometheus.tar.gz"));
         assert!(!download.contains("grafana.deb"));
         assert!(!download.contains("node_exporter.tar.gz"));
-        // Image tarballs are downloaded from S3 (no registry pull on the instance).
         assert!(download.contains(&format!(
             "-O /home/ubuntu/images/{}",
             image_file_name(TRACER_IMAGE)
@@ -1455,7 +1454,6 @@ mod tests {
         assert!(setup.contains("ExecStart=/usr/local/bin/docker run --rm --name tracer"));
         assert!(!setup.contains("/usr/bin/docker"));
         assert!(!setup.contains("apt-get install -y docker.io"));
-        // Images are loaded from tarballs, never pulled or authenticated against a registry.
         assert!(!setup.contains("docker pull"));
         assert!(!setup.contains("docker login"));
         for image in [
