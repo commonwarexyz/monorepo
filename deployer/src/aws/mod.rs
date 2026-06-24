@@ -57,7 +57,7 @@
 //!
 //! * Deployed in `us-east-1` with a configurable instance type (e.g., `t4g.small` for ARM64, `t3.small` for x86_64) and storage (e.g., 10GB gp2). Architecture is auto-detected from the instance type.
 //! * Runs:
-//!     * **Prometheus**: Scrapes binary metrics from all instances at `:9090` and system metrics from all instances at `:9100`.
+//!     * **Prometheus**: Scrapes enabled binary metrics at `:9090` and system metrics from all instances at `:9100`.
 //!     * **Loki**: Listens at `:3100`, storing logs in `/loki/chunks` with a TSDB index at `/loki/index`.
 //!     * **Pyroscope**: Listens at `:4040`, storing profiles in `/var/lib/pyroscope`.
 //!     * **Tempo**: Listens at `:4318`, storing traces in `/tempo`.
@@ -72,7 +72,7 @@
 //! * Deployed in user-specified regions with configurable ARM64 or AMD64 instance types and storage.
 //!   Instances whose type includes EC2 NVMe instance store automatically mount it at `/home/ubuntu`.
 //! * Run:
-//!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090`.
+//!     * **Custom Binary**: Executes with `--hosts=/home/ubuntu/hosts.yaml --config=/home/ubuntu/config.conf`, exposing metrics at `:9090` by default.
 //!     * **Promtail**: Forwards `/var/log/binary.log` to Loki on the monitoring instance.
 //!     * **Node Exporter**: Exposes system metrics at `:9100`.
 //!     * **Pyroscope Agent**: Forwards `perf` profiles to Pyroscope on the monitoring instance.
@@ -279,6 +279,7 @@
 //!     binary: /path/to/binary-arm64
 //!     config: /path/to/config.conf
 //!     profiling: true
+//!     # metrics: false  # Set when the binary does not expose Prometheus metrics at :9090.
 //!   - name: node2
 //!     region: us-west-2
 //!     instance_type: t3.small  # x86_64 (Intel/AMD)
@@ -297,6 +298,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
 
 cfg_if::cfg_if! {
     if #[cfg(feature = "aws")] {
@@ -684,6 +693,10 @@ pub struct InstanceConfig {
 
     /// Path to the binary configuration file
     pub config: String,
+
+    /// Whether the binary exposes Prometheus metrics at port 9090
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub metrics: bool,
 
     /// Whether to enable profiling
     pub profiling: bool,

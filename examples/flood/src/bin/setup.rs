@@ -189,6 +189,7 @@ fn main() {
             storage_throughput,
             binary: BINARY_NAME.to_string(),
             config: peer_config_file,
+            metrics: true,
             profiling: instrument,
         };
         instance_configs.push(instance);

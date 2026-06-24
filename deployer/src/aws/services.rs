@@ -599,6 +599,8 @@ self_profiling:
 pub const TEMPO_CONFIG: &str = r#"
 server:
   grpc_listen_port: 9096
+  grpc_server_max_recv_msg_size: 104857600
+  grpc_server_max_send_msg_size: 104857600
   http_listen_port: 3200
 distributor:
   receivers:
@@ -1109,7 +1111,7 @@ scrape_configs:
 }
 
 /// Generates Prometheus configuration with scrape targets for all instance IPs
-pub fn generate_prometheus_config(instances: &[(&str, &str, &str, &str)]) -> String {
+pub fn generate_prometheus_config(instances: &[(&str, &str, &str, &str, bool)]) -> String {
     let mut config = String::from(
         r#"
 global:
@@ -1120,9 +1122,10 @@ scrape_configs:
       - targets: ['localhost:9100']
 "#,
     );
-    for (name, ip, region, arch) in instances {
-        config.push_str(&format!(
-            r#"
+    for (name, ip, region, arch, metrics) in instances {
+        if *metrics {
+            config.push_str(&format!(
+                r#"
   - job_name: '{name}_binary'
     static_configs:
       - targets: ['{ip}:9090']
@@ -1131,6 +1134,11 @@ scrape_configs:
           deployer_ip: '{ip}'
           deployer_region: '{region}'
           deployer_arch: '{arch}'
+"#
+            ));
+        }
+        config.push_str(&format!(
+            r#"
   - job_name: '{name}_system'
     static_configs:
       - targets: ['{ip}:9100']
@@ -1482,7 +1490,27 @@ mod tests {
 
         assert!(TEMPO_CONFIG.contains("path: /var/tempo/traces"));
         assert!(TEMPO_CONFIG.contains("path: /var/tempo/wal"));
+        assert!(TEMPO_CONFIG.contains("grpc_server_max_recv_msg_size: 104857600"));
+        assert!(TEMPO_CONFIG.contains("grpc_server_max_send_msg_size: 104857600"));
         assert!(!TEMPO_CONFIG.contains("path: /tempo/"));
+    }
+
+    #[test]
+    fn test_prometheus_config_skips_binary_metrics_when_disabled() {
+        let config = generate_prometheus_config(&[
+            ("validator", "10.0.0.1", "us-east-1", "arm64", true),
+            ("spammer", "10.0.0.2", "us-east-1", "arm64", false),
+        ]);
+
+        assert!(config.contains("job_name: 'validator_binary'"));
+        assert!(config.contains("targets: ['10.0.0.1:9090']"));
+        assert!(config.contains("job_name: 'validator_system'"));
+        assert!(config.contains("targets: ['10.0.0.1:9100']"));
+
+        assert!(!config.contains("job_name: 'spammer_binary'"));
+        assert!(!config.contains("targets: ['10.0.0.2:9090']"));
+        assert!(config.contains("job_name: 'spammer_system'"));
+        assert!(config.contains("targets: ['10.0.0.2:9100']"));
     }
 
     #[test]
