@@ -1433,7 +1433,11 @@ impl<B: Blob> Append<B> {
         let buf_guard = self.buffer.write().await;
 
         // A single emitted write can be made durable directly during the flush.
-        if self.flush_internal(buf_guard, true, true).await?.made_durable {
+        if self
+            .flush_internal(buf_guard, true, true)
+            .await?
+            .made_durable
+        {
             return Ok(());
         }
 
@@ -1472,7 +1476,10 @@ impl<B: Blob> Append<B> {
         if outcome.rewrote_partial_footer {
             let handle = blob_state.start_sync().await;
             blob_state.barrier.record(handle);
-            let pending = blob_state.barrier.pending().expect("barrier was just recorded");
+            let pending = blob_state
+                .barrier
+                .pending()
+                .expect("barrier was just recorded");
             drop(blob_state);
             Ok(Barrier::observe(pending))
         } else {
