@@ -505,7 +505,7 @@ pub(crate) fn docker_download_url(version: &str, architecture: Architecture) -> 
     )
 }
 
-fn docker_static_arch(architecture: Architecture) -> &'static str {
+const fn docker_static_arch(architecture: Architecture) -> &'static str {
     match architecture {
         Architecture::Arm64 => "aarch64",
         Architecture::X86_64 => "x86_64",

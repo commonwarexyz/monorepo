@@ -292,7 +292,7 @@ fn cached_image(
     Ok(CachedImage {
         upstream,
         repository,
-        tag: tag.to_string(),
+        tag,
         reference,
     })
 }
@@ -314,7 +314,7 @@ fn repository_path(name: &str) -> Result<(&'static str, String), Error> {
         .ok_or_else(|| Error::InvalidImage(name.to_string()))?;
     let path = parts.next();
     match path {
-        Some(path) if path.is_empty() => Err(Error::InvalidImage(name.to_string())),
+        Some("") => Err(Error::InvalidImage(name.to_string())),
         Some(path) if first == "ghcr.io" => Ok(("ghcr", path.to_string())),
         Some(_) if first.contains('.') || first.contains(':') || first == "localhost" => {
             Err(Error::UnsupportedImageRegistry(first.to_string()))
