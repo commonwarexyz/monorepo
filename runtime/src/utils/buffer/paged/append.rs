@@ -37,8 +37,13 @@ use crate::{
 use bytes::BufMut;
 use commonware_cryptography::Crc32;
 use commonware_utils::sync::{AsyncRwLock, AsyncRwLockWriteGuard};
-use futures::stream::{FuturesUnordered, StreamExt};
+use futures::{
+    future::{BoxFuture, Shared},
+    stream::{FuturesUnordered, StreamExt},
+    FutureExt as _,
+};
 use std::{
+    io::Error as IoError,
     num::{NonZeroU16, NonZeroUsize},
     sync::Arc,
 };
@@ -51,6 +56,123 @@ enum ProtectedCrc {
     Second,
 }
 
+/// Summarizes the durability-sensitive effects of a flush.
+struct FlushOutcome {
+    /// The flush completed durability for every write it emitted.
+    durable: bool,
+}
+
+type SharedSync = Shared<BoxFuture<'static, Result<(), Arc<Error>>>>;
+
+/// A partial-page sync whose completion must be observed before rewriting that page again.
+#[derive(Clone)]
+struct PendingPartialSync {
+    generation: u64,
+    partial_page_state: Checksum,
+    completion: SharedSync,
+}
+
+impl PendingPartialSync {
+    fn new(generation: u64, partial_page_state: Checksum, handle: Handle<()>) -> Self {
+        let completion = async move { handle.await.map_err(Arc::new) }.boxed().shared();
+        Self {
+            generation,
+            partial_page_state,
+            completion,
+        }
+    }
+}
+
+/// Tracks whether a partial-page sync must complete before the page can be rewritten.
+#[derive(Clone)]
+enum PartialSync {
+    Idle,
+    Pending(PendingPartialSync),
+    PendingThenSync(PendingPartialSync),
+}
+
+impl PartialSync {
+    fn pending(&self) -> Option<PendingPartialSync> {
+        match self {
+            Self::Idle => None,
+            Self::Pending(pending) | Self::PendingThenSync(pending) => Some(pending.clone()),
+        }
+    }
+
+    fn queue_sync(&mut self) -> Option<PendingPartialSync> {
+        match self {
+            Self::Idle => None,
+            Self::Pending(pending) | Self::PendingThenSync(pending) => {
+                let pending = pending.clone();
+                *self = Self::PendingThenSync(pending.clone());
+                Some(pending)
+            }
+        }
+    }
+
+    fn complete(&mut self, pending: &PendingPartialSync) -> bool {
+        match self {
+            Self::Pending(current) | Self::PendingThenSync(current)
+                if current.generation == pending.generation =>
+            {
+                *self = Self::Idle;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+fn clone_io_error(error: &IoError) -> IoError {
+    IoError::new(error.kind(), error.to_string())
+}
+
+fn clone_error(error: &Error) -> Error {
+    match error {
+        Error::Exited => Error::Exited,
+        Error::Closed => Error::Closed,
+        Error::Aborted => Error::Aborted,
+        Error::Timeout => Error::Timeout,
+        Error::BindFailed => Error::BindFailed,
+        Error::ConnectionFailed => Error::ConnectionFailed,
+        Error::WriteFailed => Error::WriteFailed,
+        Error::ReadFailed => Error::ReadFailed,
+        Error::SendFailed => Error::SendFailed,
+        Error::RecvFailed => Error::RecvFailed,
+        Error::ResolveFailed(error) => Error::ResolveFailed(error.clone()),
+        Error::PartitionNameInvalid(partition) => {
+            Error::PartitionNameInvalid(partition.clone())
+        }
+        Error::PartitionCreationFailed(partition) => {
+            Error::PartitionCreationFailed(partition.clone())
+        }
+        Error::PartitionMissing(partition) => Error::PartitionMissing(partition.clone()),
+        Error::PartitionCorrupt(partition) => Error::PartitionCorrupt(partition.clone()),
+        Error::BlobOpenFailed(partition, name, error) => {
+            Error::BlobOpenFailed(partition.clone(), name.clone(), clone_io_error(error))
+        }
+        Error::BlobMissing(partition, name) => Error::BlobMissing(partition.clone(), name.clone()),
+        Error::BlobResizeFailed(partition, name, error) => {
+            Error::BlobResizeFailed(partition.clone(), name.clone(), clone_io_error(error))
+        }
+        Error::BlobSyncFailed(partition, name, error) => {
+            Error::BlobSyncFailed(partition.clone(), name.clone(), clone_io_error(error))
+        }
+        Error::BlobInsufficientLength => Error::BlobInsufficientLength,
+        Error::BlobCorrupt(partition, name, reason) => {
+            Error::BlobCorrupt(partition.clone(), name.clone(), reason.clone())
+        }
+        Error::BlobVersionMismatch { expected, found } => Error::BlobVersionMismatch {
+            expected: expected.clone(),
+            found: *found,
+        },
+        Error::InvalidChecksum => Error::InvalidChecksum,
+        Error::OffsetOverflow => Error::OffsetOverflow,
+        Error::Io(error) => Error::Io(clone_io_error(error)),
+        Error::Pool(error) => Error::Pool(*error),
+    }
+}
+
 /// Describes the state of the underlying blob with respect to the buffer.
 #[derive(Clone)]
 struct BlobState<B: Blob> {
@@ -59,9 +181,17 @@ struct BlobState<B: Blob> {
     /// The page where the next appended byte will be written to.
     current_page: u64,
 
-    /// The state of the partial page in the blob. If it was written due to a sync call, then this
-    /// will contain its CRC record.
+    /// The latest visible partial-page state written to the blob.
     partial_page_state: Option<Checksum>,
+
+    /// The partial-page state proven durable by a completed sync handle.
+    durable_partial_page_state: Option<Checksum>,
+
+    /// Partial-page sync state. Rewrites of this page must wait for pending syncs.
+    partial_sync: PartialSync,
+
+    /// Monotonically identifies partial-page syncs.
+    partial_sync_generation: u64,
 
     /// Whether prior plain writes or resizes must be made durable by a full sync.
     needs_sync: bool,
@@ -125,6 +255,7 @@ impl<B: Blob> BlobState<B> {
         }
         self.blob.sync().await?;
         self.needs_sync = false;
+        self.durable_partial_page_state = self.partial_page_state.clone();
         Ok(())
     }
 
@@ -229,7 +360,10 @@ impl<B: Blob> Append<B> {
                 BlobState {
                     blob,
                     current_page: pages - 1,
-                    partial_page_state: Some(crc_record),
+                    partial_page_state: Some(crc_record.clone()),
+                    durable_partial_page_state: Some(crc_record),
+                    partial_sync: PartialSync::Idle,
+                    partial_sync_generation: 0,
                     needs_sync,
                 },
                 Some(partial_page),
@@ -239,6 +373,9 @@ impl<B: Blob> Append<B> {
                     blob,
                     current_page: pages,
                     partial_page_state: None,
+                    durable_partial_page_state: None,
+                    partial_sync: PartialSync::Idle,
+                    partial_sync_generation: 0,
                     needs_sync,
                 },
                 None,
@@ -428,6 +565,9 @@ impl<B: Blob> Append<B> {
         // so seeding it with a view of `buf` would pin the entire backing allocation until the
         // next append to this blob (or forever, if there is none).
         blob_state.current_page += (bulk_len / logical_page_size) as u64;
+        if bulk_len > 0 {
+            blob_state.durable_partial_page_state = None;
+        }
         let suffix = buf.slice(fill + bulk_len..);
         let suffix = if suffix.is_empty() {
             suffix
@@ -473,39 +613,52 @@ impl<B: Blob> Append<B> {
     /// caller always holds the buffer write lock (`buf_guard`), and all paths into `flush_internal`
     /// require that lock, so concurrent flushes are impossible.
     ///
-    /// Returns `true` if the flush made its writes durable, so no additional sync is needed.
+    /// Returns whether the flush made its writes durable.
     async fn flush_internal(
         &self,
         mut buf_guard: AsyncRwLockWriteGuard<'_, Buffer>,
         write_partial_page: bool,
         sync: bool,
-    ) -> Result<bool, Error> {
+    ) -> Result<FlushOutcome, Error> {
+        let logical_page_size = self.cache_ref.page_size() as usize;
+        if self
+            .rewrites_current_page(&buf_guard, write_partial_page, logical_page_size)
+            .await
+        {
+            self.wait_for_pending_partial_sync().await?;
+        }
         let buffer = &mut *buf_guard;
 
-        // Read the old partial page state before doing the heavy work of preparing physical pages.
-        // This is safe because partial_page_state is only modified by flush_internal, and we hold
-        // the buffer write lock which prevents concurrent flushes.
-        let old_partial_page_state = {
+        // Read the durable partial page state before doing the heavy work of preparing physical
+        // pages. In-flight partial writes are deliberately ignored here: until their sync handle
+        // completes, later rewrites must preserve the last proven-durable checksum fallback.
+        let (partial_page_state, durable_partial_page_state) = {
             let blob_state = self.blob_state.read().await;
-            blob_state.partial_page_state.clone()
+            (
+                blob_state.partial_page_state.clone(),
+                blob_state.durable_partial_page_state.clone(),
+            )
         };
 
         // Prepare the *physical* pages corresponding to the data in the buffer.
-        // Pass the old partial page state so the CRC record is constructed correctly.
+        // Pass the durable partial page state so the CRC record preserves the crash-recoverable
+        // fallback, even when there is a newer in-flight footer.
         let (mut physical_pages, partial_page_state) = self.to_physical_pages(
             &*buffer,
             write_partial_page,
-            old_partial_page_state.as_ref(),
+            durable_partial_page_state.as_ref(),
+            partial_page_state.as_ref(),
         );
 
         // If there's nothing to write, return early.
         if physical_pages.is_empty() {
-            return Ok(false);
+            return Ok(FlushOutcome {
+                durable: false,
+            });
         }
 
         // Split buffered bytes into full logical pages to hand off now, leaving any trailing
         // partial page in tip for continued buffering.
-        let logical_page_size = self.cache_ref.page_size() as usize;
         let pages_to_cache = buffer.len() / logical_page_size;
         let bytes_to_drain = pages_to_cache * logical_page_size;
 
@@ -546,13 +699,17 @@ impl<B: Blob> Append<B> {
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
         let write_at_offset = blob_state.current_page * physical_page_size as u64;
 
-        // Identify protected regions based on the OLD partial page state.
-        let protected_regions = Self::identify_protected_regions(old_partial_page_state.as_ref());
+        // Identify protected regions based on the durable partial page state.
+        let protected_regions =
+            Self::identify_protected_regions(durable_partial_page_state.as_ref());
 
         // Update state before writing. This may appear to risk data loss if writes fail,
         // but write failures are fatal per this codebase's design - callers must not use
         // the blob after any mutable method returns an error.
         blob_state.current_page += pages_to_cache as u64;
+        if pages_to_cache > 0 {
+            blob_state.durable_partial_page_state = None;
+        }
         blob_state.partial_page_state = partial_page_state;
 
         // Make sure the buffer offset and underlying blob agree on the state of the tip.
@@ -584,7 +741,9 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_second_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            durable: sync,
+                        });
                     }
                 } else {
                     // Skip the protected first page bytes when they are fully covered.
@@ -602,11 +761,13 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_first_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            durable: sync,
+                        });
                     }
                 }
 
-                Ok(false)
+                Ok(FlushOutcome { durable: false })
             }
             Some((prefix_len, ProtectedCrc::Second)) => {
                 // Protected CRC is second: [page_size+6..page_size+12].
@@ -630,7 +791,9 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_second_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            durable: sync,
+                        });
                     }
                 } else {
                     // Skip the fully protected first segment when no bytes from it need update.
@@ -648,20 +811,48 @@ impl<B: Blob> Append<B> {
                         )
                         .await?;
                     if !has_first_write {
-                        return Ok(sync);
+                        return Ok(FlushOutcome {
+                            durable: sync,
+                        });
                     }
                 }
 
-                Ok(false)
+                Ok(FlushOutcome { durable: false })
             }
             None => {
                 // No protected regions, write everything in one operation
                 blob_state
                     .write_at_maybe_sync(write_at_offset, physical_pages, sync)
                     .await?;
-                Ok(sync)
+                Ok(FlushOutcome { durable: sync })
             }
         }
+    }
+
+    async fn rewrites_current_page(
+        &self,
+        buffer: &Buffer,
+        write_partial_page: bool,
+        logical_page_size: usize,
+    ) -> bool {
+        if buffer.is_empty() {
+            return false;
+        }
+        if buffer.len() >= logical_page_size {
+            return true;
+        }
+        if !write_partial_page {
+            return false;
+        }
+
+        let visible_len = self
+            .blob_state
+            .read()
+            .await
+            .partial_page_state
+            .as_ref()
+            .map(|crc| crc.get_crc().0 as usize);
+        visible_len != Some(buffer.len())
     }
 
     /// Returns the logical size of the blob. This accounts for both written and buffered data.
@@ -941,14 +1132,17 @@ impl<B: Blob> Append<B> {
     ///
     /// * `buffer` - The buffer containing logical page data
     /// * `include_partial_page` - Whether to include a partial page if one exists
-    /// * `old_crc_record` - The CRC record from a previously committed partial page, if any.
-    ///   When present, the first page's CRC record will preserve the old CRC in its original slot
-    ///   and place the new CRC in the other slot.
+    /// * `durable_crc_record` - The CRC record from the latest durable partial page, if any.
+    ///   When present, the first page's CRC record will preserve this CRC in its original slot and
+    ///   place the new CRC in the other slot.
+    /// * `visible_crc_record` - The CRC record from the latest visible partial page, if any.
+    ///   This is used only to detect that the buffer already matches what was last written.
     fn to_physical_pages(
         &self,
         buffer: &Buffer,
         include_partial_page: bool,
-        old_crc_record: Option<&Checksum>,
+        durable_crc_record: Option<&Checksum>,
+        visible_crc_record: Option<&Checksum>,
     ) -> (IoBufs, Option<Checksum>) {
         let logical_page_size = self.cache_ref.page_size() as usize;
         let physical_page_size = logical_page_size + CHECKSUM_SIZE as usize;
@@ -959,7 +1153,7 @@ impl<B: Blob> Append<B> {
         if pages_to_write > 0 {
             self.append_full_pages(
                 &buffer.slice(..pages_to_write * logical_page_size),
-                old_crc_record,
+                durable_crc_record,
                 &mut write_buffer,
             );
         }
@@ -977,9 +1171,9 @@ impl<B: Blob> Append<B> {
         // If there are no full pages and the partial page length matches what was already
         // written, there's nothing new to write.
         if pages_to_write == 0 {
-            if let Some(old_crc) = old_crc_record {
-                let (old_len, _) = old_crc.get_crc();
-                if partial_page.len() == old_len as usize {
+            if let Some(visible_crc) = visible_crc_record {
+                let (visible_len, _) = visible_crc.get_crc();
+                if partial_page.len() == visible_len as usize {
                     return (write_buffer, None);
                 }
             }
@@ -989,8 +1183,8 @@ impl<B: Blob> Append<B> {
 
         // For partial pages: if this is the first page and there's an old CRC, preserve it.
         // Otherwise just use the new CRC in slot 0.
-        let crc_record = if let (0, Some(old_crc)) = (pages_to_write, old_crc_record) {
-            Self::build_crc_record_preserving_old(partial_len as u16, crc, old_crc)
+        let crc_record = if let (0, Some(durable_crc)) = (pages_to_write, durable_crc_record) {
+            Self::build_crc_record_preserving_old(partial_len as u16, crc, durable_crc)
         } else {
             Checksum::new(partial_len as u16, crc)
         };
@@ -1225,6 +1419,54 @@ impl<B: Blob> Append<B> {
 }
 
 impl<B: Blob> Append<B> {
+    async fn pending_partial_sync(&self) -> Option<PendingPartialSync> {
+        self.blob_state.read().await.partial_sync.pending()
+    }
+
+    async fn queue_pending_partial_sync(&self) -> Option<PendingPartialSync> {
+        self.blob_state.write().await.partial_sync.queue_sync()
+    }
+
+    async fn wait_for_pending_partial_sync(&self) -> Result<(), Error> {
+        while let Some(pending) = self.pending_partial_sync().await {
+            Self::complete_pending_partial_sync(self.blob_state.clone(), pending).await?;
+        }
+        Ok(())
+    }
+
+    async fn complete_pending_partial_sync(
+        blob_state: Arc<AsyncRwLock<BlobState<B>>>,
+        pending: PendingPartialSync,
+    ) -> Result<(), Error> {
+        pending
+            .completion
+            .clone()
+            .await
+            .map_err(|error| clone_error(&error))?;
+
+        let mut blob_state = blob_state.write().await;
+        if blob_state.partial_sync.complete(&pending) {
+            blob_state.durable_partial_page_state = Some(pending.partial_page_state);
+            blob_state.needs_sync = false;
+        }
+        Ok(())
+    }
+
+    fn pending_partial_sync_handle(&self, pending: PendingPartialSync) -> Handle<()> {
+        let blob_state = self.blob_state.clone();
+        Handle::from_future(async move {
+            Self::complete_pending_partial_sync(blob_state, pending).await
+        })
+    }
+
+    fn delayed_start_sync_handle(&self, pending: PendingPartialSync) -> Handle<()> {
+        let append = self.clone();
+        Handle::from_future(async move {
+            Self::complete_pending_partial_sync(append.blob_state.clone(), pending).await?;
+            append.sync().await
+        })
+    }
+
     /// Flushes buffered data and makes all pending mutations durable.
     ///
     /// A single physical write can be persisted with [`Blob::write_at_sync`]. If there
@@ -1235,7 +1477,9 @@ impl<B: Blob> Append<B> {
         let buf_guard = self.buffer.write().await;
 
         // A single emitted write can be made durable directly during the flush.
-        if self.flush_internal(buf_guard, true, true).await? {
+        if self.flush_internal(buf_guard, true, true).await?.durable {
+            let mut blob_state = self.blob_state.write().await;
+            blob_state.durable_partial_page_state = blob_state.partial_page_state.clone();
             return Ok(());
         }
 
@@ -1252,14 +1496,35 @@ impl<B: Blob> Append<B> {
     /// mutations are considered issued, so a later [`Self::sync`] without
     /// intervening writes returns immediately and does not wait for this handle.
     pub async fn start_sync(&self) -> Result<Handle<()>, Error> {
+        let buf_guard = self.buffer.write().await;
+        if let Some(pending) = self.queue_pending_partial_sync().await {
+            drop(buf_guard);
+            return Ok(self.delayed_start_sync_handle(pending));
+        }
+
         // Flush any buffered data, including any partial page (plain writes only,
         // so the durability barrier is started separately below).
-        let buf_guard = self.buffer.write().await;
         self.flush_internal(buf_guard, true, false).await?;
 
         // Start syncing pending mutations and return the completion handle.
         let mut blob_state = self.blob_state.write().await;
-        Ok(blob_state.start_sync().await)
+        let pending_partial_page_state = blob_state
+            .needs_sync
+            .then(|| blob_state.partial_page_state.clone())
+            .flatten();
+        let handle = blob_state.start_sync().await;
+        let Some(partial_page_state) = pending_partial_page_state else {
+            return Ok(handle);
+        };
+        blob_state.partial_sync_generation += 1;
+        let pending = PendingPartialSync::new(
+            blob_state.partial_sync_generation,
+            partial_page_state,
+            handle,
+        );
+        blob_state.partial_sync = PartialSync::Pending(pending.clone());
+        drop(blob_state);
+        Ok(self.pending_partial_sync_handle(pending))
     }
 
     /// Resize the blob to the provided logical `size`.
@@ -1299,6 +1564,7 @@ impl<B: Blob> Append<B> {
 
         // Flush any buffered data first to ensure we have a consistent state on disk.
         self.sync().await?;
+        self.wait_for_pending_partial_sync().await?;
 
         // Acquire both locks to prevent concurrent operations.
         let mut buf_guard = self.buffer.write().await;
@@ -1357,6 +1623,7 @@ impl<B: Blob> Append<B> {
 
         // Shrink the blob to a page boundary, which requires no CRC-slot rewrite.
         blob_guard.partial_page_state = None;
+        blob_guard.durable_partial_page_state = None;
         blob_guard.current_page = full_pages;
         buf_guard.offset = tail_offset;
         buf_guard.clear();
@@ -1405,7 +1672,8 @@ impl<B: Blob> Append<B> {
             &old_crc,
         )
         .await?;
-        blob_guard.partial_page_state = Some(final_record);
+        blob_guard.partial_page_state = Some(final_record.clone());
+        blob_guard.durable_partial_page_state = Some(final_record);
 
         Ok(())
     }
@@ -1416,12 +1684,14 @@ mod tests {
     use super::*;
     use crate::{
         buffer::tests::SyncTrackingBlob, deterministic, telemetry::metrics::Registry, Buf,
-        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Storage as _,
+        BufferPool, BufferPoolConfig, Handle, IoBufsMut, Runner as _, Spawner as _, Storage as _,
+        Supervisor as _,
     };
     use commonware_codec::ReadExt;
     use commonware_macros::test_traced;
-    use commonware_utils::{NZUsize, NZU16, NZU32};
+    use commonware_utils::{channel::oneshot, sync::Mutex, NZUsize, NZU16, NZU32};
     use std::{
+        collections::VecDeque,
         num::NonZeroU16,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -1431,6 +1701,245 @@ mod tests {
 
     const PAGE_SIZE: NonZeroU16 = NZU16!(103); // janky size to ensure we test page alignment
     const BUFFER_SIZE: usize = PAGE_SIZE.get() as usize * 2;
+
+    #[derive(Default)]
+    struct SelectivePersistState {
+        data: Vec<u8>,
+        durable: Vec<u8>,
+        writes: usize,
+    }
+
+    /// Blob that can make selected plain writes crash-durable before sync.
+    #[derive(Clone)]
+    struct SelectivePersistBlob {
+        state: Arc<Mutex<SelectivePersistState>>,
+        durable_plain_writes: Arc<Vec<usize>>,
+    }
+
+    impl SelectivePersistBlob {
+        fn new(durable_plain_writes: &[usize]) -> Self {
+            Self {
+                state: Arc::new(Mutex::new(SelectivePersistState::default())),
+                durable_plain_writes: Arc::new(durable_plain_writes.to_vec()),
+            }
+        }
+
+        fn reopen_durable(&self) -> (Self, u64) {
+            let durable = self.state.lock().durable.clone();
+            let size = durable.len() as u64;
+            (
+                Self {
+                    state: Arc::new(Mutex::new(SelectivePersistState {
+                        data: durable.clone(),
+                        durable,
+                        writes: 0,
+                    })),
+                    durable_plain_writes: self.durable_plain_writes.clone(),
+                },
+                size,
+            )
+        }
+
+        fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    impl Blob for SelectivePersistBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::default()).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            let state = self.state.lock();
+            if end > state.data.len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+
+            let mut out = bufs.into();
+            out.put_slice(&state.data[start..end]);
+            Ok(out)
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())?;
+            if self.durable_plain_writes.contains(&state.writes) {
+                Self::write(&mut state.durable, offset, buf.as_ref())?;
+            }
+            Ok(())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())?;
+            Self::write(&mut state.durable, offset, buf.as_ref())
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+            self.state.lock().data.resize(len, 0);
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            let mut state = self.state.lock();
+            state.durable = state.data.clone();
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let state = self.state.clone();
+            let snapshot = state.lock().data.clone();
+            Handle::from_future(async move {
+                state.lock().durable = snapshot;
+                Ok(())
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct ControlledSyncState {
+        data: Vec<u8>,
+        durable: Vec<u8>,
+        writes: usize,
+        pending_syncs: VecDeque<oneshot::Sender<()>>,
+    }
+
+    /// Blob whose `start_sync` handles complete only when the test releases them.
+    #[derive(Clone)]
+    struct ControlledSyncBlob {
+        state: Arc<Mutex<ControlledSyncState>>,
+    }
+
+    impl ControlledSyncBlob {
+        fn new() -> Self {
+            Self {
+                state: Arc::new(Mutex::new(ControlledSyncState::default())),
+            }
+        }
+
+        fn writes(&self) -> usize {
+            self.state.lock().writes
+        }
+
+        fn pending_syncs(&self) -> usize {
+            self.state.lock().pending_syncs.len()
+        }
+
+        fn release_next_sync(&self) {
+            let sender = self
+                .state
+                .lock()
+                .pending_syncs
+                .pop_front()
+                .expect("pending sync missing");
+            let _ = sender.send(());
+        }
+
+        fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(buf.len()).ok_or(Error::OffsetOverflow)?;
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    impl Blob for ControlledSyncBlob {
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, Error> {
+            self.read_at_buf(offset, len, IoBufMut::default()).await
+        }
+
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, Error> {
+            let start = usize::try_from(offset).map_err(|_| Error::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(Error::OffsetOverflow)?;
+            let state = self.state.lock();
+            if end > state.data.len() {
+                return Err(Error::BlobInsufficientLength);
+            }
+
+            let mut out = bufs.into();
+            out.put_slice(&state.data[start..end]);
+            Ok(out)
+        }
+
+        async fn write_at(&self, offset: u64, bufs: impl Into<IoBufs> + Send) -> Result<(), Error> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), Error> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            state.writes += 1;
+            Self::write(&mut state.data, offset, buf.as_ref())?;
+            let data = state.data.clone();
+            state.durable = data;
+            Ok(())
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), Error> {
+            let len = usize::try_from(len).map_err(|_| Error::OffsetOverflow)?;
+            self.state.lock().data.resize(len, 0);
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), Error> {
+            let mut state = self.state.lock();
+            state.durable = state.data.clone();
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let (sender, receiver) = oneshot::channel();
+            let snapshot = {
+                let mut state = self.state.lock();
+                state.pending_syncs.push_back(sender);
+                state.data.clone()
+            };
+            let state = self.state.clone();
+            Handle::from_future(async move {
+                receiver.await.map_err(|_| Error::Closed)?;
+                state.lock().durable = snapshot;
+                Ok(())
+            })
+        }
+    }
 
     #[test_traced("DEBUG")]
     fn test_read_many_into_empty() {
@@ -2565,6 +3074,151 @@ mod tests {
     }
 
     #[test_traced("DEBUG")]
+    fn test_overlapped_start_sync_preserves_last_durable_partial_crc_fallback() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = SelectivePersistBlob::new(&[4]);
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref.clone())
+                .await
+                .unwrap();
+
+            append.append(b"abc").await.unwrap();
+            append.sync().await.unwrap();
+
+            append.append(b"de").await.unwrap();
+            let _first = append.start_sync().await.unwrap();
+
+            append.append(b"fg").await.unwrap();
+            let _second = append.start_sync().await.unwrap();
+
+            let (reopened_blob, reopened_size) = blob.reopen_durable();
+            let reopened = Append::new(reopened_blob, reopened_size, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+            assert!(
+                reopened.size().await >= 3,
+                "restart should preserve the last durable prefix"
+            );
+            let recovered = reopened.read_at(0, 3).await.unwrap().coalesce();
+            assert_eq!(recovered.as_ref(), b"abc");
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_sync_after_start_sync_without_new_writes_does_not_wait() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(b"abc").await.unwrap();
+            let handle = append.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let sync_append = append.clone();
+            let waiter = context.child("sync").spawn(|_| async move {
+                sync_append.sync().await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            for _ in 0..5 {
+                if completed.load(Ordering::Relaxed) == 1 {
+                    break;
+                }
+                crate::utils::reschedule().await;
+            }
+            assert_eq!(
+                completed.load(Ordering::Relaxed),
+                1,
+                "sync without new writes must not wait for the in-flight start_sync handle"
+            );
+            waiter.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+
+            blob.release_next_sync();
+            handle.await.unwrap();
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
+    fn test_overlapped_start_sync_waits_before_rewriting_partial_page() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context: deterministic::Context| async move {
+            let blob = ControlledSyncBlob::new();
+            let cache_ref = CacheRef::from_pooler(&context, PAGE_SIZE, NZUsize!(BUFFER_SIZE));
+            let append = Append::new(blob.clone(), 0, BUFFER_SIZE, cache_ref)
+                .await
+                .unwrap();
+
+            append.append(b"abc").await.unwrap();
+            append.sync().await.unwrap();
+
+            append.append(b"de").await.unwrap();
+            let first = append.start_sync().await.unwrap();
+            assert_eq!(blob.pending_syncs(), 1);
+            let writes_after_first = blob.writes();
+
+            append.append(b"fg").await.unwrap();
+            let second = append.start_sync().await.unwrap();
+            assert_eq!(
+                blob.writes(),
+                writes_after_first,
+                "second start_sync must not rewrite before the first partial sync completes"
+            );
+            let third = append.start_sync().await.unwrap();
+            assert_eq!(
+                blob.writes(),
+                writes_after_first,
+                "queued start_sync calls must coalesce behind the first partial sync"
+            );
+
+            let completed = Arc::new(AtomicUsize::new(0));
+            let completed_clone = completed.clone();
+            let waiter = context.child("second_sync").spawn(|_| async move {
+                second.await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+            let completed_clone = completed.clone();
+            let queued_waiter = context.child("third_sync").spawn(|_| async move {
+                third.await.unwrap();
+                completed_clone.fetch_add(1, Ordering::Relaxed);
+            });
+
+            crate::utils::reschedule().await;
+            assert_eq!(
+                blob.writes(),
+                writes_after_first,
+                "polling the second handle must still wait for the first sync"
+            );
+            assert_eq!(completed.load(Ordering::Relaxed), 0);
+
+            blob.release_next_sync();
+            first.await.unwrap();
+            for _ in 0..5 {
+                if completed.load(Ordering::Relaxed) == 2 {
+                    break;
+                }
+                crate::utils::reschedule().await;
+            }
+            assert!(
+                blob.writes() > writes_after_first,
+                "queued handles should rewrite the coalesced page after the first sync completes"
+            );
+            waiter.await.unwrap();
+            queued_waiter.await.unwrap();
+            assert_eq!(completed.load(Ordering::Relaxed), 2);
+            assert_eq!(blob.pending_syncs(), 0);
+        });
+    }
+
+    #[test_traced("DEBUG")]
     fn test_read_up_to_zero_len_truncates_buffer() {
         let executor = deterministic::Runner::default();
         executor.start(|context: deterministic::Context| async move {
@@ -2803,7 +3457,7 @@ mod tests {
 
             // Convert buffered logical bytes into physical-page writes.
             let (physical_pages, partial_page_state) =
-                append.to_physical_pages(&buffer, true, None);
+                append.to_physical_pages(&buffer, true, None, None);
 
             // Two full pages should each contribute a logical slice and a CRC slice, and the
             // trailing partial page should contribute one materialized padded physical page.

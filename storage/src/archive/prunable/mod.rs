@@ -225,14 +225,19 @@ mod tests {
     use commonware_runtime::{
         deterministic,
         telemetry::metrics::{has_metric_value, Metric, Registered},
-        Blob, BufferPool, BufferPooler, Error as RError, Handle, IoBufs, IoBufsMut, Metrics as _,
-        Name, Runner, Storage, Supervisor as _,
+        Blob, BufMut, BufferPool, BufferPooler, Error as RError, Handle, IoBufs, IoBufsMut,
+        Metrics as _, Name, Runner, Storage, Supervisor as _,
     };
     use commonware_utils::{
         channel::oneshot, sequence::FixedBytes, sync::Mutex, NZUsize, NZU16, NZU64,
     };
     use rand::Rng;
-    use std::{collections::BTreeMap, mem, num::NonZeroU16, sync::Arc};
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        mem,
+        num::NonZeroU16,
+        sync::Arc,
+    };
 
     fn test_key(key: &str) -> FixedBytes<64> {
         let mut buf = [0u8; 64];
@@ -250,6 +255,307 @@ mod tests {
 
     type SyncSender = oneshot::Sender<Result<(), RError>>;
     type PendingSyncs = Arc<Mutex<Vec<SyncSender>>>;
+    type BlobKey = (String, Vec<u8>);
+
+    #[derive(Clone, Default)]
+    struct CrashBlobData {
+        data: Vec<u8>,
+        durable: Vec<u8>,
+        writes: usize,
+        version: u16,
+    }
+
+    #[derive(Clone, Default)]
+    struct CrashStorageState {
+        blobs: BTreeMap<BlobKey, CrashBlobData>,
+    }
+
+    #[derive(Clone)]
+    struct SelectiveCrashContext<E> {
+        inner: E,
+        state: Arc<Mutex<CrashStorageState>>,
+        durable_plain_writes: Arc<BTreeMap<String, BTreeSet<usize>>>,
+    }
+
+    impl<E> SelectiveCrashContext<E> {
+        fn new(inner: E, durable_plain_writes: BTreeMap<String, BTreeSet<usize>>) -> Self {
+            Self {
+                inner,
+                state: Arc::new(Mutex::new(CrashStorageState::default())),
+                durable_plain_writes: Arc::new(durable_plain_writes),
+            }
+        }
+
+        fn crashed(self) -> Self {
+            let blobs = self
+                .state
+                .lock()
+                .blobs
+                .iter()
+                .map(|(key, blob)| {
+                    (
+                        key.clone(),
+                        CrashBlobData {
+                            data: blob.durable.clone(),
+                            durable: blob.durable.clone(),
+                            writes: 0,
+                            version: blob.version,
+                        },
+                    )
+                })
+                .collect();
+            Self {
+                inner: self.inner,
+                state: Arc::new(Mutex::new(CrashStorageState { blobs })),
+                durable_plain_writes: self.durable_plain_writes,
+            }
+        }
+    }
+
+    impl<E: commonware_runtime::Supervisor> commonware_runtime::Supervisor for SelectiveCrashContext<E> {
+        fn name(&self) -> Name {
+            self.inner.name()
+        }
+
+        fn child(&self, label: &'static str) -> Self {
+            Self {
+                inner: self.inner.child(label),
+                state: self.state.clone(),
+                durable_plain_writes: self.durable_plain_writes.clone(),
+            }
+        }
+
+        fn with_attribute(self, key: &'static str, value: impl std::fmt::Display) -> Self {
+            Self {
+                inner: self.inner.with_attribute(key, value),
+                state: self.state,
+                durable_plain_writes: self.durable_plain_writes,
+            }
+        }
+    }
+
+    impl<E: commonware_runtime::Metrics> commonware_runtime::Metrics for SelectiveCrashContext<E> {
+        fn register<N: Into<String>, H: Into<String>, M: Metric>(
+            &self,
+            name: N,
+            help: H,
+            metric: M,
+        ) -> Registered<M> {
+            self.inner.register(name, help, metric)
+        }
+
+        fn encode(&self) -> String {
+            self.inner.encode()
+        }
+    }
+
+    impl<E: BufferPooler> BufferPooler for SelectiveCrashContext<E> {
+        fn network_buffer_pool(&self) -> &BufferPool {
+            self.inner.network_buffer_pool()
+        }
+
+        fn storage_buffer_pool(&self) -> &BufferPool {
+            self.inner.storage_buffer_pool()
+        }
+    }
+
+    impl<E: Send + Sync + 'static> Storage for SelectiveCrashContext<E> {
+        type Blob = SelectiveCrashBlob;
+
+        async fn open_versioned(
+            &self,
+            partition: &str,
+            name: &[u8],
+            versions: std::ops::RangeInclusive<u16>,
+        ) -> Result<(Self::Blob, u64, u16), RError> {
+            let key = (partition.to_string(), name.to_vec());
+            let mut state = self.state.lock();
+            let blob = state.blobs.entry(key.clone()).or_default();
+            if !versions.contains(&blob.version) {
+                return Err(RError::BlobVersionMismatch {
+                    expected: versions,
+                    found: blob.version,
+                });
+            }
+            let len = blob.data.len() as u64;
+            Ok((
+                SelectiveCrashBlob {
+                    partition: partition.to_string(),
+                    key,
+                    state: self.state.clone(),
+                    durable_plain_writes: self.durable_plain_writes.clone(),
+                },
+                len,
+                blob.version,
+            ))
+        }
+
+        async fn remove(&self, partition: &str, name: Option<&[u8]>) -> Result<(), RError> {
+            let mut state = self.state.lock();
+            if let Some(name) = name {
+                state.blobs.remove(&(partition.to_string(), name.to_vec()));
+            } else {
+                state.blobs.retain(|(p, _), _| p != partition);
+            }
+            Ok(())
+        }
+
+        async fn scan(&self, partition: &str) -> Result<Vec<Vec<u8>>, RError> {
+            Ok(self
+                .state
+                .lock()
+                .blobs
+                .keys()
+                .filter_map(|(p, name)| (p == partition).then_some(name.clone()))
+                .collect())
+        }
+    }
+
+    #[derive(Clone)]
+    struct SelectiveCrashBlob {
+        partition: String,
+        key: BlobKey,
+        state: Arc<Mutex<CrashStorageState>>,
+        durable_plain_writes: Arc<BTreeMap<String, BTreeSet<usize>>>,
+    }
+
+    impl SelectiveCrashBlob {
+        fn name(name: &[u8]) -> String {
+            format!("{name:?}")
+        }
+
+        fn write(data: &mut Vec<u8>, offset: u64, buf: &[u8]) -> Result<(), RError> {
+            let start = usize::try_from(offset).map_err(|_| RError::OffsetOverflow)?;
+            let end = start.checked_add(buf.len()).ok_or(RError::OffsetOverflow)?;
+            if end > data.len() {
+                data.resize(end, 0);
+            }
+            data[start..end].copy_from_slice(buf);
+            Ok(())
+        }
+    }
+
+    impl Blob for SelectiveCrashBlob {
+        async fn read_at_buf(
+            &self,
+            offset: u64,
+            len: usize,
+            bufs: impl Into<IoBufsMut> + Send,
+        ) -> Result<IoBufsMut, RError> {
+            let start = usize::try_from(offset).map_err(|_| RError::OffsetOverflow)?;
+            let end = start.checked_add(len).ok_or(RError::OffsetOverflow)?;
+            let state = self.state.lock();
+            let blob = state
+                .blobs
+                .get(&self.key)
+                .ok_or(RError::BlobMissing(
+                    self.key.0.clone(),
+                    Self::name(&self.key.1),
+                ))?;
+            if end > blob.data.len() {
+                return Err(RError::BlobInsufficientLength);
+            }
+            let mut out = bufs.into();
+            out.put_slice(&blob.data[start..end]);
+            Ok(out)
+        }
+
+        async fn read_at(&self, offset: u64, len: usize) -> Result<IoBufsMut, RError> {
+            self.read_at_buf(offset, len, IoBufsMut::default()).await
+        }
+
+        async fn write_at(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), RError> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            let blob = state
+                .blobs
+                .get_mut(&self.key)
+                .ok_or(RError::BlobMissing(
+                    self.key.0.clone(),
+                    Self::name(&self.key.1),
+                ))?;
+            blob.writes += 1;
+            Self::write(&mut blob.data, offset, buf.as_ref())?;
+            if self
+                .durable_plain_writes
+                .get(&self.partition)
+                .is_some_and(|writes| writes.contains(&blob.writes))
+            {
+                Self::write(&mut blob.durable, offset, buf.as_ref())?;
+            }
+            Ok(())
+        }
+
+        async fn write_at_sync(
+            &self,
+            offset: u64,
+            bufs: impl Into<IoBufs> + Send,
+        ) -> Result<(), RError> {
+            let buf = bufs.into().coalesce();
+            let mut state = self.state.lock();
+            let blob = state
+                .blobs
+                .get_mut(&self.key)
+                .ok_or(RError::BlobMissing(
+                    self.key.0.clone(),
+                    Self::name(&self.key.1),
+                ))?;
+            blob.writes += 1;
+            Self::write(&mut blob.data, offset, buf.as_ref())?;
+            Self::write(&mut blob.durable, offset, buf.as_ref())
+        }
+
+        async fn resize(&self, len: u64) -> Result<(), RError> {
+            let len = usize::try_from(len).map_err(|_| RError::OffsetOverflow)?;
+            let mut state = self.state.lock();
+            let blob = state
+                .blobs
+                .get_mut(&self.key)
+                .ok_or(RError::BlobMissing(
+                    self.key.0.clone(),
+                    Self::name(&self.key.1),
+                ))?;
+            blob.data.resize(len, 0);
+            Ok(())
+        }
+
+        async fn sync(&self) -> Result<(), RError> {
+            let mut state = self.state.lock();
+            let blob = state
+                .blobs
+                .get_mut(&self.key)
+                .ok_or(RError::BlobMissing(
+                    self.key.0.clone(),
+                    Self::name(&self.key.1),
+                ))?;
+            blob.durable = blob.data.clone();
+            Ok(())
+        }
+
+        async fn start_sync(&self) -> Handle<()> {
+            let key = self.key.clone();
+            let state = self.state.clone();
+            let snapshot = state
+                .lock()
+                .blobs
+                .get(&key)
+                .map(|blob| blob.data.clone())
+                .unwrap_or_default();
+            Handle::from_future(async move {
+                let mut state = state.lock();
+                let blob = state
+                    .blobs
+                    .get_mut(&key)
+                    .ok_or(RError::BlobMissing(key.0.clone(), Self::name(&key.1)))?;
+                blob.durable = snapshot;
+                Ok(())
+            })
+        }
+    }
 
     #[derive(Clone)]
     struct DelayedSyncContext<E> {
@@ -431,6 +737,70 @@ mod tests {
 
             release_pending_syncs(&pending);
             handle.await.expect("sync handle should complete");
+        });
+    }
+
+    #[test_traced]
+    fn test_overlapping_put_start_sync_preserves_durable_entry_after_restart() {
+        let executor = deterministic::Runner::default();
+        executor.start(|context| async move {
+            let mut durable_plain_writes = BTreeMap::new();
+            durable_plain_writes.insert("test-index".to_string(), BTreeSet::from([4]));
+            let context = SelectiveCrashContext::new(context, durable_plain_writes);
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let mut archive = Archive::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to initialize archive");
+
+            archive
+                .put(1, test_key("aaa"), 10)
+                .await
+                .expect("Failed to put initial value");
+            archive.sync().await.expect("Failed to sync initial value");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+
+            let first = archive
+                .put_start_sync(2, test_key("bbb"), 20)
+                .await
+                .expect("Failed to start first overlapping sync");
+            let second = archive
+                .put_start_sync(3, test_key("ccc"), 30)
+                .await
+                .expect("Failed to start second overlapping sync");
+            drop(first);
+            drop(second);
+            drop(archive);
+
+            let context = context.crashed();
+            let cfg = Config {
+                translator: FourCap,
+                key_partition: "test-index".into(),
+                key_page_cache: CacheRef::from_pooler(&context, PAGE_SIZE, PAGE_CACHE_SIZE),
+                value_partition: "test-value".into(),
+                codec_config: (),
+                compression: None,
+                key_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                value_write_buffer: NZUsize!(DEFAULT_WRITE_BUFFER),
+                replay_buffer: NZUsize!(DEFAULT_REPLAY_BUFFER),
+                items_per_section: NZU64!(DEFAULT_ITEMS_PER_SECTION),
+            };
+            let archive = Archive::<_, _, FixedBytes<64>, i32>::init(context.child("storage"), cfg)
+                .await
+                .expect("Failed to restart archive");
+            assert_eq!(archive.get(Identifier::Index(1)).await.unwrap(), Some(10));
+            assert_eq!(archive.get(Identifier::Index(2)).await.unwrap(), None);
+            assert_eq!(archive.get(Identifier::Index(3)).await.unwrap(), None);
         });
     }
 
